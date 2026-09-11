@@ -126,6 +126,23 @@ impl Bus for MappedBus {
             self.ram[a] = val;
         }
     }
+
+    fn pending_irq(&mut self) -> u8 {
+        let mut max_level = 0u8;
+        for mapping in &self.devices {
+            let level = mapping.device.irq_level();
+            if level > max_level {
+                max_level = level;
+            }
+        }
+        max_level
+    }
+
+    fn tick(&mut self, cycles: u32) {
+        for mapping in &mut self.devices {
+            mapping.device.tick(cycles);
+        }
+    }
 }
 
 #[cfg(test)]

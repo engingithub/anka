@@ -25,14 +25,40 @@ use crate::cpu::types::{Ccr, Size};
 use crate::cpu::Cpu;
 
 impl<B: Bus> Cpu<B> {
-    /// Execute one instruction. Returns the number of cycles consumed.
+    /// Execute one instruction, tick devices, and check for pending
+    /// interrupts.  Returns the number of cycles consumed.
     pub fn step(&mut self) -> u32 {
         if self.halted {
+            // Check if an interrupt can wake us from STOP
+            let irq = self.bus.pending_irq();
+            if irq > 0 {
+                let ipl = self.sr.ipl_mask();
+                if irq > ipl || irq == 7 {
+                    self.halted = false;
+                    self.accept_interrupt(irq);
+                    return 44;
+                }
+            }
+            self.bus.tick(4);
             return 4;
         }
 
         let opcode = self.fetch_word();
-        self.execute(opcode)
+        let cycles = self.execute(opcode);
+
+        // Advance clocked devices
+        self.bus.tick(cycles);
+
+        // Sample interrupt lines (68000 checks after each instruction)
+        let irq = self.bus.pending_irq();
+        if irq > 0 {
+            let ipl = self.sr.ipl_mask();
+            if irq > ipl || irq == 7 {
+                self.accept_interrupt(irq);
+            }
+        }
+
+        cycles
     }
 
     /// Decode and execute a single opcode.
@@ -426,10 +452,10 @@ impl<B: Bus> Cpu<B> {
             }
             0x4E73 => {
                 // RTE — return from exception
-                let sr = self.pop16();
-                let pc = self.pop32();
-                self.sr.0 = sr;
-                self.pc = pc;
+                let new_sr = self.pop16();
+                let new_pc = self.pop32();
+                self.set_sr_value(new_sr);
+                self.pc = new_pc;
                 20
             }
             0x4E76 => {
@@ -467,15 +493,20 @@ impl<B: Bus> Cpu<B> {
                 // Further sub-decoding
                 let sub = (opcode >> 8) & 0xF;
                 match sub {
+                    0x0 if opcode & 0xC0 == 0xC0 => self.move_from_sr(opcode),
+                    0x4 if opcode & 0xC0 == 0xC0 => self.move_to_ccr(opcode),
+                    0x6 if opcode & 0xC0 == 0xC0 => self.move_to_sr(opcode),
                     0x0 if opcode & 0xC0 != 0xC0 => self.negx(opcode),
                     0x2 if opcode & 0xC0 != 0xC0 => self.clr(opcode),
                     0x4 if opcode & 0xC0 != 0xC0 => self.neg_op(opcode),
                     0x6 if opcode & 0xC0 != 0xC0 => self.not_op(opcode),
                     0x8 if opcode & 0xFFF8 == 0x4840 => self.swap(opcode),
+                    0x8 if opcode & 0xFFF8 == 0x4880 => self.ext_word(opcode),
+                    0x8 if opcode & 0xFFF8 == 0x48C0 => self.ext_long(opcode),
+                    0x8 if opcode & 0xFF80 == 0x4880 => self.movem_to_mem(opcode),
                     0x8 if opcode & 0xC0 == 0x40 => self.pea(opcode),
-                    0x8 if opcode & 0xC0 == 0x80 => self.ext_word(opcode),
-                    0x8 if opcode & 0xC0 == 0xC0 => self.ext_long(opcode),
                     0xA if opcode & 0xC0 != 0xC0 => self.tst(opcode),
+                    0xC if opcode & 0xFF80 == 0x4C80 => self.movem_to_reg(opcode),
                     0xE if opcode & 0xC0 == 0x80 => self.jsr(opcode),
                     0xE if opcode & 0xC0 == 0xC0 => self.jmp(opcode),
                     _ => {
@@ -1055,16 +1086,219 @@ impl<B: Bus> Cpu<B> {
     }
 
     // =======================================================================
+    // MOVEM — move multiple registers
+    // =======================================================================
+
+    /// MOVEM registers to memory: 0100 1000 1s mmm rrr
+    /// For pre-decrement mode -(An), the register list is reversed:
+    /// bit 0 = A7, bit 1 = A6, ..., bit 7 = A0, bit 8 = D7, ..., bit 15 = D0
+    fn movem_to_mem(&mut self, opcode: u16) -> u32 {
+        let long = opcode & 0x0040 != 0;
+        let ea_mode = ((opcode >> 3) & 7) as u8;
+        let ea_reg = (opcode & 7) as u8;
+        let mask = self.fetch_word();
+
+        if ea_mode == 4 {
+            // Pre-decrement mode -(An): register order is reversed
+            let an = ea_reg as usize;
+            for bit in 0..16u16 {
+                if mask & (1 << bit) != 0 {
+                    // bit 0=A7, 1=A6...7=A0, 8=D7, 9=D6...15=D0
+                    let val = if bit < 8 {
+                        self.a[7 - bit as usize]
+                    } else {
+                        self.d[15 - bit as usize]
+                    };
+                    if long {
+                        self.a[an] = self.a[an].wrapping_sub(4);
+                        self.bus.write32(self.a[an], val);
+                    } else {
+                        self.a[an] = self.a[an].wrapping_sub(2);
+                        self.bus.write16(self.a[an], val as u16);
+                    }
+                }
+            }
+        } else {
+            // Other modes: normal register order
+            // bit 0=D0, 1=D1...7=D7, 8=A0, 9=A1...15=A7
+            let ea = Ea::decode(ea_mode, ea_reg, self);
+            let mut addr = match &ea {
+                Ea::AddrIndirect(r) => self.a[*r as usize],
+                Ea::Displacement(r, d) => (self.a[*r as usize] as i32 + *d as i32) as u32,
+                Ea::AbsoluteLong(a) => *a,
+                Ea::AbsoluteWord(a) => *a as i16 as i32 as u32,
+                _ => { self.illegal(opcode); return 4; }
+            };
+            for bit in 0..16u16 {
+                if mask & (1 << bit) != 0 {
+                    let val = if bit < 8 { self.d[bit as usize] }
+                              else { self.a[(bit - 8) as usize] };
+                    if long {
+                        self.bus.write32(addr, val);
+                        addr = addr.wrapping_add(4);
+                    } else {
+                        self.bus.write16(addr, val as u16);
+                        addr = addr.wrapping_add(2);
+                    }
+                }
+            }
+        }
+        8
+    }
+
+    /// MOVEM memory to registers: 0100 1100 1s mmm rrr
+    /// Normal register order: bit 0=D0...7=D7, 8=A0...15=A7
+    fn movem_to_reg(&mut self, opcode: u16) -> u32 {
+        let long = opcode & 0x0040 != 0;
+        let ea_mode = ((opcode >> 3) & 7) as u8;
+        let ea_reg = (opcode & 7) as u8;
+        let mask = self.fetch_word();
+
+        if ea_mode == 3 {
+            // Post-increment mode (An)+
+            let an = ea_reg as usize;
+            for bit in 0..16u16 {
+                if mask & (1 << bit) != 0 {
+                    if long {
+                        let val = self.bus.read32(self.a[an]);
+                        self.a[an] = self.a[an].wrapping_add(4);
+                        if bit < 8 { self.d[bit as usize] = val; }
+                        else { self.a[(bit - 8) as usize] = val; }
+                    } else {
+                        let val = self.bus.read16(self.a[an]) as i16 as i32 as u32;
+                        self.a[an] = self.a[an].wrapping_add(2);
+                        if bit < 8 { self.d[bit as usize] = val; }
+                        else { self.a[(bit - 8) as usize] = val; }
+                    }
+                }
+            }
+        } else {
+            let ea = Ea::decode(ea_mode, ea_reg, self);
+            let mut addr = match &ea {
+                Ea::AddrIndirect(r) => self.a[*r as usize],
+                Ea::Displacement(r, d) => (self.a[*r as usize] as i32 + *d as i32) as u32,
+                Ea::AbsoluteLong(a) => *a,
+                Ea::AbsoluteWord(a) => *a as i16 as i32 as u32,
+                _ => { self.illegal(opcode); return 4; }
+            };
+            for bit in 0..16u16 {
+                if mask & (1 << bit) != 0 {
+                    if long {
+                        let val = self.bus.read32(addr);
+                        addr = addr.wrapping_add(4);
+                        if bit < 8 { self.d[bit as usize] = val; }
+                        else { self.a[(bit - 8) as usize] = val; }
+                    } else {
+                        let val = self.bus.read16(addr) as i16 as i32 as u32;
+                        addr = addr.wrapping_add(2);
+                        if bit < 8 { self.d[bit as usize] = val; }
+                        else { self.a[(bit - 8) as usize] = val; }
+                    }
+                }
+            }
+        }
+        12
+    }
+
+    // =======================================================================
+    // MOVE to/from SR, CCR — privilege-sensitive register access
+    // =======================================================================
+
+    /// Set SR with proper supervisor/user stack switching.
+    fn set_sr_value(&mut self, new_sr: u16) {
+        let was_super = self.sr.supervisor();
+        let will_be_super = new_sr & 0x2000 != 0;
+
+        if was_super && !will_be_super {
+            self.ssp = self.a[7];
+            self.a[7] = self.usp;
+        } else if !was_super && will_be_super {
+            self.usp = self.a[7];
+            self.a[7] = self.ssp;
+        }
+
+        self.sr.0 = new_sr;
+    }
+
+    /// MOVE SR, <ea>  (0x40C0) — read SR to destination
+    fn move_from_sr(&mut self, opcode: u16) -> u32 {
+        let ea_mode = ((opcode >> 3) & 7) as u8;
+        let ea_reg = (opcode & 7) as u8;
+        let ea = Ea::decode(ea_mode, ea_reg, self);
+        ea::write_ea(&ea, Size::Word, self, self.sr.0 as u32);
+        6
+    }
+
+    /// MOVE <ea>, CCR  (0x44C0) — write CCR only (low byte of SR)
+    fn move_to_ccr(&mut self, opcode: u16) -> u32 {
+        let ea_mode = ((opcode >> 3) & 7) as u8;
+        let ea_reg = (opcode & 7) as u8;
+        let ea = Ea::decode(ea_mode, ea_reg, self);
+        let val = ea::read_ea(&ea, Size::Word, self) as u16;
+        self.sr.0 = (self.sr.0 & 0xFF00) | (val & 0xFF);
+        12
+    }
+
+    /// MOVE <ea>, SR  (0x46C0) — write full SR (privileged)
+    fn move_to_sr(&mut self, opcode: u16) -> u32 {
+        let ea_mode = ((opcode >> 3) & 7) as u8;
+        let ea_reg = (opcode & 7) as u8;
+        let ea = Ea::decode(ea_mode, ea_reg, self);
+        let val = ea::read_ea(&ea, Size::Word, self) as u16;
+        self.set_sr_value(val);
+        12
+    }
+
+    // =======================================================================
     // Traps / exceptions
     // =======================================================================
 
+    /// Process a software trap or exception.
+    /// Saves SR and PC, enters supervisor mode, jumps to the vector.
     fn trap(&mut self, vector: u8) {
-        let vec_addr = (vector as u32) * 4;
+        let old_sr = self.sr.0;
+
+        // Switch to supervisor stack if currently in user mode
+        if !self.sr.supervisor() {
+            self.usp = self.a[7];
+            self.a[7] = self.ssp;
+            self.sr.0 |= 0x2000; // set S bit
+        }
+
+        // Build exception frame: push PC, then SR
         self.push32(self.pc);
-        self.push16(self.sr.0);
-        // Enter supervisor mode
-        self.sr.0 |= 0x2000;
+        self.push16(old_sr);
+
+        // Clear trace
+        self.sr.0 &= !0x8000;
+
+        // Load handler from vector table
+        let vec_addr = (vector as u32) * 4;
         self.pc = self.bus.read32(vec_addr);
+    }
+
+    /// Accept a hardware interrupt at the given level (1–7).
+    /// Uses auto-vectored interrupt vectors 25–31.
+    pub fn accept_interrupt(&mut self, level: u8) {
+        let old_sr = self.sr.0;
+
+        // Switch to supervisor stack if currently in user mode
+        if !self.sr.supervisor() {
+            self.usp = self.a[7];
+            self.a[7] = self.ssp;
+        }
+
+        // Enter supervisor mode, mask to this interrupt level, clear trace
+        self.sr.0 = (old_sr | 0x2000) & !0x8000;
+        self.sr.0 = (self.sr.0 & 0xF8FF) | ((level as u16) << 8);
+
+        // Build exception frame: push PC, then SR (68000 group 1 frame)
+        self.push32(self.pc);
+        self.push16(old_sr);
+
+        // Auto-vectored: level N → vector 24 + N → address (24+N)*4
+        let vector = 24 + level as u32;
+        self.pc = self.bus.read32(vector * 4);
     }
 
     fn illegal(&mut self, _opcode: u16) -> u32 {

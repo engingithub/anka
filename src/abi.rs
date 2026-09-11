@@ -127,10 +127,23 @@ pub const DEFAULT_ENTRY: u32 = 0x0000_1000;
 /// Console MMIO base address.
 pub const CONSOLE_BASE: u32 = 0x00F0_0000;
 
+/// Timer MMIO base address.
+pub const TIMER_BASE: u32 = 0x00F0_0010;
+
 /// Console register offsets.
 pub mod console {
     pub const TX_DATA: u32 = 0x00;
     pub const TX_READY: u32 = 0x01;
     pub const RX_DATA: u32 = 0x02;
     pub const RX_READY: u32 = 0x03;
+}
+
+/// Timer register offsets.
+pub mod timer {
+    pub const CTRL: u32 = 0x00;
+    pub const IRQ_LVL: u32 = 0x01;
+    pub const PERIOD_H: u32 = 0x02;
+    pub const PERIOD_L: u32 = 0x03;
+    pub const TICKS: u32 = 0x04;
+    pub const STATUS: u32 = 0x07;
 }

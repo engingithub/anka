@@ -15,6 +15,7 @@ pub mod console;
 pub mod device;
 mod flat;
 mod mapped;
+pub mod timer;
 
 pub use flat::FlatBus;
 pub use mapped::MappedBus;
@@ -56,4 +57,13 @@ pub trait Bus {
         self.write16(addr, (val >> 16) as u16);
         self.write16(addr.wrapping_add(2), val as u16);
     }
+
+    // --- Interrupts and clocking ---
+
+    /// Return the highest interrupt level asserted by any device on
+    /// the bus (1–7), or 0 if no interrupt is pending.
+    fn pending_irq(&mut self) -> u8 { 0 }
+
+    /// Advance all clocked devices by the given number of CPU cycles.
+    fn tick(&mut self, _cycles: u32) {}
 }

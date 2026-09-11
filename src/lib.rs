@@ -33,4 +33,5 @@ pub mod bus;
 pub mod cc;
 pub mod cpu;
 pub mod monitor;
+pub mod os;
 pub mod srec;

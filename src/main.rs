@@ -9,12 +9,14 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use anka::bus::console::Console;
+use anka::bus::timer::Timer;
 use anka::bus::{Bus, FlatBus, MappedBus};
 use anka::cpu::Cpu;
 use anka::monitor;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const CONSOLE_BASE: u32 = 0x00F0_0000;
+const TIMER_BASE: u32 = 0x00F0_0010;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -46,6 +48,7 @@ fn main() {
     let mut self_test = false;
     let mut hello = false;
     let mut monitor = false;
+    let mut os_demo = false;
     let mut emit_srec: Option<String> = None;
 
     let mut i = 1;
@@ -70,6 +73,7 @@ fn main() {
             "--self-test" => self_test = true,
             "--hello" => hello = true,
             "--monitor" => monitor = true,
+            "--os" => os_demo = true,
             "--emit-srec" => {
                 i += 1;
                 if i >= args.len() {
@@ -116,6 +120,10 @@ fn main() {
         return;
     }
 
+    if os_demo {
+        run_os(trace);
+        return;
+    }
     if monitor {
         run_monitor(trace);
         return;
@@ -146,6 +154,7 @@ fn main() {
     let rx_buf = console.rx_buffer();
     let mut bus = MappedBus::new_16mb();
     bus.add_device(CONSOLE_BASE, Box::new(console));
+    bus.add_device(TIMER_BASE, Box::new(Timer::new(1000, 6)));
 
     if is_srec {
         let text = fs::read_to_string(&path).unwrap_or_else(|e| {
@@ -244,6 +253,7 @@ fn run_monitor(trace: bool) {
 
     let mut bus = MappedBus::new_16mb();
     bus.add_device(CONSOLE_BASE, Box::new(console));
+    bus.add_device(TIMER_BASE, Box::new(Timer::new(1000, 6)));
 
     // Vector table
     bus.write32(0x000000, 0x0010_0000); // SSP
@@ -258,6 +268,48 @@ fn run_monitor(trace: bool) {
 
     // The monitor runs indefinitely until STOP.
     run_cpu(&mut cpu, u64::MAX, trace);
+    eprintln!();
+    print_state(&cpu);
+}
+
+// ---------------------------------------------------------------------------
+// AnkaOS demo — preemptive multitasking
+// ---------------------------------------------------------------------------
+
+fn run_os(trace: bool) {
+    eprintln!("Anka — MC68000 Emulator v{}", VERSION);
+    eprintln!("AnkaOS v0.0 — preemptive multitasking demo");
+    eprintln!();
+
+    let kernel = anka::os::build(0x1000);
+
+    let console = Console::new();
+    let rx_buf = console.rx_buffer();
+    let mut bus = MappedBus::new_16mb();
+    bus.add_device(CONSOLE_BASE, Box::new(console));
+    bus.add_device(TIMER_BASE, Box::new(Timer::new(200, 6)));
+
+    // Vector table
+    bus.write32(0x000000, 0x0010_0000);   // SSP
+    bus.write32(0x000004, 0x0000_1000);   // Reset PC → kernel entry
+
+    // Find timer ISR address and set auto-vector level 6
+    let isr_offset = kernel.windows(4)
+        .position(|w| w[0] == 0x48 && w[1] == 0xE7 && w[2] == 0xFF && w[3] == 0xFE)
+        .expect("could not find timer_isr in kernel");
+    let isr_addr = 0x1000 + isr_offset as u32;
+    bus.write32(0x078, isr_addr);
+
+    bus.load(0x1000, &kernel);
+
+    spawn_stdin_reader(rx_buf);
+    let mut cpu = Cpu::new(bus);
+
+    eprintln!("Reset: SSP={:#010X}  PC={:#010X}", cpu.a[7], cpu.pc);
+    eprintln!("Timer ISR: {:#010X}", isr_addr);
+    eprintln!();
+
+    run_cpu(&mut cpu, 1_000_000, trace);
     eprintln!();
     print_state(&cpu);
 }
@@ -710,6 +762,7 @@ EXAMPLE:
         let rx_buf = console.rx_buffer();
         let mut bus = MappedBus::new_16mb();
         bus.add_device(CONSOLE_BASE, Box::new(console));
+        bus.add_device(TIMER_BASE, Box::new(Timer::new(1000, 6)));
         bus.write32(0x000000, 0x0010_0000); // SSP
         bus.write32(0x000004, base);         // PC = _start
         bus.load(base as u32, &binary);
@@ -807,7 +860,8 @@ MEMORY MAP:
     0x000000–0x0003FF    Vector table (1 KB)
     0x000400–0xEFFFFF    RAM (program + data)
     0xF00000–0xF0000F    Console (MMIO)
-    0xF00010–0xFFFFFF    (reserved for future devices)",
+    0xF00010–0xF00017    Timer (MMIO)
+    0xF00018–0xFFFFFF    (reserved for future devices)",
         VERSION, CONSOLE_BASE
     );
 }
