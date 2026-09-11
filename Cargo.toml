@@ -1,0 +1,13 @@
+[package]
+name = "anka"
+version = "0.1.0"
+edition = "2024"
+description = "Anka – MC68000 CPU emulator with bitvector semantics"
+
+[dependencies]
+
+[dev-dependencies]
+
+[[bin]]
+name = "anka"
+path = "src/main.rs"
