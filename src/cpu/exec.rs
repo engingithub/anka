@@ -447,6 +447,22 @@ impl<B: Bus> Cpu<B> {
                 self.sr.0 = old_sys | ccr as u16;
                 20
             }
+            op if op & 0xFFF8 == 0x4E50 => {
+                // LINK An, #disp
+                let an = (op & 7) as usize;
+                let disp = self.fetch_word() as i16;
+                self.push32(self.a[an]);
+                self.a[an] = self.a[7];
+                self.a[7] = (self.a[7] as i32 + disp as i32) as u32;
+                16
+            }
+            op if op & 0xFFF8 == 0x4E58 => {
+                // UNLK An
+                let an = (op & 7) as usize;
+                self.a[7] = self.a[an];
+                self.a[an] = self.pop32();
+                12
+            }
             _ => {
                 // Further sub-decoding
                 let sub = (opcode >> 8) & 0xF;

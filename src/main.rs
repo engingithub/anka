@@ -24,6 +24,11 @@ fn main() {
         run_asm(&args[2..]);
         return;
     }
+    // Subcommand: anka cc
+    if args.len() > 1 && args[1] == "cc" {
+        run_cc(&args[2..]);
+        return;
+    }
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print_help();
@@ -610,6 +615,142 @@ EXAMPLE:
     }
 }
 
+// ---------------------------------------------------------------------------
+// C compiler subcommand
+// ---------------------------------------------------------------------------
+
+fn run_cc(args: &[String]) {
+    if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("\
+AnkaCC — tiny C compiler targeting MC68000
+
+USAGE:
+    anka cc <source.c> [-o <output.srec>] [--base ADDR] [--run]
+
+OPTIONS:
+    -o FILE         Output S-record file (default: source with .srec extension)
+    --base ADDR     Base address for code (default: 0x1000)
+    --raw           Output raw binary instead of S-record
+    --run           Compile and immediately execute
+    --help, -h      Print this help
+
+EXAMPLE:
+    anka cc hello.c -o hello.srec
+    anka cc hello.c --run               ; compile and execute
+    anka hello.srec                      ; load and run the result");
+        return;
+    }
+
+    let mut source_path: Option<String> = None;
+    let mut output_path: Option<String> = None;
+    let mut base: u32 = 0x0000_1000;
+    let mut raw = false;
+    let mut run = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: -o requires an output path");
+                    process::exit(2);
+                }
+                output_path = Some(args[i].clone());
+            }
+            "--base" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --base requires an address");
+                    process::exit(2);
+                }
+                base = parse_u32(&args, i, "--base");
+            }
+            "--raw" => raw = true,
+            "--run" => run = true,
+            arg if arg.starts_with('-') => {
+                eprintln!("error: unknown option: {}", arg);
+                process::exit(2);
+            }
+            _ => {
+                if source_path.is_some() {
+                    eprintln!("error: multiple source files not supported");
+                    process::exit(2);
+                }
+                source_path = Some(args[i].clone());
+            }
+        }
+        i += 1;
+    }
+
+    let source_path = source_path.unwrap_or_else(|| {
+        eprintln!("error: no source file given");
+        eprintln!("Try 'anka cc --help' for usage.");
+        process::exit(2);
+    });
+
+    let source = fs::read_to_string(&source_path).unwrap_or_else(|e| {
+        eprintln!("error: cannot read '{}': {}", source_path, e);
+        process::exit(1);
+    });
+
+    let binary = match anka::cc::compile(&source, base) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{}:{}", source_path, e);
+            process::exit(1);
+        }
+    };
+
+    eprintln!("AnkaCC: compiled {} → {} bytes", source_path, binary.len());
+
+    if run {
+        // Run immediately
+        let console = Console::new();
+        let rx_buf = console.rx_buffer();
+        let mut bus = MappedBus::new_16mb();
+        bus.add_device(CONSOLE_BASE, Box::new(console));
+        bus.write32(0x000000, 0x0010_0000); // SSP
+        bus.write32(0x000004, base);         // PC = _start
+        bus.load(base as u32, &binary);
+
+        spawn_stdin_reader(rx_buf);
+        let mut cpu = Cpu::new(bus);
+        run_cpu(&mut cpu, 10_000_000, false);
+        eprintln!();
+        print_state(&cpu);
+    } else {
+        // Write output file
+        let default_out = if raw {
+            source_path.rsplit_once('.').map_or_else(
+                || format!("{}.bin", source_path),
+                |(stem, _)| format!("{}.bin", stem),
+            )
+        } else {
+            source_path.rsplit_once('.').map_or_else(
+                || format!("{}.srec", source_path),
+                |(stem, _)| format!("{}.srec", stem),
+            )
+        };
+        let output_path = output_path.unwrap_or(default_out);
+
+        let out_data = if raw {
+            binary.clone()
+        } else {
+            anka::srec::write(&binary, base, base).into_bytes()
+        };
+
+        fs::write(&output_path, &out_data).unwrap_or_else(|e| {
+            eprintln!("error: cannot write '{}': {}", output_path, e);
+            process::exit(1);
+        });
+
+        let fmt = if raw { "binary" } else { "S-record" };
+        eprintln!("AnkaCC: {} → {} ({} bytes {}, base {:#010X})",
+            source_path, output_path, binary.len(), fmt, base);
+    }
+}
+
 fn print_help() {
     println!(
         "\
@@ -659,6 +800,8 @@ EXAMPLES:
     anka --hello --emit-srec h.srec Write hello demo as S-record file
     anka asm hello.s                Assemble source → hello.srec
     anka asm hello.s -o out.srec    Assemble with explicit output path
+    anka cc hello.c --run           Compile and run C program
+    anka cc hello.c -o hello.srec   Compile C to S-record
 
 MEMORY MAP:
     0x000000–0x0003FF    Vector table (1 KB)

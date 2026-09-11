@@ -272,6 +272,104 @@ impl Asm {
         self.w(0x4ED0 | an as u16);
     }
 
+    /// LINK An, #disp  (set up stack frame)
+    pub fn link(&mut self, an: u8, disp: i16) {
+        self.w(0x4E50 | an as u16);
+        self.w(disp as u16);
+    }
+
+    /// UNLK An  (tear down stack frame)
+    pub fn unlk(&mut self, an: u8) {
+        self.w(0x4E58 | an as u16);
+    }
+
+    // ---------------------------------------------------------------
+    // Compiler-oriented helpers
+    // ---------------------------------------------------------------
+
+    /// ADD.L Ds, Dd → Dd
+    pub fn add_l_dn(&mut self, src: u8, dst: u8) {
+        self.w(0xD080 | ((dst as u16) << 9) | src as u16);
+    }
+
+    /// SUB.L Ds, Dd → Dd  (Dd = Dd - Ds)
+    pub fn sub_l_dn(&mut self, src: u8, dst: u8) {
+        self.w(0x9080 | ((dst as u16) << 9) | src as u16);
+    }
+
+    /// CMP.L Ds, Dd  (Dd - Ds, set flags)
+    pub fn cmp_l_dn(&mut self, src: u8, dst: u8) {
+        self.w(0xB080 | ((dst as u16) << 9) | src as u16);
+    }
+
+    /// AND.L Ds, Dd → Dd
+    pub fn and_l_dn(&mut self, src: u8, dst: u8) {
+        self.w(0xC080 | ((dst as u16) << 9) | src as u16);
+    }
+
+    /// OR.L Ds, Dd → Dd
+    pub fn or_l_dn(&mut self, src: u8, dst: u8) {
+        self.w(0x8080 | ((dst as u16) << 9) | src as u16);
+    }
+
+    /// NEG.L Dn
+    pub fn neg_l(&mut self, dn: u8) {
+        self.w(0x4480 | dn as u16);
+    }
+
+    /// MOVE.L #imm32, Dn
+    pub fn move_l_imm(&mut self, val: u32, dn: u8) {
+        self.w(0x203C | ((dn as u16) << 9));
+        self.l(val);
+    }
+
+    /// MOVE.B (An), Dn — read byte from indirect
+    pub fn move_b_indirect_dn(&mut self, an: u8, dn: u8) {
+        self.w(0x1010 | ((dn as u16) << 9) | an as u16);
+    }
+
+    /// MOVE.L Dn, d(An) — store to frame/displacement
+    pub fn move_l_dn_disp(&mut self, dn: u8, disp: i16, an: u8) {
+        self.w(0x2140 | ((an as u16) << 9) | dn as u16);
+        self.w(disp as u16);
+    }
+
+    /// MOVE.L d(An), Dn — load from frame/displacement
+    pub fn move_l_disp_dn(&mut self, disp: i16, an: u8, dn: u8) {
+        self.w(0x2028 | ((dn as u16) << 9) | an as u16);
+        self.w(disp as u16);
+    }
+
+    /// MOVEA.L An, Am  (copy address register)
+    pub fn movea_l_an(&mut self, src: u8, dst: u8) {
+        self.w(0x2048 | ((dst as u16) << 9) | src as u16);
+    }
+
+    /// MOVE.L An, -(A7) — push address register
+    pub fn push_a(&mut self, an: u8) {
+        self.w(0x2F08 | an as u16);
+    }
+
+    /// MOVE.L (A7)+, An — pop address register
+    pub fn pop_a(&mut self, an: u8) {
+        self.w(0x205F | ((an as u16) << 9));
+    }
+
+    /// MULS.W Ds, Dd → Dd (signed 16×16→32)
+    pub fn muls_dn(&mut self, src: u8, dst: u8) {
+        self.w(0xC1C0 | ((dst as u16) << 9) | src as u16);
+    }
+
+    /// DIVS.W Ds, Dd → Dd (signed 32÷16→16q:16r)
+    pub fn divs_dn(&mut self, src: u8, dst: u8) {
+        self.w(0x81C0 | ((dst as u16) << 9) | src as u16);
+    }
+
+    /// TST.B Dn — test byte, set CCR
+    pub fn tst_b(&mut self, dn: u8) {
+        self.w(0x4A00 | dn as u16);
+    }
+
     // ---------------------------------------------------------------
     // Branches (word displacement, label-based)
     // ---------------------------------------------------------------
@@ -288,6 +386,8 @@ impl Asm {
     pub fn bmi(&mut self, l: &str) { self.branch16(0xB, l); }
     pub fn bge(&mut self, l: &str) { self.branch16(0xC, l); }
     pub fn blt(&mut self, l: &str) { self.branch16(0xD, l); }
+    pub fn bgt(&mut self, l: &str) { self.branch16(0xE, l); }
+    pub fn ble(&mut self, l: &str) { self.branch16(0xF, l); }
 
     /// DBRA Dn, label  (decrement and branch if not −1)
     pub fn dbra(&mut self, dn: u8, label: &str) {
