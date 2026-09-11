@@ -284,85 +284,135 @@ example "two-agent isolation after revocation" {
 }
 
 // ===========================================================================
-// W⊕X: Sealed objects cannot have write authority (6S.1)
+// W⊕X: Global write-xor-execute (6S.1b)
 // ===========================================================================
-// The seal invariant: once an object enters SEALED state, no valid
-// capability for it may carry WRITE or ATOMIC permission.
+// No live object may simultaneously support W and X authority.
 //
-// This is enforced structurally by grant():
-//   state=SEALED ∧ (W ∈ perms ∨ A ∈ perms) → grant returns None.
+// Enforced structurally by grant():
+//   Active  ⇒ ¬X   (active objects reject EXECUTE grants)
+//   Sealed  ⇒ ¬W, ¬A, ¬S (sealed objects reject WRITE/ATOMIC/SEAL grants)
 //
-// Old capabilities from before sealing are invalid because seal
-// bumps generation.  New capabilities cannot carry W or A.
-// Therefore: Sealed(O) ⇒ ¬∃C: valid(C,O) ∧ W ∈ C.permissions.
+// Object lifecycle: Active (write/initialize) → seal → Sealed (fetch).
+// seal bumps generation, invalidating all pre-seal capabilities.
+//
+// W⊕X closure: for any single state, no granted permission set pw
+// can carry W while another granted permission set px carries X.
 
-// The sealed-grant predicate: what fabric.grant() accepts for sealed objects.
-// Flat definition — no if-then-else.
-// Rejects WRITE, ATOMIC, and SEAL (6S.1a: once sealed, no more sealing).
-define sealed_grant_ok(perm : BitVec8) =
-    ¬has_perm(perm, perm_W) ∧ ¬has_perm(perm, perm_A) ∧ ¬has_perm(perm, perm_S)
+// ---- Object states (2-bit encoding) ----
+define STATE_ACTIVE  = bvconst(0, 2)
+define STATE_SEALED  = bvconst(1, 2)
 
 define seal_gen(g : BitVec64) = bvadd(g, bvconst(1, 64))
 
 define perm_RX = bvor(perm_R, perm_X)
 
-example "WX1 sealed object rejects WRITE grant" {
+// ---- grant_ok: what fabric.grant() accepts for each state ----
+// Active:  any permission except EXECUTE
+// Sealed:  any permission except WRITE, ATOMIC, SEAL
+define active_grant_ok(perm : BitVec8) =
+    ¬has_perm(perm, perm_X)
+
+define sealed_grant_ok(perm : BitVec8) =
+    ¬has_perm(perm, perm_W) ∧ ¬has_perm(perm, perm_A) ∧ ¬has_perm(perm, perm_S)
+
+define grant_ok(state : BitVec2, perm : BitVec8) =
+    (state = STATE_ACTIVE ∧ active_grant_ok(perm))
+    ∨ (state = STATE_SEALED ∧ sealed_grant_ok(perm))
+
+// ═══════════════════════════════════════════════════════════════
+// Active state invariants (6S.1b)
+// ═══════════════════════════════════════════════════════════════
+
+example "WX1 active object rejects EXECUTE grant" {
+    assert(¬active_grant_ok(perm_X))
+}
+
+example "WX2 active object rejects RX grant" {
+    assert(¬active_grant_ok(perm_RX))
+}
+
+example "WX3 active object accepts WRITE grant" {
+    assert(active_grant_ok(perm_W))
+}
+
+example "WX4 active object accepts READ grant" {
+    assert(active_grant_ok(perm_R))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Sealed state invariants (6S.1 + 6S.1a)
+// ═══════════════════════════════════════════════════════════════
+
+example "WX5 sealed object rejects WRITE grant" {
     assert(¬sealed_grant_ok(perm_W))
 }
 
-example "WX2 sealed object rejects RW grant" {
+example "WX6 sealed object rejects RW grant" {
     assert(¬sealed_grant_ok(perm_RW))
 }
 
-example "WX3 sealed object rejects ATOMIC grant" {
+example "WX7 sealed object rejects ATOMIC grant" {
     assert(¬sealed_grant_ok(perm_A))
 }
 
-example "WX4 sealed object accepts READ grant" {
+example "WX8 sealed object rejects SEAL grant" {
+    assert(¬sealed_grant_ok(perm_S))
+}
+
+example "WX9 sealed object accepts READ grant" {
     assert(sealed_grant_ok(perm_R))
 }
 
-example "WX5 sealed object accepts RX grant" {
+example "WX10 sealed object accepts RX grant" {
     assert(sealed_grant_ok(perm_RX))
 }
 
-example "WX6 seal invalidates all pre-seal capabilities" {
+example "WX11 seal invalidates all pre-seal capabilities" {
     assert(
         ∀ g : BitVec64 .
         ¬generation_match(g, seal_gen(g))
     )
 }
 
-// WX7: The main W⊕X theorem — sealed objects carry no write authority.
-example "WX7 sealed grant cannot carry WRITE" {
+// ═══════════════════════════════════════════════════════════════
+// Global W⊕X theorem (6S.1b)
+// ═══════════════════════════════════════════════════════════════
+
+// WX12: For any single state, granted permissions cannot carry WRITE.
+// Active grants never carry X → trivially no X authority → W is allowed but X isn't.
+// Sealed grants never carry W → trivially no W authority → X is allowed but W isn't.
+// MAIN THEOREM: no state admits WRITE and EXECUTE simultaneously.
+example "WX12 global W xor X: no state admits W and X" {
     assert(
-        ∀ perm : BitVec8 .
-        sealed_grant_ok(perm)
-        ⟹ ¬has_perm(perm, perm_W)
+        ∀ state : BitVec2 . ∀ pw : BitVec8 . ∀ px : BitVec8 .
+        ¬(grant_ok(state, pw)
+          ∧ grant_ok(state, px)
+          ∧ has_perm(pw, perm_W)
+          ∧ has_perm(px, perm_X))
     )
 }
 
-// WX8: SEAL is a distinct authority — WRITE does not imply SEAL.
-// This is structural: perm_W = 0x02, perm_S = 0x10.
-// has_perm(W, S) = (W & S) = S, but 0x02 & 0x10 = 0 ≠ 0x10.
-example "WX8 WRITE does not imply SEAL authority" {
-    assert(¬has_perm(perm_W, perm_S))
+// WX13: Even a single permission set cannot carry both W and X.
+example "WX13 single-grant W xor X" {
+    assert(
+        ∀ state : BitVec2 . ∀ perm : BitVec8 .
+        grant_ok(state, perm)
+        ⟹ ¬(has_perm(perm, perm_W) ∧ has_perm(perm, perm_X))
+    )
 }
 
-// WX9: Sealed objects also reject SEAL grant.
-example "WX9 sealed object rejects SEAL grant" {
-    assert(¬sealed_grant_ok(perm_S))
-}
-
-// WX10: The trilogy — address ≠ memory authority, WRITE ≠ seal authority,
-//       executable address ≠ control-flow authority.
-// (Control-flow will be proven in CF1-CF6; here we prove the SEAL separation.)
-example "WX10 sealed grant: no WRITE, no SEAL, no ATOMIC" {
+// WX14: Sealed grant carries no WRITE, no SEAL, no ATOMIC (6S.1a).
+example "WX14 sealed grant: no WRITE, no SEAL, no ATOMIC" {
     assert(
         ∀ perm : BitVec8 .
         sealed_grant_ok(perm)
         ⟹ (¬has_perm(perm, perm_W) ∧ ¬has_perm(perm, perm_S) ∧ ¬has_perm(perm, perm_A))
     )
+}
+
+// WX15: WRITE does not imply SEAL authority (the second trilogy property).
+example "WX15 WRITE does not imply SEAL authority" {
+    assert(¬has_perm(perm_W, perm_S))
 }
 
 // ===========================================================================

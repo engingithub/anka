@@ -440,7 +440,7 @@ mod tests {
         fabric.place_object(stack, 0x020000);
 
         let dom = fabric.create_domain();
-        fabric.grant(dom, text,  0, 0x4000, Permissions::RX);
+        // text: RX granted after seal (in run_program)
         fabric.grant(dom, data,  0, 0x4000, Permissions::RW);
         fabric.grant(dom, stack, 0, 0x4000, Permissions::RW);
 
@@ -452,7 +452,6 @@ mod tests {
         core.address_map.add(0x00000, 0x4000, text);
         core.address_map.add(0x10000, 0x4000, data);
         core.address_map.add(0x20000, 0x4000, stack);
-        // SP starts at top of stack
         core.r[SP as usize] = 0x20000 + 0x4000;
         core
     }
@@ -464,6 +463,8 @@ mod tests {
         eprintln!("--- Compiled listing ---\n{}", asm.listing());
 
         fabric.write_physical(0x000000, &asm.to_bytes());
+        fabric.seal_object(text);
+        fabric.grant(dom, text, 0, 0x4000, Permissions::RX);
         let mut core = make_core(dom, text, data, stack);
 
         let result = core.run(&mut fabric, 10000);

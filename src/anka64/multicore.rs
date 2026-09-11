@@ -65,7 +65,7 @@ mod tests {
     ///   0x020000: Shared data (0x4000)
     ///   0x030000: Core 0 stack (0x4000)
     ///   0x040000: Core 1 stack (0x4000)
-    fn setup_two_cores() -> (Fabric, MultiCore, DomainId, DomainId, ObjectId) {
+    fn setup_two_cores() -> (Fabric, MultiCore, DomainId, DomainId, ObjectId, ObjectId, ObjectId) {
         let mut fabric = Fabric::new(0x800000);
 
         let text0  = fabric.alloc_object("core0_text",  0x4000, ObjectKind::Memory);
@@ -82,12 +82,12 @@ mod tests {
         // Domain for each core: own text + shared data + own stack
         // Both domains get RW + ATOMIC on shared data
         let dom0 = fabric.create_domain();
-        fabric.grant(dom0, text0,  0, 0x4000, Permissions::RX);
+        // text0: RX granted after seal (below)
         fabric.grant(dom0, shared, 0, 0x4000, Permissions(Permissions::RW.0 | Permissions::ATOMIC.0));
         fabric.grant(dom0, stack0, 0, 0x4000, Permissions::RW);
 
         let dom1 = fabric.create_domain();
-        fabric.grant(dom1, text1,  0, 0x4000, Permissions::RX);
+        // text1: RX granted after seal (below)
         fabric.grant(dom1, shared, 0, 0x4000, Permissions(Permissions::RW.0 | Permissions::ATOMIC.0));
         fabric.grant(dom1, stack1, 0, 0x4000, Permissions::RW);
 
@@ -108,7 +108,15 @@ mod tests {
         mc.add_core(core0);
         mc.add_core(core1);
 
-        (fabric, mc, dom0, dom1, shared)
+        (fabric, mc, dom0, dom1, shared, text0, text1)
+    }
+
+    /// Seal an object and grant RX.
+    /// W⊕X lifecycle: Active(write) → Sealed(fetch).
+    fn seal_code_object(fabric: &mut Fabric, obj: ObjectId, dom: DomainId) {
+        fabric.seal_object(obj);
+        let size = fabric.objects[&obj].size;
+        fabric.grant(dom, obj, 0, size, Permissions::RX);
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -117,7 +125,7 @@ mod tests {
 
     #[test]
     fn p16_two_cores_independent() {
-        let (mut fabric, mut mc, _, _, _) = setup_two_cores();
+        let (mut fabric, mut mc, dom0, dom1, _, text0, text1) = setup_two_cores();
 
         // Core 0: MOVI R0, 42; HALT
         let mut asm0 = Asm64::new();
@@ -130,6 +138,9 @@ mod tests {
         asm1.movi(R0, 99);
         asm1.halt();
         fabric.write_physical(0x010000, &asm1.to_bytes());
+
+        seal_code_object(&mut fabric, text0, dom0);
+        seal_code_object(&mut fabric, text1, dom1);
 
         mc.run_sc(&mut fabric, 100);
 
@@ -150,7 +161,7 @@ mod tests {
 
     #[test]
     fn p17_naive_counter_lost_updates() {
-        let (mut fabric, mut mc, _, _, _) = setup_two_cores();
+        let (mut fabric, mut mc, dom0, dom1, _, text0, text1) = setup_two_cores();
         let n = 10;
 
         // shared[0x0000] = counter, initially 0
@@ -189,6 +200,9 @@ mod tests {
         fabric.write_physical(0x000000, &asm.to_bytes());
         fabric.write_physical(0x010000, &asm.to_bytes());
 
+        seal_code_object(&mut fabric, text0, dom0);
+        seal_code_object(&mut fabric, text1, dom1);
+
         mc.run_sc(&mut fabric, 100_000);
 
         assert!(mc.cores[0].halted);
@@ -216,7 +230,7 @@ mod tests {
 
     #[test]
     fn p18_spinlock_counter_correct() {
-        let (mut fabric, mut mc, _, _, _) = setup_two_cores();
+        let (mut fabric, mut mc, dom0, dom1, _, text0, text1) = setup_two_cores();
         let n = 10;
 
         // shared[0x0000] = counter (initially 0)
@@ -285,6 +299,9 @@ mod tests {
         fabric.write_physical(0x000000, &asm.to_bytes());
         fabric.write_physical(0x010000, &asm.to_bytes());
 
+        seal_code_object(&mut fabric, text0, dom0);
+        seal_code_object(&mut fabric, text1, dom1);
+
         mc.run_sc(&mut fabric, 1_000_000);
 
         assert!(mc.cores[0].halted);
@@ -321,7 +338,7 @@ mod tests {
         fabric.write_physical(0x020000, &0xCAFEu64.to_le_bytes());
 
         let dom0 = fabric.create_domain();
-        fabric.grant(dom0, text0,  0, 0x4000, Permissions::RX);
+        // text0: RX after seal (below)
         fabric.grant(dom0, shared, 0, 0x4000, Permissions::RW);
 
         let dma_dom = fabric.create_domain();
@@ -333,6 +350,7 @@ mod tests {
         asm.ld(R0, R1, 0);
         asm.halt();
         fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text0, dom0);
 
         // DMA: authorize a write (but don't commit yet)
         let dma_req = super::super::fabric::request(
@@ -381,7 +399,7 @@ mod tests {
     #[test]
     fn m3_protection_independent_of_core_identity() {
         // Same domain on two different cores → same authority
-        let (mut fabric, _, _, _, shared) = setup_two_cores();
+        let (mut fabric, _, _, _, shared, _, _) = setup_two_cores();
 
         // Core 0 writes
         let req0 = super::super::fabric::request(

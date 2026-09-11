@@ -311,17 +311,19 @@ impl Kernel {
         self.fabric.place_object(stack_obj, stack_phys);
         self.fabric.grant(child_dom, stack_obj, 0, stack_size, Permissions::RW);
 
-        // --- Child trap handler (HALT for kernel interception) ---
+        // --- Child trap handler: alloc → initialize → seal → grant RX ---
+        // W⊕X: no exceptional executable-object creation path.
         let trap_size: u64 = 0x1000;
         let trap_obj = self.fabric.alloc_object("child_trap", trap_size, ObjectKind::Memory);
         let trap_phys = self.next_phys;
         self.next_phys += trap_size;
         self.fabric.place_object(trap_obj, trap_phys);
-        self.fabric.grant(child_dom, trap_obj, 0, trap_size, Permissions::RX);
 
         let mut handler = Asm64::new();
         handler.halt();
-        self.fabric.write_physical(trap_phys, &handler.to_bytes());
+        self.fabric.initialize_object(trap_obj, 0, &handler.to_bytes());
+        self.fabric.seal_object(trap_obj);
+        self.fabric.grant(child_dom, trap_obj, 0, trap_size, Permissions::RX);
 
         // --- Child core ---
         let child_agent = AgentId(self.next_agent);
@@ -400,6 +402,12 @@ mod tests {
     const CPU0: AgentId = AgentId(0);
 
     /// Create a process with its own domain, objects, and address map.
+    ///
+    /// Text object starts Active.  Callers must:
+    ///   1. Write code and trap handler to text via write_physical()
+    ///   2. Call seal_code_object() before running the kernel
+    ///
+    /// W⊕X: Active ⇒ ¬X, Sealed ⇒ ¬W.
     fn create_process(
         fabric: &mut Fabric,
         agent: AgentId,
@@ -416,7 +424,7 @@ mod tests {
         fabric.place_object(stack, stack_phys);
 
         let dom = fabric.create_domain();
-        fabric.grant(dom, text,  0, 0x4000, Permissions::RX);
+        // text: RX granted AFTER seal (see seal_code_object)
         fabric.grant(dom, data,  0, 0x4000, Permissions::RW);
         fabric.grant(dom, stack, 0, 0x4000, Permissions::RW);
 
@@ -425,19 +433,23 @@ mod tests {
         core.address_map.add(0x10000, 0x4000, data);
         core.address_map.add(0x20000, 0x4000, stack);
         core.r[SP as usize] = 0x20000 + 0x4000;
-        // Trap handler = HALT at virtual address 0x3FF0 (in text object)
         core.trap_vector = 0x3FF0;
 
         (core, dom, text, data, stack)
     }
 
     fn install_trap_handler(fabric: &mut Fabric, text_phys: u64) {
-        // At offset 0x3FF0 in text object, write a HALT instruction.
-        // The OS kernel intercepts this HALT as a syscall.
         let mut handler = Asm64::new();
         handler.halt();
-        let bytes = handler.to_bytes();
-        fabric.write_physical(text_phys + 0x3FF0, &bytes);
+        fabric.write_physical(text_phys + 0x3FF0, &handler.to_bytes());
+    }
+
+    /// Seal an object and grant RX to a domain.
+    /// W⊕X lifecycle: Active(write) → Sealed(fetch).
+    fn seal_code_object(fabric: &mut Fabric, obj: ObjectId, dom: DomainId) {
+        fabric.seal_object(obj);
+        let size = fabric.objects[&obj].size;
+        fabric.grant(dom, obj, 0, size, Permissions::RX);
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -456,7 +468,7 @@ mod tests {
             create_process(&mut fabric, CPU0, "proc0", 0x000000, 0x010000, 0x020000);
         install_trap_handler(&mut fabric, 0x000000);
 
-        // Build program using AST:
+        // Build program — must be written before sealing text object
         //   syscall_write(42): R0=SYS_WRITE, R1=42, TRAP #0
         //   syscall_exit(0):   R0=SYS_EXIT,  R1=0,  TRAP #0
         // Build the program manually via Asm64
@@ -483,6 +495,7 @@ mod tests {
         asm.trap(0);
 
         fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, _text, _dom);
 
         let mut kernel = Kernel::new(fabric);
         kernel.spawn(core);
@@ -509,13 +522,13 @@ mod tests {
         let mut fabric = Fabric::new(0x800000);
 
         // Process A at physical 0x000000..
-        let (core_a, _dom_a, _t, _d, _s) =
+        let (core_a, dom_a, text_a, _d, _s) =
             create_process(&mut fabric, AgentId(0), "procA",
                 0x000000, 0x010000, 0x020000);
         install_trap_handler(&mut fabric, 0x000000);
 
         // Process B at physical 0x100000..
-        let (core_b, _dom_b, _t, _d, _s) =
+        let (core_b, dom_b, text_b, _d, _s) =
             create_process(&mut fabric, AgentId(1), "procB",
                 0x100000, 0x110000, 0x120000);
         install_trap_handler(&mut fabric, 0x100000);
@@ -561,6 +574,10 @@ mod tests {
         asm_b.mov(R1, R4);     // exit(42)
         asm_b.trap(0);
         fabric.write_physical(0x100000, &asm_b.to_bytes());
+
+        // Seal both text objects (W⊕X lifecycle)
+        seal_code_object(&mut fabric, text_a, dom_a);
+        seal_code_object(&mut fabric, text_b, dom_b);
 
         let mut kernel = Kernel::new(fabric);
         kernel.spawn(core_a);
@@ -621,13 +638,12 @@ mod tests {
         fabric.place_object(stack,  0x030000);
 
         let dom = fabric.create_domain();
-        fabric.grant(dom, text,   0, 0x4000, Permissions::RX);
         fabric.grant(dom, output, 0, 0x1000, Permissions::RWS);
         fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
 
         install_trap_handler(&mut fabric, 0x000000);
 
-        // Write valid code to output buffer (MOVI R1,42; MOVI R0,0; TRAP #0)
+        // Write valid code to output buffer
         let mut code = Asm64::new();
         code.movi(R1, 42);
         code.movi(R0, SYS_EXIT as i32);
@@ -635,9 +651,9 @@ mod tests {
         fabric.write_physical(0x020000, &code.to_bytes());
 
         // Program: call SYS_EXEC directly (skip SYS_SEAL)
-        // output is at virtual 0x05000
         build_syscall_program(&mut fabric, 0x000000, SYS_EXEC,
             0x5000, 16);
+        seal_code_object(&mut fabric, text, dom);
 
         let mut core = Anka64Core::new(AgentId(0), dom);
         core.address_map.add(0x00000, 0x4000, text);
@@ -677,7 +693,6 @@ mod tests {
         fabric.place_object(stack,    0x030000);
 
         let dom = fabric.create_domain();
-        fabric.grant(dom, text,    0, 0x4000, Permissions::RX);
         fabric.grant(dom, rw_only, 0, 0x1000, Permissions::RW); // no SEAL!
         fabric.grant(dom, stack,   0, 0x4000, Permissions::RW);
 
@@ -686,6 +701,7 @@ mod tests {
         // Program: SYS_SEAL on the RW-only object
         build_syscall_program(&mut fabric, 0x000000, SYS_SEAL,
             0x5000, 0);
+        seal_code_object(&mut fabric, text, dom);
 
         let mut core = Anka64Core::new(AgentId(0), dom);
         core.address_map.add(0x00000, 0x4000, text);
@@ -719,13 +735,13 @@ mod tests {
         fabric.place_object(text, 0x00000);
 
         let dom = fabric.create_domain();
-        fabric.grant(dom, text, 0, 0x1000, Permissions::RX);
 
-        // Write some code at aligned address
+        // Write code and seal before granting RX
         let mut asm = Asm64::new();
         asm.movi(R0, 42);
         asm.halt();
         fabric.write_physical(0x00000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
 
         // Start at aligned PC = 0 → should work
         let mut core = Anka64Core::new(AgentId(0), dom);
@@ -780,7 +796,6 @@ mod tests {
         fabric.place_object(stack,  0x030000);
 
         let dom = fabric.create_domain();
-        fabric.grant(dom, text,   0, 0x4000, Permissions::RX);
         // Narrow SEAL: only [0x100, 0x120), not the whole object
         fabric.grant(dom, buffer, 0x100, 0x20, Permissions::SEAL);
         fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
@@ -789,6 +804,7 @@ mod tests {
 
         build_syscall_program(&mut fabric, 0x000000, SYS_SEAL,
             0x5000, 0);
+        seal_code_object(&mut fabric, text, dom);
 
         let mut core = Anka64Core::new(AgentId(0), dom);
         core.address_map.add(0x00000, 0x4000, text);
@@ -825,11 +841,10 @@ mod tests {
         fabric.place_object(stack, 0x030000);
 
         let dom = fabric.create_domain();
-        fabric.grant(dom, text,  0, 0x4000, Permissions::RX);
         fabric.grant(dom, code,  0, 0x1000, Permissions::RWS);
         fabric.grant(dom, stack, 0, 0x4000, Permissions::RW);
 
-        // Write valid code and seal
+        // Write valid code and seal the code object
         let mut asm = Asm64::new();
         asm.movi(R1, 42);
         asm.movi(R0, SYS_EXIT as i32);
@@ -845,6 +860,7 @@ mod tests {
         // Program: SYS_EXEC with code_size=0x100 (larger than authority)
         build_syscall_program(&mut fabric, 0x000000, SYS_EXEC,
             0x5000, 0x100);
+        seal_code_object(&mut fabric, text, dom);
 
         let mut core = Anka64Core::new(AgentId(0), dom);
         core.address_map.add(0x00000, 0x4000, text);
@@ -882,11 +898,10 @@ mod tests {
         fabric.place_object(stack, 0x030000);
 
         let dom = fabric.create_domain();
-        fabric.grant(dom, text,  0, 0x4000, Permissions::RX);
         fabric.grant(dom, code,  0, 0x1000, Permissions::RWS);
         fabric.grant(dom, stack, 0, 0x4000, Permissions::RW);
 
-        // Write simple code and seal
+        // Write simple code and seal the code object
         let mut asm = Asm64::new();
         asm.movi(R1, 77);
         asm.movi(R0, SYS_EXIT as i32);
@@ -902,6 +917,7 @@ mod tests {
         // SYS_EXEC with code_size = 16 (within parent's [0, 0x1000))
         build_syscall_program(&mut fabric, 0x000000, SYS_EXEC,
             0x5000, 16);
+        seal_code_object(&mut fabric, text, dom);
 
         let mut core = Anka64Core::new(AgentId(0), dom);
         core.address_map.add(0x00000, 0x4000, text);
@@ -1013,7 +1029,7 @@ mod tests {
         fabric.place_object(stack,  0x030000);
 
         let dom = fabric.create_domain();
-        fabric.grant(dom, text,   0, 0x4000, Permissions::RX);
+        // text: RX granted after seal (below)
         fabric.grant(dom, source, 0, 0x1000, Permissions::READ);
         fabric.grant(dom, output, 0, 0x1000, Permissions::RWS); // RW+Seal: code emission buffer
         fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
@@ -1174,6 +1190,7 @@ mod tests {
         eprintln!("--- Guest compiler listing ---");
         eprintln!("{}", asm.listing());
         fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
 
         // ─── Set up compiler process ──────────────────────────
         let mut core = Anka64Core::new(AgentId(0), dom);
