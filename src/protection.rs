@@ -287,7 +287,14 @@ impl Capability {
     pub fn perms(&self) -> Perm { self.perms }
 
     /// Check whether this capability authorises an access.
+    ///
+    /// A real request requires w > 0 ∧ op ≠ ∅.  This matches the
+    /// Kleis `real_request` guard so Layer 1 and Layer 2 agree on
+    /// every degenerate transaction.
     pub fn permits(&self, addr: u32, size: u32, op: Perm) -> bool {
+        if size == 0 || op.0 == 0 {
+            return false;
+        }
         if !self.perms.contains(op) {
             return false;
         }
@@ -594,6 +601,28 @@ mod tests {
         assert!(cap.permits(0x10FC, 4, Perm::READ));  // last 4 bytes
         assert!(!cap.permits(0x10FD, 4, Perm::READ)); // 1 byte past end
         assert!(!cap.permits(0x0FFF, 1, Perm::READ)); // 1 byte before start
+    }
+
+    /// Kleis real_request domain restriction: w > 0 ∧ op ≠ ∅.
+    /// Zero-length or zero-permission requests are not real.
+    #[test]
+    fn degenerate_requests_denied() {
+        let cap = Capability::new(1, 0x1000, 0x100, Perm::RWX);
+
+        // Zero-length request at valid address
+        assert!(!cap.permits(0x1000, 0, Perm::READ),
+            "zero-length request should be denied");
+
+        // Zero-length at one-past-end (the exact dma_write edge case)
+        assert!(!cap.permits(0x1100, 0, Perm::WRITE),
+            "zero-length at one-past-end should be denied");
+
+        // Zero-permission request
+        assert!(!cap.permits(0x1000, 4, Perm(0)),
+            "zero-permission request should be denied");
+
+        // Both zero
+        assert!(!cap.permits(0x1000, 0, Perm(0)));
     }
 
     #[test]
