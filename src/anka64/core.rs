@@ -245,24 +245,59 @@ impl Anka64Core {
                 }
             }
             Sem::Call => {
+                // Mint-or-fault: CALL either mints authority and transfers,
+                // or faults without changing any state.
                 let return_addr = self.pc + 4;
-                self.r[LR as usize] = return_addr;
-                // Mint return authority: resolve PC to code object + generation
-                if let Some((code_obj, _offset)) = self.address_map.resolve(self.pc) {
-                    if let Some(obj) = fabric.objects.get(&code_obj) {
-                        self.return_stack.push(ReturnAuthority {
-                            code_object: code_obj,
-                            generation: obj.generation,
-                            target: return_addr,
+                let (code_obj, _offset) = match self.address_map.resolve(self.pc) {
+                    Some(r) => r,
+                    None => {
+                        return StepResult::Fault(FaultRecord {
+                            agent: self.agent,
+                            domain: self.domain,
+                            privilege: self.privilege,
+                            transaction: TransactionId(0),
+                            object: ObjectId(0),
+                            generation: None,
+                            offset: self.pc,
+                            width: Width::Word,
+                            kind: AccessKind::Fetch,
+                            pc: Some(self.pc),
+                            reason: FaultReason::ControlFlowViolation,
                         });
                     }
-                }
+                };
+                let obj_gen = match fabric.objects.get(&code_obj) {
+                    Some(obj) => obj.generation,
+                    None => {
+                        return StepResult::Fault(FaultRecord {
+                            agent: self.agent,
+                            domain: self.domain,
+                            privilege: self.privilege,
+                            transaction: TransactionId(0),
+                            object: code_obj,
+                            generation: None,
+                            offset: self.pc,
+                            width: Width::Word,
+                            kind: AccessKind::Fetch,
+                            pc: Some(self.pc),
+                            reason: FaultReason::ControlFlowViolation,
+                        });
+                    }
+                };
+                // All resolved — commit atomically:
+                self.r[LR as usize] = return_addr;
+                self.return_stack.push(ReturnAuthority {
+                    code_object: code_obj,
+                    generation: obj_gen,
+                    target: return_addr,
+                });
                 next_pc = (self.pc as i64 + insn.imm * 4) as u64;
             }
             Sem::Ret => {
-                // Validate return authority: LR must match protected stack
+                // Peek → validate → pop only on success.
+                // Failed RET leaves R unchanged (fault atomicity, N8 analogue).
                 let lr_val = self.r[LR as usize];
-                match self.return_stack.pop() {
+                let ret_auth = match self.return_stack.last() {
                     None => {
                         return StepResult::Fault(FaultRecord {
                             agent: self.agent,
@@ -278,45 +313,46 @@ impl Anka64Core {
                             reason: FaultReason::ControlFlowViolation,
                         });
                     }
-                    Some(ret_auth) => {
-                        // Check 1: LR matches the minted return target
-                        if lr_val != ret_auth.target {
-                            return StepResult::Fault(FaultRecord {
-                                agent: self.agent,
-                                domain: self.domain,
-                                privilege: self.privilege,
-                                transaction: TransactionId(0),
-                                object: ret_auth.code_object,
-                                generation: Some(ret_auth.generation),
-                                offset: lr_val,
-                                width: Width::Word,
-                                kind: AccessKind::Fetch,
-                                pc: Some(self.pc),
-                                reason: FaultReason::ControlFlowViolation,
-                            });
-                        }
-                        // Check 2: code object generation still valid
-                        match fabric.objects.get(&ret_auth.code_object) {
-                            Some(obj) if obj.generation == ret_auth.generation => {}
-                            _ => {
-                                return StepResult::Fault(FaultRecord {
-                                    agent: self.agent,
-                                    domain: self.domain,
-                                    privilege: self.privilege,
-                                    transaction: TransactionId(0),
-                                    object: ret_auth.code_object,
-                                    generation: Some(ret_auth.generation),
-                                    offset: lr_val,
-                                    width: Width::Word,
-                                    kind: AccessKind::Fetch,
-                                    pc: Some(self.pc),
-                                    reason: FaultReason::ControlFlowViolation,
-                                });
-                            }
-                        }
-                        next_pc = ret_auth.target;
+                    Some(auth) => auth.clone(),
+                };
+                // Check 1: LR matches the minted return target
+                if lr_val != ret_auth.target {
+                    return StepResult::Fault(FaultRecord {
+                        agent: self.agent,
+                        domain: self.domain,
+                        privilege: self.privilege,
+                        transaction: TransactionId(0),
+                        object: ret_auth.code_object,
+                        generation: Some(ret_auth.generation),
+                        offset: lr_val,
+                        width: Width::Word,
+                        kind: AccessKind::Fetch,
+                        pc: Some(self.pc),
+                        reason: FaultReason::ControlFlowViolation,
+                    });
+                }
+                // Check 2: code object generation still valid
+                match fabric.objects.get(&ret_auth.code_object) {
+                    Some(obj) if obj.generation == ret_auth.generation => {}
+                    _ => {
+                        return StepResult::Fault(FaultRecord {
+                            agent: self.agent,
+                            domain: self.domain,
+                            privilege: self.privilege,
+                            transaction: TransactionId(0),
+                            object: ret_auth.code_object,
+                            generation: Some(ret_auth.generation),
+                            offset: lr_val,
+                            width: Width::Word,
+                            kind: AccessKind::Fetch,
+                            pc: Some(self.pc),
+                            reason: FaultReason::ControlFlowViolation,
+                        });
                     }
                 }
+                // All checks pass — NOW pop (fault atomicity)
+                self.return_stack.pop();
+                next_pc = ret_auth.target;
             }
 
             // ─── System ─────────────────────────────────────────
@@ -1056,5 +1092,86 @@ mod tests {
         assert!(core.return_stack.is_empty(),
             "return stack should be empty after matched CALL/RET");
         eprintln!("P23: legitimate CALL/RET = 42, return stack empty ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // P24: Failed RET leaves R unchanged (fault atomicity, N8 analogue)
+    //
+    // The control-flow analogue of N8c: a faulting return does
+    // not consume the protected return authority it was checking.
+    //
+    // Sequence:
+    //   CALL fn            ; mints return authority (depth 1)
+    //   fn: corrupt LR     ; overwrite with bad address
+    //   fn: RET             ; faults — LR ≠ authority target
+    //                       ; R must still have depth 1
+    //
+    // Then externally: restore LR, step again → legitimate RET
+    // succeeds using the preserved authority.
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p24_failed_ret_preserves_return_stack() {
+        let mut fabric = Fabric::new(0x100000);
+
+        let text = fabric.alloc_object("text", 0x1000, ObjectKind::Memory);
+        let data = fabric.alloc_object("data", 0x1000, ObjectKind::Memory);
+        fabric.place_object(text, 0x00000);
+        fabric.place_object(data, 0x10000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, data, 0, 0x1000, Permissions::RW);
+
+        // Program:
+        //   0x00: CALL fn        ; word 0 → word 3
+        //   0x04: HALT           ; word 1 (legitimate return point)
+        //   0x08: NOP            ; word 2 (padding)
+        //   0x0C: MOVI LR, 0x42 ; word 3 (fn: corrupt LR)
+        //   0x10: RET            ; word 4 (fn: → fault, LR ≠ 0x04)
+        //   0x14: RET            ; word 5 (second RET — after LR restored)
+        let mut asm = Asm64::new();
+        let call_addr = asm.here();
+        asm.call(3 - call_addr);         // word 0: CALL → word 3
+        asm.halt();                       // word 1: legitimate return @ 0x04
+        asm.nop();                        // word 2: padding
+        asm.movi(LR, 0x42);             // word 3: corrupt LR
+        asm.ret();                        // word 4: faults (0x42 ≠ 0x04)
+        asm.ret();                        // word 5: second RET (after fix)
+
+        load_program(&mut fabric, &asm);
+        seal_text(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(CPU0, dom);
+        core.address_map.add(0x0000, 0x1000, text);
+        core.address_map.add(0x8000, 0x1000, data);
+
+        // Run until fault
+        let result = core.run(&mut fabric, 100);
+        match &result {
+            StepResult::Fault(fault) => {
+                assert_eq!(fault.reason, FaultReason::ControlFlowViolation);
+            }
+            _ => panic!("expected ControlFlowViolation, got {:?}", result),
+        }
+
+        // R must still have depth 1 — the failed RET did NOT consume it
+        assert_eq!(core.return_stack.len(), 1,
+            "failed RET must not consume return authority");
+        assert_eq!(core.return_stack[0].target, 0x04,
+            "preserved authority must still point to legitimate return");
+
+        // Fix LR and advance PC past the faulting RET to word 5
+        core.r[LR as usize] = 0x04;  // restore legitimate return address
+        core.pc = 0x14;               // word 5: the second RET
+        core.halted = false;
+
+        let result2 = core.step(&mut fabric);
+        assert!(matches!(result2, StepResult::Continue));
+        assert_eq!(core.pc, 0x04, "RET should have returned to 0x04");
+        assert!(core.return_stack.is_empty(),
+            "successful RET should have consumed the authority");
+
+        eprintln!("P24: failed RET preserved R (depth=1), second RET succeeded ✓");
+        eprintln!("     fault atomicity: faulting RET ⟹ R' = R");
     }
 }
