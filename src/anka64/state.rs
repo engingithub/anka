@@ -386,12 +386,32 @@ impl fmt::Display for FaultReason {
 
 /// Protected return authority minted by CALL.
 ///
-/// Lives on a per-core protected stack, not in ordinary memory.
-/// CALL is the only mint.  LD/ST/ALU cannot forge, read, or modify
-/// return authority.  RET validates against the top of the stack.
+/// Lives on a per-execution-context protected stack, not in ordinary
+/// memory.  CALL is the only mint.  LD/ST/ALU cannot forge, read,
+/// or modify return authority.  RET validates against the top of
+/// the stack; failed RET leaves R unchanged (fault atomicity).
 ///
 /// Rule 29: data that names executable code is not, by itself,
 /// authority to transfer control to it.
+///
+/// **Future: ExecutionContext separation.**
+/// Currently stored on `Anka64Core`.  The architectural intent is
+/// that an `ExecutionContext` owns R and migrates between cores:
+///   `Core0 owns Context7 → migrate → Core1 owns Context7`
+/// This is structurally correct today (Rust move semantics carry
+/// `return_stack` with the core) but should become explicit when
+/// the architecture gains context switching.
+///
+/// **Future: remapping provenance.**
+/// `target` is a virtual address.  RET currently checks that
+/// `target` matches LR and that `code_object`'s generation is
+/// valid, but does NOT re-verify that `target` still resolves
+/// to `code_object`.  While address mappings are effectively
+/// static today, once Anka gains mutable remapping the stronger
+/// invariant should be: `resolve(target) = (code_object, offset)`
+/// at RET time.  Otherwise the same virtual address could be
+/// remapped to a different sealed code object while the original
+/// object's generation remains valid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReturnAuthority {
     /// Code object containing the CALL site.

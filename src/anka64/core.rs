@@ -109,11 +109,17 @@ pub struct Anka64Core {
     pub saved_pc: Option<u64>,
     pub saved_privilege: Option<Privilege>,
 
-    /// Protected return-authority stack (6S.2).
+    /// Protected return-authority stack (6S.2 + 6S.2a).
     ///
     /// Not in ordinary memory.  Not accessible through capabilities.
     /// CALL is the only mint; RET is the only consumer.
     /// LD/ST/ALU cannot read, write, or forge entries.
+    ///
+    /// Fault atomicity: failed RET does not pop (peek → validate → pop).
+    /// CALL atomicity: mint-or-fault (no partial state change).
+    ///
+    /// Architecturally belongs to the execution context, not the
+    /// physical core.  See `ReturnAuthority` doc for future plans.
     pub return_stack: Vec<ReturnAuthority>,
 }
 
