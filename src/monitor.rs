@@ -126,8 +126,8 @@ pub fn build(entry: u32) -> Vec<u8> {
     a.label("cmd_go");
     a.bsr("putchar"); // echo 'g'
     a.bsr("read_hex");
+    a.movea_l_dn(0, 0); // A0 = target (before newline clobbers D0)
     a.bsr("newline");
-    a.movea_l_dn(0, 0); // A0 = target
     a.jmp_indirect(0); // JMP (A0)
 
     // ==================================================================
