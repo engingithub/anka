@@ -31,6 +31,7 @@ pub mod abi;
 pub mod asm;
 pub mod bus;
 pub mod cc;
+pub mod concurrent;
 pub mod cpu;
 pub mod hostile;
 pub mod monitor;

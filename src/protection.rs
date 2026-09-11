@@ -60,7 +60,7 @@ pub struct ObjectEntry {
 /// fail the generation check on access.
 #[derive(Debug, Clone, Default)]
 pub struct ObjectTable {
-    entries: Vec<ObjectEntry>,
+    pub(crate) entries: Vec<ObjectEntry>,
 }
 
 impl ObjectTable {
