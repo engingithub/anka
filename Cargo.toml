@@ -5,6 +5,7 @@ edition = "2024"
 description = "Anka – MC68000 CPU emulator with bitvector semantics"
 
 [dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 

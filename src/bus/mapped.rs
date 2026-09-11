@@ -48,7 +48,7 @@ impl MappedBus {
     /// Register a device at the given base address.
     pub fn add_device(&mut self, base: u32, device: Box<dyn Device>) {
         let size = device.size();
-        println!(
+        eprintln!(
             "  MMIO: {:#010X}–{:#010X}  {} ({})",
             base,
             base + size - 1,

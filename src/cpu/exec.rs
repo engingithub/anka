@@ -455,6 +455,8 @@ impl<B: Bus> Cpu<B> {
                     0x2 if opcode & 0xC0 != 0xC0 => self.clr(opcode),
                     0x4 if opcode & 0xC0 != 0xC0 => self.neg_op(opcode),
                     0x6 if opcode & 0xC0 != 0xC0 => self.not_op(opcode),
+                    0x8 if opcode & 0xFFF8 == 0x4840 => self.swap(opcode),
+                    0x8 if opcode & 0xC0 == 0x40 => self.pea(opcode),
                     0x8 if opcode & 0xC0 == 0x80 => self.ext_word(opcode),
                     0x8 if opcode & 0xC0 == 0xC0 => self.ext_long(opcode),
                     0xA if opcode & 0xC0 != 0xC0 => self.tst(opcode),
@@ -464,15 +466,6 @@ impl<B: Bus> Cpu<B> {
                         // LEA: 0100 rrr 111 mmm rrr
                         if opcode & 0x01C0 == 0x01C0 {
                             self.lea(opcode)
-                        } else if opcode & 0x0140 == 0x0100 {
-                            // MOVEM, SWAP, PEA, etc. — simplified
-                            if opcode & 0x01F8 == 0x0148 {
-                                self.swap(opcode)
-                            } else if opcode & 0x01C0 == 0x0040 {
-                                self.pea(opcode)
-                            } else {
-                                self.illegal(opcode)
-                            }
                         } else {
                             self.illegal(opcode)
                         }
