@@ -2030,8 +2030,18 @@ mod tests {
                             binop(BinOp::Mul, var(0), lit(10)),
                             binop(BinOp::Sub, var(3), lit(48)),
                         )),
-                        assign(1, lit(1)),
-                        call_stmt("advance", vec![]),
+                        // Overflow: value > 131071
+                        Stmt::If(
+                            binop(BinOp::Lt, lit(131071), var(0)),
+                            vec![
+                                deref_assign(lit(WS_ERROR), lit(1)),
+                                assign(2, lit(0)),
+                            ],
+                            vec![
+                                assign(1, lit(1)),
+                                call_stmt("advance", vec![]),
+                            ],
+                        ),
                     ], vec![
                         assign(2, lit(0)),
                     ]),
@@ -2207,9 +2217,21 @@ mod tests {
                 Stmt::VarDecl(3, Type::Int, Some(
                     call("parse_expr", vec![]))),
 
-                // ─── Expect ';' ──────────────────────────
+                // ─── Expect ';' then EOF ─────────────────
                 call_stmt("skip_ws", vec![]),
                 call_stmt("expect_char", vec![lit(59)]),   // ';'
+
+                // Require end-of-source: skip trailing whitespace,
+                // then check pos == src_len.  Reject trailing garbage.
+                call_stmt("skip_ws", vec![]),
+                Stmt::If(
+                    binop(BinOp::Ne,
+                        deref(lit(WS_POS)),
+                        deref(lit(WS_SRC_LEN)),
+                    ),
+                    vec![deref_assign(lit(WS_ERROR), lit(1))],
+                    vec![],
+                ),
 
                 // ─── Check error ─────────────────────────
                 Stmt::VarDecl(4, Type::Int, Some(
@@ -2428,5 +2450,52 @@ mod tests {
     fn b1_error_missing_keyword() {
         run_6b1_test(b"42;", u64::MAX, false);
         eprintln!("6B.1: \"42;\" → error (missing 'return') ✓");
+    }
+
+    // ─── 6B.1a: overflow and EOF regressions ────────────────────
+
+    #[test]
+    fn b1a_literal_overflow_wrapping() {
+        // 2^64 + 42 = 18446744073709551658
+        // Without per-digit overflow check, u64 wraps to 42.
+        // The compiler must reject during parsing, not accept the wrap.
+        run_6b1_test(b"return 18446744073709551658;", u64::MAX, false);
+        eprintln!("6B.1a: 2^64+42 wrap → error (overflow during parsing) ✓");
+    }
+
+    #[test]
+    fn b1a_literal_overflow_boundary() {
+        // 131072 exceeds 18-bit MOVI range
+        run_6b1_test(b"return 131072;", u64::MAX, false);
+        eprintln!("6B.1a: \"return 131072;\" → error (MOVI overflow) ✓");
+    }
+
+    #[test]
+    fn b1a_literal_max_accepted() {
+        run_6b1_test(b"return 131071;", 131071, true);
+        eprintln!("6B.1a: \"return 131071;\" → 131071 (MOVI max) ✓");
+    }
+
+    #[test]
+    fn b1a_trailing_garbage() {
+        // After ';', source must be exhausted.  "garbage" is not EOF.
+        run_6b1_test(b"return 42;garbage", u64::MAX, false);
+        eprintln!("6B.1a: \"return 42;garbage\" → error (not EOF) ✓");
+    }
+
+    #[test]
+    fn b1a_trailing_whitespace_ok() {
+        // Trailing whitespace after ';' should be accepted.
+        run_6b1_test(b"return 42;  ", 42, true);
+        eprintln!("6B.1a: \"return 42;  \" → 42 (trailing ws ok) ✓");
+    }
+
+    #[test]
+    fn b1a_expr_overflow_in_addition() {
+        // 131070 + 2 = 131072 > 131071: main's range check catches this.
+        // The expression value exceeds MOVI range even though
+        // individual literals are fine.
+        run_6b1_test(b"return 131070 + 2;", u64::MAX, false);
+        eprintln!("6B.1a: \"return 131070 + 2;\" → error (expr overflow) ✓");
     }
 }
