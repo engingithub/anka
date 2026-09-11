@@ -1,0 +1,178 @@
+// Generated from desc.rs — do not edit by hand.
+// An instruction does not exist unless every consumer agrees.
+
+import "stdlib/prelude.kleis"
+
+// Opcode: BitVec8, Register: BitVec4
+
+// ─── Opcode constants ───────────────────────────────
+
+define op_add = bvconst(1, 8)
+define op_sub = bvconst(2, 8)
+define op_and = bvconst(3, 8)
+define op_or = bvconst(4, 8)
+define op_xor = bvconst(5, 8)
+define op_shl = bvconst(6, 8)
+define op_shr = bvconst(7, 8)
+define op_asr = bvconst(8, 8)
+define op_mul = bvconst(11, 8)
+define op_cmp = bvconst(9, 8)
+define op_mov = bvconst(10, 8)
+define op_addi = bvconst(16, 8)
+define op_subi = bvconst(17, 8)
+define op_andi = bvconst(18, 8)
+define op_ori = bvconst(19, 8)
+define op_xori = bvconst(20, 8)
+define op_cmpi = bvconst(21, 8)
+define op_movi = bvconst(22, 8)
+define op_ld = bvconst(32, 8)
+define op_st = bvconst(33, 8)
+define op_lea = bvconst(34, 8)
+define op_xchg = bvconst(35, 8)
+define op_b = bvconst(48, 8)
+define op_call = bvconst(50, 8)
+define op_ret = bvconst(56, 8)
+define op_trap = bvconst(57, 8)
+define op_eret = bvconst(58, 8)
+define op_nop = bvconst(63, 8)
+define op_halt = bvconst(62, 8)
+
+// ─── Format classification ──────────────────────────
+
+// Format R: add, sub, and, or, xor, shl, shr, asr, mul, cmp, mov
+// Format I: addi, subi, andi, ori, xori, cmpi, movi, ld, st, lea, xchg
+// Format B: b, call
+// Format S: ret, trap, eret, nop, halt
+
+// ─── Memory effects ─────────────────────────────────
+
+define has_load_effect(op : BitVec8) =
+    op = op_ld
+
+define has_store_effect(op : BitVec8) =
+    op = op_st
+
+define has_atomic_effect(op : BitVec8) =
+    op = op_xchg
+
+define has_no_memory_effect(op : BitVec8) =
+    op = op_add
+    ∨     op = op_sub
+    ∨     op = op_and
+    ∨     op = op_or
+    ∨     op = op_xor
+    ∨     op = op_shl
+    ∨     op = op_shr
+    ∨     op = op_asr
+    ∨     op = op_mul
+    ∨     op = op_cmp
+    ∨     op = op_mov
+    ∨     op = op_addi
+    ∨     op = op_subi
+    ∨     op = op_andi
+    ∨     op = op_ori
+    ∨     op = op_xori
+    ∨     op = op_cmpi
+    ∨     op = op_movi
+    ∨     op = op_lea
+    ∨     op = op_b
+    ∨     op = op_call
+    ∨     op = op_ret
+    ∨     op = op_trap
+    ∨     op = op_eret
+    ∨     op = op_nop
+    ∨     op = op_halt
+
+// ─── ALU semantics ──────────────────────────────────
+
+// add: rd ← bvadd(rs1, rs2/imm)
+define sem_add(a : BitVec64, b : BitVec64) = bvadd(a, b)
+
+// sub: rd ← bvsub(rs1, rs2/imm)
+define sem_sub(a : BitVec64, b : BitVec64) = bvsub(a, b)
+
+// and: rd ← bvand(rs1, rs2/imm)
+define sem_and(a : BitVec64, b : BitVec64) = bvand(a, b)
+
+// or: rd ← bvor(rs1, rs2/imm)
+define sem_or(a : BitVec64, b : BitVec64) = bvor(a, b)
+
+// xor: rd ← bvxor(rs1, rs2/imm)
+define sem_xor(a : BitVec64, b : BitVec64) = bvxor(a, b)
+
+// shl: rd ← bvshl(rs1, rs2/imm)
+define sem_shl(a : BitVec64, b : BitVec64) = bvshl(a, b)
+
+// shr: rd ← bvlshr(rs1, rs2/imm)
+define sem_shr(a : BitVec64, b : BitVec64) = bvlshr(a, b)
+
+// asr: rd ← bvashr(rs1, rs2/imm)
+define sem_asr(a : BitVec64, b : BitVec64) = bvashr(a, b)
+
+// mul: rd ← bvmul(rs1, rs2/imm)
+define sem_mul(a : BitVec64, b : BitVec64) = bvmul(a, b)
+
+// addi: rd ← bvadd(rs1, rs2/imm)
+define sem_addi(a : BitVec64, b : BitVec64) = bvadd(a, b)
+
+// subi: rd ← bvsub(rs1, rs2/imm)
+define sem_subi(a : BitVec64, b : BitVec64) = bvsub(a, b)
+
+// andi: rd ← bvand(rs1, rs2/imm)
+define sem_andi(a : BitVec64, b : BitVec64) = bvand(a, b)
+
+// ori: rd ← bvor(rs1, rs2/imm)
+define sem_ori(a : BitVec64, b : BitVec64) = bvor(a, b)
+
+// xori: rd ← bvxor(rs1, rs2/imm)
+define sem_xori(a : BitVec64, b : BitVec64) = bvxor(a, b)
+
+// ─── Properties ─────────────────────────────────────
+
+// P1: opcode uniqueness (checked by desc.rs validation)
+
+example "memory effects are mutually exclusive" {
+    assert(
+        ∀ op : BitVec8 .
+        ¬(has_load_effect(op) ∧ has_store_effect(op))
+        ∧ ¬(has_load_effect(op) ∧ has_atomic_effect(op))
+        ∧ ¬(has_store_effect(op) ∧ has_atomic_effect(op))
+    )
+}
+
+example "ALU add is commutative" {
+    assert(
+        ∀ a : BitVec64 . ∀ b : BitVec64 .
+        sem_add(a, b) = sem_add(b, a)
+    )
+}
+
+example "ALU mul is commutative" {
+    assert(
+        ∀ a : BitVec64 . ∀ b : BitVec64 .
+        sem_mul(a, b) = sem_mul(b, a)
+    )
+}
+
+example "ALU sub self is zero" {
+    assert(
+        ∀ a : BitVec64 .
+        sem_sub(a, a) = bvconst(0, 64)
+    )
+}
+
+example "ALU xor self is zero" {
+    assert(
+        ∀ a : BitVec64 .
+        sem_xor(a, a) = bvconst(0, 64)
+    )
+}
+
+example "ALU and self is identity" {
+    assert(
+        ∀ a : BitVec64 .
+        sem_and(a, a) = a
+    )
+}
+
+// Total instructions in table: 29
