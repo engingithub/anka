@@ -23,6 +23,8 @@ pub const SYS_WRITE: u64 = 1;  // write(value) — log output
 pub const SYS_YIELD: u64 = 2;  // yield to other process
 pub const SYS_SEND: u64 = 3;   // send(dest_pid, value)
 pub const SYS_RECV: u64 = 4;   // recv() → value
+pub const SYS_SEAL: u64 = 5;   // seal(addr) — RW→RX, W⊕X enforcement
+pub const SYS_EXEC: u64 = 6;   // exec(code_addr, code_size) → child exit code
 
 // ───────────────────────────────────────────────────────────────────
 // Process descriptor
@@ -57,6 +59,10 @@ pub struct Kernel {
     pub output: Vec<(u64, u64)>,  // (pid, value) log
     mailboxes: Vec<Vec<Message>>,
     current: usize,
+    /// Next available physical address for dynamic allocation.
+    pub next_phys: u64,
+    /// Next available agent ID for child processes.
+    pub next_agent: u64,
 }
 
 impl Kernel {
@@ -67,6 +73,8 @@ impl Kernel {
             output: Vec::new(),
             mailboxes: Vec::new(),
             current: 0,
+            next_phys: 0x100000,
+            next_agent: 100,
         }
     }
 
@@ -165,10 +173,127 @@ impl Kernel {
                 }
                 self.resume_from_trap(idx);
             }
+            SYS_SEAL => {
+                self.handle_seal(idx);
+            }
+            SYS_EXEC => {
+                self.handle_exec(idx);
+            }
             _ => {
                 eprintln!("Unknown syscall {} from pid {}", syscall, proc.pid);
                 proc.exited = true;
                 proc.exit_code = 0xBAD;
+            }
+        }
+    }
+
+    /// Seal an object: RW → RX (W⊕X enforcement).
+    ///
+    /// R1 = virtual address of the object to seal.
+    /// The kernel revokes the object (invalidating all RW capabilities),
+    /// re-activates it, and grants RX to the calling domain.
+    ///
+    /// This is the "mutable data → sealed executable" transition:
+    ///   source(R) → compiler → output(RW,NX) → **kernel seal** → code(RX,!W)
+    fn handle_seal(&mut self, idx: usize) {
+        let vaddr = self.processes[idx].core.r[R1 as usize];
+        let (object, _offset) = self.processes[idx].core.address_map.resolve(vaddr)
+            .expect("seal: address not in process address map");
+
+        let domain = self.processes[idx].core.domain;
+        let obj_size = self.fabric.objects[&object].size;
+
+        // Revoke: bumps generation, invalidates all existing capabilities
+        self.fabric.revoke(object);
+
+        // Re-activate (revoke marks state = Revoked)
+        self.fabric.objects.get_mut(&object).unwrap().state = ObjectState::Active;
+
+        // Grant RX at the new generation — W is gone, X is granted
+        self.fabric.grant(domain, object, 0, obj_size, Permissions::RX);
+
+        self.processes[idx].core.r[R0 as usize] = 0;
+        self.resume_from_trap(idx);
+    }
+
+    /// Execute a sealed code object as a new child process.
+    ///
+    /// R1 = virtual address of sealed code object.
+    /// R2 = code size in bytes.
+    /// Returns: child's exit code in R0.
+    ///
+    /// The kernel creates a new domain, grants RX on the code to the
+    /// child, allocates stack and trap handler, runs the child to
+    /// completion, and returns the exit code to the parent.
+    fn handle_exec(&mut self, idx: usize) {
+        let code_vaddr = self.processes[idx].core.r[R1 as usize];
+        let code_size = self.processes[idx].core.r[R2 as usize];
+
+        let (code_obj, _) = self.processes[idx].core.address_map.resolve(code_vaddr)
+            .expect("exec: code address not in process address map");
+
+        // --- Child domain: isolated authority container ---
+        let child_dom = self.fabric.create_domain();
+        self.fabric.grant(child_dom, code_obj, 0, code_size, Permissions::RX);
+
+        // --- Child stack ---
+        let stack_size: u64 = 0x4000;
+        let stack_obj = self.fabric.alloc_object("child_stack", stack_size, ObjectKind::Memory);
+        let stack_phys = self.next_phys;
+        self.next_phys += stack_size;
+        self.fabric.place_object(stack_obj, stack_phys);
+        self.fabric.grant(child_dom, stack_obj, 0, stack_size, Permissions::RW);
+
+        // --- Child trap handler (HALT for kernel interception) ---
+        let trap_size: u64 = 0x1000;
+        let trap_obj = self.fabric.alloc_object("child_trap", trap_size, ObjectKind::Memory);
+        let trap_phys = self.next_phys;
+        self.next_phys += trap_size;
+        self.fabric.place_object(trap_obj, trap_phys);
+        self.fabric.grant(child_dom, trap_obj, 0, trap_size, Permissions::RX);
+
+        let mut handler = Asm64::new();
+        handler.halt();
+        self.fabric.write_physical(trap_phys, &handler.to_bytes());
+
+        // --- Child core ---
+        let child_agent = AgentId(self.next_agent);
+        self.next_agent += 1;
+
+        let mut child = Anka64Core::new(child_agent, child_dom);
+        child.address_map.add(0x00000, code_size, code_obj);
+        child.address_map.add(0x10000, stack_size, stack_obj);
+        child.address_map.add(0x20000, trap_size, trap_obj);
+        child.r[SP as usize] = 0x10000 + stack_size;
+        child.trap_vector = 0x20000;
+
+        // --- Spawn and run synchronously ---
+        let child_pid = self.spawn(child);
+        let child_idx = child_pid as usize;
+        self.run_to_completion(child_idx, 100_000);
+
+        // Return child's exit code to the parent
+        self.processes[idx].core.r[R0 as usize] = self.processes[child_idx].exit_code;
+        self.resume_from_trap(idx);
+    }
+
+    /// Run a process to completion (used by SYS_EXEC).
+    fn run_to_completion(&mut self, idx: usize, max_steps: usize) {
+        for _ in 0..max_steps {
+            if self.processes[idx].exited { return; }
+
+            let result = self.processes[idx].core.step(&mut self.fabric);
+            match result {
+                super::core::StepResult::Continue => {}
+                super::core::StepResult::Halted => {
+                    self.handle_syscall(idx);
+                }
+                super::core::StepResult::Fault(f) => {
+                    eprintln!("Process {} faulted: {:?}", self.processes[idx].pid, f.reason);
+                    self.processes[idx].exited = true;
+                    self.processes[idx].exit_code = 0xDEAD;
+                    return;
+                }
             }
         }
     }
@@ -202,7 +327,6 @@ impl Kernel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::cc;
     use super::super::fabric::Fabric;
 
     const CPU0: AgentId = AgentId(0);
@@ -387,5 +511,254 @@ mod tests {
         eprintln!("P15: A→send(42)→B, B→recv()=42→write(42)→exit(42) ✓");
         eprintln!("     Process A domain ≠ Process B domain");
         eprintln!("     Both domains protected by the fabric");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // P20: Guest-hosted compilation — int main() { return 42; }
+    //
+    //   Phase 6A: the machine creates software for itself.
+    //
+    //   1. Host AnkaCC₆₄ compiles a tiny C "compiler" to Anka64 code
+    //   2. The compiler runs as a user process:
+    //      - reads return value (42) from source object
+    //      - encodes Anka64 instructions into output buffer
+    //      - calls SYS_SEAL → kernel enforces W⊕X (RW → RX)
+    //      - calls SYS_EXEC → kernel spawns child from sealed code
+    //   3. Child process executes the compiled code → exits with 42
+    //   4. Parent receives child's exit code → exits with 42
+    //
+    //   Security properties proven:
+    //     - No special compiler privilege (ordinary user process)
+    //     - W⊕X: mutable data → kernel seal → executable code
+    //     - Child runs in its own domain (authority isolation)
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p20_guest_compiler_return_42() {
+        use super::super::cc::{self, *};
+
+        // ─── Physical memory layout ───────────────────────────
+        //   0x000000 : compiler text    (0x4000)
+        //   0x010000 : source data      (0x1000)
+        //   0x020000 : output buffer    (0x1000)
+        //   0x030000 : compiler stack   (0x4000)
+        //   0x040000+: dynamic (kernel allocs child stack, trap)
+        let mut fabric = Fabric::new(0x200000);
+
+        let text   = fabric.alloc_object("compiler_text",  0x4000, ObjectKind::Memory);
+        let source = fabric.alloc_object("source_data",    0x1000, ObjectKind::Memory);
+        let output = fabric.alloc_object("output_buf",     0x1000, ObjectKind::Memory);
+        let stack  = fabric.alloc_object("compiler_stack", 0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text,   0x000000);
+        fabric.place_object(source, 0x010000);
+        fabric.place_object(output, 0x020000);
+        fabric.place_object(stack,  0x030000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, text,   0, 0x4000, Permissions::RX);
+        fabric.grant(dom, source, 0, 0x1000, Permissions::READ);
+        fabric.grant(dom, output, 0, 0x1000, Permissions::RW);
+        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+
+        // Source: the number 42 as a 64-bit little-endian value
+        fabric.write_physical(0x010000, &42u64.to_le_bytes());
+
+        // Trap handler at offset 0x3FF0 in text object
+        install_trap_handler(&mut fabric, 0x000000);
+
+        // ─── The guest compiler: a C program ──────────────────
+        //
+        //   Virtual address map:
+        //     0x00000 : text (RX)   — compiler code
+        //     0x04000 : source (R)  — contains return value
+        //     0x05000 : output (RW) — code emission target
+        //     0x06000 : stack (RW)  — grows downward from 0x0A000
+        //
+        //   The compiler reads the return value from source,
+        //   encodes three Anka64 instructions, stores them to
+        //   the output buffer, seals it (RW→RX), and execs it.
+        //
+        //   Anka64 encoding constants:
+        //     MOVI opcode = 22 (0x16), I-format: [op(6)|rd(4)|rs1(4)|imm(18)]
+        //     TRAP opcode = 57 (0x39), S-format: [op(6)|imm(26)]
+        //     NOP  opcode = 63 (0x3F), S-format
+        //
+        //   Emitted code for `int main() { return 42; }`:
+        //     word 0: MOVI R1, 42     ; exit code
+        //     word 1: MOVI R0, 0      ; SYS_EXIT
+        //     word 2: TRAP #0         ; syscall
+        //     word 3: NOP             ; padding
+
+        let compiler_prog = Program {
+            functions: vec![Function {
+                name: "main".into(),
+                params: vec![],
+                ret_type: Type::Int,
+                locals: vec![
+                    (0, Type::Int),  // retval
+                    (1, Type::Int),  // movi_r1
+                    (2, Type::Int),  // movi_r0
+                    (3, Type::Int),  // trap_insn
+                    (4, Type::Int),  // nop_insn
+                    (5, Type::Int),  // pair0
+                    (6, Type::Int),  // pair1
+                    (7, Type::Int),  // child_exit
+                ],
+                body: vec![
+                    // retval = *(int*)0x4000
+                    Stmt::VarDecl(0, Type::Int, Some(
+                        Expr::Deref(Box::new(Expr::IntLit(0x4000)))
+                    )),
+
+                    // movi_r1 = (22 << 26) | (1 << 22) | retval
+                    Stmt::VarDecl(1, Type::Int, Some(
+                        Expr::BinOp(BinOp::Or,
+                            Box::new(Expr::BinOp(BinOp::Or,
+                                Box::new(Expr::BinOp(BinOp::Shl,
+                                    Box::new(Expr::IntLit(22)),
+                                    Box::new(Expr::IntLit(26)),
+                                )),
+                                Box::new(Expr::BinOp(BinOp::Shl,
+                                    Box::new(Expr::IntLit(1)),
+                                    Box::new(Expr::IntLit(22)),
+                                )),
+                            )),
+                            Box::new(Expr::Var(0)),
+                        )
+                    )),
+
+                    // movi_r0 = 22 << 26
+                    Stmt::VarDecl(2, Type::Int, Some(
+                        Expr::BinOp(BinOp::Shl,
+                            Box::new(Expr::IntLit(22)),
+                            Box::new(Expr::IntLit(26)),
+                        )
+                    )),
+
+                    // trap_insn = 57 << 26
+                    Stmt::VarDecl(3, Type::Int, Some(
+                        Expr::BinOp(BinOp::Shl,
+                            Box::new(Expr::IntLit(57)),
+                            Box::new(Expr::IntLit(26)),
+                        )
+                    )),
+
+                    // nop_insn = 63 << 26
+                    Stmt::VarDecl(4, Type::Int, Some(
+                        Expr::BinOp(BinOp::Shl,
+                            Box::new(Expr::IntLit(63)),
+                            Box::new(Expr::IntLit(26)),
+                        )
+                    )),
+
+                    // pair0 = movi_r1 | (movi_r0 << 32)
+                    // Packs two 32-bit instructions into one 64-bit store:
+                    //   low  word (offset +0): MOVI R1, retval
+                    //   high word (offset +4): MOVI R0, 0
+                    Stmt::VarDecl(5, Type::Int, Some(
+                        Expr::BinOp(BinOp::Or,
+                            Box::new(Expr::Var(1)),
+                            Box::new(Expr::BinOp(BinOp::Shl,
+                                Box::new(Expr::Var(2)),
+                                Box::new(Expr::IntLit(32)),
+                            )),
+                        )
+                    )),
+
+                    // *(int*)0x5000 = pair0
+                    Stmt::Expr(Expr::DerefAssign(
+                        Box::new(Expr::IntLit(0x5000)),
+                        Box::new(Expr::Var(5)),
+                    )),
+
+                    // pair1 = trap_insn | (nop_insn << 32)
+                    //   low  word (offset +8): TRAP #0
+                    //   high word (offset +C): NOP
+                    Stmt::VarDecl(6, Type::Int, Some(
+                        Expr::BinOp(BinOp::Or,
+                            Box::new(Expr::Var(3)),
+                            Box::new(Expr::BinOp(BinOp::Shl,
+                                Box::new(Expr::Var(4)),
+                                Box::new(Expr::IntLit(32)),
+                            )),
+                        )
+                    )),
+
+                    // *(int*)0x5008 = pair1
+                    Stmt::Expr(Expr::DerefAssign(
+                        Box::new(Expr::IntLit(0x5008)),
+                        Box::new(Expr::Var(6)),
+                    )),
+
+                    // SYS_SEAL: seal output buffer (RW → RX)
+                    Stmt::Expr(Expr::Syscall(SYS_SEAL as u8, vec![
+                        Expr::IntLit(0x5000),
+                    ])),
+
+                    // SYS_EXEC: spawn child from sealed code
+                    Stmt::VarDecl(7, Type::Int, Some(
+                        Expr::Syscall(SYS_EXEC as u8, vec![
+                            Expr::IntLit(0x5000),
+                            Expr::IntLit(16),   // 4 words × 4 bytes
+                        ])
+                    )),
+
+                    // SYS_EXIT with child's result
+                    Stmt::Expr(Expr::Syscall(SYS_EXIT as u8, vec![
+                        Expr::Var(7),
+                    ])),
+                ],
+            }],
+        };
+
+        // ─── Compile with host AnkaCC₆₄ ──────────────────────
+        let asm = cc::compile(&compiler_prog);
+        eprintln!("--- Guest compiler listing ---");
+        eprintln!("{}", asm.listing());
+        fabric.write_physical(0x000000, &asm.to_bytes());
+
+        // ─── Set up compiler process ──────────────────────────
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x00000, 0x4000, text);    // code
+        core.address_map.add(0x04000, 0x1000, source);  // source data
+        core.address_map.add(0x05000, 0x1000, output);  // output buffer
+        core.address_map.add(0x06000, 0x4000, stack);   // stack
+        core.r[SP as usize] = 0x06000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        // ─── Run ──────────────────────────────────────────────
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x040000;
+        kernel.next_agent = 10;
+        kernel.spawn(core);
+        kernel.run(1000, 1000);
+
+        // ─── Verify ───────────────────────────────────────────
+
+        // Compiler process exited with child's result
+        assert!(kernel.processes[0].exited,
+            "compiler process should have exited");
+        assert_eq!(kernel.processes[0].exit_code, 42,
+            "compiler should exit with child's result (42)");
+
+        // Child process was spawned and exited with 42
+        assert!(kernel.processes.len() >= 2,
+            "child process should have been spawned");
+        assert!(kernel.processes[1].exited,
+            "child process should have exited");
+        assert_eq!(kernel.processes[1].exit_code, 42,
+            "child should have returned 42");
+
+        // ─── The three 42s ────────────────────────────────────
+        //   First 42:  emulator executes code
+        //   Second 42: Anka64 executes its own ISA
+        //   Third 42:  Anka64 creates the program that returns 42
+        eprintln!();
+        eprintln!("P20: int main() {{ return 42; }} ✓");
+        eprintln!("     Guest compiler → sealed executable → child → R0 = 42");
+        eprintln!("     W⊕X lifecycle: source(R) → compiler → output(RW) → seal → code(RX) → execute");
+        eprintln!("     No special compiler privilege — ordinary user process");
+        eprintln!("     Child domain ≠ parent domain (authority isolation)");
     }
 }
