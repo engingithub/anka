@@ -20,5 +20,6 @@
 
 pub mod state;
 pub mod fabric;
+pub mod desc;
 pub mod isa;
 pub mod core;

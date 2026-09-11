@@ -4,7 +4,13 @@
 //!
 //! The core NEVER pokes RAM directly.  Every memory effect travels
 //! through the Phase-1 fabric.
+//!
+//! Execution is table-driven: the decoder produces a DecodedInsn
+//! carrying a reference to the description table; the executor
+//! dispatches on the semantic tag, not a hand-written match of
+//! each opcode.
 
+use super::desc::{Sem, AluOp, FlagEffect as DescFlagEffect};
 use super::fabric::Fabric;
 use super::isa::*;
 use super::state::*;
@@ -46,10 +52,10 @@ impl AddressMap {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Flags {
-    pub z: bool, // zero
-    pub n: bool, // negative (sign bit)
-    pub c: bool, // carry (ARM convention: 1 = no borrow on SUB)
-    pub v: bool, // signed overflow
+    pub z: bool,
+    pub n: bool,
+    pub c: bool,
+    pub v: bool,
 }
 
 impl Flags {
@@ -95,7 +101,6 @@ pub struct Anka64Core {
     pub address_map: AddressMap,
     pub halted: bool,
 
-    // Trap support
     pub trap_vector: u64,
     saved_pc: Option<u64>,
     saved_privilege: Option<Privilege>,
@@ -119,6 +124,9 @@ impl Anka64Core {
     }
 
     /// Execute one instruction cycle through the fabric.
+    ///
+    /// Dispatch is on the semantic tag from the description table,
+    /// not a hand-written match of each opcode.
     pub fn step(&mut self, fabric: &mut Fabric) -> StepResult {
         if self.halted { return StepResult::Halted; }
 
@@ -128,157 +136,93 @@ impl Anka64Core {
             Err(fault) => return StepResult::Fault(fault),
         };
 
-        // 2. Decode
-        let insn = Insn::decode(word);
+        // 2. Decode (table-driven)
+        let insn = decode(word);
 
-        // 3. Execute
+        if insn.is_illegal() {
+            self.halted = true;
+            return StepResult::Halted;
+        }
+
+        // 3. Execute (semantic dispatch)
         let mut next_pc = self.pc + 4;
 
-        match insn {
-            // ─── R-format arithmetic ────────────────────────
-            Insn::Add(d, a, b) => {
-                let (result, carry) = self.r[a as usize].overflowing_add(self.r[b as usize]);
-                self.r[d as usize] = result;
-                self.set_flags_add(self.r[a as usize], self.r[b as usize], result, carry);
-            }
-            Insn::Sub(d, a, b) => {
-                let va = self.r[a as usize];
-                let vb = self.r[b as usize];
-                let result = va.wrapping_sub(vb);
-                self.r[d as usize] = result;
-                self.set_flags_sub(va, vb, result);
-            }
-            Insn::And(d, a, b) => {
-                self.r[d as usize] = self.r[a as usize] & self.r[b as usize];
-                self.set_flags_logic(self.r[d as usize]);
-            }
-            Insn::Or(d, a, b) => {
-                self.r[d as usize] = self.r[a as usize] | self.r[b as usize];
-                self.set_flags_logic(self.r[d as usize]);
-            }
-            Insn::Xor(d, a, b) => {
-                self.r[d as usize] = self.r[a as usize] ^ self.r[b as usize];
-                self.set_flags_logic(self.r[d as usize]);
-            }
-            Insn::Shl(d, a, b) => {
-                let shift = self.r[b as usize] & 63;
-                self.r[d as usize] = self.r[a as usize] << shift;
-                self.set_flags_logic(self.r[d as usize]);
-            }
-            Insn::Shr(d, a, b) => {
-                let shift = self.r[b as usize] & 63;
-                self.r[d as usize] = self.r[a as usize] >> shift;
-                self.set_flags_logic(self.r[d as usize]);
-            }
-            Insn::Asr(d, a, b) => {
-                let shift = self.r[b as usize] & 63;
-                self.r[d as usize] = ((self.r[a as usize] as i64) >> shift) as u64;
-                self.set_flags_logic(self.r[d as usize]);
-            }
-            Insn::Cmp(a, b) => {
-                let va = self.r[a as usize];
-                let vb = self.r[b as usize];
-                let result = va.wrapping_sub(vb);
-                self.set_flags_sub(va, vb, result);
-            }
-            Insn::Mov(d, s) => {
-                self.r[d as usize] = self.r[s as usize];
+        match insn.desc.semantics {
+            // ─── ALU: register-register or register-immediate ───
+            Sem::Alu(alu_op) => {
+                let a = self.r[insn.rs1 as usize];
+                let b = self.alu_operand_b(&insn);
+                let result = Self::alu_eval(alu_op, a, b);
+                self.r[insn.rd as usize] = result;
+                self.update_flags(insn.desc.flags, a, b, result);
             }
 
-            // ─── I-format arithmetic ────────────────────────
-            Insn::Addi(d, a, imm) => {
-                let va = self.r[a as usize];
-                let vb = imm as i64 as u64;
-                let (result, carry) = va.overflowing_add(vb);
-                self.r[d as usize] = result;
-                self.set_flags_add(va, vb, result, carry);
-            }
-            Insn::Subi(d, a, imm) => {
-                let va = self.r[a as usize];
-                let vb = imm as i64 as u64;
-                let result = va.wrapping_sub(vb);
-                self.r[d as usize] = result;
-                self.set_flags_sub(va, vb, result);
-            }
-            Insn::Andi(d, a, imm) => {
-                self.r[d as usize] = self.r[a as usize] & (imm as i64 as u64);
-                self.set_flags_logic(self.r[d as usize]);
-            }
-            Insn::Ori(d, a, imm) => {
-                self.r[d as usize] = self.r[a as usize] | (imm as i64 as u64);
-                self.set_flags_logic(self.r[d as usize]);
-            }
-            Insn::Xori(d, a, imm) => {
-                self.r[d as usize] = self.r[a as usize] ^ (imm as i64 as u64);
-                self.set_flags_logic(self.r[d as usize]);
-            }
-            Insn::Cmpi(a, imm) => {
-                let va = self.r[a as usize];
-                let vb = imm as i64 as u64;
-                let result = va.wrapping_sub(vb);
-                self.set_flags_sub(va, vb, result);
-            }
-            Insn::Movi(d, imm) => {
-                self.r[d as usize] = imm as i64 as u64;
+            // ─── Compare (ALU subtract, flags only) ─────────────
+            Sem::Cmp => {
+                let a = self.r[insn.rs1 as usize];
+                let b = self.cmp_operand_b(&insn);
+                let result = a.wrapping_sub(b);
+                self.update_flags(insn.desc.flags, a, b, result);
             }
 
-            // ─── Memory (one transaction per instruction) ───
-            Insn::Ld(d, base, disp) => {
-                let addr = self.r[base as usize].wrapping_add(disp as i64 as u64);
+            // ─── Move / Load immediate ──────────────────────────
+            Sem::Mov  => { self.r[insn.rd as usize] = self.r[insn.rs1 as usize]; }
+            Sem::Movi => { self.r[insn.rd as usize] = insn.imm as u64; }
+
+            // ─── Memory (one transaction per instruction) ───────
+            Sem::Load => {
+                let addr = self.r[insn.rs1 as usize].wrapping_add(insn.imm as u64);
                 match self.fabric_read(fabric, addr, Width::Double, AccessKind::Read) {
                     Ok(bytes) => {
-                        self.r[d as usize] = u64::from_le_bytes(
+                        self.r[insn.rd as usize] = u64::from_le_bytes(
                             [bytes[0], bytes[1], bytes[2], bytes[3],
                              bytes[4], bytes[5], bytes[6], bytes[7]]);
                     }
                     Err(fault) => return StepResult::Fault(fault),
                 }
             }
-            Insn::St(src, base, disp) => {
-                let addr = self.r[base as usize].wrapping_add(disp as i64 as u64);
-                let data = self.r[src as usize].to_le_bytes().to_vec();
+            Sem::Store => {
+                let addr = self.r[insn.rs1 as usize].wrapping_add(insn.imm as u64);
+                let data = self.r[insn.rd as usize].to_le_bytes().to_vec();
                 match self.fabric_write(fabric, addr, Width::Double, data) {
                     Ok(()) => {}
                     Err(fault) => return StepResult::Fault(fault),
                 }
             }
-            Insn::Lea(d, base, disp) => {
-                self.r[d as usize] = self.r[base as usize].wrapping_add(disp as i64 as u64);
+            Sem::Lea => {
+                self.r[insn.rd as usize] =
+                    self.r[insn.rs1 as usize].wrapping_add(insn.imm as u64);
             }
 
-            // ─── Branches ───────────────────────────────────
-            Insn::Bcc(cond, off) => {
-                if self.flags.test(cond) {
-                    next_pc = (self.pc as i64 + (off as i64) * 4) as u64;
+            // ─── Control flow ───────────────────────────────────
+            Sem::Branch => {
+                if self.flags.test(insn.cond) {
+                    next_pc = (self.pc as i64 + insn.imm * 4) as u64;
                 }
             }
-            Insn::Call(off) => {
+            Sem::Call => {
                 self.r[LR as usize] = self.pc + 4;
-                next_pc = (self.pc as i64 + (off as i64) * 4) as u64;
+                next_pc = (self.pc as i64 + insn.imm * 4) as u64;
             }
-
-            // ─── System ─────────────────────────────────────
-            Insn::Ret => {
+            Sem::Ret => {
                 next_pc = self.r[LR as usize];
             }
-            Insn::Trap(_vector) => {
+
+            // ─── System ─────────────────────────────────────────
+            Sem::Trap => {
                 self.saved_pc = Some(self.pc + 4);
                 self.saved_privilege = Some(self.privilege);
                 self.privilege = Privilege::Supervisor;
                 next_pc = self.trap_vector;
             }
-            Insn::Eret => {
+            Sem::Eret => {
                 if let Some(p) = self.saved_privilege.take() {
                     self.privilege = p;
                 }
                 next_pc = self.saved_pc.take().unwrap_or(self.pc + 4);
             }
-            Insn::Nop => {}
-            Insn::Halt => {
-                self.halted = true;
-                return StepResult::Halted;
-            }
-            Insn::Illegal(_) => {
+            Sem::Nop  => {}
+            Sem::Halt => {
                 self.halted = true;
                 return StepResult::Halted;
             }
@@ -286,6 +230,38 @@ impl Anka64Core {
 
         self.pc = next_pc;
         StepResult::Continue
+    }
+
+    // ───────────── ALU ──────────────────────────────────────────
+
+    fn alu_eval(op: AluOp, a: u64, b: u64) -> u64 {
+        match op {
+            AluOp::Add => a.wrapping_add(b),
+            AluOp::Sub => a.wrapping_sub(b),
+            AluOp::And => a & b,
+            AluOp::Or  => a | b,
+            AluOp::Xor => a ^ b,
+            AluOp::Shl => a << (b & 63),
+            AluOp::Shr => a >> (b & 63),
+            AluOp::Asr => ((a as i64) >> (b & 63)) as u64,
+            AluOp::Mul => a.wrapping_mul(b),
+        }
+    }
+
+    /// Second operand for ALU: rs2 for R-format, imm for I-format.
+    fn alu_operand_b(&self, insn: &DecodedInsn) -> u64 {
+        match insn.desc.format {
+            super::desc::Format::R => self.r[insn.rs2 as usize],
+            _ => insn.imm as u64,
+        }
+    }
+
+    /// Second operand for CMP: rs2 for R-format, imm for I-format.
+    fn cmp_operand_b(&self, insn: &DecodedInsn) -> u64 {
+        match insn.desc.format {
+            super::desc::Format::R => self.r[insn.rs2 as usize],
+            _ => insn.imm as u64,
+        }
     }
 
     // ───────────── Fabric memory operations ──────────────────────
@@ -356,25 +332,28 @@ impl Anka64Core {
 
     // ───────────── Flag helpers ──────────────────────────────────
 
-    fn set_flags_add(&mut self, a: u64, b: u64, result: u64, carry: bool) {
-        self.flags.z = result == 0;
-        self.flags.n = (result >> 63) != 0;
-        self.flags.c = carry;
-        self.flags.v = ((!((a ^ b)) & (a ^ result)) >> 63) != 0;
-    }
-
-    fn set_flags_sub(&mut self, a: u64, b: u64, result: u64) {
-        self.flags.z = result == 0;
-        self.flags.n = (result >> 63) != 0;
-        self.flags.c = a >= b; // ARM: carry = no borrow
-        self.flags.v = (((a ^ b) & (a ^ result)) >> 63) != 0;
-    }
-
-    fn set_flags_logic(&mut self, result: u64) {
-        self.flags.z = result == 0;
-        self.flags.n = (result >> 63) != 0;
-        self.flags.c = false;
-        self.flags.v = false;
+    fn update_flags(&mut self, effect: DescFlagEffect, a: u64, b: u64, result: u64) {
+        match effect {
+            DescFlagEffect::Arith => {
+                self.flags.z = result == 0;
+                self.flags.n = (result >> 63) != 0;
+                self.flags.c = result < a; // unsigned carry
+                self.flags.v = ((!(a ^ b) & (a ^ result)) >> 63) != 0;
+            }
+            DescFlagEffect::Sub => {
+                self.flags.z = result == 0;
+                self.flags.n = (result >> 63) != 0;
+                self.flags.c = a >= b; // ARM: carry = no borrow
+                self.flags.v = (((a ^ b) & (a ^ result)) >> 63) != 0;
+            }
+            DescFlagEffect::Logic => {
+                self.flags.z = result == 0;
+                self.flags.n = (result >> 63) != 0;
+                self.flags.c = false;
+                self.flags.v = false;
+            }
+            DescFlagEffect::None => {}
+        }
     }
 
     /// Run until halted or fault, up to a maximum number of steps.
@@ -390,7 +369,7 @@ impl Anka64Core {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Tests — the 8-program ladder
+// Tests — the 8-program ladder (UNCHANGED from Phase 2)
 // ═══════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
@@ -728,5 +707,43 @@ mod tests {
         assert_eq!(final_val, 99, "shared should contain DMA's write");
 
         eprintln!("P8: CPU0 wrote 42, DMA0 read 42, DMA0 wrote 99 ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Program 9: MUL — added ONLY through the description
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p9_mul_through_description() {
+        let (mut fabric, _text, _data, _dom, mut core) = setup();
+
+        // 6 × 7 = 42  (the answer, obviously)
+        let mut asm = Asm64::new();
+        asm.movi(R0, 6);
+        asm.movi(R1, 7);
+        asm.mul(R2, R0, R1);
+        asm.halt();
+        load_program(&mut fabric, &asm);
+
+        let result = core.run(&mut fabric, 100);
+        assert!(matches!(result, StepResult::Halted));
+        assert_eq!(core.r[R2 as usize], 42);
+
+        // Verify all consumers agree this instruction exists:
+        // 1. Assembler emitted it (above)
+        // 2. Decoder recognizes it
+        let word = asm.to_bytes();
+        let mul_word = u32::from_le_bytes([word[8], word[9], word[10], word[11]]);
+        let decoded = decode(mul_word);
+        assert_eq!(decoded.desc.name, "mul");
+        // 3. Disassembler round-trips it
+        let text = disassemble(&decoded);
+        assert!(text.starts_with("mul"), "disassembly should start with 'mul': {}", text);
+        // 4. Rust executed it (R2 = 42)
+        // 5. Description table has it
+        assert!(super::super::desc::by_name("mul").is_some());
+
+        eprintln!("P9: 6 × 7 = {} (MUL through description) ✓", core.r[R2 as usize]);
+        eprintln!("    disassembly: {}", text);
     }
 }
