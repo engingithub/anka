@@ -377,6 +377,52 @@ impl Fabric {
         }
     }
 
+    // ───────────────── Core integration ─────────────────────────
+
+    /// Execute a complete read transaction, returning data or fault.
+    ///
+    /// The full lifecycle runs: authorize → translate → commit.
+    /// On success, data is read from the translated physical address.
+    pub fn execute_read(
+        &mut self,
+        request: MemoryRequest,
+    ) -> Result<Vec<u8>, FaultRecord> {
+        let width = request.width.bytes() as usize;
+        let idx = self.submit(request, None);
+        self.advance(idx); // authorize
+        self.advance(idx); // translate
+        self.advance(idx); // commit
+        match self.transactions[idx].state {
+            TxState::Committed => {
+                let phys = self.transactions[idx].physical_address.unwrap() as usize;
+                Ok(self.memory[phys..phys + width].to_vec())
+            }
+            TxState::Faulted => {
+                Err(self.transactions[idx].fault.clone().unwrap())
+            }
+            _ => unreachable!("transaction not terminal after 3 advances"),
+        }
+    }
+
+    /// Execute a complete write transaction, or return a fault.
+    pub fn execute_write(
+        &mut self,
+        request: MemoryRequest,
+        data: Vec<u8>,
+    ) -> Result<(), FaultRecord> {
+        let idx = self.submit(request, Some(data));
+        self.advance(idx);
+        self.advance(idx);
+        self.advance(idx);
+        match self.transactions[idx].state {
+            TxState::Committed => Ok(()),
+            TxState::Faulted => {
+                Err(self.transactions[idx].fault.clone().unwrap())
+            }
+            _ => unreachable!("transaction not terminal after 3 advances"),
+        }
+    }
+
     // ───────────────── Observation ───────────────────────────────
 
     pub fn transaction(&self, idx: usize) -> &Transaction {
