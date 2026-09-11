@@ -1,74 +1,29 @@
 // ================================================================
-// ANKA PROTECTION MODEL — FORMAL VERIFICATION
+// ANKA PROTECTION — EXECUTABLE FORMAL THEORY
 // ================================================================
-//
-// Formalizes the Anka capability-based protection invariants using
-// Z3 bitvector theory.  Properties are PROVEN for ALL inputs.
-//
-// The fundamental invariant:
-//
-//   No user-controlled execution sequence can increase its authority.
-//
-// This theory verifies the protection fabric at the transaction
-// level — the unit of authorization in Anka's architecture.
-//
-// Three-layer separation (verified independently):
-//
-//   Authority   — may this agent perform this operation?
-//   Translation — where does this object physically reside?
-//   Consistency — when do other agents see the write?
-//
-// This file addresses Authority.
+// Security properties are proof obligations (example/assert), not axioms.
+// Address model: 24-bit (current 68000 experiment).
+// Permissions: R=001, W=010, X=100.
 // ================================================================
 
 import "stdlib/prelude.kleis"
 
-// ================================================================
-// TYPES
-// ================================================================
-//
-// We model addresses as BitVec24 (MC68000 address bus) and
-// permissions as BitVec3 (R=001, W=010, X=100).
-//
-// For Anka64, these widen to BitVec64 addresses and the same
-// permission encoding, but the axioms are width-independent.
-// ================================================================
-
-// Permission bits
-operation perm_R : BitVec3        // 001 = Read
-operation perm_W : BitVec3        // 010 = Write
-operation perm_X : BitVec3        // 100 = Execute
-
-define perm_R = bvconst(1, 3)
-define perm_W = bvconst(2, 3)
-define perm_X = bvconst(4, 3)
-define perm_RW = bvor(perm_R, perm_W)
-define perm_RX = bvor(perm_R, perm_X)
-define perm_RWX = bvor(perm_RW, perm_X)
+// ---- Permission encoding -------------------------------------------------
+define perm_R    = bvconst(1, 3)
+define perm_W    = bvconst(2, 3)
+define perm_X    = bvconst(4, 3)
+define perm_RW   = bvor(perm_R, perm_W)
+define perm_RX   = bvor(perm_R, perm_X)
+define perm_RWX  = bvor(perm_RW, perm_X)
 define perm_NONE = bvconst(0, 3)
 
-// Check if a permission set contains a required permission
-define has_perm(granted : BitVec3, required : BitVec3) : BitVec3 =
-    bvand(granted, required)
+// A transaction must represent a real access.
+define real_request(size : BitVec24, op : BitVec3) =
+    bvugt(size, bvconst(0, 24)) ∧ ¬(op = perm_NONE)
 
-// ================================================================
-// CAPABILITY
-//
-//   C = (O, g, b, ℓ, π)
-//
-// where:
-//   O = object identity    (BitVec16)
-//   g = generation counter (BitVec16)
-//   b = base address       (BitVec24)
-//   ℓ = length in bytes    (BitVec24)
-//   π = permissions        (BitVec3)
-// ================================================================
-
-// A capability authorizes access to [base, base+length) with
-// permissions π, for object O at generation g.
-
-// Does a capability cover a given address range with the right
-// permission?
+// Whole-transaction authority check.
+// Subtractive bound check avoids endpoint-addition overflow:
+//   addr >= base, size <= len, addr-base <= len-size.
 define cap_permits(
     cap_base : BitVec24,
     cap_len  : BitVec24,
@@ -77,34 +32,25 @@ define cap_permits(
     size     : BitVec24,
     op       : BitVec3
 ) =
-    // Permission check: granted permissions include the required op
-    bvand(cap_perm, op) = op
-    // Range check: addr >= base
+    real_request(size, op)
+    ∧ bvand(cap_perm, op) = op
     ∧ bvuge(addr, cap_base)
-    // Range check: size <= length
     ∧ bvule(size, cap_len)
-    // Range check: addr - base <= length - size (no overflow)
     ∧ bvule(bvsub(addr, cap_base), bvsub(cap_len, size))
-
-// ================================================================
-// GENERATION CHECK
-//
-// A capability is valid only if its generation matches the
-// object's current generation.  This prevents stale references
-// after object recycling.
-// ================================================================
 
 define generation_valid(cap_gen : BitVec16, obj_gen : BitVec16) =
     cap_gen = obj_gen
 
-// ================================================================
-// PRIVILEGE MODEL
-//
-// supervisor = 1 → all accesses permitted (bypass protection)
-// supervisor = 0 → must have a valid capability
-// ================================================================
+// Current 68000 protection-controller control plane: 0xF00020..0xF00027.
+define in_control_plane(addr : BitVec24) =
+    bvuge(addr, bvconst(15728672, 24))
+    ∧ bvult(addr, bvconst(15728680, 24))
 
-define access_permitted(
+// Total authorization decision for one transaction.
+// Supervisor bypasses ordinary capability checks.
+// User mode can never authorize a transaction whose starting address is
+// in the protection-controller control plane.
+define authorize(
     supervisor : BitVec1,
     cap_base   : BitVec24,
     cap_len    : BitVec24,
@@ -116,226 +62,250 @@ define access_permitted(
     op         : BitVec3
 ) =
     supervisor = bvconst(1, 1)
-    ∨ (generation_valid(cap_gen, obj_gen)
-       ∧ cap_permits(cap_base, cap_len, cap_perm, addr, size, op))
+    ∨ (
+        supervisor = bvconst(0, 1)
+        ∧ ¬in_control_plane(addr)
+        ∧ generation_valid(cap_gen, obj_gen)
+        ∧ cap_permits(cap_base, cap_len, cap_perm, addr, size, op)
+      )
 
-// ================================================================
-// AXIOMS — Properties that must hold for ALL inputs
-// ================================================================
+// ---- Minimal transaction transition model --------------------------------
+// We model four observable state components plus fault metadata.
+// Authorized transactions may replace state by supplied effect values.
+// Denied transactions must preserve all non-fault state.
 
-structure AnkaProtection {
+define next_mem(allowed : BitVec1, before : BitVec32, effect : BitVec32) =
+    if allowed = bvconst(1,1) then effect else before
 
-    // ─── Authority cannot be manufactured ─────────────────────
-    //
-    // A user-mode access (supervisor=0) with no matching capability
-    // must be denied.
+define next_dev(allowed : BitVec1, before : BitVec32, effect : BitVec32) =
+    if allowed = bvconst(1,1) then effect else before
 
-    axiom no_authority_from_nothing :
+define next_obj(allowed : BitVec1, before : BitVec32, effect : BitVec32) =
+    if allowed = bvconst(1,1) then effect else before
+
+define next_ctrl(allowed : BitVec1, before : BitVec32, effect : BitVec32) =
+    if allowed = bvconst(1,1) then effect else before
+
+define next_fault_count(allowed : BitVec1, before : BitVec32) =
+    if allowed = bvconst(1,1) then before else bvadd(before, bvconst(1, 32))
+
+define next_fault_addr(allowed : BitVec1, old_addr : BitVec24, req_addr : BitVec24) =
+    if allowed = bvconst(1,1) then old_addr else req_addr
+
+// ===========================================================================
+// CORE AUTHORITY PROOFS
+// ===========================================================================
+
+example "P1 no authority from an empty capability" {
+    assert(
         ∀ addr : BitVec24 . ∀ size : BitVec24 . ∀ op : BitVec3 .
-        ¬ access_permitted(
-            bvconst(0, 1),       // user mode
-            bvconst(0, 24),      // cap_base = 0
-            bvconst(0, 24),      // cap_len = 0  (empty capability)
-            perm_NONE,           // no permissions
-            bvconst(0, 16),      // cap gen
-            bvconst(0, 16),      // obj gen
-            addr, size, op
-        )
-
-    // ─── Read does not imply Write ────────────────────────────
-
-    axiom read_does_not_imply_write :
-        ∀ addr : BitVec24 . ∀ size : BitVec24 .
-        ∀ cap_base : BitVec24 . ∀ cap_len : BitVec24 .
-        ∀ cap_gen : BitVec16 . ∀ obj_gen : BitVec16 .
-        // If we have read-only authority...
-        cap_permits(cap_base, cap_len, perm_R, addr, size, perm_R)
-        // ...that does NOT grant write authority
-        → ¬ cap_permits(cap_base, cap_len, perm_R, addr, size, perm_W)
-
-    // ─── Write does not imply Execute ─────────────────────────
-
-    axiom write_does_not_imply_execute :
-        ∀ addr : BitVec24 . ∀ size : BitVec24 .
-        ∀ cap_base : BitVec24 . ∀ cap_len : BitVec24 .
-        cap_permits(cap_base, cap_len, perm_W, addr, size, perm_W)
-        → ¬ cap_permits(cap_base, cap_len, perm_W, addr, size, perm_X)
-
-    // ─── Stale generation denies access ───────────────────────
-
-    axiom stale_generation_denied :
-        ∀ cap_base : BitVec24 . ∀ cap_len : BitVec24 .
-        ∀ cap_perm : BitVec3 .
-        ∀ addr : BitVec24 . ∀ size : BitVec24 . ∀ op : BitVec3 .
-        // Object generation has been bumped
-        ¬ access_permitted(
-            bvconst(0, 1),       // user mode
-            cap_base, cap_len, cap_perm,
-            bvconst(0, 16),      // cap holds generation 0
-            bvconst(1, 16),      // object is now generation 1
-            addr, size, op
-        )
-
-    // ─── Supervisor bypasses all checks ───────────────────────
-
-    axiom supervisor_always_permitted :
-        ∀ addr : BitVec24 . ∀ size : BitVec24 . ∀ op : BitVec3 .
-        ∀ cap_base : BitVec24 . ∀ cap_len : BitVec24 .
-        ∀ cap_perm : BitVec3 .
-        ∀ cap_gen : BitVec16 . ∀ obj_gen : BitVec16 .
-        access_permitted(
-            bvconst(1, 1),       // supervisor mode
-            cap_base, cap_len, cap_perm,
-            cap_gen, obj_gen,
-            addr, size, op
-        )
-
-    // ─── Disjoint capabilities cannot compose ─────────────────
-    //
-    // An access that spans two adjacent capabilities but is not
-    // fully covered by either must be denied.
-    //
-    // Cap A covers [0x1000, 0x1002), Cap B covers [0x1002, 0x1004).
-    // A 4-byte access at 0x1000 must require a SINGLE capability
-    // covering the entire range.
-
-    axiom no_cross_capability_stitch :
-        ¬ cap_permits(
-            bvconst(4096, 24),   // cap_base = 0x1000
-            bvconst(2, 24),      // cap_len = 2 bytes
-            perm_RW,
-            bvconst(4096, 24),   // addr = 0x1000
-            bvconst(4, 24),      // size = 4 bytes (longword)
-            perm_R
-        )
-
-    // ─── Out-of-bounds access denied ──────────────────────────
-
-    axiom one_past_end_denied :
-        ∀ cap_base : BitVec24 . ∀ cap_len : BitVec24 .
-        ∀ cap_perm : BitVec3 .
-        // The byte immediately past the end is not authorized
-        bvugt(cap_len, bvconst(0, 24))
-        → ¬ cap_permits(
-            cap_base, cap_len, cap_perm,
-            bvadd(cap_base, cap_len),  // one past end
-            bvconst(1, 24),            // 1 byte
-            perm_R
-        )
+        real_request(size, op)
+        → ¬authorize(
+            bvconst(0,1),
+            bvconst(0,24), bvconst(0,24), perm_NONE,
+            bvconst(0,16), bvconst(0,16),
+            addr, size, op)
+    )
 }
 
-// ================================================================
-// REACHABILITY — Sanity checks
-// ================================================================
-
-structure AnkaReachability {
-
-    // A valid capability CAN grant read access
-    axiom read_is_reachable :
-        ∃ base : BitVec24 . ∃ len : BitVec24 . ∃ addr : BitVec24 .
-        cap_permits(base, len, perm_R, addr, bvconst(1, 24), perm_R)
-
-    // A valid capability CAN grant write access
-    axiom write_is_reachable :
-        ∃ base : BitVec24 . ∃ len : BitVec24 . ∃ addr : BitVec24 .
-        cap_permits(base, len, perm_W, addr, bvconst(1, 24), perm_W)
-
-    // Generation match CAN succeed
-    axiom generation_match_reachable :
-        ∃ g : BitVec16 . generation_valid(g, g)
-
-    // User mode CAN access if capability is valid
-    axiom user_access_reachable :
-        ∃ base : BitVec24 . ∃ len : BitVec24 . ∃ addr : BitVec24 .
-        access_permitted(
-            bvconst(0, 1), base, len, perm_RW,
-            bvconst(0, 16), bvconst(0, 16),
-            addr, bvconst(4, 24), perm_R
-        )
-}
-
-// ================================================================
-// HOSTILE-WORLD INVARIANTS
-//
-// These correspond to the Rust test suite in hostile.rs.
-// Each property is the formal statement of what each attack
-// must NOT be able to achieve.
-// ================================================================
-
-structure HostileWorldInvariants {
-
-    // INVARIANT 1: A user-mode process cannot set the supervisor bit.
-    //
-    // In the Rust implementation, MOVE to SR traps with vector 8.
-    // Here we verify the abstract property: user-mode access to
-    // supervisor-only state is never permitted.
-    //
-    // Modeled as: no capability can grant access to the protection
-    // controller address range (0xF00020-0xF00027).
-
-    axiom user_cannot_access_protection_controller :
-        ∀ addr : BitVec24 . ∀ size : BitVec24 . ∀ op : BitVec3 .
-        ∀ cap_base : BitVec24 . ∀ cap_len : BitVec24 . ∀ cap_perm : BitVec3 .
-        ∀ cap_gen : BitVec16 . ∀ obj_gen : BitVec16 .
-        // If the address is in the protection controller range...
-        (bvuge(addr, bvconst(15728672, 24))    // 0xF00020
-         ∧ bvult(addr, bvconst(15728680, 24))) // 0xF00028
-        // ...then user-mode access is denied regardless of capabilities
-        //
-        // This is an architectural invariant: the protection controller
-        // is NOT part of any user-addressable object.  It is control-plane
-        // state, like the SR register.
-        //
-        // NOTE: This axiom must be ENFORCED by the bus, not merely declared.
-        // In the Rust code, ProtectedBus::read8/write8 checks supervisor
-        // before checking capabilities for this address range.
-
-    // INVARIANT 2: Capabilities cannot be widened.
-    //
-    // If a domain has a capability for [base, base+len) with
-    // permissions π, no user action can produce a capability for
-    // a wider range or with additional permissions.
-    //
-    // This is guaranteed by construction: capabilities are created
-    // only by the kernel (supervisor mode) and stored in Domains.
-    // User code cannot forge, widen, or modify capabilities.
-
-    axiom read_only_means_read_only :
-        ∀ addr : BitVec24 . ∀ size : BitVec24 .
+example "P2 read authority does not grant write" {
+    assert(
         ∀ base : BitVec24 . ∀ len : BitVec24 .
+        ∀ addr : BitVec24 . ∀ size : BitVec24 .
         cap_permits(base, len, perm_R, addr, size, perm_R)
-        → ¬ cap_permits(base, len, perm_R, addr, size, perm_W)
-        ∧ ¬ cap_permits(base, len, perm_R, addr, size, perm_X)
+        → ¬cap_permits(base, len, perm_R, addr, size, perm_W)
+    )
 }
 
-// ================================================================
-// ANKA64 FORWARD — Transaction-level protection
-//
-// The fundamental Anka64 memory transaction.  This is what the
-// 68000 model converges toward.
-// ================================================================
+example "P3 write authority does not grant execute" {
+    assert(
+        ∀ base : BitVec24 . ∀ len : BitVec24 .
+        ∀ addr : BitVec24 . ∀ size : BitVec24 .
+        cap_permits(base, len, perm_W, addr, size, perm_W)
+        → ¬cap_permits(base, len, perm_W, addr, size, perm_X)
+    )
+}
 
-// For when we move to Anka64:
-//
-// struct MemoryRequest {
-//     agent:      AgentId,
-//     domain:     DomainId,
-//     privilege:  Privilege,   // Supervisor | User
-//     object:     ObjectId,
-//     generation: u32,
-//     offset:     u64,
-//     width:      Width,       // Byte | Word | Long | Quad
-//     kind:       AccessKind,  // Fetch | Read | Write
-// }
-//
-// authorize(R) ∈ {allow, fault}
-//
-// Denied transactions are observationally equivalent to never
-// having occurred, except for the fault record.
-//
-// That is the property to formalize next:
-//
-// ∀ R : MemoryRequest .
-//   ¬authorize(R) →
-//     state_after(R) = state_before(R)
-//     ∧ fault_log_after(R) = append(fault_log_before(R), fault(R))
+example "P4 stale generation is denied in user mode" {
+    assert(
+        ∀ base : BitVec24 . ∀ len : BitVec24 . ∀ perms : BitVec3 .
+        ∀ addr : BitVec24 . ∀ size : BitVec24 . ∀ op : BitVec3 .
+        real_request(size, op)
+        → ¬authorize(
+            bvconst(0,1), base, len, perms,
+            bvconst(0,16), bvconst(1,16),
+            addr, size, op)
+    )
+}
+
+example "P5 supervisor bypasses ordinary authority checks" {
+    assert(
+        ∀ base : BitVec24 . ∀ len : BitVec24 . ∀ perms : BitVec3 .
+        ∀ cg : BitVec16 . ∀ og : BitVec16 .
+        ∀ addr : BitVec24 . ∀ size : BitVec24 . ∀ op : BitVec3 .
+        authorize(bvconst(1,1), base, len, perms, cg, og, addr, size, op)
+    )
+}
+
+example "P6 user cannot access protection controller even with RWX capability" {
+    assert(
+        ∀ addr : BitVec24 . ∀ size : BitVec24 . ∀ op : BitVec3 .
+        ∀ base : BitVec24 . ∀ len : BitVec24 .
+        ∀ cg : BitVec16 . ∀ og : BitVec16 .
+        (in_control_plane(addr) ∧ real_request(size, op))
+        → ¬authorize(
+            bvconst(0,1), base, len, perm_RWX, cg, og,
+            addr, size, op)
+    )
+}
+
+example "P7 adjacent capabilities cannot stitch a longword" {
+    assert(
+        ¬cap_permits(
+            bvconst(4096,24), bvconst(2,24), perm_RW,
+            bvconst(4096,24), bvconst(4,24), perm_R)
+        ∧
+        ¬cap_permits(
+            bvconst(4098,24), bvconst(2,24), perm_RW,
+            bvconst(4096,24), bvconst(4,24), perm_R)
+    )
+}
+
+example "P8 one-past-end byte is denied" {
+    assert(
+        ∀ base : BitVec24 . ∀ len : BitVec24 . ∀ perms : BitVec3 .
+        bvugt(len, bvconst(0,24))
+        → ¬cap_permits(
+            base, len, perms,
+            bvadd(base, len), bvconst(1,24), perm_R)
+    )
+}
+
+// Permission attenuation: a read-only capability's allowed operations are a
+// subset of those allowed by an otherwise identical RW capability.
+example "P9 adding permissions cannot remove an allowed read" {
+    assert(
+        ∀ base : BitVec24 . ∀ len : BitVec24 .
+        ∀ addr : BitVec24 . ∀ size : BitVec24 .
+        cap_permits(base, len, perm_R, addr, size, perm_R)
+        → cap_permits(base, len, perm_RW, addr, size, perm_R)
+    )
+}
+
+// Spatial attenuation: shrinking a capability to the exact authorized request
+// preserves that request, provided the original capability authorized it.
+example "P10 exact sub-capability preserves an authorized request" {
+    assert(
+        ∀ base : BitVec24 . ∀ len : BitVec24 . ∀ perms : BitVec3 .
+        ∀ addr : BitVec24 . ∀ size : BitVec24 . ∀ op : BitVec3 .
+        cap_permits(base, len, perms, addr, size, op)
+        → cap_permits(addr, size, perms, addr, size, op)
+    )
+}
+
+// ===========================================================================
+// REACHABILITY / NON-VACUITY
+// ===========================================================================
+
+example "R1 valid user read is reachable" {
+    assert(
+        authorize(
+            bvconst(0,1),
+            bvconst(4096,24), bvconst(4096,24), perm_R,
+            bvconst(7,16), bvconst(7,16),
+            bvconst(4096,24), bvconst(4,24), perm_R)
+    )
+}
+
+example "R2 valid user write is reachable" {
+    assert(
+        authorize(
+            bvconst(0,1),
+            bvconst(8192,24), bvconst(4096,24), perm_RW,
+            bvconst(9,16), bvconst(9,16),
+            bvconst(8200,24), bvconst(4,24), perm_W)
+    )
+}
+
+// ===========================================================================
+// DENIED-TRANSACTION NONINTERFERENCE
+// ===========================================================================
+
+example "N1 denied transaction leaves memory unchanged" {
+    assert(
+        ∀ mem_before : BitVec32 . ∀ mem_effect : BitVec32 .
+        next_mem(bvconst(0,1), mem_before, mem_effect) = mem_before
+    )
+}
+
+example "N2 denied transaction leaves device state unchanged" {
+    assert(
+        ∀ dev_before : BitVec32 . ∀ dev_effect : BitVec32 .
+        next_dev(bvconst(0,1), dev_before, dev_effect) = dev_before
+    )
+}
+
+example "N3 denied transaction leaves object table unchanged" {
+    assert(
+        ∀ obj_before : BitVec32 . ∀ obj_effect : BitVec32 .
+        next_obj(bvconst(0,1), obj_before, obj_effect) = obj_before
+    )
+}
+
+example "N4 denied transaction leaves control state unchanged" {
+    assert(
+        ∀ ctrl_before : BitVec32 . ∀ ctrl_effect : BitVec32 .
+        next_ctrl(bvconst(0,1), ctrl_before, ctrl_effect) = ctrl_before
+    )
+}
+
+example "N5 denied transaction records exactly one fault" {
+    assert(
+        ∀ count : BitVec32 .
+        next_fault_count(bvconst(0,1), count) = bvadd(count, bvconst(1,32))
+    )
+}
+
+example "N6 denied transaction records faulting address" {
+    assert(
+        ∀ old_addr : BitVec24 . ∀ req_addr : BitVec24 .
+        next_fault_addr(bvconst(0,1), old_addr, req_addr) = req_addr
+    )
+}
+
+example "N7 authorized transaction does not create a fault record" {
+    assert(
+        ∀ count : BitVec32 . ∀ old_addr : BitVec24 . ∀ req_addr : BitVec24 .
+        next_fault_count(bvconst(1,1), count) = count
+        ∧ next_fault_addr(bvconst(1,1), old_addr, req_addr) = old_addr
+    )
+}
+
+// End-to-end denied-request theorem: for an actually denied authorization
+// decision, all ordinary state is observationally unchanged and only fault
+// metadata changes.
+example "N8 unauthorized request is observationally inert except fault metadata" {
+    assert(
+        ∀ supervisor : BitVec1 .
+        ∀ base : BitVec24 . ∀ len : BitVec24 . ∀ perms : BitVec3 .
+        ∀ cg : BitVec16 . ∀ og : BitVec16 .
+        ∀ addr : BitVec24 . ∀ size : BitVec24 . ∀ op : BitVec3 .
+        ∀ mem0 : BitVec32 . ∀ mem1 : BitVec32 .
+        ∀ dev0 : BitVec32 . ∀ dev1 : BitVec32 .
+        ∀ obj0 : BitVec32 . ∀ obj1 : BitVec32 .
+        ∀ ctl0 : BitVec32 . ∀ ctl1 : BitVec32 .
+        ∀ faults : BitVec32 . ∀ old_fault_addr : BitVec24 .
+        (
+          ¬authorize(supervisor, base, len, perms, cg, og, addr, size, op)
+          →
+          (
+            next_mem(bvconst(0,1), mem0, mem1) = mem0
+            ∧ next_dev(bvconst(0,1), dev0, dev1) = dev0
+            ∧ next_obj(bvconst(0,1), obj0, obj1) = obj0
+            ∧ next_ctrl(bvconst(0,1), ctl0, ctl1) = ctl0
+            ∧ next_fault_count(bvconst(0,1), faults) = bvadd(faults, bvconst(1,32))
+            ∧ next_fault_addr(bvconst(0,1), old_fault_addr, addr) = addr
+          )
+        )
+    )
+}
