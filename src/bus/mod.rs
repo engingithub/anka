@@ -11,9 +11,13 @@
 //! Design note: the trait takes `&mut self` because I/O side-effects
 //! (device registers, cycle counting) are expected.
 
+pub mod console;
+pub mod device;
 mod flat;
+mod mapped;
 
 pub use flat::FlatBus;
+pub use mapped::MappedBus;
 
 /// Address mask for the original MC68000 (24-bit address bus).
 pub const ADDR_MASK_68K: u32 = 0x00FF_FFFF;

@@ -1,16 +1,23 @@
 //! Anka — MC68000 emulator entry point.
 //!
-//! Loads a raw binary image into emulated memory and executes it,
-//! or runs a built-in self-test if no file is given.
+//! Loads a raw binary ROM image into emulated memory and executes it,
+//! or runs a built-in demo if no file is given.
 
 use std::env;
 use std::fs;
 use std::process;
 
-use anka::bus::{Bus, FlatBus};
+use anka::bus::console::Console;
+use anka::bus::{Bus, FlatBus, MappedBus};
 use anka::cpu::Cpu;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// MMIO base address for the console device.
+///
+/// 0x00F0_0000 sits near the top of the 24-bit address space,
+/// well above typical program/data addresses.
+const CONSOLE_BASE: u32 = 0x00F0_0000;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -31,6 +38,7 @@ fn main() {
     let mut max_steps: u64 = 10_000_000;
     let mut trace = false;
     let mut self_test = false;
+    let mut hello = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -55,6 +63,7 @@ fn main() {
             }
             "--trace" | "-t" => trace = true,
             "--self-test" => self_test = true,
+            "--hello" => hello = true,
             arg if arg.starts_with('-') => {
                 eprintln!("error: unknown option: {}", arg);
                 eprintln!("Try 'anka --help' for usage.");
@@ -71,10 +80,15 @@ fn main() {
         i += 1;
     }
 
+    if hello {
+        run_hello(trace);
+        return;
+    }
+
     if self_test || rom_path.is_none() {
         if rom_path.is_none() && !self_test {
             println!("No ROM file given — running built-in self-test.");
-            println!("Try 'anka --help' for usage.");
+            println!("Try 'anka --help' for usage, or 'anka --hello' for I/O demo.");
             println!();
         }
         run_self_test(trace);
@@ -97,24 +111,24 @@ fn main() {
     println!();
     println!("  ROM:       {}  ({} bytes)", path, data.len());
     println!("  Load addr: {:#010X}", load_addr);
+    println!("  Console:   {:#010X}", CONSOLE_BASE);
     println!("  Max steps: {}", max_steps);
     println!("  Trace:     {}", if trace { "on" } else { "off" });
     println!();
 
-    let mut bus = FlatBus::new_16mb();
+    let mut bus = MappedBus::new_16mb();
+    bus.add_device(CONSOLE_BASE, Box::new(Console::new()));
 
-    // If the ROM is loaded at address 0, it includes its own vector table.
-    // Otherwise, synthesize a minimal vector table pointing at load_addr.
     if load_addr == 0 {
         bus.load(0, &data);
     } else {
-        // Vector table: SSP at 0x00100000, PC at load_addr
         bus.write32(0x000000, 0x0010_0000);
         bus.write32(0x000004, load_addr);
         bus.load(load_addr, &data);
     }
 
     let mut cpu = Cpu::new(bus);
+    println!();
     println!(
         "Reset: SSP={:#010X}  PC={:#010X}",
         cpu.a[7], cpu.pc
@@ -126,7 +140,7 @@ fn main() {
 }
 
 // ---------------------------------------------------------------------------
-// Built-in self-test
+// Built-in self-test (arithmetic only, no I/O)
 // ---------------------------------------------------------------------------
 
 fn run_self_test(trace: bool) {
@@ -170,6 +184,81 @@ fn run_self_test(trace: bool) {
 }
 
 // ---------------------------------------------------------------------------
+// Hello demo: CPU prints a string through MMIO console
+// ---------------------------------------------------------------------------
+
+fn run_hello(trace: bool) {
+    eprintln!("Anka — MC68000 Emulator v{}", VERSION);
+    eprintln!("Running hello demo: CPU → MMIO console → stdout");
+    eprintln!();
+
+    let mut bus = MappedBus::new_16mb();
+    bus.add_device(CONSOLE_BASE, Box::new(Console::new()));
+
+    let ssp: u32 = 0x0010_0000;
+    let entry: u32 = 0x0000_1000;
+    let string_addr: u32 = 0x0000_2000;
+
+    bus.write32(0x000000, ssp);
+    bus.write32(0x000004, entry);
+
+    // The string to print, stored at 0x2000.
+    let message = b"Hello from Anka!\n";
+    bus.load(string_addr, message);
+
+    // Hand-assembled 68000 program:
+    //
+    //   ; A0 = pointer to string
+    //   ; A1 = console TX_DATA address
+    //   ;
+    //   ; putchar: MOVE.B (A0)+, D0      ; load next byte
+    //   ;          BEQ.S  done            ; if zero, we're done
+    //   ;          MOVE.B D0, (A1)        ; write to console
+    //   ;          BRA.S  putchar         ; loop
+    //   ; done:    STOP   #$2700
+    //
+    // Encoding:
+    //   LEA string, A0            ; 41F9 0000 2000
+    //   LEA $00F00000, A1         ; 43F9 00F0 0000
+    // loop:
+    //   MOVE.B (A0)+, D0          ; 1018
+    //   BEQ.S  done  (+4)         ; 6704
+    //   MOVE.B D0, (A1)           ; 1280
+    //   BRA.S  loop  (-6)         ; 60F8
+    // done:
+    //   STOP   #$2700             ; 4E72 2700
+
+    let program: &[u16] = &[
+        // LEA $00002000, A0
+        0x41F9, 0x0000, 0x2000,
+        // LEA $00F00000, A1
+        0x43F9, 0x00F0, 0x0000,
+        // loop:
+        0x1018, // MOVE.B (A0)+, D0
+        0x6704, // BEQ.S done (+4 bytes = skip 2 words)
+        0x1280, // MOVE.B D0, (A1)
+        0x60F8, // BRA.S loop (-8 bytes back to MOVE.B (A0)+,D0)
+        // done:
+        0x4E72, // STOP
+        0x2700, // #$2700
+    ];
+
+    let mut addr = entry;
+    for &word in program {
+        bus.write16(addr, word);
+        addr += 2;
+    }
+
+    let mut cpu = Cpu::new(bus);
+    eprintln!("Reset: SSP={:#010X}  PC={:#010X}", cpu.a[7], cpu.pc);
+    eprintln!();
+
+    run_cpu(&mut cpu, 10_000, trace);
+    eprintln!();
+    print_state(&cpu);
+}
+
+// ---------------------------------------------------------------------------
 // Execution loop
 // ---------------------------------------------------------------------------
 
@@ -183,7 +272,7 @@ fn run_cpu<B: Bus>(cpu: &mut Cpu<B>, max_steps: u64, trace: bool) {
         steps += 1;
 
         if trace {
-            println!(
+            eprintln!(
                 "  PC={:#010X}  cycles=+{:<3}  D0={:#010X}  D1={:#010X}  D2={:#010X}  SR={:#06X}",
                 pc_before, cycles, cpu.d[0], cpu.d[1], cpu.d[2], cpu.sr.0
             );
@@ -197,19 +286,19 @@ fn run_cpu<B: Bus>(cpu: &mut Cpu<B>, max_steps: u64, trace: bool) {
         );
     }
 
-    println!(
+    eprintln!(
         "Halted after {} steps, {} total cycles.",
         steps, cpu.cycles
     );
 }
 
 fn print_state<B: Bus>(cpu: &Cpu<B>) {
-    println!();
-    println!("  D0={:#010X}  D1={:#010X}  D2={:#010X}  D3={:#010X}", cpu.d[0], cpu.d[1], cpu.d[2], cpu.d[3]);
-    println!("  D4={:#010X}  D5={:#010X}  D6={:#010X}  D7={:#010X}", cpu.d[4], cpu.d[5], cpu.d[6], cpu.d[7]);
-    println!("  A0={:#010X}  A1={:#010X}  A2={:#010X}  A3={:#010X}", cpu.a[0], cpu.a[1], cpu.a[2], cpu.a[3]);
-    println!("  A4={:#010X}  A5={:#010X}  A6={:#010X}  A7={:#010X}", cpu.a[4], cpu.a[5], cpu.a[6], cpu.a[7]);
-    println!("  PC={:#010X}  SR={:#06X}", cpu.pc, cpu.sr.0);
+    eprintln!();
+    eprintln!("  D0={:#010X}  D1={:#010X}  D2={:#010X}  D3={:#010X}", cpu.d[0], cpu.d[1], cpu.d[2], cpu.d[3]);
+    eprintln!("  D4={:#010X}  D5={:#010X}  D6={:#010X}  D7={:#010X}", cpu.d[4], cpu.d[5], cpu.d[6], cpu.d[7]);
+    eprintln!("  A0={:#010X}  A1={:#010X}  A2={:#010X}  A3={:#010X}", cpu.a[0], cpu.a[1], cpu.a[2], cpu.a[3]);
+    eprintln!("  A4={:#010X}  A5={:#010X}  A6={:#010X}  A7={:#010X}", cpu.a[4], cpu.a[5], cpu.a[6], cpu.a[7]);
+    eprintln!("  PC={:#010X}  SR={:#06X}", cpu.pc, cpu.sr.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -247,10 +336,19 @@ DESCRIPTION:
     Loads a raw binary ROM image into emulated MC68000 memory and
     executes it. If no ROM file is given, runs a built-in self-test.
 
+    The machine includes an MMIO console at {:#010X}:
+      +0x00  TX_DATA   (W)  Write byte → stdout
+      +0x01  TX_READY  (R)  Always 0x01
+      +0x02  RX_DATA   (R)  Read byte from input buffer
+      +0x03  RX_READY  (R)  0x01 if data available
+
     The ROM is loaded at --load-addr (default 0x1000) and a minimal
     vector table is synthesised (SSP=0x100000, PC=load-addr). If
     --load-addr is 0, the ROM is expected to contain its own vector
     table starting at address 0.
+
+    Console output goes to stdout; all diagnostics go to stderr.
+    This means you can pipe or redirect the emulated program's output.
 
 ARGUMENTS:
     ROM_FILE            Raw binary file to load into memory
@@ -260,22 +358,26 @@ OPTIONS:
                         Accepts decimal or 0x-prefixed hex
     --max-steps N       Stop after N instructions (default: 10,000,000)
     --trace, -t         Print every instruction as it executes
-    --self-test         Run the built-in self-test and exit
+    --self-test         Run the built-in arithmetic self-test
+    --hello             Run the I/O demo (prints 'Hello from Anka!')
     --version, -V       Print version and exit
     --help, -h          Print this help and exit
 
 EXAMPLES:
     anka                            Run built-in self-test
+    anka --hello                    CPU prints via MMIO console
+    anka --hello --trace            Hello with instruction trace
     anka --self-test --trace        Self-test with instruction trace
     anka rom.bin                    Load ROM at 0x1000 and run
     anka rom.bin --trace            Load ROM with instruction trace
     anka rom.bin --load-addr 0x0    ROM includes its own vector table
     anka rom.bin --max-steps 5000   Stop after 5000 instructions
 
-NOTES:
-    The emulated CPU is a Motorola MC68000 with a 24-bit address bus
-    (16 MB flat memory). All arithmetic uses explicit bitvector
-    semantics — Rust host arithmetic never redefines 68000 behaviour.",
-        VERSION
+MEMORY MAP:
+    0x000000–0x0003FF    Vector table (1 KB)
+    0x000400–0xEFFFFF    RAM (program + data)
+    0xF00000–0xF0000F    Console (MMIO)
+    0xF00010–0xFFFFFF    (reserved for future devices)",
+        VERSION, CONSOLE_BASE
     );
 }
