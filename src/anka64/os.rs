@@ -187,20 +187,22 @@ impl Kernel {
         }
     }
 
-    /// Seal an object: Active(RW) → Sealed(RX).
+    /// Seal an object: Active(RW+S) → Sealed(RX).
     ///
     /// R1 = virtual address of the object to seal.
     /// Returns: R0 = 0 on success, R0 = MAX on error.
     ///
-    /// Authority check: the calling domain must possess a valid WRITE
-    /// capability on the object.  Address map resolution alone is not
-    /// authority — "name of object ≠ authority over object."
+    /// Authority check: the calling domain must possess a valid SEAL
+    /// capability covering the entire object.  WRITE authority alone
+    /// is not sufficient — writing a buffer and authorizing it to
+    /// become executable code are different powers:
+    ///   WRITE authority ≠ authority to create executable code.
     ///
     /// The seal is structural (fabric-level):
     ///   - Bumps generation (invalidates all old capabilities)
     ///   - Sets state = Sealed
     ///   - Grants RX at the new generation
-    ///   - grant() will refuse WRITE/ATOMIC on this object forever
+    ///   - grant() will refuse WRITE/ATOMIC/SEAL on this object forever
     fn handle_seal(&mut self, idx: usize) {
         let vaddr = self.processes[idx].core.r[R1 as usize];
         let (object, _offset) = match self.processes[idx].core.address_map.resolve(vaddr) {
@@ -213,15 +215,17 @@ impl Kernel {
         };
 
         let domain = self.processes[idx].core.domain;
+        let obj_size = self.fabric.objects[&object].size;
 
-        // Authority check: caller must have WRITE on the object.
-        if !self.fabric.has_authority(domain, object, Permissions::WRITE) {
+        // Range-exact authority: caller must have SEAL covering [0, obj_size).
+        // Narrow SEAL authority cannot seal the whole object.
+        if self.fabric.find_authorizing_cap(
+            domain, object, 0, obj_size, Permissions::SEAL
+        ).is_none() {
             self.processes[idx].core.r[R0 as usize] = u64::MAX;
             self.resume_from_trap(idx);
             return;
         }
-
-        let obj_size = self.fabric.objects[&object].size;
 
         // Structural seal: Active → Sealed, generation bumped.
         if !self.fabric.seal_object(object) {
@@ -243,17 +247,18 @@ impl Kernel {
     /// R2 = code size in bytes.
     /// Returns: child's exit code in R0, or MAX on error.
     ///
-    /// Two structural checks before the kernel creates anything:
+    /// Three structural checks before the kernel creates anything:
     ///   1. Object must be Sealed (W⊕X: no simultaneous W+X)
-    ///   2. Caller must have EXECUTE authority (name ≠ authority)
-    ///
-    /// The child's RX authority exists only because the kernel
-    /// verified the parent's authority first.
+    ///   2. Caller must have EXECUTE authority covering the range
+    ///      (range-exact, not object-level)
+    ///   3. Child's authority is derived from parent's capability,
+    ///      not freshly minted — attenuation (I7) applies structurally:
+    ///        Authority(C_child) ⊆ Authority(C_parent)
     fn handle_exec(&mut self, idx: usize) {
         let code_vaddr = self.processes[idx].core.r[R1 as usize];
         let code_size = self.processes[idx].core.r[R2 as usize];
 
-        let (code_obj, _) = match self.processes[idx].core.address_map.resolve(code_vaddr) {
+        let (code_obj, code_offset) = match self.processes[idx].core.address_map.resolve(code_vaddr) {
             Some(r) => r,
             None => {
                 self.processes[idx].core.r[R0 as usize] = u64::MAX;
@@ -274,16 +279,29 @@ impl Kernel {
 
         let domain = self.processes[idx].core.domain;
 
-        // Check 2: caller must have EXECUTE authority
-        if !self.fabric.has_authority(domain, code_obj, Permissions::EXECUTE) {
-            self.processes[idx].core.r[R0 as usize] = u64::MAX;
-            self.resume_from_trap(idx);
-            return;
-        }
+        // Check 2: range-exact EXECUTE authority.
+        // Narrow execute capability cannot authorize a larger range.
+        let parent_cap = match self.fabric.find_authorizing_cap(
+            domain, code_obj, code_offset, code_size, Permissions::EXECUTE
+        ) {
+            Some(cap) => cap.clone(),
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
 
         // --- Child domain: isolated authority container ---
+        // Check 3: derive child's RX from parent's capability (I7).
+        // Authority(C_child) ⊆ Authority(C_parent).
         let child_dom = self.fabric.create_domain();
-        self.fabric.grant(child_dom, code_obj, 0, code_size, Permissions::RX);
+        let child_perms = Permissions(
+            parent_cap.permissions().0 & Permissions::RX.0
+        );
+        self.fabric.derive(
+            child_dom, &parent_cap, code_offset, code_size, child_perms,
+        );
 
         // --- Child stack ---
         let stack_size: u64 = 0x4000;
@@ -604,7 +622,7 @@ mod tests {
 
         let dom = fabric.create_domain();
         fabric.grant(dom, text,   0, 0x4000, Permissions::RX);
-        fabric.grant(dom, output, 0, 0x1000, Permissions::RW);
+        fabric.grant(dom, output, 0, 0x1000, Permissions::RWS);
         fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
 
         install_trap_handler(&mut fabric, 0x000000);
@@ -645,33 +663,33 @@ mod tests {
     }
 
     #[test]
-    fn s2_seal_requires_write_authority() {
-        // A process has only READ authority on an object.
-        // Calling SYS_SEAL should fail — sealing requires WRITE.
+    fn s2_seal_requires_seal_authority() {
+        // A process has RW authority on an object but no SEAL.
+        // Calling SYS_SEAL should fail — WRITE ≠ SEAL authority.
         let mut fabric = Fabric::new(0x200000);
 
         let text     = fabric.alloc_object("text",     0x4000, ObjectKind::Memory);
-        let readonly = fabric.alloc_object("readonly", 0x1000, ObjectKind::Memory);
+        let rw_only  = fabric.alloc_object("rw_only",  0x1000, ObjectKind::Memory);
         let stack    = fabric.alloc_object("stack",    0x4000, ObjectKind::Memory);
 
         fabric.place_object(text,     0x000000);
-        fabric.place_object(readonly, 0x020000);
+        fabric.place_object(rw_only,  0x020000);
         fabric.place_object(stack,    0x030000);
 
         let dom = fabric.create_domain();
-        fabric.grant(dom, text,     0, 0x4000, Permissions::RX);
-        fabric.grant(dom, readonly, 0, 0x1000, Permissions::READ); // no WRITE!
-        fabric.grant(dom, stack,    0, 0x4000, Permissions::RW);
+        fabric.grant(dom, text,    0, 0x4000, Permissions::RX);
+        fabric.grant(dom, rw_only, 0, 0x1000, Permissions::RW); // no SEAL!
+        fabric.grant(dom, stack,   0, 0x4000, Permissions::RW);
 
         install_trap_handler(&mut fabric, 0x000000);
 
-        // Program: SYS_SEAL on the read-only object
+        // Program: SYS_SEAL on the RW-only object
         build_syscall_program(&mut fabric, 0x000000, SYS_SEAL,
             0x5000, 0);
 
         let mut core = Anka64Core::new(AgentId(0), dom);
         core.address_map.add(0x00000, 0x4000, text);
-        core.address_map.add(0x05000, 0x1000, readonly);
+        core.address_map.add(0x05000, 0x1000, rw_only);
         core.address_map.add(0x06000, 0x4000, stack);
         core.r[SP as usize] = 0x06000 + 0x4000;
         core.trap_vector = 0x3FF0;
@@ -682,12 +700,13 @@ mod tests {
 
         assert!(kernel.processes[0].exited);
         assert_eq!(kernel.processes[0].exit_code, u64::MAX,
-            "SYS_SEAL without WRITE authority should return error");
+            "SYS_SEAL without SEAL authority should return error");
         // Object should still be Active (not Sealed)
-        assert_eq!(kernel.fabric.objects[&readonly].state, ObjectState::Active,
+        assert_eq!(kernel.fabric.objects[&rw_only].state, ObjectState::Active,
             "object should remain Active after failed seal");
 
-        eprintln!("S2: SYS_SEAL without WRITE authority → rejected ✓");
+        eprintln!("S2: SYS_SEAL with RW but no SEAL → rejected ✓");
+        eprintln!("    WRITE authority ≠ authority to create executable code");
     }
 
     #[test]
@@ -742,6 +761,216 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════
+    // 6S.1a security tests — range-exact authority + SEAL separation
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn s4_narrow_seal_cannot_seal_whole_object() {
+        // Domain has SEAL authority only over [0x100, 0x20).
+        // SYS_SEAL requires SEAL covering [0, obj_size).
+        // Narrow SEAL → rejected.
+        let mut fabric = Fabric::new(0x200000);
+
+        let text   = fabric.alloc_object("text",   0x4000, ObjectKind::Memory);
+        let buffer = fabric.alloc_object("buffer", 0x1000, ObjectKind::Memory);
+        let stack  = fabric.alloc_object("stack",  0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text,   0x000000);
+        fabric.place_object(buffer, 0x020000);
+        fabric.place_object(stack,  0x030000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, text,   0, 0x4000, Permissions::RX);
+        // Narrow SEAL: only [0x100, 0x120), not the whole object
+        fabric.grant(dom, buffer, 0x100, 0x20, Permissions::SEAL);
+        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+
+        install_trap_handler(&mut fabric, 0x000000);
+
+        build_syscall_program(&mut fabric, 0x000000, SYS_SEAL,
+            0x5000, 0);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x05000, 0x1000, buffer);
+        core.address_map.add(0x06000, 0x4000, stack);
+        core.r[SP as usize] = 0x06000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.run(1000, 100);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "narrow SEAL should not authorize whole-object seal");
+        assert_eq!(kernel.fabric.objects[&buffer].state, ObjectState::Active);
+
+        eprintln!("S4: narrow SEAL [0x100,0x20) cannot seal whole object ✓");
+        eprintln!("    Attenuation holds: narrow authority → narrow result");
+    }
+
+    #[test]
+    fn s5_narrow_exec_cannot_authorize_larger_range() {
+        // Parent has EXECUTE on [0, 0x10) of a sealed object.
+        // SYS_EXEC with code_size=0x100 → rejected (narrow authority).
+        let mut fabric = Fabric::new(0x200000);
+
+        let text   = fabric.alloc_object("text",   0x4000, ObjectKind::Memory);
+        let code   = fabric.alloc_object("code",   0x1000, ObjectKind::Memory);
+        let stack  = fabric.alloc_object("stack",  0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text, 0x000000);
+        fabric.place_object(code, 0x020000);
+        fabric.place_object(stack, 0x030000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, text,  0, 0x4000, Permissions::RX);
+        fabric.grant(dom, code,  0, 0x1000, Permissions::RWS);
+        fabric.grant(dom, stack, 0, 0x4000, Permissions::RW);
+
+        // Write valid code and seal
+        let mut asm = Asm64::new();
+        asm.movi(R1, 42);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        fabric.write_physical(0x020000, &asm.to_bytes());
+        fabric.seal_object(code);
+
+        // Grant only narrow EXECUTE: [0, 0x10) — 4 instructions worth
+        fabric.grant(dom, code, 0, 0x10, Permissions::RX);
+
+        install_trap_handler(&mut fabric, 0x000000);
+
+        // Program: SYS_EXEC with code_size=0x100 (larger than authority)
+        build_syscall_program(&mut fabric, 0x000000, SYS_EXEC,
+            0x5000, 0x100);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x05000, 0x1000, code);
+        core.address_map.add(0x06000, 0x4000, stack);
+        core.r[SP as usize] = 0x06000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x040000;
+        kernel.spawn(core);
+        kernel.run(1000, 100);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "narrow EXECUTE should not authorize larger code range");
+        assert_eq!(kernel.processes.len(), 1, "no child spawned");
+
+        eprintln!("S5: EXECUTE on [0,0x10) cannot authorize exec of 0x100 bytes ✓");
+        eprintln!("    Authority(child) ⊆ Authority(parent) — structural");
+    }
+
+    #[test]
+    fn s6_child_authority_derived_from_parent() {
+        // After SYS_EXEC, verify the child's capability was derived
+        // (not freshly minted) — it must be within the parent's range.
+        let mut fabric = Fabric::new(0x200000);
+
+        let text   = fabric.alloc_object("text",   0x4000, ObjectKind::Memory);
+        let code   = fabric.alloc_object("code",   0x1000, ObjectKind::Memory);
+        let stack  = fabric.alloc_object("stack",  0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text, 0x000000);
+        fabric.place_object(code, 0x020000);
+        fabric.place_object(stack, 0x030000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, text,  0, 0x4000, Permissions::RX);
+        fabric.grant(dom, code,  0, 0x1000, Permissions::RWS);
+        fabric.grant(dom, stack, 0, 0x4000, Permissions::RW);
+
+        // Write simple code and seal
+        let mut asm = Asm64::new();
+        asm.movi(R1, 77);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        fabric.write_physical(0x020000, &asm.to_bytes());
+        fabric.seal_object(code);
+
+        // Parent gets whole-object RX (post-seal)
+        fabric.grant(dom, code, 0, 0x1000, Permissions::RX);
+
+        install_trap_handler(&mut fabric, 0x000000);
+
+        // SYS_EXEC with code_size = 16 (within parent's [0, 0x1000))
+        build_syscall_program(&mut fabric, 0x000000, SYS_EXEC,
+            0x5000, 16);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x05000, 0x1000, code);
+        core.address_map.add(0x06000, 0x4000, stack);
+        core.r[SP as usize] = 0x06000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x040000;
+        kernel.next_agent = 10;
+        kernel.spawn(core);
+        kernel.run(1000, 1000);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, 77,
+            "child should return 77");
+        assert!(kernel.processes.len() >= 2);
+
+        // Verify child's code capability was derived (subset of parent's)
+        let child_dom = kernel.processes[1].core.domain;
+        let child_caps: Vec<_> = kernel.fabric.domains[&child_dom]
+            .capabilities.iter()
+            .filter(|c| c.object() == code)
+            .collect();
+        assert!(!child_caps.is_empty(), "child should have code capability");
+        let child_code_cap = child_caps[0];
+        // Child's range [offset, offset+length) must be within parent's [0, 0x1000)
+        assert_eq!(child_code_cap.offset(), 0);
+        assert_eq!(child_code_cap.length(), 16);
+        assert!(child_code_cap.permissions().is_subset_of(Permissions::RX),
+            "child permissions must be subset of parent's RX");
+
+        eprintln!("S6: child code cap = ({}, {}, {:?}) ⊆ parent (0, 0x1000, RX) ✓",
+            child_code_cap.offset(), child_code_cap.length(),
+            child_code_cap.permissions());
+        eprintln!("    Authority(child) ⊆ Authority(parent) — I7 structural");
+    }
+
+    #[test]
+    fn s7_overflow_grant_rejected() {
+        // Try to grant a capability where offset + length overflows u64.
+        // The Kleis model uses subtraction-based checks to avoid this.
+        let mut fabric = Fabric::new(0x100000);
+        let obj = fabric.alloc_object("huge", 0x1000, ObjectKind::Memory);
+        fabric.place_object(obj, 0x0000);
+        let dom = fabric.create_domain();
+
+        // offset = u64::MAX - 10, length = 20 → overflow
+        let result = fabric.grant(dom, obj, u64::MAX - 10, 20, Permissions::READ);
+        assert!(result.is_none(), "overflow grant should be rejected");
+
+        // offset = 0, length = obj_size + 1 → exceeds object
+        let result = fabric.grant(dom, obj, 0, 0x1001, Permissions::READ);
+        assert!(result.is_none(), "length > obj_size should be rejected");
+
+        // offset = 1, length = obj_size → offset would go past end
+        let result = fabric.grant(dom, obj, 1, 0x1000, Permissions::READ);
+        assert!(result.is_none(), "offset+length > obj_size should be rejected");
+
+        // Valid: offset = 0, length = obj_size → exact fit
+        let result = fabric.grant(dom, obj, 0, 0x1000, Permissions::READ);
+        assert!(result.is_some(), "exact fit should succeed");
+
+        eprintln!("S7: overflow range checks in grant() ✓");
+        eprintln!("    Rule 28: Rust ≡ Kleis subtraction-based bounds");
+    }
+
+    // ═══════════════════════════════════════════════════════════
     // P20: Guest-hosted compilation — int main() { return 42; }
     //
     //   Phase 6A: the machine creates software for itself.
@@ -786,7 +1015,7 @@ mod tests {
         let dom = fabric.create_domain();
         fabric.grant(dom, text,   0, 0x4000, Permissions::RX);
         fabric.grant(dom, source, 0, 0x1000, Permissions::READ);
-        fabric.grant(dom, output, 0, 0x1000, Permissions::RW);
+        fabric.grant(dom, output, 0, 0x1000, Permissions::RWS); // RW+Seal: code emission buffer
         fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
 
         // Source: the number 42 as a 64-bit little-endian value

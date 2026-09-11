@@ -62,9 +62,18 @@ impl Permissions {
     pub const WRITE: Self = Self(0x02);
     pub const EXECUTE: Self = Self(0x04);
     pub const ATOMIC: Self = Self(0x08);
+    /// Authority to seal an object (Active → Sealed).
+    ///
+    /// Separate from WRITE because writing a buffer and authorizing
+    /// it to become executable code are different powers:
+    ///   WRITE authority ≠ authority to create executable code.
+    pub const SEAL: Self = Self(0x10);
     pub const RW: Self = Self(0x03);
     pub const RX: Self = Self(0x05);
     pub const RWX: Self = Self(0x07);
+    /// Read + Write + Seal: the capability needed for a code
+    /// emission buffer that will later be sealed.
+    pub const RWS: Self = Self(0x13);
 
     pub fn contains(self, required: Self) -> bool {
         self.0 & required.0 == required.0

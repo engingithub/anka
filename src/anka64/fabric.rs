@@ -170,13 +170,18 @@ impl Fabric {
             ObjectState::Sealed => {
                 if perms.contains(Permissions::WRITE)
                     || perms.contains(Permissions::ATOMIC)
+                    || perms.contains(Permissions::SEAL)
                 {
-                    return None; // W⊕X: sealed objects reject write authority
+                    return None; // W⊕X: sealed objects reject write/atomic/seal
                 }
             }
             _ => return None,
         }
-        if offset + length > obj.size { return None; }
+        // Overflow-safe range check (Rule 28: match Kleis subtraction form).
+        //   Kleis: bvule(cap_len, obj_size) ∧ bvule(cap_off, bvsub(obj_size, cap_len))
+        //   Rust:  length <= obj.size       && offset <= obj.size - length
+        if length > obj.size { return None; }
+        if offset > obj.size - length { return None; }
 
         let cap = Capability64::new(object, obj.generation, offset, length, perms);
         self.domains.get_mut(&domain)?.capabilities.push(cap.clone());
@@ -229,27 +234,28 @@ impl Fabric {
         }
     }
 
-    /// Check whether a domain holds a valid capability with the required
-    /// permissions on a given object.
+    /// Find a valid capability in a domain that covers a specific range
+    /// with the required permissions.
     ///
-    /// This is the authority check that prevents "name ≠ authority"
-    /// violations: resolving an address to an ObjectId is not sufficient;
-    /// the domain must actually possess a matching capability.
-    pub fn has_authority(
+    /// This is the range-exact authority check. The old object-level
+    /// `has_authority()` asked only "does the domain have *some* capability
+    /// on this object?" — that lets narrow authority amplify to whole-object
+    /// authority, violating attenuation (I7).
+    ///
+    /// This method answers the stronger question:
+    ///   ∃ C ∈ D : valid(C) ∧ C ⊢ (O, offset, length, permission)
+    pub fn find_authorizing_cap(
         &self,
         domain: DomainId,
         object: ObjectId,
+        offset: u64,
+        length: u64,
         required: Permissions,
-    ) -> bool {
-        if let Some(dom) = self.domains.get(&domain) {
-            dom.capabilities.iter().any(|cap| {
-                cap.object() == object
-                    && cap.permissions().contains(required)
-                    && self.validate(cap)
-            })
-        } else {
-            false
-        }
+    ) -> Option<&Capability64> {
+        self.domains.get(&domain)?.capabilities.iter().find(|cap| {
+            self.validate(cap)
+                && cap.covers(object, offset, length, required)
+        })
     }
 
     /// Authorize a memory request against a domain's capabilities.

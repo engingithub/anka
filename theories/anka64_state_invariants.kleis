@@ -17,15 +17,17 @@
 
 import "stdlib/prelude.kleis"
 
-// ---- Permission encoding (4-bit: R=1, W=2, X=4, A=8) ----------------
-define perm_R    = bvconst(1, 4)
-define perm_W    = bvconst(2, 4)
-define perm_X    = bvconst(4, 4)
-define perm_A    = bvconst(8, 4)
+// ---- Permission encoding (8-bit, matching Rust u8) --------------------
+// R=0x01, W=0x02, X=0x04, A=0x08, S=0x10
+define perm_R    = bvconst(1,  8)
+define perm_W    = bvconst(2,  8)
+define perm_X    = bvconst(4,  8)
+define perm_A    = bvconst(8,  8)
+define perm_S    = bvconst(16, 8)
 define perm_RW   = bvor(perm_R, perm_W)
-define perm_NONE = bvconst(0, 4)
+define perm_NONE = bvconst(0,  8)
 
-define has_perm(held : BitVec4, required : BitVec4) =
+define has_perm(held : BitVec8, required : BitVec8) =
     bvand(held, required) = required
 
 // ---- Generation model (64-bit) ----------------------------------------
@@ -63,10 +65,10 @@ define req_within_cap(
 define authorize(
     cap_gen   : BitVec64, obj_gen  : BitVec64,
     cap_off   : BitVec64, cap_len  : BitVec64,
-    cap_perm  : BitVec4,
+    cap_perm  : BitVec8,
     obj_size  : BitVec64,
     req_off   : BitVec64, req_width : BitVec64,
-    req_perm  : BitVec4
+    req_perm  : BitVec8
 ) =
     generation_match(cap_gen, obj_gen)
     ∧ cap_within_object(cap_off, cap_len, obj_size)
@@ -79,8 +81,8 @@ define commit_allowed(cap_gen : BitVec64, obj_gen_at_commit : BitVec64) =
 
 // ---- Delegation (attenuation) ------------------------------------------
 define derive_allowed(
-    parent_off  : BitVec64, parent_len  : BitVec64, parent_perm : BitVec4,
-    child_off   : BitVec64, child_len   : BitVec64, child_perm  : BitVec4
+    parent_off  : BitVec64, parent_len  : BitVec64, parent_perm : BitVec8,
+    child_off   : BitVec64, child_len   : BitVec64, child_perm  : BitVec8
 ) =
     req_within_cap(child_off, child_len, parent_off, parent_len)
     ∧ has_perm(parent_perm, child_perm)
@@ -99,9 +101,9 @@ example "I1/I2 authorization depends only on domain and request" {
         ∀ agent1 : BitVec64 . ∀ agent2 : BitVec64 .
         ∀ cap_gen : BitVec64 . ∀ obj_gen : BitVec64 .
         ∀ cap_off : BitVec64 . ∀ cap_len : BitVec64 .
-        ∀ cap_perm : BitVec4 . ∀ obj_size : BitVec64 .
+        ∀ cap_perm : BitVec8 . ∀ obj_size : BitVec64 .
         ∀ req_off : BitVec64 . ∀ req_width : BitVec64 .
-        ∀ req_perm : BitVec4 .
+        ∀ req_perm : BitVec8 .
         authorize(cap_gen, obj_gen, cap_off, cap_len, cap_perm,
                   obj_size, req_off, req_width, req_perm)
         ⟺
@@ -122,9 +124,9 @@ example "I3 physical base absent from authorization" {
         ∀ phys_base1 : BitVec64 . ∀ phys_base2 : BitVec64 .
         ∀ cap_gen : BitVec64 . ∀ obj_gen : BitVec64 .
         ∀ cap_off : BitVec64 . ∀ cap_len : BitVec64 .
-        ∀ cap_perm : BitVec4 . ∀ obj_size : BitVec64 .
+        ∀ cap_perm : BitVec8 . ∀ obj_size : BitVec64 .
         ∀ req_off : BitVec64 . ∀ req_width : BitVec64 .
-        ∀ req_perm : BitVec4 .
+        ∀ req_perm : BitVec8 .
         authorize(cap_gen, obj_gen, cap_off, cap_len, cap_perm,
                   obj_size, req_off, req_width, req_perm)
         ⟺
@@ -171,7 +173,7 @@ example "I6/N8c stale-at-commit implies denied" {
 
 example "I7a derived permissions are a subset" {
     assert(
-        ∀ pp : BitVec4 . ∀ cp : BitVec4 .
+        ∀ pp : BitVec8 . ∀ cp : BitVec8 .
         ∀ po : BitVec64 . ∀ pl : BitVec64 .
         ∀ co : BitVec64 . ∀ cl : BitVec64 .
         derive_allowed(po, pl, pp, co, cl, cp)
@@ -181,7 +183,7 @@ example "I7a derived permissions are a subset" {
 
 example "I7b derived range is contained in parent" {
     assert(
-        ∀ pp : BitVec4 . ∀ cp : BitVec4 .
+        ∀ pp : BitVec8 . ∀ cp : BitVec8 .
         ∀ po : BitVec64 . ∀ pl : BitVec64 .
         ∀ co : BitVec64 . ∀ cl : BitVec64 .
         derive_allowed(po, pl, pp, co, cl, cp)
@@ -221,7 +223,7 @@ example "I7c range containment transitivity (8-bit witness)" {
 // I7d: Permission containment is transitive.
 example "I7d permission containment transitivity" {
     assert(
-        ∀ pp : BitVec4 . ∀ cp : BitVec4 . ∀ rp : BitVec4 .
+        ∀ pp : BitVec8 . ∀ cp : BitVec8 . ∀ rp : BitVec8 .
         (has_perm(pp, cp) ∧ has_perm(cp, rp))
         ⟹ has_perm(pp, rp)
     )
@@ -256,10 +258,10 @@ example "I8b double revocation still stale" {
 example "I9 distinct objects have independent authorization" {
     assert(
         ∀ gen_a : BitVec64 . ∀ gen_b : BitVec64 .
-        ∀ off_a : BitVec64 . ∀ len_a : BitVec64 . ∀ perm_a : BitVec4 .
-        ∀ off_b : BitVec64 . ∀ len_b : BitVec64 . ∀ perm_b : BitVec4 .
+        ∀ off_a : BitVec64 . ∀ len_a : BitVec64 . ∀ perm_a : BitVec8 .
+        ∀ off_b : BitVec64 . ∀ len_b : BitVec64 . ∀ perm_b : BitVec8 .
         ∀ obj_size : BitVec64 .
-        ∀ ro : BitVec64 . ∀ rw : BitVec64 . ∀ rp : BitVec4 .
+        ∀ ro : BitVec64 . ∀ rw : BitVec64 . ∀ rp : BitVec8 .
         (authorize(gen_a, gen_a, off_a, len_a, perm_a, obj_size, ro, rw, rp)
          ∧ ¬generation_match(gen_a, gen_b))
         ⟹ ¬authorize(gen_b, gen_a, off_b, len_b, perm_b, obj_size, ro, rw, rp)
@@ -296,8 +298,9 @@ example "two-agent isolation after revocation" {
 
 // The sealed-grant predicate: what fabric.grant() accepts for sealed objects.
 // Flat definition — no if-then-else.
-define sealed_grant_ok(perm : BitVec4) =
-    ¬has_perm(perm, perm_W) ∧ ¬has_perm(perm, perm_A)
+// Rejects WRITE, ATOMIC, and SEAL (6S.1a: once sealed, no more sealing).
+define sealed_grant_ok(perm : BitVec8) =
+    ¬has_perm(perm, perm_W) ∧ ¬has_perm(perm, perm_A) ∧ ¬has_perm(perm, perm_S)
 
 define seal_gen(g : BitVec64) = bvadd(g, bvconst(1, 64))
 
@@ -330,23 +333,35 @@ example "WX6 seal invalidates all pre-seal capabilities" {
     )
 }
 
-// The combined theorem: after sealing, no valid capability can
-// carry WRITE permission.
-//
-// Proof sketch:
-//   - Pre-seal caps have gen g.  Seal bumps to g+1.  WX6 ⟹ stale.
-//   - Post-seal caps at gen g+1 must satisfy sealed_grant_ok(perm).
-//     WX1/WX2 ⟹ perm cannot contain W.
-//   - Therefore: ∀C at gen g+1: ¬has_perm(C.perm, W).        ∎
-//
-// We express this as: for any permission that sealed_grant_ok accepts,
-// that permission does not contain WRITE.
-
+// WX7: The main W⊕X theorem — sealed objects carry no write authority.
 example "WX7 sealed grant cannot carry WRITE" {
     assert(
-        ∀ perm : BitVec4 .
+        ∀ perm : BitVec8 .
         sealed_grant_ok(perm)
         ⟹ ¬has_perm(perm, perm_W)
+    )
+}
+
+// WX8: SEAL is a distinct authority — WRITE does not imply SEAL.
+// This is structural: perm_W = 0x02, perm_S = 0x10.
+// has_perm(W, S) = (W & S) = S, but 0x02 & 0x10 = 0 ≠ 0x10.
+example "WX8 WRITE does not imply SEAL authority" {
+    assert(¬has_perm(perm_W, perm_S))
+}
+
+// WX9: Sealed objects also reject SEAL grant.
+example "WX9 sealed object rejects SEAL grant" {
+    assert(¬sealed_grant_ok(perm_S))
+}
+
+// WX10: The trilogy — address ≠ memory authority, WRITE ≠ seal authority,
+//       executable address ≠ control-flow authority.
+// (Control-flow will be proven in CF1-CF6; here we prove the SEAL separation.)
+example "WX10 sealed grant: no WRITE, no SEAL, no ATOMIC" {
+    assert(
+        ∀ perm : BitVec8 .
+        sealed_grant_ok(perm)
+        ⟹ (¬has_perm(perm, perm_W) ∧ ¬has_perm(perm, perm_S) ∧ ¬has_perm(perm, perm_A))
     )
 }
 
