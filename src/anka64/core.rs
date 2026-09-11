@@ -443,6 +443,12 @@ mod tests {
 
     /// Set up fabric with text + data objects, domain with appropriate
     /// capabilities, and a core ready to execute.
+    ///
+    /// Text object starts Active.  Callers must:
+    ///   1. Write code via load_program()
+    ///   2. Call seal_text() before running the core
+    ///
+    /// W⊕X: Active ⇒ ¬X, Sealed ⇒ ¬W.
     fn setup() -> (Fabric, ObjectId, ObjectId, DomainId, Anka64Core) {
         let mut fabric = Fabric::new(0x100000);
 
@@ -452,7 +458,7 @@ mod tests {
         fabric.place_object(data, 0x10000);
 
         let dom = fabric.create_domain();
-        fabric.grant(dom, text, 0, 0x1000, Permissions::RX);
+        // text: RX granted AFTER seal (see seal_text)
         fabric.grant(dom, data, 0, 0x1000, Permissions::RW);
 
         let mut core = Anka64Core::new(CPU0, dom);
@@ -464,6 +470,14 @@ mod tests {
 
     fn load_program(fabric: &mut Fabric, asm: &Asm64) {
         fabric.write_physical(0x00000, &asm.to_bytes());
+    }
+
+    /// Seal text object and grant RX.
+    /// W⊕X lifecycle: Active(write) → Sealed(fetch).
+    fn seal_text(fabric: &mut Fabric, text: ObjectId, dom: DomainId) {
+        fabric.seal_object(text);
+        let size = fabric.objects[&text].size;
+        fabric.grant(dom, text, 0, size, Permissions::RX);
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -480,6 +494,7 @@ mod tests {
         asm.add(R2, R0, R1);
         asm.halt();
         load_program(&mut fabric, &asm);
+        seal_text(&mut fabric, _text, _dom);
 
         let result = core.run(&mut fabric, 100);
         assert!(matches!(result, StepResult::Halted));
@@ -507,6 +522,7 @@ mod tests {
         asm.bcc(Cond::Ne, loop_addr - branch_addr);
         asm.halt();
         load_program(&mut fabric, &asm);
+        seal_text(&mut fabric, _text, _dom);
 
         let result = core.run(&mut fabric, 500);
         assert!(matches!(result, StepResult::Halted));
@@ -538,6 +554,7 @@ mod tests {
         asm.add(R0, R0, R1);             // word 4: add function
         asm.ret();                        // word 5
         load_program(&mut fabric, &asm);
+        seal_text(&mut fabric, _text, _dom);
 
         let result = core.run(&mut fabric, 100);
         assert!(matches!(result, StepResult::Halted));
@@ -561,6 +578,7 @@ mod tests {
         asm.ld(R2, R1, 0);              // load [R1 + 0] to R2
         asm.halt();
         load_program(&mut fabric, &asm);
+        seal_text(&mut fabric, _text, _dom);
 
         let result = core.run(&mut fabric, 100);
         assert!(matches!(result, StepResult::Halted));
@@ -588,13 +606,7 @@ mod tests {
 
         // Domain has text+data but NOT secret
         let dom = fabric.create_domain();
-        fabric.grant(dom, text, 0, 0x1000, Permissions::RX);
         fabric.grant(dom, data, 0, 0x1000, Permissions::RW);
-
-        let mut core = Anka64Core::new(CPU0, dom);
-        core.address_map.add(0x0000, 0x1000, text);
-        core.address_map.add(0x8000, 0x1000, data);
-        core.address_map.add(0xC000, 0x1000, secret); // mapped but no capability!
 
         // Write known value to data
         fabric.write_physical(0x10000, &42u64.to_le_bytes());
@@ -607,6 +619,12 @@ mod tests {
         // Actually, let's use a two-step approach
         asm.halt();
         load_program(&mut fabric, &asm);
+        seal_text(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(CPU0, dom);
+        core.address_map.add(0x0000, 0x1000, text);
+        core.address_map.add(0x8000, 0x1000, data);
+        core.address_map.add(0xC000, 0x1000, secret); // mapped but no capability!
 
         // Just test the legal load
         let result = core.run(&mut fabric, 100);
@@ -653,6 +671,7 @@ mod tests {
         asm.eret();                // word 9
 
         load_program(&mut fabric, &asm);
+        seal_text(&mut fabric, _text, _dom);
         core.trap_vector = 8 * 4; // byte address of word 8
 
         // Run: user → trap → handler → eret → user → halt
@@ -719,9 +738,8 @@ mod tests {
         // Sentinel
         fabric.write_physical(0x10000, &0xDEADu64.to_le_bytes());
 
-        // CPU domain: text + shared
+        // CPU domain: text (sealed) + shared
         let cpu_dom = fabric.create_domain();
-        fabric.grant(cpu_dom, text, 0, 0x1000, Permissions::RX);
         fabric.grant(cpu_dom, shared, 0, 0x1000, Permissions::RW);
 
         // DMA domain: shared only
@@ -729,16 +747,18 @@ mod tests {
         fabric.grant(dma_dom, shared, 0, 0x1000, Permissions::RW);
 
         // CPU writes 42 to shared via program
-        let mut core = Anka64Core::new(CPU0, cpu_dom);
-        core.address_map.add(0x0000, 0x1000, text);
-        core.address_map.add(0x8000, 0x1000, shared);
-
         let mut asm = Asm64::new();
         asm.movi(R0, 42);
         asm.movi(R1, 0x8000_u16 as i32);
         asm.st(R0, R1, 0);
         asm.halt();
-        load_program(&mut fabric, &asm);
+        fabric.write_physical(0x00000, &asm.to_bytes());
+        fabric.seal_object(text);
+        fabric.grant(cpu_dom, text, 0, 0x1000, Permissions::RX);
+
+        let mut core = Anka64Core::new(CPU0, cpu_dom);
+        core.address_map.add(0x0000, 0x1000, text);
+        core.address_map.add(0x8000, 0x1000, shared);
 
         let result = core.run(&mut fabric, 100);
         assert!(matches!(result, StepResult::Halted));
@@ -785,6 +805,7 @@ mod tests {
         asm.mul(R2, R0, R1);
         asm.halt();
         load_program(&mut fabric, &asm);
+        seal_text(&mut fabric, _text, _dom);
 
         let result = core.run(&mut fabric, 100);
         assert!(matches!(result, StepResult::Halted));

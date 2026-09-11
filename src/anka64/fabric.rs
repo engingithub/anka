@@ -166,7 +166,11 @@ impl Fabric {
     ) -> Option<Capability64> {
         let obj = self.objects.get(&object)?;
         match obj.state {
-            ObjectState::Active => {}
+            ObjectState::Active => {
+                if perms.contains(Permissions::EXECUTE) {
+                    return None; // W⊕X: active objects reject execute
+                }
+            }
             ObjectState::Sealed => {
                 if perms.contains(Permissions::WRITE)
                     || perms.contains(Permissions::ATOMIC)
@@ -214,6 +218,34 @@ impl Fabric {
         );
         self.domains.get_mut(&domain)?.capabilities.push(cap.clone());
         Some(cap)
+    }
+
+    /// Write bytes into an Active object (bounds-checked, object-relative).
+    ///
+    /// This is the formal initialization path for objects that will
+    /// later be sealed and become executable.  Once sealed, not even
+    /// this method can modify the object's bytes (Active-only check).
+    ///
+    /// `write_physical()` remains for test bootstrap only.
+    pub fn initialize_object(&mut self, id: ObjectId, offset: u64, data: &[u8]) -> bool {
+        let obj = match self.objects.get(&id) {
+            Some(o) if o.state == ObjectState::Active => o,
+            _ => return false,
+        };
+        let len = data.len() as u64;
+        if len > obj.size { return false; }
+        if offset > obj.size - len { return false; }
+        let phys_base = match self.placement.get(&id) {
+            Some(&b) => b,
+            None => return false,
+        };
+        let base = (phys_base + offset) as usize;
+        for (i, &byte) in data.iter().enumerate() {
+            if base + i < self.memory.len() {
+                self.memory[base + i] = byte;
+            }
+        }
+        true
     }
 
     // ───────────────── Authorization ─────────────────────────────
@@ -936,6 +968,79 @@ mod tests {
 
         // Seal on Revoked fails
         assert!(!f.seal_object(obj), "seal should fail on Revoked");
+    }
+
+    #[test]
+    fn wx4_active_object_rejects_execute_grant() {
+        let (mut f, obj, _dom) = setup_basic();
+
+        // Object is Active — try to grant EXECUTE
+        assert_eq!(f.objects[&obj].state, ObjectState::Active);
+
+        let exec_dom = f.create_domain();
+        assert!(f.grant(exec_dom, obj, 0, 0x1000, Permissions::EXECUTE).is_none(),
+            "W⊕X: active object accepted EXECUTE grant");
+
+        // RX also contains EXECUTE — must fail
+        assert!(f.grant(exec_dom, obj, 0, 0x1000, Permissions::RX).is_none(),
+            "W⊕X: active object accepted RX grant");
+
+        // WRITE on Active — must succeed
+        assert!(f.grant(exec_dom, obj, 0, 0x1000, Permissions::WRITE).is_some(),
+            "Active object rejected WRITE grant");
+
+        // READ on Active — must succeed
+        assert!(f.grant(exec_dom, obj, 0, 0x1000, Permissions::READ).is_some(),
+            "Active object rejected READ grant");
+
+        eprintln!("WX4: Active(O) ⇒ ¬∃C: valid(C,O) ∧ X ∈ C.perms ✓");
+    }
+
+    #[test]
+    fn wx4b_initialize_object() {
+        let (mut f, obj, _dom) = setup_basic();
+
+        // Active → initialize succeeds
+        assert!(f.initialize_object(obj, 0, &[1, 2, 3, 4]));
+
+        // Bounds check: offset + length > size fails
+        assert!(!f.initialize_object(obj, 0x1000, &[1]),
+            "initialize_object should reject out-of-bounds write");
+
+        // Seal → initialize fails
+        assert!(f.seal_object(obj));
+        assert!(!f.initialize_object(obj, 0, &[1]),
+            "initialize_object should reject Sealed object");
+
+        eprintln!("WX4b: initialize_object: Active ✓, bounds ✓, Sealed ✗ ✓");
+    }
+
+    #[test]
+    fn wx5_full_wx_lifecycle() {
+        // Complete lifecycle: alloc Active → write → seal → grant RX
+        let (mut f, obj, dom) = setup_basic();
+
+        // Step 1: Active object can be written
+        let w_dom = f.create_domain();
+        assert!(f.grant(w_dom, obj, 0, 0x1000, Permissions::WRITE).is_some());
+
+        // Step 2: Seal the object
+        assert!(f.seal_object(obj));
+
+        // Step 3: Sealed object can be granted RX
+        let rx_dom = f.create_domain();
+        assert!(f.grant(rx_dom, obj, 0, 0x1000, Permissions::RX).is_some());
+
+        // Step 4: No domain has WRITE + EXECUTE on same object
+        // - w_dom's cap is stale (generation bumped by seal)
+        // - rx_dom's cap has no WRITE
+        let w_cap = f.find_authorizing_cap(w_dom, obj, 0, 0x1000, Permissions::WRITE);
+        assert!(w_cap.is_none(), "stale write cap should not validate");
+
+        let rx_cap = f.find_authorizing_cap(rx_dom, obj, 0, 0x1000, Permissions::EXECUTE);
+        assert!(rx_cap.is_some(), "post-seal RX cap should validate");
+
+        eprintln!("WX5: full W⊕X lifecycle: Active(W) → Sealed(RX), no overlap ✓");
     }
 
     #[test]
