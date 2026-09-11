@@ -40,6 +40,8 @@ pub enum Sem {
     Load,
     /// Store to memory (one write transaction).
     Store,
+    /// Atomic exchange (one read-modify-write transaction).
+    Xchg,
     /// Compute effective address (no memory transaction).
     Lea,
     /// Conditional branch.
@@ -80,6 +82,7 @@ pub enum MemEffect {
     None,
     Load,
     Store,
+    Atomic,
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -177,6 +180,7 @@ pub const INSNS: &[InsnDesc] = &[
     InsnDesc { name: "ld",   opcode: 0x20, format: Format::I, operands: Operands::RdBaseDisp,  semantics: Sem::Load,  mem: MemEffect::Load,  flags: FlagEffect::None },
     InsnDesc { name: "st",   opcode: 0x21, format: Format::I, operands: Operands::SrcBaseDisp, semantics: Sem::Store, mem: MemEffect::Store, flags: FlagEffect::None },
     InsnDesc { name: "lea",  opcode: 0x22, format: Format::I, operands: Operands::RdBaseDisp,  semantics: Sem::Lea,   mem: MemEffect::None,  flags: FlagEffect::None },
+    InsnDesc { name: "xchg", opcode: 0x23, format: Format::I, operands: Operands::RdBaseDisp,  semantics: Sem::Xchg,  mem: MemEffect::Atomic, flags: FlagEffect::None },
 
     // ─── B-format control ───────────────────────────────────────
     InsnDesc { name: "b",    opcode: 0x30, format: Format::B, operands: Operands::CondOff,  semantics: Sem::Branch, mem: MemEffect::None, flags: FlagEffect::None },
@@ -266,6 +270,19 @@ pub fn generate_kleis() -> String {
     }
     out.push_str("\n");
 
+    out.push_str("define has_atomic_effect(op : BitVec8) =\n");
+    let atomics: Vec<String> = INSNS.iter()
+        .filter(|d| d.mem == MemEffect::Atomic)
+        .map(|d| format!("    op = op_{}", d.name))
+        .collect();
+    if atomics.is_empty() {
+        out.push_str("    false\n");
+    } else {
+        out.push_str(&atomics.join("\n    ∨ "));
+        out.push_str("\n");
+    }
+    out.push_str("\n");
+
     out.push_str("define has_no_memory_effect(op : BitVec8) =\n");
     let nones: Vec<String> = INSNS.iter()
         .filter(|d| d.mem == MemEffect::None)
@@ -306,11 +323,13 @@ pub fn generate_kleis() -> String {
     // P1: Each opcode maps to exactly one instruction
     out.push_str("// P1: opcode uniqueness (checked by desc.rs validation)\n\n");
 
-    // P2: Every memory instruction produces exactly one MemoryRequest
-    out.push_str("example \"one memory effect per instruction\" {\n");
+    // P2: Memory effects are mutually exclusive
+    out.push_str("example \"memory effects are mutually exclusive\" {\n");
     out.push_str("    assert(\n");
     out.push_str("        ∀ op : BitVec8 .\n");
     out.push_str("        ¬(has_load_effect(op) ∧ has_store_effect(op))\n");
+    out.push_str("        ∧ ¬(has_load_effect(op) ∧ has_atomic_effect(op))\n");
+    out.push_str("        ∧ ¬(has_store_effect(op) ∧ has_atomic_effect(op))\n");
     out.push_str("    )\n");
     out.push_str("}\n\n");
 
@@ -428,9 +447,10 @@ mod tests {
             match d.mem {
                 MemEffect::Load => assert_eq!(d.semantics, Sem::Load, "{} has Load effect but wrong semantics", d.name),
                 MemEffect::Store => assert_eq!(d.semantics, Sem::Store, "{} has Store effect but wrong semantics", d.name),
+                MemEffect::Atomic => assert_eq!(d.semantics, Sem::Xchg, "{} has Atomic effect but wrong semantics", d.name),
                 MemEffect::None => assert!(
-                    !matches!(d.semantics, Sem::Load | Sem::Store),
-                    "{} has no memory effect but Load/Store semantics", d.name
+                    !matches!(d.semantics, Sem::Load | Sem::Store | Sem::Xchg),
+                    "{} has no memory effect but Load/Store/Xchg semantics", d.name
                 ),
             }
         }
@@ -452,7 +472,9 @@ mod tests {
         assert!(kleis.contains("sem_mul"), "missing sem_mul");
         assert!(kleis.contains("has_load_effect"), "missing has_load_effect");
         assert!(kleis.contains("has_store_effect"), "missing has_store_effect");
-        assert!(kleis.contains("one memory effect per instruction"), "missing theorem");
+        assert!(kleis.contains("memory effects are mutually exclusive"), "missing exclusion theorem");
+        assert!(kleis.contains("has_atomic_effect"), "missing has_atomic_effect");
+        assert!(kleis.contains("op_xchg"), "missing op_xchg");
         eprintln!("Generated Kleis theory:\n{}", kleis);
     }
 }

@@ -25,3 +25,4 @@ pub mod isa;
 pub mod core;
 pub mod cc;
 pub mod os;
+pub mod multicore;

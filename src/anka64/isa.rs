@@ -283,6 +283,7 @@ impl Asm64 {
     pub fn ld(&mut self, rd: u8, base: u8, disp: i32) { self.emit_i_named("ld", rd, base, disp); }
     pub fn st(&mut self, src: u8, base: u8, disp: i32) { self.emit_i_named("st", src, base, disp); }
     pub fn lea(&mut self, rd: u8, base: u8, disp: i32) { self.emit_i_named("lea", rd, base, disp); }
+    pub fn xchg(&mut self, rd: u8, base: u8, disp: i32) { self.emit_i_named("xchg", rd, base, disp); }
 
     // Branch (offset in words relative to this instruction)
     pub fn bcc(&mut self, cond: Cond, word_off: i32) { self.emit_b_named("b", cond as u8, word_off); }

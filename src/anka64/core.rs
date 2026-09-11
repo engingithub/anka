@@ -197,6 +197,18 @@ impl Anka64Core {
                 self.r[insn.rd as usize] =
                     self.r[insn.rs1 as usize].wrapping_add(insn.imm as u64);
             }
+            Sem::Xchg => {
+                let addr = self.r[insn.rs1 as usize].wrapping_add(insn.imm as u64);
+                let new_val = self.r[insn.rd as usize].to_le_bytes().to_vec();
+                match self.fabric_atomic_xchg(fabric, addr, Width::Double, new_val) {
+                    Ok(old_bytes) => {
+                        self.r[insn.rd as usize] = u64::from_le_bytes(
+                            [old_bytes[0], old_bytes[1], old_bytes[2], old_bytes[3],
+                             old_bytes[4], old_bytes[5], old_bytes[6], old_bytes[7]]);
+                    }
+                    Err(fault) => return StepResult::Fault(fault),
+                }
+            }
 
             // ─── Control flow ───────────────────────────────────
             Sem::Branch => {
@@ -332,6 +344,31 @@ impl Anka64Core {
             })?;
         let req = self.make_request(object, offset, width, AccessKind::Write);
         fabric.execute_write(req, data)
+    }
+
+    fn fabric_atomic_xchg(
+        &self,
+        fabric: &mut Fabric,
+        addr: u64,
+        width: Width,
+        new_value: Vec<u8>,
+    ) -> Result<Vec<u8>, FaultRecord> {
+        let (object, offset) = self.address_map.resolve(addr)
+            .ok_or_else(|| FaultRecord {
+                agent: self.agent,
+                domain: self.domain,
+                privilege: self.privilege,
+                transaction: TransactionId(0),
+                object: ObjectId(0),
+                generation: None,
+                offset: addr,
+                width,
+                kind: AccessKind::Atomic,
+                pc: Some(self.pc),
+                reason: FaultReason::TranslationFault,
+            })?;
+        let req = self.make_request(object, offset, width, AccessKind::Atomic);
+        fabric.execute_atomic_xchg(req, new_value)
     }
 
     // ───────────── Flag helpers ──────────────────────────────────

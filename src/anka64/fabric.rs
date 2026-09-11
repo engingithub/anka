@@ -423,6 +423,39 @@ impl Fabric {
         }
     }
 
+    /// Execute an atomic exchange: read old value, write new value,
+    /// one indivisible transaction.  Under SC this is guaranteed
+    /// atomic because only one core steps at a time.
+    pub fn execute_atomic_xchg(
+        &mut self,
+        request: MemoryRequest,
+        new_value: Vec<u8>,
+    ) -> Result<Vec<u8>, FaultRecord> {
+        let width = request.width.bytes() as usize;
+        let idx = self.submit(request, Some(new_value));
+        self.advance(idx); // authorize
+        self.advance(idx); // translate → Prepared
+
+        if self.transactions[idx].state == TxState::Faulted {
+            return Err(self.transactions[idx].fault.clone().unwrap());
+        }
+
+        // Capture old value while in Prepared state (before commit writes)
+        let phys = self.transactions[idx].physical_address.unwrap() as usize;
+        let old_value = self.memory[phys..phys + width].to_vec();
+
+        // Commit (writes new value, revalidates generation)
+        self.advance(idx);
+
+        match self.transactions[idx].state {
+            TxState::Committed => Ok(old_value),
+            TxState::Faulted => {
+                Err(self.transactions[idx].fault.clone().unwrap())
+            }
+            _ => unreachable!("transaction not terminal after 3 advances"),
+        }
+    }
+
     // ───────────────── Observation ───────────────────────────────
 
     pub fn transaction(&self, idx: usize) -> &Transaction {

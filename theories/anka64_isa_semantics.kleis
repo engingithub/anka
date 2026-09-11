@@ -28,6 +28,7 @@ define op_movi = bvconst(22, 8)
 define op_ld = bvconst(32, 8)
 define op_st = bvconst(33, 8)
 define op_lea = bvconst(34, 8)
+define op_xchg = bvconst(35, 8)
 define op_b = bvconst(48, 8)
 define op_call = bvconst(50, 8)
 define op_ret = bvconst(56, 8)
@@ -39,7 +40,7 @@ define op_halt = bvconst(62, 8)
 // ─── Format classification ──────────────────────────
 
 // Format R: add, sub, and, or, xor, shl, shr, asr, mul, cmp, mov
-// Format I: addi, subi, andi, ori, xori, cmpi, movi, ld, st, lea
+// Format I: addi, subi, andi, ori, xori, cmpi, movi, ld, st, lea, xchg
 // Format B: b, call
 // Format S: ret, trap, eret, nop, halt
 
@@ -50,6 +51,9 @@ define has_load_effect(op : BitVec8) =
 
 define has_store_effect(op : BitVec8) =
     op = op_st
+
+define has_atomic_effect(op : BitVec8) =
+    op = op_xchg
 
 define has_no_memory_effect(op : BitVec8) =
     op = op_add
@@ -127,10 +131,12 @@ define sem_xori(a : BitVec64, b : BitVec64) = bvxor(a, b)
 
 // P1: opcode uniqueness (checked by desc.rs validation)
 
-example "one memory effect per instruction" {
+example "memory effects are mutually exclusive" {
     assert(
         ∀ op : BitVec8 .
         ¬(has_load_effect(op) ∧ has_store_effect(op))
+        ∧ ¬(has_load_effect(op) ∧ has_atomic_effect(op))
+        ∧ ¬(has_store_effect(op) ∧ has_atomic_effect(op))
     )
 }
 
@@ -169,4 +175,4 @@ example "ALU and self is identity" {
     )
 }
 
-// Total instructions in table: 28
+// Total instructions in table: 29
