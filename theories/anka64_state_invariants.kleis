@@ -448,23 +448,35 @@ define OP_OTHER    = bvconst(5, 3)  // branch, nop, halt, trap, eret
 
 // ---- Return-stack depth transitions ----
 //
-// R' = push(R, r)    when op = CALL
+// R' = push(R, r)    when op = CALL   ∧ depth < MAX
 // R' = R             when op ∈ {LD, ST, ALU, XCHG, OTHER}
-// R' = pop(R)        when op = RET_OK  (validation passed)
+// R' = pop(R)        when op = RET_OK ∧ depth > 0
 // R' = R             when op = RET_FAIL (fault atomicity)
 //
-// We model each transition as a predicate: "op X produces depth' from depth."
+// Validity guards (Rule 28 — no wraparound ambiguity):
+//   CALL:   depth < MAX  (push requires room)
+//   RET_OK: depth > 0    (pop requires non-empty stack)
+//
+// Without these guards, RET_OK at depth 0 produces depth 2^64-1,
+// which the implementation correctly rejects but the model would
+// silently admit.  The formal model must not contain impossible
+// machine states.
+
+define bv64_max = bvsub(bvconst(0, 64), bvconst(1, 64))
 
 define call_depth(depth : BitVec64, depth_prime : BitVec64) =
-    depth_prime = bvadd(depth, bvconst(1, 64))
+    bvult(depth, bv64_max)
+    ∧ depth_prime = bvadd(depth, bvconst(1, 64))
 
 define ret_ok_depth(depth : BitVec64, depth_prime : BitVec64) =
-    depth_prime = bvsub(depth, bvconst(1, 64))
+    bvugt(depth, bvconst(0, 64))
+    ∧ depth_prime = bvsub(depth, bvconst(1, 64))
 
 define preserves_depth(depth : BitVec64, depth_prime : BitVec64) =
     depth_prime = depth
 
 // Transition relation: which (op, depth) pairs produce which depth'.
+// Impossible states (RET_OK at 0, CALL at MAX) have no valid transition.
 define depth_transition(op : BitVec3, depth : BitVec64, depth_prime : BitVec64) =
     (op = OP_CALL     ∧ call_depth(depth, depth_prime))
     ∨ (op = OP_RET_OK   ∧ ret_ok_depth(depth, depth_prime))
@@ -539,10 +551,24 @@ example "CF5 stale generation faults and preserves return stack" {
     )
 }
 
-// CF6: migrate(ctx, CPU_a, CPU_b) ⟹ R' = R
-// Return authority is part of the execution context, not the
-// physical core.  The ret_auth_match predicate does not take
-// CoreId as input — migration is a no-op on return authority.
+// CF6: return-authority validity is independent of core identity.
+//
+// The ret_auth_match predicate does not take CoreId as input.
+// This proves: the same return authority validates identically
+// regardless of which physical core evaluates RET.
+//
+// This is NECESSARY but NOT SUFFICIENT for full migration safety.
+// Full migration requires an ExecutionContext struct that owns R
+// and transfers between cores:
+//
+//   struct ExecutionContext { r, pc, flags, domain, return_stack, ... }
+//   Core0 owns Context7 → migrate → Core1 owns Context7
+//
+// The current implementation stores return_stack on Anka64Core,
+// which structurally travels with the core (Rust move semantics).
+// A future phase should separate ExecutionContext from Core to
+// make "context owns return authority; core executes context"
+// architectural, not merely incidental.
 define ret_auth_valid_on_core(
     lr : BitVec64,
     auth_target : BitVec64,
@@ -553,7 +579,7 @@ define ret_auth_valid_on_core(
     lr = auth_target
     ∧ generation_match(auth_gen, current_gen)
 
-example "CF6 migration preserves return authority validity" {
+example "CF6 return-authority validity is independent of core identity" {
     assert(
         ∀ lr : BitVec64 . ∀ target : BitVec64 .
         ∀ auth_gen : BitVec64 . ∀ current_gen : BitVec64 .
