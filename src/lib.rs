@@ -37,4 +37,5 @@ pub mod monitor;
 pub mod os;
 pub mod os_protected;
 pub mod protection;
+pub mod secure_os;
 pub mod srec;

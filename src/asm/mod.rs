@@ -267,6 +267,12 @@ impl Asm {
         self.w(0x4E72);
         self.w(imm);
     }
+
+    /// TRAP #vector (0–15)
+    pub fn trap_n(&mut self, vector: u8) {
+        assert!(vector < 16, "TRAP vector must be 0–15");
+        self.w(0x4E40 | vector as u16);
+    }
     /// JMP (An)
     pub fn jmp_indirect(&mut self, an: u8) {
         self.w(0x4ED0 | an as u16);

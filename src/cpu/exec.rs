@@ -486,6 +486,12 @@ impl<B: Bus> Cpu<B> {
                 self.sr.0 = old_sys | ccr as u16;
                 20
             }
+            op if op & 0xFFF0 == 0x4E40 => {
+                // TRAP #vector — vectors 32–47
+                let vector = 32 + (op & 0x0F) as u8;
+                self.trap(vector);
+                34
+            }
             op if op & 0xFFF8 == 0x4E60 => {
                 // MOVE An, USP — write USP (privileged)
                 if !self.require_supervisor() { return 4; }
