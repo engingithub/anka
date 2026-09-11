@@ -295,6 +295,9 @@ impl Asm64 {
     pub fn nop(&mut self)          { self.emit_s_named("nop", 0); }
     pub fn halt(&mut self)         { self.emit_s_named("halt", 0); }
 
+    /// Direct access to encoded words (for fixups).
+    pub fn words_mut(&mut self) -> &mut Vec<u32> { &mut self.words }
+
     /// Emit as little-endian byte stream.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.words.len() * 4);

@@ -19,12 +19,14 @@ use super::state::*;
 // Address map: virtual address → (ObjectId, offset)
 // ───────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone)]
 pub struct AddressMapEntry {
     pub virt_base: u64,
     pub size: u64,
     pub object: ObjectId,
 }
 
+#[derive(Debug, Clone)]
 pub struct AddressMap {
     entries: Vec<AddressMapEntry>,
 }
@@ -52,6 +54,7 @@ impl AddressMap {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Flags {
+
     pub z: bool,
     pub n: bool,
     pub c: bool,
@@ -91,6 +94,7 @@ pub enum StepResult {
 // Core
 // ───────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone)]
 pub struct Anka64Core {
     pub r: [u64; 16],
     pub pc: u64,
@@ -102,8 +106,8 @@ pub struct Anka64Core {
     pub halted: bool,
 
     pub trap_vector: u64,
-    saved_pc: Option<u64>,
-    saved_privilege: Option<Privilege>,
+    pub saved_pc: Option<u64>,
+    pub saved_privilege: Option<Privilege>,
 }
 
 impl Anka64Core {
