@@ -147,3 +147,14 @@ pub mod timer {
     pub const TICKS: u32 = 0x04;
     pub const STATUS: u32 = 0x07;
 }
+
+/// Protection controller MMIO base address.
+pub const PROTECT_BASE: u32 = 0x00F0_0020;
+
+/// Protection controller register offsets.
+pub mod protect {
+    /// Write: set active domain index (byte).
+    pub const DOMAIN: u32 = 0x00;
+    /// Read: violation count (32-bit).
+    pub const VIOLATIONS: u32 = 0x04;
+}

@@ -46,6 +46,13 @@ impl<B: Bus> Cpu<B> {
         let opcode = self.fetch_word();
         let cycles = self.execute(opcode);
 
+        // Check for bus fault (access violation) — vector 2
+        if self.bus.bus_fault().is_some() {
+            self.bus.clear_bus_fault();
+            self.trap(2);
+            return cycles;
+        }
+
         // Advance clocked devices
         self.bus.tick(cycles);
 
@@ -1218,6 +1225,7 @@ impl<B: Bus> Cpu<B> {
         }
 
         self.sr.0 = new_sr;
+        self.bus.set_supervisor(will_be_super);
     }
 
     /// MOVE SR, <ea>  (0x40C0) — read SR to destination
@@ -1262,8 +1270,9 @@ impl<B: Bus> Cpu<B> {
         if !self.sr.supervisor() {
             self.usp = self.a[7];
             self.a[7] = self.ssp;
-            self.sr.0 |= 0x2000; // set S bit
+            self.sr.0 |= 0x2000;
         }
+        self.bus.set_supervisor(true);
 
         // Build exception frame: push PC, then SR
         self.push32(self.pc);
@@ -1291,6 +1300,7 @@ impl<B: Bus> Cpu<B> {
         // Enter supervisor mode, mask to this interrupt level, clear trace
         self.sr.0 = (old_sr | 0x2000) & !0x8000;
         self.sr.0 = (self.sr.0 & 0xF8FF) | ((level as u16) << 8);
+        self.bus.set_supervisor(true);
 
         // Build exception frame: push PC, then SR (68000 group 1 frame)
         self.push32(self.pc);

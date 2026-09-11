@@ -348,18 +348,6 @@ mod tests {
         // Load kernel
         bus.load(0x1000, &kernel);
 
-        // The timer_isr label is at a known offset in the binary.
-        // We need to find it. Let's use a different approach:
-        // build with a known label and use the Asm to tell us.
-        //
-        // Actually, let's just build a helper Asm to get the offset.
-        let mut finder = Asm::new(0x1000);
-        // Replicate just enough to find the timer_isr offset.
-        // This is fragile. Better approach: export the label address.
-
-        // Alternative: scan the kernel for the MOVEM.L pattern that
-        // starts the ISR. Or better yet, just compute it.
-        //
         // Find the ISR entry point by scanning for its MOVEM signature
         let isr_offset = kernel.windows(4)
             .position(|w| w[0] == 0x48 && w[1] == 0xE7 && w[2] == 0xFF && w[3] == 0xFE)

@@ -34,4 +34,6 @@ pub mod cc;
 pub mod cpu;
 pub mod monitor;
 pub mod os;
+pub mod os_protected;
+pub mod protection;
 pub mod srec;

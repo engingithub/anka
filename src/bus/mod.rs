@@ -14,7 +14,7 @@
 pub mod console;
 pub mod device;
 mod flat;
-mod mapped;
+pub mod mapped;
 pub mod timer;
 
 pub use flat::FlatBus;
@@ -66,4 +66,17 @@ pub trait Bus {
 
     /// Advance all clocked devices by the given number of CPU cycles.
     fn tick(&mut self, _cycles: u32) {}
+
+    // --- Protection ---
+
+    /// Notify the bus of a privilege-level change.  A protected bus
+    /// uses this to bypass capability checks in supervisor mode.
+    fn set_supervisor(&mut self, _is_super: bool) {}
+
+    /// Check whether a bus fault (access violation) occurred.
+    /// Returns the faulting address, if any.
+    fn bus_fault(&mut self) -> Option<u32> { None }
+
+    /// Clear the bus fault flag.
+    fn clear_bus_fault(&mut self) {}
 }
