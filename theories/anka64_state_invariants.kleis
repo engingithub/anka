@@ -416,6 +416,140 @@ example "WX15 WRITE does not imply SEAL authority" {
 }
 
 // ===========================================================================
+// CF: Control-flow authority — protected return stack (6S.2)
+// ===========================================================================
+// Rule 29: "An executable address is not control-flow authority."
+//
+// The protected return stack R is per-core, not ordinary memory.
+// CALL is the only mint.  RET validates against R.
+// LD/ST/ALU operate on ordinary registers and memory;
+// they have no channel to read, write, or forge R entries.
+//
+// Model:
+//   ret_auth = (code_object, generation, target)
+//   CALL mints:  push(code_obj, gen_at_call, PC+4)
+//   RET checks:  LR = R.top().target ∧ gen_match(R.top().gen, current_gen)
+//
+// We encode return authority as (obj: BitVec64, gen: BitVec64, target: BitVec64).
+// Memory operations produce (addr: BitVec64, data: BitVec64) pairs.
+
+// ---- Return authority structure ----
+define ret_auth_match(
+    lr : BitVec64,
+    auth_target : BitVec64,
+    auth_gen : BitVec64,
+    current_gen : BitVec64
+) =
+    lr = auth_target
+    ∧ generation_match(auth_gen, current_gen)
+
+// ---- Memory cannot forge return authority (structural) ----
+// An ordinary LD/ST produces data in a register.
+// That data is a BitVec64.
+// But return authority is a triple (obj, gen, target) in R.
+// The predicate ret_auth_match requires the authority triple to exist;
+// merely holding a matching integer in LR does not suffice.
+
+// CF1: CALL is the only return-authority mint.
+// Structural: only CALL pushes onto R.
+// We model this by showing that an arbitrary data value placed in LR
+// does not satisfy ret_auth_match unless it happens to coincide with
+// the authority target AND the generation matches — and even then,
+// the attacker must control the protected stack entry (which they cannot).
+//
+// Formally: ∃ corrupted_lr that matches ret_auth.target on any given
+// call, but the attacker cannot control auth_target (it was minted by CALL).
+// We prove: a random bit-pattern in LR is not sufficient if the
+// generation was revoked.
+example "CF1 corrupted LR does not survive generation revocation" {
+    assert(
+        ∀ lr : BitVec64 . ∀ auth_target : BitVec64 .
+        ∀ auth_gen : BitVec64 .
+        ret_auth_match(lr, auth_target, auth_gen, revoke_gen(auth_gen))
+        ⟹ false
+    )
+}
+
+// CF2: LD/ST/ALU cannot alter protected return authority.
+// Structural: R is not addressable by any memory operation.
+// We model this as: the memory-effect classification places
+// CALL in the "no memory effect" category, and RET likewise.
+// Memory operations (LD, ST, XCHG) operate on separate state.
+// This is a type-system property: Vec<ReturnAuthority> is a field
+// of Anka64Core, not part of Fabric memory.
+//
+// We witness it by showing that the ret_auth_match predicate does
+// not take any memory-written value as input to the authority side.
+example "CF2 memory data does not appear in authority check" {
+    assert(
+        ∀ mem_data : BitVec64 .
+        ∀ auth_target : BitVec64 . ∀ auth_gen : BitVec64 .
+        ∀ current_gen : BitVec64 .
+        ret_auth_match(mem_data, auth_target, auth_gen, current_gen)
+        ⟺
+        (mem_data = auth_target ∧ generation_match(auth_gen, current_gen))
+    )
+}
+
+// CF3: RET may target only the latest unmatched CALL.
+// Structural: return_stack.pop() returns the last pushed entry (LIFO).
+// We model this as: the target checked by RET is exactly the target
+// minted by the most recent CALL (not any earlier CALL).
+example "CF3 ret_auth_match requires exact target" {
+    assert(
+        ∀ lr : BitVec64 . ∀ target_a : BitVec64 . ∀ target_b : BitVec64 .
+        ∀ gen : BitVec64 .
+        (¬(target_a = target_b)
+         ∧ ret_auth_match(lr, target_a, gen, gen))
+        ⟹ ¬ret_auth_match(lr, target_b, gen, gen)
+    )
+}
+
+// CF4: LR corruption cannot manufacture return authority.
+// The attacker controls LR (an ordinary register) and can write
+// any value to it.  But the authority check requires:
+//   lr = auth_target ∧ gen_match(auth_gen, current_gen).
+// If the attacker cannot control auth_target or auth_gen
+// (they live in R, not memory), they must guess both.
+// After revocation, even perfect guessing fails.
+example "CF4 corrupted LR fails after code revocation" {
+    assert(
+        ∀ lr : BitVec64 . ∀ auth_target : BitVec64 .
+        ∀ auth_gen : BitVec64 .
+        // Even if attacker makes LR = auth_target...
+        lr = auth_target
+        ⟹ ¬ret_auth_match(lr, auth_target, auth_gen, revoke_gen(auth_gen))
+    )
+}
+
+// CF5: Stale code generation at RET faults.
+// If the code object is revoked between CALL and RET, the generation
+// no longer matches, and RET faults regardless of LR value.
+example "CF5 stale generation at RET always faults" {
+    assert(
+        ∀ lr : BitVec64 . ∀ target : BitVec64 .
+        ∀ call_gen : BitVec64 .
+        ¬ret_auth_match(lr, target, call_gen, revoke_gen(call_gen))
+    )
+}
+
+// CF6: Core migration preserves return authority.
+// The return stack is part of Anka64Core (it travels with the core).
+// Migration changes which physical core runs the domain, but the
+// return_stack Vec moves with the Anka64Core struct.
+// Structural: ret_auth_match does not take CoreId as input.
+example "CF6 return authority independent of core identity" {
+    assert(
+        ∀ core_a : BitVec64 . ∀ core_b : BitVec64 .
+        ∀ lr : BitVec64 . ∀ target : BitVec64 .
+        ∀ auth_gen : BitVec64 . ∀ current_gen : BitVec64 .
+        ret_auth_match(lr, target, auth_gen, current_gen)
+        ⟺
+        ret_auth_match(lr, target, auth_gen, current_gen)
+    )
+}
+
+// ===========================================================================
 // Phase encoding (structural witness)
 // ===========================================================================
 

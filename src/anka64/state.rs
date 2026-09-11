@@ -364,6 +364,10 @@ pub enum FaultReason {
     InvalidObject,
     TranslationFault,
     AlignmentFault,
+    /// RET target does not carry return authority minted by matching CALL.
+    ///
+    /// Rule 29: "An executable address is not control-flow authority."
+    ControlFlowViolation,
 }
 
 impl fmt::Display for FaultReason {
@@ -375,8 +379,27 @@ impl fmt::Display for FaultReason {
             Self::InvalidObject => write!(f, "InvalidObject"),
             Self::TranslationFault => write!(f, "TranslationFault"),
             Self::AlignmentFault => write!(f, "AlignmentFault"),
+            Self::ControlFlowViolation => write!(f, "ControlFlowViolation"),
         }
     }
+}
+
+/// Protected return authority minted by CALL.
+///
+/// Lives on a per-core protected stack, not in ordinary memory.
+/// CALL is the only mint.  LD/ST/ALU cannot forge, read, or modify
+/// return authority.  RET validates against the top of the stack.
+///
+/// Rule 29: data that names executable code is not, by itself,
+/// authority to transfer control to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReturnAuthority {
+    /// Code object containing the CALL site.
+    pub code_object: ObjectId,
+    /// Generation of that object at CALL time.
+    pub generation: Generation,
+    /// Virtual return address (PC + 4 of the CALL).
+    pub target: u64,
 }
 
 /// A first-class architectural fault record.
