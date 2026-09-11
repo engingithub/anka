@@ -187,29 +187,50 @@ impl Kernel {
         }
     }
 
-    /// Seal an object: RW → RX (W⊕X enforcement).
+    /// Seal an object: Active(RW) → Sealed(RX).
     ///
     /// R1 = virtual address of the object to seal.
-    /// The kernel revokes the object (invalidating all RW capabilities),
-    /// re-activates it, and grants RX to the calling domain.
+    /// Returns: R0 = 0 on success, R0 = MAX on error.
     ///
-    /// This is the "mutable data → sealed executable" transition:
-    ///   source(R) → compiler → output(RW,NX) → **kernel seal** → code(RX,!W)
+    /// Authority check: the calling domain must possess a valid WRITE
+    /// capability on the object.  Address map resolution alone is not
+    /// authority — "name of object ≠ authority over object."
+    ///
+    /// The seal is structural (fabric-level):
+    ///   - Bumps generation (invalidates all old capabilities)
+    ///   - Sets state = Sealed
+    ///   - Grants RX at the new generation
+    ///   - grant() will refuse WRITE/ATOMIC on this object forever
     fn handle_seal(&mut self, idx: usize) {
         let vaddr = self.processes[idx].core.r[R1 as usize];
-        let (object, _offset) = self.processes[idx].core.address_map.resolve(vaddr)
-            .expect("seal: address not in process address map");
+        let (object, _offset) = match self.processes[idx].core.address_map.resolve(vaddr) {
+            Some(r) => r,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
 
         let domain = self.processes[idx].core.domain;
+
+        // Authority check: caller must have WRITE on the object.
+        if !self.fabric.has_authority(domain, object, Permissions::WRITE) {
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return;
+        }
+
         let obj_size = self.fabric.objects[&object].size;
 
-        // Revoke: bumps generation, invalidates all existing capabilities
-        self.fabric.revoke(object);
+        // Structural seal: Active → Sealed, generation bumped.
+        if !self.fabric.seal_object(object) {
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return;
+        }
 
-        // Re-activate (revoke marks state = Revoked)
-        self.fabric.objects.get_mut(&object).unwrap().state = ObjectState::Active;
-
-        // Grant RX at the new generation — W is gone, X is granted
+        // Grant RX at the new generation
         self.fabric.grant(domain, object, 0, obj_size, Permissions::RX);
 
         self.processes[idx].core.r[R0 as usize] = 0;
@@ -220,17 +241,45 @@ impl Kernel {
     ///
     /// R1 = virtual address of sealed code object.
     /// R2 = code size in bytes.
-    /// Returns: child's exit code in R0.
+    /// Returns: child's exit code in R0, or MAX on error.
     ///
-    /// The kernel creates a new domain, grants RX on the code to the
-    /// child, allocates stack and trap handler, runs the child to
-    /// completion, and returns the exit code to the parent.
+    /// Two structural checks before the kernel creates anything:
+    ///   1. Object must be Sealed (W⊕X: no simultaneous W+X)
+    ///   2. Caller must have EXECUTE authority (name ≠ authority)
+    ///
+    /// The child's RX authority exists only because the kernel
+    /// verified the parent's authority first.
     fn handle_exec(&mut self, idx: usize) {
         let code_vaddr = self.processes[idx].core.r[R1 as usize];
         let code_size = self.processes[idx].core.r[R2 as usize];
 
-        let (code_obj, _) = self.processes[idx].core.address_map.resolve(code_vaddr)
-            .expect("exec: code address not in process address map");
+        let (code_obj, _) = match self.processes[idx].core.address_map.resolve(code_vaddr) {
+            Some(r) => r,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+
+        // Check 1: object must be Sealed
+        let is_sealed = self.fabric.objects.get(&code_obj)
+            .map(|o| o.state == ObjectState::Sealed)
+            .unwrap_or(false);
+        if !is_sealed {
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return;
+        }
+
+        let domain = self.processes[idx].core.domain;
+
+        // Check 2: caller must have EXECUTE authority
+        if !self.fabric.has_authority(domain, code_obj, Permissions::EXECUTE) {
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return;
+        }
 
         // --- Child domain: isolated authority container ---
         let child_dom = self.fabric.create_domain();
@@ -327,6 +376,7 @@ impl Kernel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::core::StepResult;
     use super::super::fabric::Fabric;
 
     const CPU0: AgentId = AgentId(0);
@@ -511,6 +561,184 @@ mod tests {
         eprintln!("P15: A→send(42)→B, B→recv()=42→write(42)→exit(42) ✓");
         eprintln!("     Process A domain ≠ Process B domain");
         eprintln!("     Both domains protected by the fabric");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 6S.1 security tests — executable authority
+    // ═══════════════════════════════════════════════════════════
+
+    /// Helper: build a process that calls a single syscall and exits.
+    fn build_syscall_program(
+        fabric: &mut Fabric,
+        text_phys: u64,
+        syscall_num: u64,
+        arg1: i32,
+        arg2: i32,
+    ) {
+        let mut asm = Asm64::new();
+        asm.movi(R1, arg1);
+        asm.movi(R2, arg2);
+        asm.movi(R0, syscall_num as i32);
+        asm.trap(0);
+        // After syscall returns, R0 has result → exit with it
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        fabric.write_physical(text_phys, &asm.to_bytes());
+    }
+
+    #[test]
+    fn s1_exec_rejects_unsealed_object() {
+        // A process creates an RW buffer, writes valid code to it,
+        // and calls SYS_EXEC WITHOUT calling SYS_SEAL first.
+        // The kernel must reject: object is Active, not Sealed.
+        let mut fabric = Fabric::new(0x200000);
+
+        let text   = fabric.alloc_object("text",   0x4000, ObjectKind::Memory);
+        let output = fabric.alloc_object("output", 0x1000, ObjectKind::Memory);
+        let stack  = fabric.alloc_object("stack",  0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text,   0x000000);
+        fabric.place_object(output, 0x020000);
+        fabric.place_object(stack,  0x030000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, text,   0, 0x4000, Permissions::RX);
+        fabric.grant(dom, output, 0, 0x1000, Permissions::RW);
+        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+
+        install_trap_handler(&mut fabric, 0x000000);
+
+        // Write valid code to output buffer (MOVI R1,42; MOVI R0,0; TRAP #0)
+        let mut code = Asm64::new();
+        code.movi(R1, 42);
+        code.movi(R0, SYS_EXIT as i32);
+        code.trap(0);
+        fabric.write_physical(0x020000, &code.to_bytes());
+
+        // Program: call SYS_EXEC directly (skip SYS_SEAL)
+        // output is at virtual 0x05000
+        build_syscall_program(&mut fabric, 0x000000, SYS_EXEC,
+            0x5000, 16);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x05000, 0x1000, output);
+        core.address_map.add(0x06000, 0x4000, stack);
+        core.r[SP as usize] = 0x06000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x040000;
+        kernel.spawn(core);
+        kernel.run(1000, 100);
+
+        // Process exited. SYS_EXEC should have returned MAX (error).
+        // The process then exits with that error code.
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "SYS_EXEC on unsealed object should return error");
+        assert_eq!(kernel.processes.len(), 1,
+            "no child should have been spawned");
+
+        eprintln!("S1: SYS_EXEC on unsealed object → rejected ✓");
+    }
+
+    #[test]
+    fn s2_seal_requires_write_authority() {
+        // A process has only READ authority on an object.
+        // Calling SYS_SEAL should fail — sealing requires WRITE.
+        let mut fabric = Fabric::new(0x200000);
+
+        let text     = fabric.alloc_object("text",     0x4000, ObjectKind::Memory);
+        let readonly = fabric.alloc_object("readonly", 0x1000, ObjectKind::Memory);
+        let stack    = fabric.alloc_object("stack",    0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text,     0x000000);
+        fabric.place_object(readonly, 0x020000);
+        fabric.place_object(stack,    0x030000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, text,     0, 0x4000, Permissions::RX);
+        fabric.grant(dom, readonly, 0, 0x1000, Permissions::READ); // no WRITE!
+        fabric.grant(dom, stack,    0, 0x4000, Permissions::RW);
+
+        install_trap_handler(&mut fabric, 0x000000);
+
+        // Program: SYS_SEAL on the read-only object
+        build_syscall_program(&mut fabric, 0x000000, SYS_SEAL,
+            0x5000, 0);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x05000, 0x1000, readonly);
+        core.address_map.add(0x06000, 0x4000, stack);
+        core.r[SP as usize] = 0x06000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.run(1000, 100);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "SYS_SEAL without WRITE authority should return error");
+        // Object should still be Active (not Sealed)
+        assert_eq!(kernel.fabric.objects[&readonly].state, ObjectState::Active,
+            "object should remain Active after failed seal");
+
+        eprintln!("S2: SYS_SEAL without WRITE authority → rejected ✓");
+    }
+
+    #[test]
+    fn s3_pc_alignment_faults() {
+        // Set PC to an unaligned address → AlignmentFault.
+        // This blocks overlapping instruction streams from ROP gadgets.
+        let mut fabric = Fabric::new(0x100000);
+
+        let text = fabric.alloc_object("text", 0x1000, ObjectKind::Memory);
+        fabric.place_object(text, 0x00000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, text, 0, 0x1000, Permissions::RX);
+
+        // Write some code at aligned address
+        let mut asm = Asm64::new();
+        asm.movi(R0, 42);
+        asm.halt();
+        fabric.write_physical(0x00000, &asm.to_bytes());
+
+        // Start at aligned PC = 0 → should work
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x0000, 0x1000, text);
+        let result = core.step(&mut fabric);
+        assert!(matches!(result, StepResult::Continue),
+            "aligned fetch should succeed");
+
+        // Set PC to unaligned address (offset +1 into instruction)
+        core.pc = 1;
+        let result = core.step(&mut fabric);
+        match result {
+            StepResult::Fault(f) => {
+                assert_eq!(f.reason, FaultReason::AlignmentFault);
+            }
+            other => panic!("expected AlignmentFault, got {:?}", other),
+        }
+
+        // PC+2 also unaligned
+        core.pc = 6;
+        let result = core.step(&mut fabric);
+        assert!(matches!(result, StepResult::Fault(ref f) if f.reason == FaultReason::AlignmentFault),
+            "PC=6 should fault");
+
+        // PC+3 also unaligned
+        core.pc = 7;
+        let result = core.step(&mut fabric);
+        assert!(matches!(result, StepResult::Fault(ref f) if f.reason == FaultReason::AlignmentFault),
+            "PC=7 should fault");
+
+        eprintln!("S3: PC mod 4 ≠ 0 → AlignmentFault ✓");
+        eprintln!("    Blocks overlapping instruction streams from ROP gadgets");
     }
 
     // ═══════════════════════════════════════════════════════════
