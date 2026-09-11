@@ -28,6 +28,7 @@
 //! ```
 
 pub mod abi;
+pub mod anka64;
 pub mod asm;
 pub mod bus;
 pub mod cc;
