@@ -7,6 +7,8 @@
 //! This is SC by construction.
 
 use super::core::Anka64Core;
+#[cfg(test)]
+use super::core::StepResult;
 use super::fabric::Fabric;
 
 // ───────────────────────────────────────────────────────────────────

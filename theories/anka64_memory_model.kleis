@@ -1,172 +1,321 @@
-// Anka64 Memory Model — Sequential Consistency
-// Phase 5: multicore execution with formally specified ordering.
+// Anka64 Memory Model — Phase 5.1
+// Sequential consistency from concrete definitions.
+// 0 axioms.  Every property derived from the scheduler
+// and transition semantics modeled below.
 //
-// "There exists one global ordering of committed memory transactions,
-//  consistent with each core's program order."
+// Litmus test: negate any architectural rule in the
+// definitions and at least one proof fails.
 
 import "stdlib/prelude.kleis"
 
-// ─── Model primitives ───────────────────────────────
+// ═══════════════════════════════════════════════════
+// Concrete scheduler: two-core round-robin
+// ═══════════════════════════════════════════════════
 //
-// Transaction:  (core, sequence, address, value, kind)
-//   core:     BitVec4   — which core issued this
-//   sequence: BitVec32  — program-order index within that core
-//   address:  BitVec64  — physical address after translation
-//   value:    BitVec64  — data read or written
-//   kind:     BitVec4   — 0=Read, 1=Write, 2=Fetch, 3=Atomic
+// MultiCore::run_sc() in multicore.rs steps cores
+// round-robin, one instruction per core per round.
+// Core c (0 or 1) with program-sequence s executes
+// at global slot:
 //
-// Global order: a total ordering G on all committed transactions.
-
-define KIND_READ  = bvconst(0, 4)
-define KIND_WRITE = bvconst(1, 4)
-define KIND_FETCH = bvconst(2, 4)
-define KIND_ATOMIC = bvconst(3, 4)
-
-// Predicate: transaction a precedes b in program order on the same core.
-// po(core_a, seq_a, core_b, seq_b) ⇔ same core ∧ seq_a < seq_b
-define po(ca : BitVec4, sa : BitVec32, cb : BitVec4, sb : BitVec32) =
-    ca = cb ∧ bvult(sa, sb)
-
-// ─── M1: Program order preserved in global order ────
+//     G(s, c) = 2·s + c
 //
-// If transaction a precedes b in program order,
-// then a precedes b in the global order.
-// (SC's core axiom: the interleaving respects program order.)
+// This is the actual scheduling rule, not an axiom.
 
-example "M1 program order implies global order" {
+define G(seq : BitVec32, core : BitVec32) : BitVec32 =
+    bvadd(bvmul(bvconst(2, 32), seq), core)
+
+// Overflow guard: 2·SEQ_BOUND + 1 < 2^31.
+define SEQ_BOUND = bvconst(1073741823, 32)
+
+// ═══════════════════════════════════════════════════
+// Concrete memory transition: one symbolic location
+// ═══════════════════════════════════════════════════
+//
+// Every committed event applies exactly one transition.
+// State_k → (event) → State_{k+1}.
+// XCHG is one transition, not two phases.
+
+define KIND_READ  = bvconst(0, 8)
+define KIND_WRITE = bvconst(1, 8)
+define KIND_XCHG  = bvconst(2, 8)
+
+// Memory state after event commits.
+// READ:        memory unchanged
+// WRITE(val):  memory ← val
+// XCHG(val):   memory ← val  (new value written)
+define mem_after(old : BitVec64, kind : BitVec8, val : BitVec64) : BitVec64 =
+    if kind = KIND_WRITE then val
+    else if kind = KIND_XCHG then val
+    else old
+
+// Value observed by the agent that issued the event.
+// READ:   observes current memory
+// XCHG:   observes old memory (before write)
+// WRITE:  agent doesn't read (returns 0, unused)
+define observed(mem : BitVec64, kind : BitVec8) : BitVec64 =
+    if kind = KIND_READ then mem
+    else if kind = KIND_XCHG then mem
+    else bvconst(0, 64)
+
+// ═══════════════════════════════════════════════════
+// Concrete authorization: no CoreId argument
+// ═══════════════════════════════════════════════════
+//
+// Reuses the Phase 0 model.  Authorization is a
+// function of (domain, object, generation, offset,
+// permission) — never core identity.
+
+define generation_match(cap_gen : BitVec64, obj_gen : BitVec64) =
+    cap_gen = obj_gen
+
+define revoke_gen(g : BitVec64) =
+    bvadd(g, bvconst(1, 64))
+
+define authorize(
+    cap_gen  : BitVec64, obj_gen : BitVec64,
+    cap_base : BitVec64, cap_len : BitVec64,
+    req_off  : BitVec64,
+    cap_perm : BitVec8, req_perm : BitVec8
+) =
+    generation_match(cap_gen, obj_gen)
+    ∧ bvule(cap_base, req_off)
+    ∧ bvult(req_off, bvadd(cap_base, cap_len))
+    ∧ bvand(req_perm, cap_perm) = req_perm
+
+// Wrapper that takes a core argument but ignores it.
+// Its only purpose is the M3 regression test.
+define authorize_for(
+    core     : BitVec32,
+    cap_gen  : BitVec64, obj_gen : BitVec64,
+    cap_base : BitVec64, cap_len : BitVec64,
+    req_off  : BitVec64,
+    cap_perm : BitVec8, req_perm : BitVec8
+) =
+    authorize(cap_gen, obj_gen, cap_base, cap_len,
+              req_off, cap_perm, req_perm)
+
+// ═══════════════════════════════════════════════════
+// Concrete commit semantics
+// ═══════════════════════════════════════════════════
+
+define commit_succeeds(auth_gen : BitVec64, obj_gen_at_commit : BitVec64) =
+    generation_match(auth_gen, obj_gen_at_commit)
+
+// Guarded write: memory changes only when commit succeeds.
+define guarded_write(old : BitVec64, val : BitVec64, committed : Bool) : BitVec64 =
+    if committed then val else old
+
+// ═══════════════════════════════════════════════════
+// M1 — Program order preserved in global order
+// ═══════════════════════════════════════════════════
+//
+// Derived from the concrete scheduler G(s, c) = 2s+c.
+// G(a) < G(b) is NOT a premise — it follows from
+// the arithmetic of the round-robin rule.
+
+example "M1 round-robin preserves program order" {
     assert(
-        ∀ ca : BitVec4 . ∀ sa : BitVec32 . ∀ ga : BitVec32 .
-        ∀ cb : BitVec4 . ∀ sb : BitVec32 . ∀ gb : BitVec32 .
-        (po(ca, sa, cb, sb) ∧ bvult(ga, gb))
-        → bvult(ga, gb)
+        ∀ sa : BitVec32 . ∀ sb : BitVec32 . ∀ c : BitVec32 .
+        (bvult(c, bvconst(2, 32))
+         ∧ bvult(sa, sb)
+         ∧ bvult(sb, SEQ_BOUND))
+        → bvult(G(sa, c), G(sb, c))
     )
 }
 
-// ─── M2: Atomic indivisibility ──────────────────────
+// ═══════════════════════════════════════════════════
+// M2 — Atomic indivisibility
+// ═══════════════════════════════════════════════════
 //
-// An atomic transaction (XCHG) reads old and writes new
-// as one indivisible step.  No other transaction can
-// interpose between the read-phase and write-phase.
-//
-// Modeled: if tx is atomic and committed, no transaction
-// from a different core has a global position between
-// the atomic's read and write phases.
+// XCHG is one transition, not two phases.
+// No intermediate state exists between read and write.
 
-example "M2 atomic exchange visible to other cores" {
+// Two distinct cores at the same round get distinct
+// global slots.  No event can interpose into XCHG
+// because there is no slot between its read and write.
+example "M2 distinct cores get distinct global slots" {
     assert(
-        ∀ old_val : BitVec64 . ∀ new_val : BitVec64 .
-        ∀ result : BitVec64 . ∀ other_read : BitVec64 .
-        (result = old_val ∧ other_read = new_val ∧ ¬(old_val = new_val))
-        → ¬(other_read = old_val)
+        ∀ s : BitVec32 . ∀ ca : BitVec32 . ∀ cb : BitVec32 .
+        (bvult(s, SEQ_BOUND)
+         ∧ bvult(ca, bvconst(2, 32))
+         ∧ bvult(cb, bvconst(2, 32))
+         ∧ ¬(ca = cb))
+        → ¬(G(s, ca) = G(s, cb))
     )
 }
 
-// ─── M3: Protection independent of core identity ────
-//
-// The fabric authorizes transactions based on domain,
-// not core identity.  Two cores in the same domain have
-// identical authority.
-
-example "M3 authority depends on domain not core" {
-    assert(
-        ∀ core0 : BitVec4 . ∀ core1 : BitVec4 .
-        ∀ domain : BitVec32 . ∀ addr : BitVec64 . ∀ perm : BitVec8 .
-        ¬(core0 = core1)
-        → (domain = domain)
-    )
-}
-
-// ─── M4: Revocation wins the race ───────────────────
-//
-// If an object is revoked (generation bumped) while a
-// transaction is in-flight, the transaction faults.
-// Modeled: stale generation ⇒ ¬committed.
-
-example "M4 stale generation never commits" {
-    assert(
-        ∀ auth_gen : BitVec32 . ∀ current_gen : BitVec32 .
-        bvult(auth_gen, current_gen)
-        → ¬(auth_gen = current_gen)
-    )
-}
-
-// ─── M5: DMA ordering respects the memory model ─────
-//
-// DMA agents are non-core fabric participants.
-// Their transactions enter the same global order.
-// A DMA write that commits after a core write to the
-// same address observes the core's value first.
-
-example "M5 DMA participates in global order" {
-    assert(
-        ∀ core_id : BitVec4 . ∀ dma_id : BitVec4 .
-        ∀ gc : BitVec32 . ∀ gd : BitVec32 .
-        ∀ addr : BitVec64 .
-        (bvult(gc, gd))
-        → bvult(gc, gd)
-    )
-}
-
-// ─── M6: Concurrency cannot manufacture authority ───
-//
-// No interleaving of core steps can produce a committed
-// transaction on an object for which no capability exists.
-// This is the multicore extension of Phase 0's forgery
-// impossibility: the fabric checks every transaction
-// regardless of which core issued it.
-
-example "M6 no capability no commit" {
-    assert(
-        ∀ core : BitVec4 . ∀ domain : BitVec32 .
-        ∀ object : BitVec32 . ∀ perm : BitVec8 .
-        ∀ has_cap : Bool .
-        (¬has_cap) → ¬has_cap
-    )
-}
-
-// ─── Composites ─────────────────────────────────────
-
-// SC with protection: if two cores access the same address,
-// and one write precedes the other in global order,
-// the later read must see the written value (or a later write).
-// This is the "single copy atomicity" guarantee.
-
-example "SC single copy atomicity" {
-    assert(
-        ∀ v1 : BitVec64 . ∀ v2 : BitVec64 .
-        ∀ g1 : BitVec32 . ∀ g2 : BitVec32 .
-        (bvult(g1, g2) ∧ ¬(v1 = v2))
-        → bvult(g1, g2)
-    )
-}
-
-// Atomic exchange semantic: XCHG returns old value and stores new.
-// old = mem[addr]; mem[addr] = new; result = old.
-// Verify: result ≠ new (unless they happen to be equal).
-
-example "XCHG result is pre-write value" {
+// XCHG as one step: observes old, writes new.
+// If mem_after returned old instead of new_val,
+// this proof would fail.
+example "M2 XCHG reads old and writes new in one step" {
     assert(
         ∀ old : BitVec64 . ∀ new_val : BitVec64 .
-        ∀ result : BitVec64 .
-        (result = old ∧ ¬(old = new_val))
-        → ¬(result = new_val)
+        observed(old, KIND_XCHG) = old
+        ∧ mem_after(old, KIND_XCHG, new_val) = new_val
     )
 }
 
-// ─── Summary ────────────────────────────────────────
+// 3-event trace: write v1, XCHG with new=v2, read.
+// XCHG observes v1, writes v2.  Final read sees v2.
+example "M2 write-xchg-read trace" {
+    assert(
+        ∀ s0 : BitVec64 . ∀ v1 : BitVec64 . ∀ v2 : BitVec64 .
+        observed(mem_after(s0, KIND_WRITE, v1), KIND_XCHG) = v1
+        ∧ observed(
+            mem_after(mem_after(s0, KIND_WRITE, v1), KIND_XCHG, v2),
+            KIND_READ) = v2
+    )
+}
+
+// ═══════════════════════════════════════════════════
+// M3 — Protection independent of core identity
+// ═══════════════════════════════════════════════════
 //
-// Properties proven:
-//   M1 — Program order preserved in global order
-//   M2 — Atomic operations are indivisible
-//   M3 — Protection independent of core identity
-//   M4 — Revocation wins every race
-//   M5 — DMA participates in global order
-//   M6 — Concurrency cannot manufacture authority
+// Structural theorem.  authorize_for(core, R)
+// delegates to authorize(R) which has no CoreId
+// argument.  If anyone adds CoreId to authorize,
+// this proof breaks.
+
+example "M3 authorization core-agnostic" {
+    assert(
+        ∀ c0 : BitVec32 . ∀ c1 : BitVec32 .
+        ∀ cg : BitVec64 . ∀ og : BitVec64 .
+        ∀ cb : BitVec64 . ∀ cl : BitVec64 .
+        ∀ ro : BitVec64 .
+        ∀ cp : BitVec8 . ∀ rp : BitVec8 .
+        authorize_for(c0, cg, og, cb, cl, ro, cp, rp)
+        = authorize_for(c1, cg, og, cb, cl, ro, cp, rp)
+    )
+}
+
+// ═══════════════════════════════════════════════════
+// M4 — Revocation wins the race
+// ═══════════════════════════════════════════════════
 //
-// Rust tests (multicore.rs) provide constructive witnesses:
-//   P16 — Two cores run independently
-//   P17 — Naive counter: LD/ST race → lost updates
-//   P18 — XCHG spinlock: counter = 2N
-//   P19 — Revocation faults in-flight transactions
+// Model: authorize at generation g, revoke (g→g+1),
+// then commit.  commit_succeeds checks generation
+// match.  The revoke bumps it, so commit fails.
+//
+// If revoke_gen returned g (no bump), the proof fails.
+
+// Follows the C1 pattern from anka_concurrent_protection.kleis:
+// authorized at g, revoke to g+1, commit fails.
+// No overflow guard needed: g+1 ≠ g for all bitvector values.
+example "M4 revocation between authorize and commit faults" {
+    assert(
+        ∀ g : BitVec64 .
+        generation_match(g, g)
+        → ¬commit_succeeds(g, revoke_gen(g))
+    )
+}
+
+// Memory is unchanged when commit fails.
+// If guarded_write ignored the committed flag,
+// the proof would fail.
+example "M4 revocation preserves memory" {
+    assert(
+        ∀ g : BitVec64 . ∀ old : BitVec64 . ∀ val : BitVec64 .
+        guarded_write(old, val, commit_succeeds(g, revoke_gen(g))) = old
+    )
+}
+
+// ═══════════════════════════════════════════════════
+// M5 — DMA in the same transition order
+// ═══════════════════════════════════════════════════
+//
+// CPU and DMA events use the same mem_after function.
+// Agent identity does not appear in the transition.
+// The ordering depends only on position in the trace.
+
+// CPU writes v1, DMA writes v2, read sees v2.
+example "M5 CPU-write DMA-write read returns DMA value" {
+    assert(
+        ∀ s0 : BitVec64 . ∀ v_cpu : BitVec64 . ∀ v_dma : BitVec64 .
+        observed(
+            mem_after(mem_after(s0, KIND_WRITE, v_cpu), KIND_WRITE, v_dma),
+            KIND_READ) = v_dma
+    )
+}
+
+// Reversed: DMA writes v1, CPU writes v2, read sees v2.
+example "M5 DMA-write CPU-write read returns CPU value" {
+    assert(
+        ∀ s0 : BitVec64 . ∀ v_dma : BitVec64 . ∀ v_cpu : BitVec64 .
+        observed(
+            mem_after(mem_after(s0, KIND_WRITE, v_dma), KIND_WRITE, v_cpu),
+            KIND_READ) = v_cpu
+    )
+}
+
+// ═══════════════════════════════════════════════════
+// M6 — Commitment implies authorization
+// ═══════════════════════════════════════════════════
+//
+// The commit transition requires both authorization
+// AND generation match.  This connects Phase 5 to
+// the Phase 0 capability model.
+
+define can_commit(
+    cap_gen  : BitVec64, obj_gen : BitVec64,
+    cap_base : BitVec64, cap_len : BitVec64,
+    req_off  : BitVec64,
+    cap_perm : BitVec8, req_perm : BitVec8
+) =
+    authorize(cap_gen, obj_gen, cap_base, cap_len,
+              req_off, cap_perm, req_perm)
+    ∧ commit_succeeds(cap_gen, obj_gen)
+
+// First theorem: committed → authorized.
+// Falls directly out of the transition semantics.
+example "M6 commitment implies authorization" {
+    assert(
+        ∀ cg : BitVec64 . ∀ og : BitVec64 .
+        ∀ cb : BitVec64 . ∀ cl : BitVec64 .
+        ∀ ro : BitVec64 .
+        ∀ cp : BitVec8 . ∀ rp : BitVec8 .
+        can_commit(cg, og, cb, cl, ro, cp, rp)
+        → authorize(cg, og, cb, cl, ro, cp, rp)
+    )
+}
+
+// Second theorem: committed → valid capability covers
+// the request (range check, permission check).
+// Connects Phase 5 commitment to Phase 0 capability
+// coverage predicates.
+example "M6 commitment implies capability coverage" {
+    assert(
+        ∀ cg : BitVec64 . ∀ og : BitVec64 .
+        ∀ cb : BitVec64 . ∀ cl : BitVec64 .
+        ∀ ro : BitVec64 .
+        ∀ cp : BitVec8 . ∀ rp : BitVec8 .
+        can_commit(cg, og, cb, cl, ro, cp, rp)
+        → (cg = og
+           ∧ bvule(cb, ro)
+           ∧ bvult(ro, bvadd(cb, cl))
+           ∧ bvand(rp, cp) = rp)
+    )
+}
+
+// ═══════════════════════════════════════════════════
+// Summary
+// ═══════════════════════════════════════════════════
+//
+// Concrete definitions, not axioms:
+//   G(seq, core)              — round-robin scheduler
+//   mem_after(old, kind, val) — memory transition
+//   observed(mem, kind)       — agent observation
+//   authorize(...)            — capability check (no CoreId)
+//   revoke_gen(g)             — generation bump
+//   commit_succeeds(a, c)     — generation revalidation
+//   guarded_write(old, v, ok) — conditional memory update
+//
+// Derived properties:
+//   M1 — program order preserved (scheduler arithmetic)
+//   M2 — XCHG indivisible (one transition, distinct slots)
+//   M3 — core-agnostic authorization (structural regression)
+//   M4 — revocation wins (gen bump → commit fails → mem unchanged)
+//   M5 — DMA same transition (last writer wins, agent-blind)
+//   M6 — commitment → authorization → capability coverage
 //
 // Total: 29 instructions, 2 cores, sequential consistency.
+// Total: 0 axioms.
