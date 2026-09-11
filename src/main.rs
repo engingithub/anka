@@ -19,6 +19,12 @@ const CONSOLE_BASE: u32 = 0x00F0_0000;
 fn main() {
     let args: Vec<String> = env::args().collect();
 
+    // Subcommand: anka asm
+    if args.len() > 1 && args[1] == "asm" {
+        run_asm(&args[2..]);
+        return;
+    }
+
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print_help();
         return;
@@ -489,6 +495,121 @@ fn parse_u32(args: &[String], i: usize, flag: &str) -> u32 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Assembler subcommand
+// ---------------------------------------------------------------------------
+
+fn run_asm(args: &[String]) {
+    if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("\
+AnkaASM — MC68000 text assembler
+
+USAGE:
+    anka asm <source.s> [-o <output.srec>] [--base ADDR]
+
+OPTIONS:
+    -o FILE         Output S-record file (default: source with .srec extension)
+    --base ADDR     Base address for code (default: 0x1000)
+    --raw           Output raw binary instead of S-record
+    --help, -h      Print this help
+
+EXAMPLE:
+    anka asm hello.s -o hello.srec
+    anka hello.srec                    ; load and run the result");
+        return;
+    }
+
+    let mut source_path: Option<String> = None;
+    let mut output_path: Option<String> = None;
+    let mut base: u32 = 0x0000_1000;
+    let mut raw = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: -o requires an output path");
+                    process::exit(2);
+                }
+                output_path = Some(args[i].clone());
+            }
+            "--base" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --base requires an address");
+                    process::exit(2);
+                }
+                base = parse_u32(&args, i, "--base");
+            }
+            "--raw" => raw = true,
+            arg if arg.starts_with('-') => {
+                eprintln!("error: unknown option: {}", arg);
+                process::exit(2);
+            }
+            _ => {
+                if source_path.is_some() {
+                    eprintln!("error: multiple source files not supported");
+                    process::exit(2);
+                }
+                source_path = Some(args[i].clone());
+            }
+        }
+        i += 1;
+    }
+
+    let source_path = source_path.unwrap_or_else(|| {
+        eprintln!("error: no source file given");
+        eprintln!("Try 'anka asm --help' for usage.");
+        process::exit(2);
+    });
+
+    let default_out = if raw {
+        source_path.rsplit_once('.').map_or_else(
+            || format!("{}.bin", source_path),
+            |(stem, _)| format!("{}.bin", stem),
+        )
+    } else {
+        source_path.rsplit_once('.').map_or_else(
+            || format!("{}.srec", source_path),
+            |(stem, _)| format!("{}.srec", stem),
+        )
+    };
+    let output_path = output_path.unwrap_or(default_out);
+
+    let source = fs::read_to_string(&source_path).unwrap_or_else(|e| {
+        eprintln!("error: cannot read '{}': {}", source_path, e);
+        process::exit(1);
+    });
+
+    match anka::asm::text::assemble(&source, base) {
+        Ok(binary) => {
+            let out_data = if raw {
+                binary.clone()
+            } else {
+                anka::srec::write(&binary, base, base).into_bytes()
+            };
+
+            fs::write(&output_path, &out_data).unwrap_or_else(|e| {
+                eprintln!("error: cannot write '{}': {}", output_path, e);
+                process::exit(1);
+            });
+
+            let fmt = if raw { "binary" } else { "S-record" };
+            eprintln!("AnkaASM: {} → {} ({} bytes {}, base {:#010X})",
+                source_path, output_path, binary.len(), fmt, base);
+        }
+        Err(errors) => {
+            for e in &errors {
+                eprintln!("{}:{}", source_path, e);
+            }
+            eprintln!("{} error(s)", errors.len());
+            process::exit(1);
+        }
+    }
+}
+
 fn print_help() {
     println!(
         "\
@@ -536,6 +657,8 @@ EXAMPLES:
     anka rom.bin --load-addr 0x0    ROM includes its own vector table
     anka program.srec               Load S-record file and run
     anka --hello --emit-srec h.srec Write hello demo as S-record file
+    anka asm hello.s                Assemble source → hello.srec
+    anka asm hello.s -o out.srec    Assemble with explicit output path
 
 MEMORY MAP:
     0x000000–0x0003FF    Vector table (1 KB)

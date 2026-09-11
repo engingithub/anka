@@ -1,12 +1,11 @@
-//! Programmatic MC68000 assembler.
+//! MC68000 assembler: programmatic builder and text parser.
 //!
-//! Constructs binary images from Rust method calls rather than parsing
-//! text.  Supports labels with forward references and two fixup kinds:
-//!
-//!   - Branch16: 16-bit PC-relative displacement (Bcc.W, BSR.W, DBcc)
-//!   - Absolute32: 32-bit absolute address (LEA xxx.L)
-//!
-//! This is the seed of AnkaASM.
+//! The programmatic builder (`Asm`) constructs binary images from Rust
+//! method calls.  The text assembler (`text::assemble`) parses Motorola-
+//! syntax source files.  Both use label-based fixups for forward
+//! references.
+
+pub mod text;
 
 use std::collections::HashMap;
 
