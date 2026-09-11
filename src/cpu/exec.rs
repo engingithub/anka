@@ -453,8 +453,11 @@ impl<B: Bus> Cpu<B> {
             }
             0x4E72 => {
                 // STOP #imm — privileged
-                let imm = self.fetch_word();
+                // Validate privilege before consuming the extension word.
+                // Architectural invariant: authority check precedes all
+                // operand access, so faults can be precisely restartable.
                 if !self.require_supervisor() { return 4; }
+                let imm = self.fetch_word();
                 self.set_sr_value(imm);
                 self.halted = true;
                 4
