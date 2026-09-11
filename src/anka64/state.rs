@@ -135,9 +135,18 @@ impl Capability64 {
 // ───────────────────────────────────────────────────────────────────
 
 /// Object lifecycle state.
+///
+/// ```text
+///   Active ──seal──▶ Sealed ──revoke──▶ Revoked ──free──▶ Freed
+///     │                                    ▲
+///     └──────────revoke────────────────────┘
+/// ```
+///
+/// Once Sealed, no WRITE or ATOMIC capability can be minted (W⊕X).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectState {
     Active,
+    Sealed,
     Revoked,
     Freed,
 }
@@ -345,6 +354,7 @@ pub enum FaultReason {
     WrongPermission,
     InvalidObject,
     TranslationFault,
+    AlignmentFault,
 }
 
 impl fmt::Display for FaultReason {
@@ -355,6 +365,7 @@ impl fmt::Display for FaultReason {
             Self::WrongPermission => write!(f, "WrongPermission"),
             Self::InvalidObject => write!(f, "InvalidObject"),
             Self::TranslationFault => write!(f, "TranslationFault"),
+            Self::AlignmentFault => write!(f, "AlignmentFault"),
         }
     }
 }

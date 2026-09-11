@@ -86,7 +86,9 @@ impl Fabric {
         for (&existing_id, &existing_base) in &self.placement {
             if existing_id == id { continue; }
             if let Some(existing_obj) = self.objects.get(&existing_id) {
-                if existing_obj.state != ObjectState::Active { continue; }
+                if !matches!(existing_obj.state, ObjectState::Active | ObjectState::Sealed) {
+                    continue;
+                }
                 let existing_end = existing_base + existing_obj.size;
                 if physical_base < existing_end && new_end > existing_base {
                     return false; // overlap rejected (I9)
@@ -117,6 +119,24 @@ impl Fabric {
         }
     }
 
+    /// Seal an object — transition Active → Sealed, bump generation.
+    ///
+    /// W⊕X structural invariant: once sealed, `grant()` refuses to
+    /// create WRITE or ATOMIC capabilities for this object.
+    /// All existing capabilities (including RW) become stale.
+    ///
+    /// Returns false if the object is not Active.
+    pub fn seal_object(&mut self, id: ObjectId) -> bool {
+        if let Some(obj) = self.objects.get_mut(&id) {
+            if obj.state != ObjectState::Active { return false; }
+            obj.generation = obj.generation.next();
+            obj.state = ObjectState::Sealed;
+            true
+        } else {
+            false
+        }
+    }
+
     // ───────────────── Domain management ─────────────────────────
 
     pub fn create_domain(&mut self) -> DomainId {
@@ -134,6 +154,8 @@ impl Fabric {
     }
 
     /// Grant a new capability covering a range within an object.
+    ///
+    /// W⊕X: refuses WRITE or ATOMIC on Sealed objects.
     pub fn grant(
         &mut self,
         domain: DomainId,
@@ -143,7 +165,17 @@ impl Fabric {
         perms: Permissions,
     ) -> Option<Capability64> {
         let obj = self.objects.get(&object)?;
-        if obj.state != ObjectState::Active { return None; }
+        match obj.state {
+            ObjectState::Active => {}
+            ObjectState::Sealed => {
+                if perms.contains(Permissions::WRITE)
+                    || perms.contains(Permissions::ATOMIC)
+                {
+                    return None; // W⊕X: sealed objects reject write authority
+                }
+            }
+            _ => return None,
+        }
         if offset + length > obj.size { return None; }
 
         let cap = Capability64::new(object, obj.generation, offset, length, perms);
@@ -183,13 +215,38 @@ impl Fabric {
 
     /// Validate a capability against the object table.
     ///
-    /// Checks: object active, generation match, range ⊆ object.
+    /// Checks: object alive (Active or Sealed), generation match,
+    /// range ⊆ object.  A Sealed object is still alive — it accepts
+    /// READ/EXECUTE operations but no WRITE (enforced by `grant()`).
     pub fn validate(&self, cap: &Capability64) -> bool {
         if let Some(obj) = self.objects.get(&cap.object()) {
-            obj.state == ObjectState::Active
+            matches!(obj.state, ObjectState::Active | ObjectState::Sealed)
                 && cap.generation() == obj.generation
                 && cap.length() <= obj.size
                 && cap.offset() <= obj.size - cap.length()
+        } else {
+            false
+        }
+    }
+
+    /// Check whether a domain holds a valid capability with the required
+    /// permissions on a given object.
+    ///
+    /// This is the authority check that prevents "name ≠ authority"
+    /// violations: resolving an address to an ObjectId is not sufficient;
+    /// the domain must actually possess a matching capability.
+    pub fn has_authority(
+        &self,
+        domain: DomainId,
+        object: ObjectId,
+        required: Permissions,
+    ) -> bool {
+        if let Some(dom) = self.domains.get(&domain) {
+            dom.capabilities.iter().any(|cap| {
+                cap.object() == object
+                    && cap.permissions().contains(required)
+                    && self.validate(cap)
+            })
         } else {
             false
         }
@@ -784,6 +841,95 @@ mod tests {
         assert!(f.place_object(obj_a, 0x4000));
         assert!(!f.place_object(obj_b, 0x4800), // overlaps A
             "I9: overlapping placement accepted");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // W⊕X structural invariant: Sealed objects reject WRITE
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn wx1_sealed_object_rejects_write_grant() {
+        let (mut f, obj, dom) = setup_basic();
+
+        // Seal the object
+        assert!(f.seal_object(obj));
+        assert_eq!(f.objects[&obj].state, ObjectState::Sealed);
+
+        // Try to grant WRITE — must fail
+        let new_dom = f.create_domain();
+        assert!(f.grant(new_dom, obj, 0, 0x1000, Permissions::WRITE).is_none(),
+            "W⊕X: sealed object accepted WRITE grant");
+
+        // Try to grant RW — must fail (contains WRITE)
+        assert!(f.grant(new_dom, obj, 0, 0x1000, Permissions::RW).is_none(),
+            "W⊕X: sealed object accepted RW grant");
+
+        // Try to grant ATOMIC — must fail
+        assert!(f.grant(new_dom, obj, 0, 0x1000, Permissions::ATOMIC).is_none(),
+            "W⊕X: sealed object accepted ATOMIC grant");
+
+        // Grant READ — must succeed
+        assert!(f.grant(new_dom, obj, 0, 0x1000, Permissions::READ).is_some(),
+            "W⊕X: sealed object rejected READ grant");
+
+        // Grant RX — must succeed
+        assert!(f.grant(new_dom, obj, 0, 0x1000, Permissions::RX).is_some(),
+            "W⊕X: sealed object rejected RX grant");
+
+        eprintln!("WX1: Sealed(O) ⇒ ¬∃C: valid(C,O) ∧ W ∈ C.perms ✓");
+    }
+
+    #[test]
+    fn wx2_sealed_object_denies_write_transaction() {
+        let (mut f, obj, dom) = setup_basic();
+
+        // Write before seal — should succeed
+        let idx1 = f.submit(write_req(CPU0, dom, obj, 0), Some(PAYLOAD_A.to_vec()));
+        f.advance(idx1); f.advance(idx1); f.advance(idx1);
+        assert_eq!(f.transaction(idx1).state, TxState::Committed);
+
+        // Seal the object
+        assert!(f.seal_object(obj));
+
+        // Grant RX at new generation for read access
+        let rx_dom = f.create_domain();
+        f.grant(rx_dom, obj, 0, 0x1000, Permissions::RX);
+
+        // Write after seal — old cap is stale, no new WRITE cap possible
+        let idx2 = f.submit(write_req(CPU0, dom, obj, 0), Some(PAYLOAD_B.to_vec()));
+        f.advance(idx2);
+        assert_eq!(f.transaction(idx2).state, TxState::Faulted);
+        assert_eq!(f.transaction(idx2).fault.as_ref().unwrap().reason,
+            FaultReason::StaleGeneration);
+
+        // Read after seal — should succeed with new RX cap
+        let read_idx = f.submit(read_req(CPU0, rx_dom, obj, 0), None);
+        f.advance(read_idx); f.advance(read_idx); f.advance(read_idx);
+        assert_eq!(f.transaction(read_idx).state, TxState::Committed);
+
+        // Verify data unchanged (PAYLOAD_A from before seal)
+        assert_eq!(f.mem4(0x4000), PAYLOAD_A);
+
+        eprintln!("WX2: write transaction on sealed object → StaleGeneration ✓");
+    }
+
+    #[test]
+    fn wx3_seal_only_from_active() {
+        let (mut f, obj, _) = setup_basic();
+
+        // Seal works on Active
+        assert!(f.seal_object(obj), "seal should succeed on Active");
+        assert_eq!(f.objects[&obj].state, ObjectState::Sealed);
+
+        // Double-seal fails — already Sealed, not Active
+        assert!(!f.seal_object(obj), "seal should fail on already-Sealed");
+
+        // Revoke the sealed object
+        f.revoke(obj);
+        assert_eq!(f.objects[&obj].state, ObjectState::Revoked);
+
+        // Seal on Revoked fails
+        assert!(!f.seal_object(obj), "seal should fail on Revoked");
     }
 
     #[test]

@@ -134,6 +134,26 @@ impl Anka64Core {
     pub fn step(&mut self, fabric: &mut Fabric) -> StepResult {
         if self.halted { return StepResult::Halted; }
 
+        // 0. PC alignment — 32-bit fixed-width ISA.
+        // Without this, attacker-controlled LR can point to byte offsets
+        // inside existing instructions, creating overlapping instruction
+        // streams that bypass code sealing.
+        if self.pc & 3 != 0 {
+            return StepResult::Fault(FaultRecord {
+                agent: self.agent,
+                domain: self.domain,
+                privilege: self.privilege,
+                transaction: TransactionId(0),
+                object: ObjectId(0),
+                generation: None,
+                offset: self.pc,
+                width: Width::Word,
+                kind: AccessKind::Fetch,
+                pc: Some(self.pc),
+                reason: FaultReason::AlignmentFault,
+            });
+        }
+
         // 1. Fetch (through fabric)
         let word = match self.fabric_read(fabric, self.pc, Width::Word, AccessKind::Fetch) {
             Ok(bytes) => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),

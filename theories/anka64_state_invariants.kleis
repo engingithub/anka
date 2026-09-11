@@ -282,6 +282,75 @@ example "two-agent isolation after revocation" {
 }
 
 // ===========================================================================
+// W⊕X: Sealed objects cannot have write authority (6S.1)
+// ===========================================================================
+// The seal invariant: once an object enters SEALED state, no valid
+// capability for it may carry WRITE or ATOMIC permission.
+//
+// This is enforced structurally by grant():
+//   state=SEALED ∧ (W ∈ perms ∨ A ∈ perms) → grant returns None.
+//
+// Old capabilities from before sealing are invalid because seal
+// bumps generation.  New capabilities cannot carry W or A.
+// Therefore: Sealed(O) ⇒ ¬∃C: valid(C,O) ∧ W ∈ C.permissions.
+
+// The sealed-grant predicate: what fabric.grant() accepts for sealed objects.
+// Flat definition — no if-then-else.
+define sealed_grant_ok(perm : BitVec4) =
+    ¬has_perm(perm, perm_W) ∧ ¬has_perm(perm, perm_A)
+
+define seal_gen(g : BitVec64) = bvadd(g, bvconst(1, 64))
+
+define perm_RX = bvor(perm_R, perm_X)
+
+example "WX1 sealed object rejects WRITE grant" {
+    assert(¬sealed_grant_ok(perm_W))
+}
+
+example "WX2 sealed object rejects RW grant" {
+    assert(¬sealed_grant_ok(perm_RW))
+}
+
+example "WX3 sealed object rejects ATOMIC grant" {
+    assert(¬sealed_grant_ok(perm_A))
+}
+
+example "WX4 sealed object accepts READ grant" {
+    assert(sealed_grant_ok(perm_R))
+}
+
+example "WX5 sealed object accepts RX grant" {
+    assert(sealed_grant_ok(perm_RX))
+}
+
+example "WX6 seal invalidates all pre-seal capabilities" {
+    assert(
+        ∀ g : BitVec64 .
+        ¬generation_match(g, seal_gen(g))
+    )
+}
+
+// The combined theorem: after sealing, no valid capability can
+// carry WRITE permission.
+//
+// Proof sketch:
+//   - Pre-seal caps have gen g.  Seal bumps to g+1.  WX6 ⟹ stale.
+//   - Post-seal caps at gen g+1 must satisfy sealed_grant_ok(perm).
+//     WX1/WX2 ⟹ perm cannot contain W.
+//   - Therefore: ∀C at gen g+1: ¬has_perm(C.perm, W).        ∎
+//
+// We express this as: for any permission that sealed_grant_ok accepts,
+// that permission does not contain WRITE.
+
+example "WX7 sealed grant cannot carry WRITE" {
+    assert(
+        ∀ perm : BitVec4 .
+        sealed_grant_ok(perm)
+        ⟹ ¬has_perm(perm, perm_W)
+    )
+}
+
+// ===========================================================================
 // Phase encoding (structural witness)
 // ===========================================================================
 
