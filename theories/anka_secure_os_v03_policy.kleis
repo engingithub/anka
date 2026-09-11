@@ -1,0 +1,51 @@
+// ANKA Secure OS v0.3 — concrete policy witnesses from secure_os.rs
+// This does not model a fabric bug; it checks the capabilities the harness grants.
+import "stdlib/prelude.kleis"
+
+define perm_R   = bvconst(1,3)
+define perm_W   = bvconst(2,3)
+define perm_X   = bvconst(4,3)
+define perm_RW  = bvconst(3,3)
+define perm_RX  = bvconst(5,3)
+define perm_NONE = bvconst(0,3)
+
+define real_request(size : BitVec24, op : BitVec3) =
+    bvugt(size,bvconst(0,24)) ∧ ¬(op=perm_NONE)
+
+define range_contains(base : BitVec24, len : BitVec24, addr : BitVec24, size : BitVec24) =
+    bvugt(size,bvconst(0,24))
+    ∧ bvuge(addr,base)
+    ∧ bvule(size,len)
+    ∧ bvule(bvsub(addr,base),bvsub(len,size))
+
+define cap_permits(base : BitVec24, len : BitVec24, perms : BitVec3,
+                   addr : BitVec24, size : BitVec24, op : BitVec3) =
+    real_request(size,op)
+    ∧ bvand(perms,op)=op
+    ∧ range_contains(base,len,addr,size)
+
+// Current secure_os.rs grants every process RW to kernel.data 0x0800..0x08FF.
+example "POLICY witness proc can overwrite CURRENT_PID" {
+    assert(
+        cap_permits(
+            bvconst(2048,24), bvconst(256,24), perm_RW,
+            bvconst(2048,24), bvconst(4,24), perm_W)
+    )
+}
+
+example "POLICY witness proc can overwrite SAVED_SP_1" {
+    assert(
+        cap_permits(
+            bvconst(2048,24), bvconst(256,24), perm_RW,
+            bvconst(2068,24), bvconst(4,24), perm_W)
+    )
+}
+
+// kernel.code is RX, so the same policy does not grant vector-table writes.
+example "Code RX capability cannot rewrite vector 2" {
+    assert(
+        ¬cap_permits(
+            bvconst(0,24), bvconst(65536,24), perm_RX,
+            bvconst(8,24), bvconst(4,24), perm_W)
+    )
+}

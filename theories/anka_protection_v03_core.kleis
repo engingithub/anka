@@ -1,0 +1,435 @@
+// ================================================================
+// ANKA SECURE OS v0.3 — EXECUTABLE PROTECTION THEORY
+// ================================================================
+// Proof obligations only: 0 axioms.
+// Current address model: 24-bit MC68000 experiment.
+// Permissions: R=001, W=010, X=100.
+// Models: whole-transaction authority, object generations,
+// attenuation, revocation, DMA delegation, and denied-transaction
+// noninterference.
+// ================================================================
+
+import "stdlib/prelude.kleis"
+
+// ---- Permission encoding -------------------------------------------------
+define perm_R    = bvconst(1, 3)
+define perm_W    = bvconst(2, 3)
+define perm_X    = bvconst(4, 3)
+define perm_RW   = bvor(perm_R, perm_W)
+define perm_RX   = bvor(perm_R, perm_X)
+define perm_RWX  = bvor(perm_RW, perm_X)
+define perm_NONE = bvconst(0, 3)
+
+// A transaction must touch at least one byte and request at least one right.
+define real_request(size : BitVec24, op : BitVec3) =
+    bvugt(size, bvconst(0, 24)) ∧ ¬(op = perm_NONE)
+
+// Whole-transaction range inclusion.  Subtractive form avoids endpoint
+// addition overflow.
+define range_contains(
+    outer_base : BitVec24,
+    outer_len  : BitVec24,
+    inner_base : BitVec24,
+    inner_len  : BitVec24
+) =
+    bvugt(inner_len, bvconst(0,24))
+    ∧ bvuge(inner_base, outer_base)
+    ∧ bvule(inner_len, outer_len)
+    ∧ bvule(bvsub(inner_base, outer_base), bvsub(outer_len, inner_len))
+
+// Capability authorizes one indivisible transaction.
+define cap_permits(
+    cap_base : BitVec24,
+    cap_len  : BitVec24,
+    cap_perm : BitVec3,
+    addr     : BitVec24,
+    size     : BitVec24,
+    op       : BitVec3
+) =
+    real_request(size, op)
+    ∧ bvand(cap_perm, op) = op
+    ∧ range_contains(cap_base, cap_len, addr, size)
+
+// Object-lifecycle validity.
+define generation_valid(cap_gen : BitVec16, obj_gen : BitVec16) =
+    cap_gen = obj_gen
+
+define object_valid(active : BitVec1, cap_gen : BitVec16, obj_gen : BitVec16) =
+    active = bvconst(1,1) ∧ generation_valid(cap_gen, obj_gen)
+
+// Current protection-controller control plane: 0xF00020..0xF00027.
+define in_control_plane(addr : BitVec24) =
+    bvuge(addr, bvconst(15728672, 24))
+    ∧ bvult(addr, bvconst(15728680, 24))
+
+// CPU authorization for one capability.  Supervisor bypasses ordinary checks;
+// user mode is excluded from the control plane and requires a live object.
+define cpu_authorize(
+    supervisor : BitVec1,
+    active     : BitVec1,
+    cap_base   : BitVec24,
+    cap_len    : BitVec24,
+    cap_perm   : BitVec3,
+    cap_gen    : BitVec16,
+    obj_gen    : BitVec16,
+    addr       : BitVec24,
+    size       : BitVec24,
+    op         : BitVec3
+) =
+    supervisor = bvconst(1,1)
+    ∨ (
+        supervisor = bvconst(0,1)
+        ∧ ¬in_control_plane(addr)
+        ∧ object_valid(active, cap_gen, obj_gen)
+        ∧ cap_permits(cap_base, cap_len, cap_perm, addr, size, op)
+      )
+
+// A child capability can only be derived from a live current-generation parent,
+// within the parent's range, and with a subset of its permissions.
+define derive_allowed(
+    active      : BitVec1,
+    parent_base : BitVec24,
+    parent_len  : BitVec24,
+    parent_perm : BitVec3,
+    parent_gen  : BitVec16,
+    obj_gen     : BitVec16,
+    child_base  : BitVec24,
+    child_len   : BitVec24,
+    child_perm  : BitVec3
+) =
+    object_valid(active, parent_gen, obj_gen)
+    ∧ range_contains(parent_base, parent_len, child_base, child_len)
+    ∧ bvand(parent_perm, child_perm) = child_perm
+
+
+// Relative/object-offset form used for the strongest delegation theorem.
+// This is also the native Anka64 coordinate system: requests are offsets within
+// an object, so physical placement/base arithmetic disappears from authority.
+define rel_contains(outer_len : BitVec24, offset : BitVec24, inner_len : BitVec24) =
+    bvugt(inner_len, bvconst(0,24))
+    ∧ bvule(inner_len, outer_len)
+    ∧ bvule(offset, bvsub(outer_len, inner_len))
+
+define derive_relative(
+    parent_len : BitVec24, parent_perm : BitVec3,
+    child_offset : BitVec24, child_len : BitVec24, child_perm : BitVec3
+) =
+    rel_contains(parent_len, child_offset, child_len)
+    ∧ bvand(parent_perm, child_perm) = child_perm
+
+define request_relative(
+    cap_len : BitVec24, cap_perm : BitVec3,
+    offset : BitVec24, size : BitVec24, op : BitVec3
+) =
+    real_request(size, op)
+    ∧ bvand(cap_perm, op) = op
+    ∧ rel_contains(cap_len, offset, size)
+
+// Revocation bumps the object generation by one epoch.
+define revoke_gen(g : BitVec16) = bvadd(g, bvconst(1,16))
+
+// DMA operates on a delegated capability by object-relative offset.
+// This is the Anka64-style transaction abstraction: placement is not needed
+// to decide authority.
+define dma_authorize(
+    active   : BitVec1,
+    cap_len  : BitVec24,
+    cap_perm : BitVec3,
+    cap_gen  : BitVec16,
+    obj_gen  : BitVec16,
+    offset   : BitVec24,
+    size     : BitVec24
+) =
+    object_valid(active, cap_gen, obj_gen)
+    ∧ real_request(size, perm_W)
+    ∧ bvand(cap_perm, perm_W) = perm_W
+    ∧ bvule(size, cap_len)
+    ∧ bvule(offset, bvsub(cap_len, size))
+
+// ---- Minimal transition model --------------------------------------------
+// Denied transactions preserve ordinary state and append fault metadata.
+define next_mem(allowed : BitVec1, before : BitVec32, effect : BitVec32) =
+    if allowed = bvconst(1,1) then effect else before
+
+define next_dev(allowed : BitVec1, before : BitVec32, effect : BitVec32) =
+    if allowed = bvconst(1,1) then effect else before
+
+define next_obj(allowed : BitVec1, before : BitVec32, effect : BitVec32) =
+    if allowed = bvconst(1,1) then effect else before
+
+define next_ctrl(allowed : BitVec1, before : BitVec32, effect : BitVec32) =
+    if allowed = bvconst(1,1) then effect else before
+
+define next_fault_count(allowed : BitVec1, before : BitVec32) =
+    if allowed = bvconst(1,1) then before else bvadd(before, bvconst(1,32))
+
+define next_fault_addr(allowed : BitVec1, old_addr : BitVec24, req_addr : BitVec24) =
+    if allowed = bvconst(1,1) then old_addr else req_addr
+
+// ===========================================================================
+// BASE AUTHORITY
+// ===========================================================================
+
+example "P1 empty capability grants no real request" {
+    assert(
+        ∀ addr : BitVec24 . ∀ size : BitVec24 . ∀ op : BitVec3 .
+        real_request(size, op)
+        → ¬cpu_authorize(
+            bvconst(0,1), bvconst(1,1),
+            bvconst(0,24), bvconst(0,24), perm_NONE,
+            bvconst(0,16), bvconst(0,16),
+            addr, size, op)
+    )
+}
+
+example "P2 read does not grant write" {
+    assert(
+        ∀ base : BitVec24 . ∀ len : BitVec24 . ∀ addr : BitVec24 . ∀ size : BitVec24 .
+        cap_permits(base, len, perm_R, addr, size, perm_R)
+        → ¬cap_permits(base, len, perm_R, addr, size, perm_W)
+    )
+}
+
+example "P3 write does not grant execute" {
+    assert(
+        ∀ base : BitVec24 . ∀ len : BitVec24 . ∀ addr : BitVec24 . ∀ size : BitVec24 .
+        cap_permits(base, len, perm_W, addr, size, perm_W)
+        → ¬cap_permits(base, len, perm_W, addr, size, perm_X)
+    )
+}
+
+example "P4 stale CPU capability denied" {
+    assert(
+        ∀ base : BitVec24 . ∀ len : BitVec24 . ∀ perms : BitVec3 .
+        ∀ addr : BitVec24 . ∀ size : BitVec24 . ∀ op : BitVec3 .
+        real_request(size, op)
+        → ¬cpu_authorize(
+            bvconst(0,1), bvconst(1,1), base, len, perms,
+            bvconst(0,16), bvconst(1,16), addr, size, op)
+    )
+}
+
+example "P5 freed object denies CPU access even if generations match" {
+    assert(
+        ∀ base : BitVec24 . ∀ len : BitVec24 . ∀ perms : BitVec3 .
+        ∀ g : BitVec16 . ∀ addr : BitVec24 . ∀ size : BitVec24 . ∀ op : BitVec3 .
+        real_request(size, op)
+        → ¬cpu_authorize(
+            bvconst(0,1), bvconst(0,1), base, len, perms,
+            g, g, addr, size, op)
+    )
+}
+
+example "P6 user cannot access protection controller even with RWX" {
+    assert(
+        ∀ addr : BitVec24 . ∀ size : BitVec24 . ∀ op : BitVec3 .
+        (in_control_plane(addr) ∧ real_request(size, op))
+        → ¬cpu_authorize(
+            bvconst(0,1), bvconst(1,1),
+            bvconst(0,24), bvconst(16777215,24), perm_RWX,
+            bvconst(7,16), bvconst(7,16), addr, size, op)
+    )
+}
+
+example "P7 adjacent capabilities cannot stitch a longword" {
+    assert(
+        ¬cap_permits(bvconst(4096,24), bvconst(2,24), perm_RW,
+                     bvconst(4096,24), bvconst(4,24), perm_R)
+        ∧
+        ¬cap_permits(bvconst(4098,24), bvconst(2,24), perm_RW,
+                     bvconst(4096,24), bvconst(4,24), perm_R)
+    )
+}
+
+example "P8 one-past-end byte denied" {
+    assert(
+        ∀ base : BitVec24 . ∀ len : BitVec24 . ∀ perms : BitVec3 .
+        bvugt(len, bvconst(0,24))
+        → ¬cap_permits(base, len, perms,
+                       bvadd(base, len), bvconst(1,24), perm_R)
+    )
+}
+
+// ===========================================================================
+// ATTENUATION / DELEGATION
+// ===========================================================================
+
+example "D1 derived capability permissions are a subset" {
+    assert(
+        ∀ active : BitVec1 . ∀ pb : BitVec24 . ∀ pl : BitVec24 . ∀ pp : BitVec3 .
+        ∀ pg : BitVec16 . ∀ og : BitVec16 .
+        ∀ cb : BitVec24 . ∀ cl : BitVec24 . ∀ cp : BitVec3 .
+        derive_allowed(active,pb,pl,pp,pg,og,cb,cl,cp)
+        → bvand(pp, cp) = cp
+    )
+}
+
+example "D2 derived capability range is contained in parent" {
+    assert(
+        ∀ active : BitVec1 . ∀ pb : BitVec24 . ∀ pl : BitVec24 . ∀ pp : BitVec3 .
+        ∀ pg : BitVec16 . ∀ og : BitVec16 .
+        ∀ cb : BitVec24 . ∀ cl : BitVec24 . ∀ cp : BitVec3 .
+        derive_allowed(active,pb,pl,pp,pg,og,cb,cl,cp)
+        → range_contains(pb,pl,cb,cl)
+    )
+}
+
+example "D3 stale parent cannot derive" {
+    assert(
+        ∀ pb : BitVec24 . ∀ pl : BitVec24 . ∀ pp : BitVec3 .
+        ∀ pg : BitVec16 . ∀ og : BitVec16 .
+        ∀ cb : BitVec24 . ∀ cl : BitVec24 . ∀ cp : BitVec3 .
+        ¬(pg = og)
+        → ¬derive_allowed(bvconst(1,1),pb,pl,pp,pg,og,cb,cl,cp)
+    )
+}
+
+example "D5 valid attenuated child is reachable" {
+    assert(
+        derive_allowed(
+            bvconst(1,1),
+            bvconst(131072,24), bvconst(4096,24), perm_RW,
+            bvconst(3,16), bvconst(3,16),
+            bvconst(131072,24), bvconst(256,24), perm_W)
+    )
+}
+
+// ===========================================================================
+// REVOCATION
+// ===========================================================================
+
+example "R1 one generation bump differs from old generation" {
+    assert(
+        ∀ g : BitVec16 . ¬(revoke_gen(g) = g)
+    )
+}
+
+example "R2 old capability stale immediately after generation bump" {
+    assert(
+        ∀ g : BitVec16 .
+        ¬object_valid(bvconst(1,1), g, revoke_gen(g))
+    )
+}
+
+example "R3 freed object invalidates capability regardless of generation" {
+    assert(
+        ∀ cg : BitVec16 . ∀ og : BitVec16 .
+        ¬object_valid(bvconst(0,1), cg, og)
+    )
+}
+
+// ===========================================================================
+// DMA AGENT
+// ===========================================================================
+
+example "M1 stale DMA capability denied" {
+    assert(
+        ∀ len : BitVec24 . ∀ perms : BitVec3 . ∀ offset : BitVec24 . ∀ size : BitVec24 .
+        ¬dma_authorize(
+            bvconst(1,1), len, perms,
+            bvconst(0,16), bvconst(1,16), offset, size)
+    )
+}
+
+example "M2 freed DMA object denied" {
+    assert(
+        ∀ len : BitVec24 . ∀ perms : BitVec3 . ∀ g : BitVec16 .
+        ∀ offset : BitVec24 . ∀ size : BitVec24 .
+        ¬dma_authorize(bvconst(0,1), len, perms, g, g, offset, size)
+    )
+}
+
+example "M3 read-only delegated capability cannot DMA write" {
+    assert(
+        ∀ len : BitVec24 . ∀ g : BitVec16 . ∀ offset : BitVec24 . ∀ size : BitVec24 .
+        ¬dma_authorize(bvconst(1,1), len, perm_R, g, g, offset, size)
+    )
+}
+
+example "M4 DMA cannot start one byte past end" {
+    assert(
+        ∀ len : BitVec24 . ∀ g : BitVec16 .
+        bvugt(len, bvconst(0,24))
+        → ¬dma_authorize(
+            bvconst(1,1), len, perm_W, g, g,
+            len, bvconst(1,24))
+    )
+}
+
+example "M5 valid delegated DMA write is reachable" {
+    assert(
+        dma_authorize(
+            bvconst(1,1), bvconst(4096,24), perm_W,
+            bvconst(9,16), bvconst(9,16),
+            bvconst(0,24), bvconst(4,24))
+    )
+}
+
+// ===========================================================================
+// DENIED-TRANSACTION NONINTERFERENCE
+// ===========================================================================
+
+example "N1 denied transaction leaves memory unchanged" {
+    assert(
+        ∀ before : BitVec32 . ∀ effect : BitVec32 .
+        next_mem(bvconst(0,1), before, effect) = before
+    )
+}
+
+example "N2 denied transaction leaves device state unchanged" {
+    assert(
+        ∀ before : BitVec32 . ∀ effect : BitVec32 .
+        next_dev(bvconst(0,1), before, effect) = before
+    )
+}
+
+example "N3 denied transaction leaves object state unchanged" {
+    assert(
+        ∀ before : BitVec32 . ∀ effect : BitVec32 .
+        next_obj(bvconst(0,1), before, effect) = before
+    )
+}
+
+example "N4 denied transaction leaves control state unchanged" {
+    assert(
+        ∀ before : BitVec32 . ∀ effect : BitVec32 .
+        next_ctrl(bvconst(0,1), before, effect) = before
+    )
+}
+
+example "N5 denied transaction appends exactly one fault" {
+    assert(
+        ∀ count : BitVec32 .
+        next_fault_count(bvconst(0,1), count) = bvadd(count, bvconst(1,32))
+    )
+}
+
+example "N6 denied transaction records faulting address" {
+    assert(
+        ∀ old_addr : BitVec24 . ∀ req_addr : BitVec24 .
+        next_fault_addr(bvconst(0,1), old_addr, req_addr) = req_addr
+    )
+}
+
+example "N7 denied DMA is observationally inert except fault metadata" {
+    assert(
+        ∀ active : BitVec1 . ∀ len : BitVec24 . ∀ perms : BitVec3 .
+        ∀ cg : BitVec16 . ∀ og : BitVec16 . ∀ offset : BitVec24 . ∀ size : BitVec24 .
+        ∀ mem0 : BitVec32 . ∀ mem1 : BitVec32 .
+        ∀ dev0 : BitVec32 . ∀ dev1 : BitVec32 .
+        ∀ obj0 : BitVec32 . ∀ obj1 : BitVec32 .
+        ∀ ctl0 : BitVec32 . ∀ ctl1 : BitVec32 .
+        ∀ faults : BitVec32 . ∀ old_fault_addr : BitVec24 .
+        (
+          ¬dma_authorize(active,len,perms,cg,og,offset,size)
+          → (
+              next_mem(bvconst(0,1),mem0,mem1) = mem0
+              ∧ next_dev(bvconst(0,1),dev0,dev1) = dev0
+              ∧ next_obj(bvconst(0,1),obj0,obj1) = obj0
+              ∧ next_ctrl(bvconst(0,1),ctl0,ctl1) = ctl0
+              ∧ next_fault_count(bvconst(0,1),faults) = bvadd(faults,bvconst(1,32))
+              ∧ next_fault_addr(bvconst(0,1),old_fault_addr,offset) = offset
+             )
+        )
+    )
+}

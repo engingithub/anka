@@ -1,0 +1,90 @@
+// ================================================================
+// ANKA v0.3 — FORMAL SPOT-CHECK OF CURRENT RUST DOMAIN SCAN
+// ================================================================
+// This file models the order-sensitive loop in ProtectedBus::check().
+// It proves a concrete case where a stale matching cap placed before a
+// valid matching cap causes denial, even though the domain contains valid
+// authority for the request.
+// ================================================================
+
+import "stdlib/prelude.kleis"
+
+define perm_R  = bvconst(1,3)
+define perm_RW = bvconst(3,3)
+define perm_NONE = bvconst(0,3)
+
+define real_request(size : BitVec24, op : BitVec3) =
+    bvugt(size,bvconst(0,24)) ∧ ¬(op = perm_NONE)
+
+define cap_permits(
+    base : BitVec24, len : BitVec24, perms : BitVec3,
+    addr : BitVec24, size : BitVec24, op : BitVec3
+) =
+    real_request(size,op)
+    ∧ bvand(perms,op) = op
+    ∧ bvuge(addr,base)
+    ∧ bvule(size,len)
+    ∧ bvule(bvsub(addr,base),bvsub(len,size))
+
+define generation_valid(cg : BitVec16, og : BitVec16) = cg = og
+
+// Mirrors current Rust loop: first range+permission match is decisive.
+define rust_ordered_two(
+    b1 : BitVec24, l1 : BitVec24, p1 : BitVec3, g1 : BitVec16,
+    b2 : BitVec24, l2 : BitVec24, p2 : BitVec3, g2 : BitVec16,
+    og : BitVec16,
+    addr : BitVec24, size : BitVec24, op : BitVec3
+) =
+    if cap_permits(b1,l1,p1,addr,size,op) then
+        if generation_valid(g1,og) then bvconst(1,1) else bvconst(0,1)
+    else
+        if cap_permits(b2,l2,p2,addr,size,op) then
+            if generation_valid(g2,og) then bvconst(1,1) else bvconst(0,1)
+        else bvconst(0,1)
+
+// Desired set semantics: any valid matching capability authorizes.
+define any_valid_two(
+    b1 : BitVec24, l1 : BitVec24, p1 : BitVec3, g1 : BitVec16,
+    b2 : BitVec24, l2 : BitVec24, p2 : BitVec3, g2 : BitVec16,
+    og : BitVec16,
+    addr : BitVec24, size : BitVec24, op : BitVec3
+) =
+    (
+      cap_permits(b1,l1,p1,addr,size,op) ∧ generation_valid(g1,og)
+    )
+    ∨
+    (
+      cap_permits(b2,l2,p2,addr,size,op) ∧ generation_valid(g2,og)
+    )
+
+example "BUG witness stale first valid second Rust scan denies" {
+    assert(
+        rust_ordered_two(
+            bvconst(4096,24),bvconst(4096,24),perm_RW,bvconst(0,16),
+            bvconst(4096,24),bvconst(4096,24),perm_RW,bvconst(1,16),
+            bvconst(1,16),
+            bvconst(4100,24),bvconst(4,24),perm_R)
+        = bvconst(0,1)
+    )
+}
+
+example "Same domain has valid authority under set semantics" {
+    assert(
+        any_valid_two(
+            bvconst(4096,24),bvconst(4096,24),perm_RW,bvconst(0,16),
+            bvconst(4096,24),bvconst(4096,24),perm_RW,bvconst(1,16),
+            bvconst(1,16),
+            bvconst(4100,24),bvconst(4,24),perm_R)
+    )
+}
+
+example "Putting valid cap first succeeds" {
+    assert(
+        rust_ordered_two(
+            bvconst(4096,24),bvconst(4096,24),perm_RW,bvconst(1,16),
+            bvconst(4096,24),bvconst(4096,24),perm_RW,bvconst(0,16),
+            bvconst(1,16),
+            bvconst(4100,24),bvconst(4,24),perm_R)
+        = bvconst(1,1)
+    )
+}

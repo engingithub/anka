@@ -1,0 +1,42 @@
+// ANKA v0.3 — TCB boundary witness for public Capability construction.
+// Mirrors ObjectTable::validate: Active && cap.generation == object.generation.
+// It does NOT bind cap base/length/perms to the object's recorded placement.
+import "stdlib/prelude.kleis"
+
+define perm_W  = bvconst(2,3)
+define perm_RW = bvconst(3,3)
+define perm_NONE = bvconst(0,3)
+
+define real_request(size : BitVec24, op : BitVec3) =
+    bvugt(size,bvconst(0,24)) ∧ ¬(op=perm_NONE)
+
+define cap_permits(base : BitVec24, len : BitVec24, perms : BitVec3,
+                   addr : BitVec24, size : BitVec24, op : BitVec3) =
+    real_request(size,op)
+    ∧ bvand(perms,op)=op
+    ∧ bvuge(addr,base)
+    ∧ bvule(size,len)
+    ∧ bvule(bvsub(addr,base),bvsub(len,size))
+
+define rust_validate(active : BitVec1, cap_gen : BitVec16, obj_gen : BitVec16) =
+    active=bvconst(1,1) ∧ cap_gen=obj_gen
+
+define rust_dma_authorize(active : BitVec1,
+                          cap_base : BitVec24, cap_len : BitVec24, cap_perm : BitVec3,
+                          cap_gen : BitVec16, obj_gen : BitVec16,
+                          addr : BitVec24, size : BitVec24) =
+    rust_validate(active,cap_gen,obj_gen)
+    ∧ cap_permits(cap_base,cap_len,cap_perm,addr,size,perm_W)
+
+// Object table says object is at 0x020000..0x020FFF, but a fabricated Capability
+// for the same object_id/generation claims 0x050000..0x050FFF. Current validate()
+// cannot distinguish this if the caller can construct the Capability struct.
+example "TCB witness fabricated cap can authorize outside recorded object placement" {
+    assert(
+        rust_dma_authorize(
+            bvconst(1,1),
+            bvconst(327680,24), bvconst(4096,24), perm_RW,
+            bvconst(0,16), bvconst(0,16),
+            bvconst(327680,24), bvconst(4,24))
+    )
+}

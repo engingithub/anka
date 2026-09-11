@@ -1,0 +1,40 @@
+// ANKA v0.3 — delegation non-amplification, isolated solver obligation.
+// 0 axioms.  Object-relative coordinates are the native authority model.
+import "stdlib/prelude.kleis"
+
+define perm_NONE = bvconst(0,3)
+define real_request(size : BitVec24, op : BitVec3) =
+    bvugt(size,bvconst(0,24)) ∧ ¬(op=perm_NONE)
+
+define rel_contains(outer_len : BitVec24, offset : BitVec24, inner_len : BitVec24) =
+    bvugt(inner_len,bvconst(0,24))
+    ∧ bvule(inner_len,outer_len)
+    ∧ bvule(offset,bvsub(outer_len,inner_len))
+
+define derive_relative(
+    parent_len : BitVec24, parent_perm : BitVec3,
+    child_offset : BitVec24, child_len : BitVec24, child_perm : BitVec3
+) =
+    rel_contains(parent_len,child_offset,child_len)
+    ∧ bvand(parent_perm,child_perm)=child_perm
+
+define request_relative(
+    cap_len : BitVec24, cap_perm : BitVec3,
+    offset : BitVec24, size : BitVec24, op : BitVec3
+) =
+    real_request(size,op)
+    ∧ bvand(cap_perm,op)=op
+    ∧ rel_contains(cap_len,offset,size)
+
+example "Delegation cannot amplify authority" {
+    assert(
+        ∀ pl : BitVec24 . ∀ pp : BitVec3 .
+        ∀ child_off : BitVec24 . ∀ cl : BitVec24 . ∀ cp : BitVec3 .
+        ∀ req_off : BitVec24 . ∀ size : BitVec24 . ∀ op : BitVec3 .
+        (
+          derive_relative(pl,pp,child_off,cl,cp)
+          ∧ request_relative(cl,cp,req_off,size,op)
+        )
+        → request_relative(pl,pp,bvadd(child_off,req_off),size,op)
+    )
+}

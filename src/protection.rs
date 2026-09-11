@@ -131,12 +131,24 @@ impl ObjectTable {
     }
 
     /// Validate a capability against the object table.
-    /// Returns true if the capability's generation matches the
-    /// object's current generation and the object is active.
+    ///
+    /// Returns true iff:
+    ///   1. The object exists and is Active
+    ///   2. The capability's generation matches the object's
+    ///   3. The capability's range ⊆ the object's recorded range
+    ///
+    /// Condition 3 closes the forgery boundary: even if Rust code
+    /// constructs a `Capability` with a valid object_id/generation,
+    /// it cannot claim a range outside the object's placement.
+    ///
+    /// valid(C, O) ⟹ range(C) ⊆ range(O)
     pub fn validate(&self, cap: &Capability) -> bool {
         if let Some(entry) = self.entries.get(cap.object_id as usize) {
             entry.state == ObjectState::Active
                 && cap.generation == entry.generation
+                && cap.base >= entry.base
+                && cap.length <= entry.length
+                && cap.base - entry.base <= entry.length - cap.length
         } else {
             false
         }
@@ -244,24 +256,35 @@ impl Perm {
 
 /// A capability grants access to a range of addresses within a
 /// named memory object.
+///
+/// Fields are private.  Capabilities are minted only through
+/// [`ObjectTable::make_cap`] or [`ObjectTable::derive_cap`].
+/// The legacy constructor [`Capability::new`] is `pub(crate)`
+/// for v0.1/v0.2 backward compatibility where no object table
+/// is configured.
 #[derive(Debug, Clone)]
 pub struct Capability {
-    /// Object identity — what logical object does this refer to?
-    pub object_id: u32,
-    /// Generation — protects against stale references after recycling.
-    pub generation: u32,
-    /// Base address (physical).
-    pub base: u32,
-    /// Length in bytes.
-    pub length: u32,
-    /// Permission set.
-    pub perms: Perm,
+    object_id: u32,
+    generation: u32,
+    base: u32,
+    length: u32,
+    perms: Perm,
 }
 
 impl Capability {
-    pub fn new(object_id: u32, base: u32, length: u32, perms: Perm) -> Self {
+    /// Legacy constructor — creates a capability without an object
+    /// table entry.  Use `ObjectTable::make_cap()` for new code.
+    pub(crate) fn new(object_id: u32, base: u32, length: u32, perms: Perm) -> Self {
         Self { object_id, generation: 0, base, length, perms }
     }
+
+    // ── Accessors ─────────────────────────────────────────────
+
+    pub fn object_id(&self) -> u32 { self.object_id }
+    pub fn generation(&self) -> u32 { self.generation }
+    pub fn base(&self) -> u32 { self.base }
+    pub fn length(&self) -> u32 { self.length }
+    pub fn perms(&self) -> Perm { self.perms }
 
     /// Check whether this capability authorises an access.
     pub fn permits(&self, addr: u32, size: u32, op: Perm) -> bool {
@@ -362,40 +385,44 @@ impl ProtectedBus {
 
     /// Check whether an access is permitted.
     ///
-    /// For each capability in the active domain, we check:
-    ///   1. Range and permission (cap_permits)
-    ///   2. Generation validity against the object table
+    /// The domain is a **set** of capabilities.  Authorization is
+    /// existential:
     ///
-    /// If a capability covers the range but its generation is stale,
-    /// we report StaleGeneration rather than NoCapability.
+    ///   authorize(D, R) ⟺ ∃ C ∈ D : valid(C) ∧ C ⊢ R
+    ///
+    /// We scan all capabilities before deciding.  A valid match
+    /// anywhere in the domain authorizes the access, regardless of
+    /// ordering.  Only after scanning the entire set do we report
+    /// a fault — StaleGeneration if any stale cap covered the
+    /// request, otherwise NoCapability or WrongPermission.
+    ///
+    /// This preserves monotonicity: Authority(D) ⊆ Authority(D+C)
+    /// implies Allowed(D) ⊆ Allowed(D+C).
     fn check(&mut self, addr: u32, size: u32, op: Perm) -> bool {
         if self.supervisor {
             return true;
         }
         if let Some(domain) = self.domains.get(self.active_domain) {
-            // Check each capability: range+permission first, then generation
+            let mut stale_match = false;
+
             for cap in &domain.caps {
                 if cap.permits(addr, size, op) {
-                    // Range and permissions match — check generation
                     if self.objects.entries.is_empty() {
-                        // No object table configured — legacy mode,
-                        // skip generation check (v0.1 compatibility)
+                        // No object table — legacy mode
                         return true;
                     }
                     if self.objects.validate(cap) {
                         return true;
                     }
-                    // Generation mismatch — stale capability
-                    let record = FaultRecord::new(addr, size, op, FaultReason::StaleGeneration)
-                        .with_domain(self.active_domain, &domain.name);
-                    self.fault_log.push(record.clone());
-                    self.fault = Some(record);
-                    self.violations += 1;
-                    return false;
+                    stale_match = true;
                 }
             }
-            // No capability covers the range
-            let reason = if domain.caps.iter().any(|c| c.permits(addr, size, Perm::READ)
+
+            // No valid capability authorizes the request.
+            let reason = if stale_match {
+                FaultReason::StaleGeneration
+            } else if domain.caps.iter().any(|c|
+                c.permits(addr, size, Perm::READ)
                 || c.permits(addr, size, Perm::WRITE)
                 || c.permits(addr, size, Perm(Perm::EXEC.0)))
             {
@@ -628,7 +655,7 @@ mod tests {
 
         // Make a capability
         let cap = ot.make_cap(id, Perm::RW).unwrap();
-        assert_eq!(cap.generation, 0);
+        assert_eq!(cap.generation(), 0);
         assert!(ot.validate(&cap));
 
         // Revoke — generation bumps, cap becomes stale
@@ -649,9 +676,9 @@ mod tests {
 
         // Can narrow range
         let child = ot.derive_cap(&parent, 0x2100, 0x100, Perm::READ).unwrap();
-        assert_eq!(child.base, 0x2100);
-        assert_eq!(child.length, 0x100);
-        assert_eq!(child.generation, parent.generation);
+        assert_eq!(child.base(), 0x2100);
+        assert_eq!(child.length(), 0x100);
+        assert_eq!(child.generation(), parent.generation());
     }
 
     #[test]
@@ -684,6 +711,98 @@ mod tests {
         assert_eq!(val, 0xFF);
         let fault = bus.take_fault().unwrap();
         assert_eq!(fault.reason, FaultReason::StaleGeneration);
+    }
+
+    /// Kleis counterexample: two capabilities covering the same range,
+    /// C₁ = stale, C₂ = valid.  With order [C₁, C₂], the old scan
+    /// returned StaleGeneration on C₁ and never examined C₂.
+    ///
+    /// Under set semantics, the valid C₂ must authorize the access
+    /// regardless of ordering.  This test verifies both orderings
+    /// produce the same result.
+    /// Kleis TCB witness: a fabricated capability claiming the same
+    /// object_id/generation but a different range must be rejected
+    /// by validate().
+    #[test]
+    fn forgery_boundary_range_check() {
+        let mut ot = ObjectTable::new();
+        let id = ot.alloc("real_obj", 0x20000, 0x1000);
+
+        // Legitimate capability — should validate
+        let legit = ot.make_cap(id, Perm::RW).unwrap();
+        assert!(ot.validate(&legit));
+
+        // Fabricated capability: same object_id and generation,
+        // but claims range 0x50000..0x50FFF (outside the object)
+        let fabricated = Capability {
+            object_id: id,
+            generation: 0,
+            base: 0x50000,
+            length: 0x1000,
+            perms: Perm::RW,
+        };
+        assert!(!ot.validate(&fabricated),
+            "validate() accepted fabricated cap outside object range");
+
+        // Fabricated: correct base but excessive length
+        let oversized = Capability {
+            object_id: id,
+            generation: 0,
+            base: 0x20000,
+            length: 0x2000, // twice the object's length
+            perms: Perm::RW,
+        };
+        assert!(!ot.validate(&oversized),
+            "validate() accepted oversized cap");
+
+        // Sub-range within object — should validate
+        let sub = Capability {
+            object_id: id,
+            generation: 0,
+            base: 0x20100,
+            length: 0x100,
+            perms: Perm::READ,
+        };
+        assert!(ot.validate(&sub),
+            "validate() rejected sub-range within object");
+    }
+
+    #[test]
+    fn scan_order_independence() {
+        // Try stale-first ordering
+        let inner = MappedBus::new(0x10000);
+        let mut bus = ProtectedBus::new(inner);
+
+        let obj_id = bus.objects.alloc("region", 0x1000, 0x1000);
+
+        // Cap at generation 0 (will become stale)
+        let stale_cap = bus.objects.make_cap(obj_id, Perm::RW).unwrap();
+
+        // Revoke and re-alloc at generation 1
+        bus.objects.revoke(obj_id);
+        bus.objects.entries[obj_id as usize].state = ObjectState::Active;
+        bus.objects.entries[obj_id as usize].generation = 1;
+
+        // Valid cap at generation 1
+        let valid_cap = bus.objects.make_cap(obj_id, Perm::RW).unwrap();
+
+        // Domain with [stale, valid] ordering
+        let mut dom = Domain::new("test");
+        dom.grant(stale_cap);
+        dom.grant(valid_cap);
+        bus.add_domain(dom);
+        bus.set_domain(0);
+
+        // Write sentinel
+        bus.inner.write8(0x1050, 0x42);
+
+        // User mode read — must succeed (valid cap exists in set)
+        bus.set_supervisor(false);
+        let val = bus.read8(0x1050);
+        assert_eq!(val, 0x42, "set semantics: stale-first ordering denied valid access");
+        assert!(bus.take_fault().is_none(),
+            "set semantics: spurious fault with valid cap in domain");
+        assert_eq!(bus.violation_count(), 0);
     }
 
     #[test]

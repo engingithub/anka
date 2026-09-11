@@ -722,8 +722,8 @@ mod tests {
 
         // Can attenuate: narrow range, same permissions
         let child = bus.objects.derive_cap(&parent, 0x1010, 0x20, Perm::READ).unwrap();
-        assert_eq!(child.base, 0x1010);
-        assert_eq!(child.length, 0x20);
+        assert_eq!(child.base(), 0x1010);
+        assert_eq!(child.length(), 0x20);
 
         // Child DMA write should fail (read-only)
         let result = bus.dma_write(&child, 0, &[0xFF]);
@@ -845,40 +845,38 @@ mod tests {
         // ─── Protection setup ───────────────────────────────
         let mut pbus = ProtectedBus::new(bus);
 
-        // Object table
+        // Object table — every capability traces to a registered object.
         let code_obj = pbus.objects.alloc("kernel.code", 0x0000, 0x10000);
-        let kdata_obj = pbus.objects.alloc("kernel.data", 0x0800, 0x100);
+        let _kdata_obj = pbus.objects.alloc("kernel.data", 0x0800, 0x100);
         let stack0_obj = pbus.objects.alloc("proc0.stack", 0x0002_0000, 0x0002_0000);
         let stack1_obj = pbus.objects.alloc("proc1.stack", 0x0006_0000, 0x0002_0000);
         let stack2_obj = pbus.objects.alloc("proc2.stack", 0x000A_0000, 0x0002_0000);
         let dma_obj = pbus.objects.alloc("dma.buffer", super::DMA_BUF, super::DMA_BUF_LEN);
+        let console_obj = pbus.objects.alloc("device.console", 0x00F0_0000, 0x10);
 
-        // Domain 0: Process A (worker) — code, own stack, console, DMA buffer
+        // Domain 0: Process A (worker) — code, own stack, console
+        //
+        // No kernel.data capability.  User processes interact with
+        // kernel state only through syscalls (TRAP #0), which run in
+        // supervisor mode.  The kdata_obj (CURRENT_PID, SAVED_SP,
+        // PROC_DEAD, etc.) is supervisor-only.
         let mut dom0 = Domain::new("proc0.worker");
         dom0.grant(pbus.objects.make_cap(code_obj, Perm::RX).unwrap());
-        dom0.grant(pbus.objects.make_cap(kdata_obj, Perm::RW).unwrap());
         dom0.grant(pbus.objects.make_cap(stack0_obj, Perm::RW).unwrap());
-        dom0.grant(Capability::new(99, 0x00F0_0000, 0x10, Perm::RW)); // console
-        // Note: process 0 does NOT get direct DMA buffer access.
-        // It writes through the syscall path (kernel mediates).
+        dom0.grant(pbus.objects.make_cap(console_obj, Perm::RW).unwrap());
 
-        // Domain 1: Process B (device service) — code, own stack, console
-        // Initially it also has a capability for the DMA buffer.
-        // After process 0 exits, the object is revoked.
+        // Domain 1: Process B (device service) — code, own stack, console, DMA buffer
         let mut dom1 = Domain::new("proc1.devsvc");
         dom1.grant(pbus.objects.make_cap(code_obj, Perm::RX).unwrap());
-        dom1.grant(pbus.objects.make_cap(kdata_obj, Perm::RW).unwrap());
         dom1.grant(pbus.objects.make_cap(stack1_obj, Perm::RW).unwrap());
-        dom1.grant(Capability::new(99, 0x00F0_0000, 0x10, Perm::RW));
-        // Delegate DMA buffer read to device service
+        dom1.grant(pbus.objects.make_cap(console_obj, Perm::RW).unwrap());
         dom1.grant(pbus.objects.make_cap(dma_obj, Perm::RW).unwrap());
 
         // Domain 2: Process C (monitor) — code, own stack, console
         let mut dom2 = Domain::new("proc2.monitor");
         dom2.grant(pbus.objects.make_cap(code_obj, Perm::RX).unwrap());
-        dom2.grant(pbus.objects.make_cap(kdata_obj, Perm::RW).unwrap());
         dom2.grant(pbus.objects.make_cap(stack2_obj, Perm::RW).unwrap());
-        dom2.grant(Capability::new(99, 0x00F0_0000, 0x10, Perm::RW));
+        dom2.grant(pbus.objects.make_cap(console_obj, Perm::RW).unwrap());
 
         pbus.add_domain(dom0);
         pbus.add_domain(dom1);
