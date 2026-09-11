@@ -64,6 +64,12 @@ impl Asm {
         self.code.extend_from_slice(&v.to_be_bytes());
     }
 
+    /// Emit a raw opcode word.  Useful for instructions not yet
+    /// covered by a typed method.
+    pub fn emit(&mut self, word: u16) {
+        self.w(word);
+    }
+
     // ---------------------------------------------------------------
     // Branch/fixup helpers
     // ---------------------------------------------------------------

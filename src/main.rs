@@ -35,6 +35,7 @@ fn main() {
     let mut self_test = false;
     let mut hello = false;
     let mut monitor = false;
+    let mut emit_srec: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -58,6 +59,14 @@ fn main() {
             "--self-test" => self_test = true,
             "--hello" => hello = true,
             "--monitor" => monitor = true,
+            "--emit-srec" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --emit-srec requires an output path");
+                    process::exit(2);
+                }
+                emit_srec = Some(args[i].clone());
+            }
             arg if arg.starts_with('-') => {
                 eprintln!("error: unknown option: {}", arg);
                 eprintln!("Try 'anka --help' for usage.");
@@ -72,6 +81,28 @@ fn main() {
             }
         }
         i += 1;
+    }
+
+    // --emit-srec: produce an S-record file from a built-in program
+    if let Some(ref out_path) = emit_srec {
+        let (binary, base, name) = if monitor {
+            let rom = anka::monitor::build(0x1000);
+            (rom, 0x1000u32, "monitor")
+        } else if hello {
+            let rom = build_hello_rom();
+            (rom, 0x1000u32, "hello")
+        } else {
+            let rom = build_self_test_rom();
+            (rom, 0x1000u32, "self-test")
+        };
+
+        let srec_text = anka::srec::write(&binary, base, base);
+        fs::write(out_path, &srec_text).unwrap_or_else(|e| {
+            eprintln!("error: cannot write '{}': {}", out_path, e);
+            process::exit(1);
+        });
+        eprintln!("Wrote {} S-record ({} bytes) → {}", name, binary.len(), out_path);
+        return;
     }
 
     if monitor {
@@ -92,37 +123,86 @@ fn main() {
         return;
     }
 
-    // Load external ROM
+    // Load external ROM (raw binary or S-record)
     let path = rom_path.unwrap();
-    let data = fs::read(&path).unwrap_or_else(|e| {
-        eprintln!("error: cannot read '{}': {}", path, e);
-        process::exit(1);
-    });
-    if data.is_empty() {
-        eprintln!("error: ROM file '{}' is empty", path);
-        process::exit(1);
-    }
-
-    eprintln!("Anka — MC68000 Emulator v{}", VERSION);
-    eprintln!();
-    eprintln!("  ROM:       {}  ({} bytes)", path, data.len());
-    eprintln!("  Load addr: {:#010X}", load_addr);
-    eprintln!("  Console:   {:#010X}", CONSOLE_BASE);
-    eprintln!("  Max steps: {}", max_steps);
-    eprintln!("  Trace:     {}", if trace { "on" } else { "off" });
-    eprintln!();
+    let is_srec = path.ends_with(".srec")
+        || path.ends_with(".s19")
+        || path.ends_with(".s28")
+        || path.ends_with(".s37")
+        || path.ends_with(".mot");
 
     let console = Console::new();
     let rx_buf = console.rx_buffer();
     let mut bus = MappedBus::new_16mb();
     bus.add_device(CONSOLE_BASE, Box::new(console));
 
-    if load_addr == 0 {
-        bus.load(0, &data);
+    if is_srec {
+        let text = fs::read_to_string(&path).unwrap_or_else(|e| {
+            eprintln!("error: cannot read '{}': {}", path, e);
+            process::exit(1);
+        });
+        let srec = anka::srec::parse(&text).unwrap_or_else(|e| {
+            eprintln!("error: {}: {}", path, e);
+            process::exit(1);
+        });
+
+        // Load all data records into memory
+        for rec in &srec.records {
+            if let anka::srec::Record::Data { address, data } = rec {
+                bus.load(*address, data);
+            }
+        }
+
+        // Use entry from S-record if available, otherwise use --load-addr.
+        // Always set up the vector table (SSP + reset PC) unless the
+        // S-record itself loaded data at address 0x000000.
+        let entry = srec.entry.unwrap_or(load_addr);
+        let covers_vectors = srec.records.iter().any(|r| matches!(
+            r, anka::srec::Record::Data { address, data }
+            if *address <= 0x000004 && *address + data.len() as u32 > 0x000004
+        ));
+        if !covers_vectors {
+            bus.write32(0x000000, 0x0010_0000); // SSP
+            bus.write32(0x000004, entry);        // Reset PC
+        }
+
+        eprintln!("Anka — MC68000 Emulator v{}", VERSION);
+        eprintln!();
+        eprintln!("  S-record:  {}  ({} data bytes)", path, srec.data_size());
+        eprintln!("  Range:     {:#010X}–{:#010X}",
+            srec.base_address().unwrap_or(0),
+            srec.end_address().unwrap_or(0));
+        eprintln!("  Entry:     {:#010X}{}", entry,
+            if srec.entry.is_some() { " (from S-record)" } else { "" });
+        eprintln!("  Console:   {:#010X}", CONSOLE_BASE);
+        eprintln!("  Trace:     {}", if trace { "on" } else { "off" });
+        eprintln!();
     } else {
-        bus.write32(0x000000, 0x0010_0000);
-        bus.write32(0x000004, load_addr);
-        bus.load(load_addr, &data);
+        let data = fs::read(&path).unwrap_or_else(|e| {
+            eprintln!("error: cannot read '{}': {}", path, e);
+            process::exit(1);
+        });
+        if data.is_empty() {
+            eprintln!("error: ROM file '{}' is empty", path);
+            process::exit(1);
+        }
+
+        if load_addr == 0 {
+            bus.load(0, &data);
+        } else {
+            bus.write32(0x000000, 0x0010_0000);
+            bus.write32(0x000004, load_addr);
+            bus.load(load_addr, &data);
+        }
+
+        eprintln!("Anka — MC68000 Emulator v{}", VERSION);
+        eprintln!();
+        eprintln!("  ROM:       {}  ({} bytes)", path, data.len());
+        eprintln!("  Load addr: {:#010X}", load_addr);
+        eprintln!("  Console:   {:#010X}", CONSOLE_BASE);
+        eprintln!("  Max steps: {}", max_steps);
+        eprintln!("  Trace:     {}", if trace { "on" } else { "off" });
+        eprintln!();
     }
 
     // Start stdin reader for interactive console input
@@ -175,37 +255,35 @@ fn run_monitor(trace: bool) {
 // Hello demo
 // ---------------------------------------------------------------------------
 
+/// Build the hello ROM as a flat binary at address 0x1000.
+fn build_hello_rom() -> Vec<u8> {
+    let mut a = anka::asm::Asm::new(0x1000);
+    a.lea_label("msg", 0);          // LEA msg, A0
+    a.lea(CONSOLE_BASE, 1);         // LEA $00F00000, A1
+    a.label("loop");
+    a.move_b_postinc_dn(0, 0);      // MOVE.B (A0)+, D0
+    a.beq("done");
+    a.move_b_dn_indirect(0, 1);     // MOVE.B D0, (A1)
+    a.bra("loop");
+    a.label("done");
+    a.stop(0x2700);
+    a.label("msg");
+    a.ascii_z("Hello from Anka!\n");
+    a.assemble()
+}
+
 fn run_hello(trace: bool) {
     eprintln!("Anka — MC68000 Emulator v{}", VERSION);
     eprintln!("Running hello demo: CPU → MMIO console → stdout");
     eprintln!();
 
+    let rom = build_hello_rom();
     let mut bus = MappedBus::new_16mb();
     bus.add_device(CONSOLE_BASE, Box::new(Console::new()));
 
-    let ssp: u32 = 0x0010_0000;
-    let entry: u32 = 0x0000_1000;
-    let string_addr: u32 = 0x0000_2000;
-
-    bus.write32(0x000000, ssp);
-    bus.write32(0x000004, entry);
-    bus.load(string_addr, b"Hello from Anka!\n");
-
-    let program: &[u16] = &[
-        0x41F9, 0x0000, 0x2000, // LEA $00002000, A0
-        0x43F9, 0x00F0, 0x0000, // LEA $00F00000, A1
-        0x1018, // MOVE.B (A0)+, D0
-        0x6704, // BEQ.S done
-        0x1280, // MOVE.B D0, (A1)
-        0x60F8, // BRA.S loop
-        0x4E72, 0x2700, // STOP #$2700
-    ];
-
-    let mut addr = entry;
-    for &word in program {
-        bus.write16(addr, word);
-        addr += 2;
-    }
+    bus.write32(0x000000, 0x0010_0000);
+    bus.write32(0x000004, 0x0000_1000);
+    bus.load(0x1000, &rom);
 
     let mut cpu = Cpu::new(bus);
     eprintln!("Reset: SSP={:#010X}  PC={:#010X}", cpu.a[7], cpu.pc);
@@ -220,20 +298,27 @@ fn run_hello(trace: bool) {
 // Self-test
 // ---------------------------------------------------------------------------
 
+/// Build the self-test ROM as a flat binary at address 0x1000.
+fn build_self_test_rom() -> Vec<u8> {
+    let mut a = anka::asm::Asm::new(0x1000);
+    a.moveq(42, 0); // MOVEQ #42, D0
+    a.moveq(10, 1); // MOVEQ #10, D1
+    a.emit(0xD081); // ADD.L D1, D0
+    a.nop();
+    a.stop(0x2700);
+    a.assemble()
+}
+
 fn run_self_test(trace: bool) {
     println!("Anka — MC68000 Emulator v{}", VERSION);
     println!("Running built-in self-test: MOVEQ #42,D0 + MOVEQ #10,D1 → ADD.L D1,D0");
     println!();
 
+    let rom = build_self_test_rom();
     let mut bus = FlatBus::new_16mb();
     bus.write32(0x000000, 0x0010_0000);
     bus.write32(0x000004, 0x0000_1000);
-    let program: &[u16] = &[0x702A, 0x720A, 0xD081, 0x4E71, 0x4E72, 0x2700];
-    let mut addr = 0x0000_1000u32;
-    for &word in program {
-        bus.write16(addr, word);
-        addr += 2;
-    }
+    bus.load(0x1000, &rom);
 
     let mut cpu = Cpu::new(bus);
     println!("Reset: SSP={:#010X}  PC={:#010X}", cpu.a[7], cpu.pc);
@@ -423,15 +508,21 @@ DESCRIPTION:
       +0x03  RX_READY  (R)  0x01 if data available
 
 ARGUMENTS:
-    ROM_FILE            Raw binary file to load into memory
+    ROM_FILE            Raw binary or Motorola S-record file to load.
+                        S-record files (.srec .s19 .s28 .s37 .mot) are
+                        detected by extension and loaded with their
+                        embedded addresses and entry point.
 
 OPTIONS:
-    --load-addr ADDR    Load address for the ROM (default: 0x1000)
+    --load-addr ADDR    Load address for raw binary ROMs (default: 0x1000)
     --max-steps N       Stop after N instructions (default: 10,000,000)
     --trace, -t         Print every instruction as it executes (stderr)
     --self-test         Run the built-in arithmetic self-test
     --hello             Run the I/O demo (prints 'Hello from Anka!')
     --monitor           Start the interactive ROM monitor
+    --emit-srec FILE    Write a built-in program as a Motorola S-record
+                        file instead of running it.  Combine with
+                        --self-test, --hello, or --monitor.
     --version, -V       Print version and exit
     --help, -h          Print this help and exit
 
@@ -443,6 +534,8 @@ EXAMPLES:
     anka rom.bin                    Load ROM at 0x1000 and run
     anka rom.bin --trace            Load ROM with instruction trace
     anka rom.bin --load-addr 0x0    ROM includes its own vector table
+    anka program.srec               Load S-record file and run
+    anka --hello --emit-srec h.srec Write hello demo as S-record file
 
 MEMORY MAP:
     0x000000–0x0003FF    Vector table (1 KB)

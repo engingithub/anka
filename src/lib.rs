@@ -27,7 +27,9 @@
 //! FlatBus   MappedBus   (future)
 //! ```
 
+pub mod abi;
 pub mod asm;
 pub mod bus;
 pub mod cpu;
 pub mod monitor;
+pub mod srec;
