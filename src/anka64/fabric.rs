@@ -887,7 +887,7 @@ mod tests {
 
     #[test]
     fn wx1_sealed_object_rejects_write_grant() {
-        let (mut f, obj, dom) = setup_basic();
+        let (mut f, obj, _dom) = setup_basic();
 
         // Seal the object
         assert!(f.seal_object(obj));
@@ -1018,7 +1018,7 @@ mod tests {
     #[test]
     fn wx5_full_wx_lifecycle() {
         // Complete lifecycle: alloc Active → write → seal → grant RX
-        let (mut f, obj, dom) = setup_basic();
+        let (mut f, obj, _dom) = setup_basic();
 
         // Step 1: Active object can be written
         let w_dom = f.create_domain();

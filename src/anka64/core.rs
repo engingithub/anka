@@ -108,6 +108,13 @@ pub struct Anka64Core {
     pub trap_vector: u64,
     pub saved_pc: Option<u64>,
     pub saved_privilege: Option<Privilege>,
+
+    /// Protected return-authority stack (6S.2).
+    ///
+    /// Not in ordinary memory.  Not accessible through capabilities.
+    /// CALL is the only mint; RET is the only consumer.
+    /// LD/ST/ALU cannot read, write, or forge entries.
+    pub return_stack: Vec<ReturnAuthority>,
 }
 
 impl Anka64Core {
@@ -124,6 +131,7 @@ impl Anka64Core {
             trap_vector: 0,
             saved_pc: None,
             saved_privilege: None,
+            return_stack: Vec::new(),
         }
     }
 
@@ -237,11 +245,78 @@ impl Anka64Core {
                 }
             }
             Sem::Call => {
-                self.r[LR as usize] = self.pc + 4;
+                let return_addr = self.pc + 4;
+                self.r[LR as usize] = return_addr;
+                // Mint return authority: resolve PC to code object + generation
+                if let Some((code_obj, _offset)) = self.address_map.resolve(self.pc) {
+                    if let Some(obj) = fabric.objects.get(&code_obj) {
+                        self.return_stack.push(ReturnAuthority {
+                            code_object: code_obj,
+                            generation: obj.generation,
+                            target: return_addr,
+                        });
+                    }
+                }
                 next_pc = (self.pc as i64 + insn.imm * 4) as u64;
             }
             Sem::Ret => {
-                next_pc = self.r[LR as usize];
+                // Validate return authority: LR must match protected stack
+                let lr_val = self.r[LR as usize];
+                match self.return_stack.pop() {
+                    None => {
+                        return StepResult::Fault(FaultRecord {
+                            agent: self.agent,
+                            domain: self.domain,
+                            privilege: self.privilege,
+                            transaction: TransactionId(0),
+                            object: ObjectId(0),
+                            generation: None,
+                            offset: lr_val,
+                            width: Width::Word,
+                            kind: AccessKind::Fetch,
+                            pc: Some(self.pc),
+                            reason: FaultReason::ControlFlowViolation,
+                        });
+                    }
+                    Some(ret_auth) => {
+                        // Check 1: LR matches the minted return target
+                        if lr_val != ret_auth.target {
+                            return StepResult::Fault(FaultRecord {
+                                agent: self.agent,
+                                domain: self.domain,
+                                privilege: self.privilege,
+                                transaction: TransactionId(0),
+                                object: ret_auth.code_object,
+                                generation: Some(ret_auth.generation),
+                                offset: lr_val,
+                                width: Width::Word,
+                                kind: AccessKind::Fetch,
+                                pc: Some(self.pc),
+                                reason: FaultReason::ControlFlowViolation,
+                            });
+                        }
+                        // Check 2: code object generation still valid
+                        match fabric.objects.get(&ret_auth.code_object) {
+                            Some(obj) if obj.generation == ret_auth.generation => {}
+                            _ => {
+                                return StepResult::Fault(FaultRecord {
+                                    agent: self.agent,
+                                    domain: self.domain,
+                                    privilege: self.privilege,
+                                    transaction: TransactionId(0),
+                                    object: ret_auth.code_object,
+                                    generation: Some(ret_auth.generation),
+                                    offset: lr_val,
+                                    width: Width::Word,
+                                    kind: AccessKind::Fetch,
+                                    pc: Some(self.pc),
+                                    reason: FaultReason::ControlFlowViolation,
+                                });
+                            }
+                        }
+                        next_pc = ret_auth.target;
+                    }
+                }
             }
 
             // ─── System ─────────────────────────────────────────
@@ -827,5 +902,159 @@ mod tests {
 
         eprintln!("P9: 6 × 7 = {} (MUL through description) ✓", core.r[R2 as usize]);
         eprintln!("    disassembly: {}", text);
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // P21: Hostile LR corruption → ControlFlowViolation (6S.2)
+    //
+    // Rule 29: "An executable address is not control-flow authority."
+    //
+    // The attacker satisfies EVERY other requirement:
+    //   ✓ corrupted target is 4-byte aligned
+    //   ✓ corrupted target lives inside sealed RX code
+    //   ✓ corrupted target is a known, valid address
+    //   ✓ ordinary stack corruption succeeds (LD/ST work)
+    //
+    // The ONLY thing missing: return authority minted by CALL.
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p21_hostile_lr_corruption() {
+        let mut fabric = Fabric::new(0x100000);
+
+        let text = fabric.alloc_object("text", 0x1000, ObjectKind::Memory);
+        let data = fabric.alloc_object("data", 0x1000, ObjectKind::Memory);
+        fabric.place_object(text, 0x00000);
+        fabric.place_object(data, 0x10000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, data, 0, 0x1000, Permissions::RW);
+
+        // ─── Program layout ────────────────────────────────
+        //
+        //   0x00: CALL victim         ; caller → victim (word 0)
+        //   0x04: HALT                ; legitimate return point (word 1)
+        //
+        //   --- attacker's gadget (also valid RX code) ---
+        //   0x08: MOVI R0, 0xBAD      ; word 2 — attacker target
+        //   0x0C: HALT                ; word 3
+        //
+        //   --- victim function ---
+        //   0x10: MOVI R3, 0x8000     ; word 4: stack base addr
+        //   0x14: ST LR, [R3 + 0]    ; word 5: spill LR to stack
+        //
+        //   --- inline "attacker" corrupts saved LR ---
+        //   0x18: MOVI R5, 8          ; word 6: attacker's gadget addr (0x08)
+        //   0x1C: ST R5, [R3 + 0]    ; word 7: overwrite saved LR
+        //
+        //   --- victim reloads corrupted LR and returns ---
+        //   0x20: LD LR, [R3 + 0]    ; word 8: reload (now corrupted)
+        //   0x24: RET                 ; word 9: → ControlFlowViolation
+        //
+        // Note: the corrupted LR (0x08) points to word 2, which is
+        // valid sealed RX code and 4-byte aligned.  Every conventional
+        // check passes.  Only the protected return stack detects the
+        // corruption.
+
+        let mut asm = Asm64::new();
+
+        // --- Caller ---
+        let call_addr = asm.here();         // word 0
+        asm.call(4 - call_addr);            // CALL victim → word 4
+        asm.halt();                          // word 1 (legitimate return)
+
+        // --- Attacker's gadget ---
+        asm.movi(R0, 0xBAD);                // word 2 (attacker target at 0x08)
+        asm.halt();                          // word 3
+
+        // --- Victim function ---
+        asm.movi(R3, 0x8000_u16 as i32);   // word 4: data base (RW stack)
+        asm.st(LR, R3, 0);                  // word 5: spill LR
+
+        // --- Attacker overwrites saved LR ---
+        asm.movi(R5, 8);                     // word 6: gadget at 0x08
+        asm.st(R5, R3, 0);                  // word 7: corrupt saved LR
+
+        // --- Victim reloads and returns ---
+        asm.ld(LR, R3, 0);                  // word 8: LR now 0x08
+        asm.ret();                           // word 9: MUST fault
+
+        load_program(&mut fabric, &asm);
+        seal_text(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(CPU0, dom);
+        core.address_map.add(0x0000, 0x1000, text);
+        core.address_map.add(0x8000, 0x1000, data);
+
+        let result = core.run(&mut fabric, 100);
+
+        // The attacker gave us everything:
+        //   aligned ✓, sealed ✓, RX ✓, valid address ✓, stack corrupted ✓
+        // But data in LR is not return authority.
+        match &result {
+            StepResult::Fault(fault) => {
+                assert_eq!(fault.reason, FaultReason::ControlFlowViolation,
+                    "expected ControlFlowViolation, got {:?}", fault.reason);
+                assert_eq!(fault.offset, 8,
+                    "fault should report the corrupted LR value");
+                eprintln!("P21: hostile LR corruption → ControlFlowViolation ✓");
+                eprintln!("     attacker had: aligned ✓ sealed ✓ RX ✓ known-address ✓");
+                eprintln!("     attacker lacked: return authority minted by CALL");
+                eprintln!("     Rule 29: an executable address is not control-flow authority");
+            }
+            _ => panic!("expected ControlFlowViolation fault, got {:?}", result),
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // P22: RET on empty return stack → ControlFlowViolation
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p22_ret_without_call() {
+        let (mut fabric, _text, _data, _dom, mut core) = setup();
+
+        // Program: just RET (no prior CALL)
+        let mut asm = Asm64::new();
+        asm.ret();
+        load_program(&mut fabric, &asm);
+        seal_text(&mut fabric, _text, _dom);
+
+        let result = core.run(&mut fabric, 10);
+        match &result {
+            StepResult::Fault(fault) => {
+                assert_eq!(fault.reason, FaultReason::ControlFlowViolation);
+                eprintln!("P22: RET without CALL → ControlFlowViolation ✓");
+            }
+            _ => panic!("expected ControlFlowViolation, got {:?}", result),
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // P23: Legitimate CALL/RET still works (regression check)
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p23_legitimate_call_ret_with_return_stack() {
+        let (mut fabric, _text, _data, _dom, mut core) = setup();
+
+        // Same as P3 but explicitly verifies return stack is empty after
+        let mut asm = Asm64::new();
+        asm.movi(R0, 40);
+        asm.movi(R1, 2);
+        let call_addr = asm.here();
+        asm.call(4 - call_addr);   // call → word 4
+        asm.halt();                 // word 3
+        asm.add(R0, R0, R1);       // word 4: add function
+        asm.ret();                  // word 5
+        load_program(&mut fabric, &asm);
+        seal_text(&mut fabric, _text, _dom);
+
+        let result = core.run(&mut fabric, 100);
+        assert!(matches!(result, StepResult::Halted));
+        assert_eq!(core.r[R0 as usize], 42);
+        assert!(core.return_stack.is_empty(),
+            "return stack should be empty after matched CALL/RET");
+        eprintln!("P23: legitimate CALL/RET = 42, return stack empty ✓");
     }
 }
