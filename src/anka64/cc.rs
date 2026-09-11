@@ -40,6 +40,7 @@ pub enum Expr {
     AddrOf(VarId),              // &var
     Assign(VarId, Box<Expr>),   // var = expr
     DerefAssign(Box<Expr>, Box<Expr>), // *ptr = expr
+    Syscall(u8, Vec<Expr>),     // syscall(number, args) → result in R0
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -47,6 +48,10 @@ pub enum BinOp {
     Add,
     Sub,
     Mul,
+    And,
+    Or,
+    Shl,
+    Shr,
     Lt,
     Le,
     Eq,
@@ -284,6 +289,10 @@ impl Compiler {
                     BinOp::Add => self.asm.add(dest, dest, tmp),
                     BinOp::Sub => self.asm.sub(dest, dest, tmp),
                     BinOp::Mul => self.asm.mul(dest, dest, tmp),
+                    BinOp::And => self.asm.and(dest, dest, tmp),
+                    BinOp::Or  => self.asm.or(dest, dest, tmp),
+                    BinOp::Shl => self.asm.shl(dest, dest, tmp),
+                    BinOp::Shr => self.asm.shr(dest, dest, tmp),
                     BinOp::Lt => {
                         self.asm.cmp(dest, tmp);
                         self.asm.movi(dest, 0);
@@ -356,6 +365,20 @@ impl Compiler {
                 let tmp = if dest == R5 { R6 } else { R5 };
                 self.compile_expr(ptr_expr, tmp);
                 self.asm.st(dest, tmp, 0);
+            }
+            Expr::Syscall(num, args) => {
+                // Put arguments in R1, R2, R3 (syscall ABI)
+                for (i, arg) in args.iter().enumerate() {
+                    if i < 3 {
+                        self.compile_expr(arg, (i as u8) + 1);
+                    }
+                }
+                self.asm.movi(R0, *num as i32);
+                self.asm.trap(0);
+                // After kernel handles the syscall, result is in R0
+                if dest != R0 {
+                    self.asm.mov(dest, R0);
+                }
             }
         }
     }
