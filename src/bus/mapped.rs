@@ -84,17 +84,11 @@ impl MappedBus {
         None
     }
 
-    /// Get a mutable reference to a device by name (for injection, etc.)
+    /// Get a mutable reference to a device by name, with checked downcast.
     pub fn device_mut<T: Device + 'static>(&mut self, name: &str) -> Option<&mut T> {
         for mapping in &mut self.devices {
             if mapping.device.name() == name {
-                let ptr = mapping.device.as_mut() as *mut dyn Device;
-                // Safety: we know the concrete type because we matched by name.
-                // This is a controlled downcast.
-                unsafe {
-                    let any_ptr = ptr as *mut T;
-                    return Some(&mut *any_ptr);
-                }
+                return mapping.device.as_any_mut().downcast_mut::<T>();
             }
         }
         None

@@ -10,8 +10,10 @@
 //!
 //!   CPU arithmetic  →  observable I/O
 
+use std::any::Any;
+
 /// A memory-mapped I/O device.
-pub trait Device {
+pub trait Device: Any {
     /// Human-readable name (for debug/trace output).
     fn name(&self) -> &str;
 
@@ -31,4 +33,7 @@ pub trait Device {
     /// Advance the device's internal state by the given number of
     /// CPU cycles.  Used by clocked devices (e.g. timer).
     fn tick(&mut self, _cycles: u32) {}
+
+    /// Downcast support — the TCB should contain no unchecked casts.
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }

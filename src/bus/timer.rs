@@ -121,6 +121,8 @@ impl Device for Timer {
             self.pending = true;
         }
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
 #[cfg(test)]

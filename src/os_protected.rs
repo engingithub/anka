@@ -479,6 +479,7 @@ mod tests {
                 self.output.lock().unwrap().push(val);
             }
         }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     }
 
     /// Find the ISR entry by scanning for the MOVEM.L signature.

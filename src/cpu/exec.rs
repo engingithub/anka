@@ -447,18 +447,21 @@ impl<B: Bus> Cpu<B> {
                 16
             }
             0x4E70 => {
-                // RESET (supervisor only — simplified)
+                // RESET — privileged
+                if !self.require_supervisor() { return 34; }
                 20
             }
             0x4E72 => {
-                // STOP #imm
+                // STOP #imm — privileged
                 let imm = self.fetch_word();
-                self.sr.0 = imm;
+                if !self.require_supervisor() { return 4; }
+                self.set_sr_value(imm);
                 self.halted = true;
                 4
             }
             0x4E73 => {
-                // RTE — return from exception
+                // RTE — return from exception — privileged
+                if !self.require_supervisor() { return 20; }
                 let new_sr = self.pop16();
                 let new_pc = self.pop32();
                 self.set_sr_value(new_sr);
@@ -479,6 +482,20 @@ impl<B: Bus> Cpu<B> {
                 let old_sys = self.sr.0 & 0xFF00;
                 self.sr.0 = old_sys | ccr as u16;
                 20
+            }
+            op if op & 0xFFF8 == 0x4E60 => {
+                // MOVE An, USP — write USP (privileged)
+                if !self.require_supervisor() { return 4; }
+                let an = (op & 7) as usize;
+                self.usp = self.a[an];
+                4
+            }
+            op if op & 0xFFF8 == 0x4E68 => {
+                // MOVE USP, An — read USP (privileged)
+                if !self.require_supervisor() { return 4; }
+                let an = (op & 7) as usize;
+                self.a[an] = self.usp;
+                4
             }
             op if op & 0xFFF8 == 0x4E50 => {
                 // LINK An, #disp
@@ -1211,6 +1228,17 @@ impl<B: Bus> Cpu<B> {
     // MOVE to/from SR, CCR — privilege-sensitive register access
     // =======================================================================
 
+    /// Check supervisor mode; if user mode, take privilege violation
+    /// exception (vector 8) and return false.
+    fn require_supervisor(&mut self) -> bool {
+        if self.sr.supervisor() {
+            true
+        } else {
+            self.trap(8); // privilege violation
+            false
+        }
+    }
+
     /// Set SR with proper supervisor/user stack switching.
     fn set_sr_value(&mut self, new_sr: u16) {
         let was_super = self.sr.supervisor();
@@ -1228,8 +1256,9 @@ impl<B: Bus> Cpu<B> {
         self.bus.set_supervisor(will_be_super);
     }
 
-    /// MOVE SR, <ea>  (0x40C0) — read SR to destination
+    /// MOVE SR, <ea>  (0x40C0) — read SR to destination (privileged)
     fn move_from_sr(&mut self, opcode: u16) -> u32 {
+        if !self.require_supervisor() { return 6; }
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         let ea = Ea::decode(ea_mode, ea_reg, self);
@@ -1249,6 +1278,7 @@ impl<B: Bus> Cpu<B> {
 
     /// MOVE <ea>, SR  (0x46C0) — write full SR (privileged)
     fn move_to_sr(&mut self, opcode: u16) -> u32 {
+        if !self.require_supervisor() { return 12; }
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         let ea = Ea::decode(ea_mode, ea_reg, self);

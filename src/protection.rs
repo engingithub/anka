@@ -28,6 +28,83 @@ use crate::abi;
 use crate::bus::mapped::MappedBus;
 use crate::bus::{Bus, ADDR_MASK_68K};
 
+use std::fmt;
+
+// ───────────────────────────────────────────────────────────────────
+// Fault records
+// ───────────────────────────────────────────────────────────────────
+
+/// Why a protection fault occurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultReason {
+    /// No capability in the domain covers this address.
+    NoCapability,
+    /// A capability covers the address but not the requested permission.
+    WrongPermission,
+    /// Access to a supervisor-only device register from user mode.
+    DeviceAccessDenied,
+    /// Object generation mismatch (stale reference).
+    StaleGeneration,
+}
+
+impl fmt::Display for FaultReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoCapability => write!(f, "no authority"),
+            Self::WrongPermission => write!(f, "wrong permission"),
+            Self::DeviceAccessDenied => write!(f, "device access denied"),
+            Self::StaleGeneration => write!(f, "stale generation"),
+        }
+    }
+}
+
+/// A forensic fault record.
+///
+/// Carries enough context for the kernel to produce a precise
+/// diagnostic and for post-mortem analysis of adversarial behaviour.
+#[derive(Debug, Clone)]
+pub struct FaultRecord {
+    /// Faulting address.
+    pub address: u32,
+    /// Access width in bytes.
+    pub size: u32,
+    /// Attempted operation.
+    pub operation: Perm,
+    /// Why the access was denied.
+    pub reason: FaultReason,
+    /// Active domain index at fault time.
+    pub domain_id: usize,
+    /// Domain name (if available).
+    pub domain_name: String,
+}
+
+impl FaultRecord {
+    pub fn new(address: u32, size: u32, operation: Perm, reason: FaultReason) -> Self {
+        Self {
+            address, size, operation, reason,
+            domain_id: 0,
+            domain_name: String::new(),
+        }
+    }
+
+    fn with_domain(mut self, id: usize, name: &str) -> Self {
+        self.domain_id = id;
+        self.domain_name = name.to_string();
+        self
+    }
+}
+
+impl fmt::Display for FaultRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let op = if self.operation == Perm::READ { "READ" }
+                 else if self.operation == Perm::WRITE { "WRITE" }
+                 else { "EXEC" };
+        write!(f, "PROTECTION FAULT  domain={}({}) addr={:06X} {}x{} reason={}",
+            self.domain_id, self.domain_name,
+            self.address, op, self.size, self.reason)
+    }
+}
+
 // ───────────────────────────────────────────────────────────────────
 // Permissions
 // ───────────────────────────────────────────────────────────────────
@@ -126,8 +203,10 @@ pub struct ProtectedBus {
     domains: Vec<Domain>,
     active_domain: usize,
     supervisor: bool,
-    fault: Option<(u32, Perm)>, // (faulting address, attempted operation)
+    fault: Option<FaultRecord>,
     violations: u64,
+    /// Complete fault log for post-mortem analysis.
+    pub fault_log: Vec<FaultRecord>,
 }
 
 impl ProtectedBus {
@@ -136,9 +215,10 @@ impl ProtectedBus {
             inner,
             domains: Vec::new(),
             active_domain: 0,
-            supervisor: true, // boot in supervisor mode
+            supervisor: true,
             fault: None,
             violations: 0,
+            fault_log: Vec::new(),
         }
     }
 
@@ -154,8 +234,8 @@ impl ProtectedBus {
         self.active_domain = domain_id;
     }
 
-    /// Check and clear the fault flag.  Returns the faulting address.
-    pub fn take_fault(&mut self) -> Option<(u32, Perm)> {
+    /// Check and clear the fault flag.  Returns the full fault record.
+    pub fn take_fault(&mut self) -> Option<FaultRecord> {
         self.fault.take()
     }
 
@@ -173,9 +253,25 @@ impl ProtectedBus {
             if domain.permits(addr, size, op) {
                 return true;
             }
+            // Determine specific reason
+            let reason = if domain.caps.iter().any(|c| c.permits(addr, size, Perm::READ)
+                || c.permits(addr, size, Perm::WRITE)
+                || c.permits(addr, size, Perm(Perm::EXEC.0)))
+            {
+                FaultReason::WrongPermission
+            } else {
+                FaultReason::NoCapability
+            };
+            let record = FaultRecord::new(addr, size, op, reason)
+                .with_domain(self.active_domain, &domain.name);
+            self.fault_log.push(record.clone());
+            self.fault = Some(record);
+        } else {
+            let record = FaultRecord::new(addr, size, op, FaultReason::NoCapability)
+                .with_domain(self.active_domain, "<invalid>");
+            self.fault_log.push(record.clone());
+            self.fault = Some(record);
         }
-        // Deny
-        self.fault = Some((addr, op));
         self.violations += 1;
         false
     }
@@ -209,7 +305,21 @@ impl ProtectedBus {
 impl Bus for ProtectedBus {
     fn read8(&mut self, addr: u32) -> u8 {
         let masked = addr & ADDR_MASK_68K;
+        // Protection controller is supervisor-only privileged state,
+        // not an ordinary device.  User access → fault.
         if self.is_protect_reg(masked) {
+            if !self.supervisor {
+                let dom_name = self.domains.get(self.active_domain)
+                    .map(|d| d.name.as_str()).unwrap_or("<invalid>");
+                let record = FaultRecord::new(
+                    masked, 1, Perm::READ,
+                    FaultReason::DeviceAccessDenied,
+                ).with_domain(self.active_domain, dom_name);
+                self.fault_log.push(record.clone());
+                self.fault = Some(record);
+                self.violations += 1;
+                return 0xFF;
+            }
             return self.read_protect_reg(masked - abi::PROTECT_BASE);
         }
         if !self.check(masked, 1, Perm::READ) {
@@ -220,7 +330,20 @@ impl Bus for ProtectedBus {
 
     fn write8(&mut self, addr: u32, val: u8) {
         let masked = addr & ADDR_MASK_68K;
+        // Protection controller is supervisor-only.
         if self.is_protect_reg(masked) {
+            if !self.supervisor {
+                let dom_name = self.domains.get(self.active_domain)
+                    .map(|d| d.name.as_str()).unwrap_or("<invalid>");
+                let record = FaultRecord::new(
+                    masked, 1, Perm::WRITE,
+                    FaultReason::DeviceAccessDenied,
+                ).with_domain(self.active_domain, dom_name);
+                self.fault_log.push(record.clone());
+                self.fault = Some(record);
+                self.violations += 1;
+                return;
+            }
             self.write_protect_reg(masked - abi::PROTECT_BASE, val);
             return;
         }
@@ -243,7 +366,7 @@ impl Bus for ProtectedBus {
     }
 
     fn bus_fault(&mut self) -> Option<u32> {
-        self.fault.map(|(addr, _)| addr)
+        self.fault.as_ref().map(|r| r.address)
     }
 
     fn clear_bus_fault(&mut self) {

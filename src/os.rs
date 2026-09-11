@@ -321,6 +321,8 @@ mod tests {
                 self.output.lock().unwrap().push(val);
             }
         }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     }
 
     #[test]
