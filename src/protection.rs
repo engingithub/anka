@@ -31,6 +31,119 @@ use crate::bus::{Bus, ADDR_MASK_68K};
 use std::fmt;
 
 // ───────────────────────────────────────────────────────────────────
+// Object table — named memory objects with generation counters
+// ───────────────────────────────────────────────────────────────────
+
+/// State of a memory object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectState {
+    /// Object is live and its capabilities are valid.
+    Active,
+    /// Object has been freed; generation was bumped on free.
+    Freed,
+}
+
+/// An entry in the object table.
+#[derive(Debug, Clone)]
+pub struct ObjectEntry {
+    pub generation: u32,
+    pub base: u32,
+    pub length: u32,
+    pub state: ObjectState,
+    pub name: String,
+}
+
+/// The object table maps ObjectId → (generation, placement, state).
+///
+/// Revocation is accomplished by incrementing the generation counter.
+/// All capabilities holding the old generation become stale and will
+/// fail the generation check on access.
+#[derive(Debug, Clone, Default)]
+pub struct ObjectTable {
+    entries: Vec<ObjectEntry>,
+}
+
+impl ObjectTable {
+    pub fn new() -> Self { Self { entries: Vec::new() } }
+
+    /// Allocate a new object.  Returns the object ID.
+    pub fn alloc(&mut self, name: &str, base: u32, length: u32) -> u32 {
+        let id = self.entries.len() as u32;
+        self.entries.push(ObjectEntry {
+            generation: 0,
+            base,
+            length,
+            state: ObjectState::Active,
+            name: name.into(),
+        });
+        id
+    }
+
+    /// Create a capability for an object at its current generation.
+    pub fn make_cap(&self, object_id: u32, perms: Perm) -> Option<Capability> {
+        let entry = self.entries.get(object_id as usize)?;
+        if entry.state != ObjectState::Active { return None; }
+        Some(Capability {
+            object_id,
+            generation: entry.generation,
+            base: entry.base,
+            length: entry.length,
+            perms,
+        })
+    }
+
+    /// Create a sub-capability: same object, possibly narrower range
+    /// and attenuated permissions.  Authority cannot be widened.
+    pub fn derive_cap(
+        &self,
+        parent: &Capability,
+        base: u32,
+        length: u32,
+        perms: Perm,
+    ) -> Option<Capability> {
+        // Parent must still be valid
+        let entry = self.entries.get(parent.object_id as usize)?;
+        if entry.state != ObjectState::Active { return None; }
+        if parent.generation != entry.generation { return None; }
+        // Cannot widen permissions
+        if !parent.perms.contains(perms) { return None; }
+        // Cannot widen range: sub-range must be within parent
+        if base < parent.base { return None; }
+        if length > parent.length { return None; }
+        if base - parent.base > parent.length - length { return None; }
+
+        Some(Capability {
+            object_id: parent.object_id,
+            generation: parent.generation,
+            base,
+            length,
+            perms,
+        })
+    }
+
+    /// Revoke an object: bump generation, mark freed.
+    /// All capabilities holding the old generation become stale.
+    pub fn revoke(&mut self, object_id: u32) {
+        if let Some(entry) = self.entries.get_mut(object_id as usize) {
+            entry.generation = entry.generation.wrapping_add(1);
+            entry.state = ObjectState::Freed;
+        }
+    }
+
+    /// Validate a capability against the object table.
+    /// Returns true if the capability's generation matches the
+    /// object's current generation and the object is active.
+    pub fn validate(&self, cap: &Capability) -> bool {
+        if let Some(entry) = self.entries.get(cap.object_id as usize) {
+            entry.state == ObjectState::Active
+                && cap.generation == entry.generation
+        } else {
+            false
+        }
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────
 // Fault records
 // ───────────────────────────────────────────────────────────────────
 
@@ -207,6 +320,8 @@ pub struct ProtectedBus {
     violations: u64,
     /// Complete fault log for post-mortem analysis.
     pub fault_log: Vec<FaultRecord>,
+    /// Object table for generation-based revocation.
+    pub objects: ObjectTable,
 }
 
 impl ProtectedBus {
@@ -219,6 +334,7 @@ impl ProtectedBus {
             fault: None,
             violations: 0,
             fault_log: Vec::new(),
+            objects: ObjectTable::new(),
         }
     }
 
@@ -245,15 +361,40 @@ impl ProtectedBus {
     }
 
     /// Check whether an access is permitted.
+    ///
+    /// For each capability in the active domain, we check:
+    ///   1. Range and permission (cap_permits)
+    ///   2. Generation validity against the object table
+    ///
+    /// If a capability covers the range but its generation is stale,
+    /// we report StaleGeneration rather than NoCapability.
     fn check(&mut self, addr: u32, size: u32, op: Perm) -> bool {
         if self.supervisor {
             return true;
         }
         if let Some(domain) = self.domains.get(self.active_domain) {
-            if domain.permits(addr, size, op) {
-                return true;
+            // Check each capability: range+permission first, then generation
+            for cap in &domain.caps {
+                if cap.permits(addr, size, op) {
+                    // Range and permissions match — check generation
+                    if self.objects.entries.is_empty() {
+                        // No object table configured — legacy mode,
+                        // skip generation check (v0.1 compatibility)
+                        return true;
+                    }
+                    if self.objects.validate(cap) {
+                        return true;
+                    }
+                    // Generation mismatch — stale capability
+                    let record = FaultRecord::new(addr, size, op, FaultReason::StaleGeneration)
+                        .with_domain(self.active_domain, &domain.name);
+                    self.fault_log.push(record.clone());
+                    self.fault = Some(record);
+                    self.violations += 1;
+                    return false;
+                }
             }
-            // Determine specific reason
+            // No capability covers the range
             let reason = if domain.caps.iter().any(|c| c.permits(addr, size, Perm::READ)
                 || c.permits(addr, size, Perm::WRITE)
                 || c.permits(addr, size, Perm(Perm::EXEC.0)))
@@ -274,6 +415,42 @@ impl ProtectedBus {
         }
         self.violations += 1;
         false
+    }
+
+    /// Perform a DMA write on behalf of a device agent.
+    ///
+    /// The device provides its own capability (not the CPU's domain).
+    /// The write is checked against the object table for generation
+    /// validity.  This is the same protection fabric — every bus
+    /// master is an agent.
+    pub fn dma_write(&mut self, cap: &Capability, offset: u32, data: &[u8]) -> Result<(), FaultRecord> {
+        let addr = cap.base.wrapping_add(offset);
+
+        // Validate the capability against the object table
+        if !self.objects.validate(cap) {
+            let record = FaultRecord::new(addr, data.len() as u32, Perm::WRITE,
+                FaultReason::StaleGeneration)
+                .with_domain(usize::MAX, "dma-agent");
+            self.fault_log.push(record.clone());
+            self.violations += 1;
+            return Err(record);
+        }
+
+        // Check range
+        if !cap.permits(addr, data.len() as u32, Perm::WRITE) {
+            let record = FaultRecord::new(addr, data.len() as u32, Perm::WRITE,
+                FaultReason::NoCapability)
+                .with_domain(usize::MAX, "dma-agent");
+            self.fault_log.push(record.clone());
+            self.violations += 1;
+            return Err(record);
+        }
+
+        // Authorized — perform the write
+        for (i, &byte) in data.iter().enumerate() {
+            self.inner.write8(addr.wrapping_add(i as u32), byte);
+        }
+        Ok(())
     }
 }
 
@@ -444,12 +621,99 @@ mod tests {
     }
 
     #[test]
-    fn generation_field_is_structural() {
-        let cap = Capability::new(1, 0x1000, 0x100, Perm::RW);
-        assert!(cap.permits(0x1050, 4, Perm::WRITE));
+    fn object_table_alloc_and_revoke() {
+        let mut ot = ObjectTable::new();
+        let id = ot.alloc("buffer", 0x1000, 0x100);
+        assert_eq!(id, 0);
+
+        // Make a capability
+        let cap = ot.make_cap(id, Perm::RW).unwrap();
         assert_eq!(cap.generation, 0);
-        assert_eq!(cap.object_id, 1);
-        // Full generation-based revocation checking will be added
-        // when object IDs are tracked at the domain level.
+        assert!(ot.validate(&cap));
+
+        // Revoke — generation bumps, cap becomes stale
+        ot.revoke(id);
+        assert!(!ot.validate(&cap));
+        assert_eq!(ot.entries[0].generation, 1);
+        assert_eq!(ot.entries[0].state, ObjectState::Freed);
+    }
+
+    #[test]
+    fn sub_capability_cannot_widen() {
+        let mut ot = ObjectTable::new();
+        let id = ot.alloc("region", 0x2000, 0x1000);
+        let parent = ot.make_cap(id, Perm::READ).unwrap();
+
+        // Cannot widen permissions
+        assert!(ot.derive_cap(&parent, 0x2000, 0x100, Perm::RW).is_none());
+
+        // Can narrow range
+        let child = ot.derive_cap(&parent, 0x2100, 0x100, Perm::READ).unwrap();
+        assert_eq!(child.base, 0x2100);
+        assert_eq!(child.length, 0x100);
+        assert_eq!(child.generation, parent.generation);
+    }
+
+    #[test]
+    fn generation_check_in_bus() {
+        let mut inner = MappedBus::new(0x10000);
+        inner.write8(0x1000, 0x42);
+
+        let mut bus = ProtectedBus::new(inner);
+
+        // Set up object table
+        let obj_id = bus.objects.alloc("testobj", 0x1000, 0x100);
+        let cap = bus.objects.make_cap(obj_id, Perm::RW).unwrap();
+
+        // Grant the capability to domain 0
+        let mut dom = Domain::new("proc0");
+        dom.grant(cap.clone());
+        bus.add_domain(dom);
+        bus.set_domain(0);
+
+        // User mode read — should succeed (generation matches)
+        bus.set_supervisor(false);
+        assert_eq!(bus.read8(0x1000), 0x42);
+        assert!(bus.take_fault().is_none());
+
+        // Revoke the object
+        bus.objects.revoke(obj_id);
+
+        // User mode read — should fail (generation stale)
+        let val = bus.read8(0x1000);
+        assert_eq!(val, 0xFF);
+        let fault = bus.take_fault().unwrap();
+        assert_eq!(fault.reason, FaultReason::StaleGeneration);
+    }
+
+    #[test]
+    fn dma_write_and_revocation() {
+        let inner = MappedBus::new(0x10000);
+        let mut bus = ProtectedBus::new(inner);
+
+        // Allocate a buffer object
+        let buf_id = bus.objects.alloc("dma-buffer", 0x4000, 0x100);
+        let cap = bus.objects.make_cap(buf_id, Perm::RW).unwrap();
+
+        // DMA write succeeds before revocation
+        let data = [0xDE, 0xAD, 0xBE, 0xEF];
+        assert!(bus.dma_write(&cap, 0, &data).is_ok());
+        assert_eq!(bus.inner.read8(0x4000), 0xDE);
+        assert_eq!(bus.inner.read8(0x4003), 0xEF);
+
+        // Revoke the buffer
+        bus.objects.revoke(buf_id);
+
+        // DMA write with stale capability — DENIED
+        let stale_data = [0xFF, 0xFF, 0xFF, 0xFF];
+        let result = bus.dma_write(&cap, 0, &stale_data);
+        assert!(result.is_err());
+        let fault = result.unwrap_err();
+        assert_eq!(fault.reason, FaultReason::StaleGeneration);
+
+        // Memory is UNCHANGED — the denied write had no side effect
+        assert_eq!(bus.inner.read8(0x4000), 0xDE);
+        assert_eq!(bus.inner.read8(0x4003), 0xEF);
+        assert_eq!(bus.violation_count(), 1);
     }
 }
