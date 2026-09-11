@@ -3,67 +3,76 @@
 // 0 axioms.  Every property derived from the scheduler
 // and transition semantics modeled below.
 //
-// Litmus test: negate any architectural rule in the
-// definitions and at least one proof fails.
+// Rule 28: one semantic fact, one authoritative definition.
+// Authorization is reproduced exactly from anka64_state_invariants.kleis.
+// The memory model depends on the canonical protection predicate,
+// not its own smaller copy.
 
 import "stdlib/prelude.kleis"
 
 // ═══════════════════════════════════════════════════
-// Concrete scheduler: two-core round-robin
+// Concrete scheduler: 3-agent round-robin
 // ═══════════════════════════════════════════════════
 //
-// MultiCore::run_sc() in multicore.rs steps cores
-// round-robin, one instruction per core per round.
-// Core c (0 or 1) with program-sequence s executes
-// at global slot:
+// Agents: CPU0, CPU1, DMA0.
+// All committed transactions share one global order.
+// Agent a with program-sequence s executes at global slot:
 //
-//     G(s, c) = 2·s + c
-//
-// This is the actual scheduling rule, not an axiom.
+//     slot(s, a) = 3·s + a
 
-define G(seq : BitVec32, core : BitVec32) : BitVec32 =
-    bvadd(bvmul(bvconst(2, 32), seq), core)
+define AGENT_CPU0  = bvconst(0, 32)
+define AGENT_CPU1  = bvconst(1, 32)
+define AGENT_DMA0  = bvconst(2, 32)
+define NUM_AGENTS  = bvconst(3, 32)
 
-// Overflow guard: 2·SEQ_BOUND + 1 < 2^31.
-define SEQ_BOUND = bvconst(1073741823, 32)
+// Overflow guard: 3·SLOT_BOUND + 2 < 2^32.
+// 715827882 × 3 + 2 = 2147483648 = 2^31, within unsigned 32-bit.
+define SLOT_BOUND = bvconst(715827882, 32)
+
+define slot(seq : BitVec32, agent : BitVec32) : BitVec32 =
+    bvadd(bvmul(NUM_AGENTS, seq), agent)
 
 // ═══════════════════════════════════════════════════
 // Concrete memory transition: one symbolic location
 // ═══════════════════════════════════════════════════
-//
-// Every committed event applies exactly one transition.
-// State_k → (event) → State_{k+1}.
-// XCHG is one transition, not two phases.
 
 define KIND_READ  = bvconst(0, 8)
 define KIND_WRITE = bvconst(1, 8)
 define KIND_XCHG  = bvconst(2, 8)
 
 // Memory state after event commits.
-// READ:        memory unchanged
-// WRITE(val):  memory ← val
-// XCHG(val):   memory ← val  (new value written)
 define mem_after(old : BitVec64, kind : BitVec8, val : BitVec64) : BitVec64 =
     if kind = KIND_WRITE then val
     else if kind = KIND_XCHG then val
     else old
 
 // Value observed by the agent that issued the event.
-// READ:   observes current memory
-// XCHG:   observes old memory (before write)
-// WRITE:  agent doesn't read (returns 0, unused)
 define observed(mem : BitVec64, kind : BitVec8) : BitVec64 =
     if kind = KIND_READ then mem
     else if kind = KIND_XCHG then mem
     else bvconst(0, 64)
 
 // ═══════════════════════════════════════════════════
-// Concrete authorization: no CoreId argument
+// Canonical authorization
 // ═══════════════════════════════════════════════════
 //
-// Reuses the Phase 0 model.  Authorization is a
-// function of (domain, object, generation, offset,
-// permission) — never core identity.
+// Reproduced exactly from anka64_state_invariants.kleis.
+// Permission encoding, generation model, overflow-safe
+// range checks — identical definitions, not a simplification.
+
+// ── Permission encoding (4-bit: R=1, W=2, X=4, A=8) ──
+
+define perm_R    = bvconst(1, 4)
+define perm_W    = bvconst(2, 4)
+define perm_X    = bvconst(4, 4)
+define perm_A    = bvconst(8, 4)
+define perm_RW   = bvor(perm_R, perm_W)
+define perm_NONE = bvconst(0, 4)
+
+define has_perm(held : BitVec4, required : BitVec4) =
+    bvand(held, required) = required
+
+// ── Generation model (64-bit) ──
 
 define generation_match(cap_gen : BitVec64, obj_gen : BitVec64) =
     cap_gen = obj_gen
@@ -71,82 +80,102 @@ define generation_match(cap_gen : BitVec64, obj_gen : BitVec64) =
 define revoke_gen(g : BitVec64) =
     bvadd(g, bvconst(1, 64))
 
+// ── Object-relative range inclusion (overflow-safe) ──
+
+define cap_within_object(
+    cap_off : BitVec64, cap_len : BitVec64, obj_size : BitVec64
+) =
+    bvule(cap_len, obj_size)
+    ∧ bvule(cap_off, bvsub(obj_size, cap_len))
+
+define req_within_cap(
+    req_off : BitVec64, req_width : BitVec64,
+    cap_off : BitVec64, cap_len : BitVec64
+) =
+    bvule(bvconst(1, 64), req_width)
+    ∧ bvule(cap_off, req_off)
+    ∧ bvule(req_width, cap_len)
+    ∧ bvule(bvsub(req_off, cap_off), bvsub(cap_len, req_width))
+
+// ── Authorization (canonical, no AgentId/CoreId input) ──
+
 define authorize(
-    cap_gen  : BitVec64, obj_gen : BitVec64,
-    cap_base : BitVec64, cap_len : BitVec64,
-    req_off  : BitVec64,
-    cap_perm : BitVec8, req_perm : BitVec8
+    cap_gen   : BitVec64, obj_gen  : BitVec64,
+    cap_off   : BitVec64, cap_len  : BitVec64,
+    cap_perm  : BitVec4,
+    obj_size  : BitVec64,
+    req_off   : BitVec64, req_width : BitVec64,
+    req_perm  : BitVec4
 ) =
     generation_match(cap_gen, obj_gen)
-    ∧ bvule(cap_base, req_off)
-    ∧ bvult(req_off, bvadd(cap_base, cap_len))
-    ∧ bvand(req_perm, cap_perm) = req_perm
+    ∧ cap_within_object(cap_off, cap_len, obj_size)
+    ∧ req_within_cap(req_off, req_width, cap_off, cap_len)
+    ∧ has_perm(cap_perm, req_perm)
 
-// Wrapper that takes a core argument but ignores it.
-// Its only purpose is the M3 regression test.
+// Wrapper that takes an agent argument but ignores it.
 define authorize_for(
-    core     : BitVec32,
-    cap_gen  : BitVec64, obj_gen : BitVec64,
-    cap_base : BitVec64, cap_len : BitVec64,
-    req_off  : BitVec64,
-    cap_perm : BitVec8, req_perm : BitVec8
+    agent     : BitVec32,
+    cap_gen   : BitVec64, obj_gen  : BitVec64,
+    cap_off   : BitVec64, cap_len  : BitVec64,
+    cap_perm  : BitVec4,
+    obj_size  : BitVec64,
+    req_off   : BitVec64, req_width : BitVec64,
+    req_perm  : BitVec4
 ) =
-    authorize(cap_gen, obj_gen, cap_base, cap_len,
-              req_off, cap_perm, req_perm)
+    authorize(cap_gen, obj_gen, cap_off, cap_len, cap_perm,
+              obj_size, req_off, req_width, req_perm)
 
 // ═══════════════════════════════════════════════════
 // Concrete commit semantics
 // ═══════════════════════════════════════════════════
 
-define commit_succeeds(auth_gen : BitVec64, obj_gen_at_commit : BitVec64) =
-    generation_match(auth_gen, obj_gen_at_commit)
+define commit_allowed(cap_gen : BitVec64, obj_gen_at_commit : BitVec64) =
+    generation_match(cap_gen, obj_gen_at_commit)
 
-// Guarded write: memory changes only when commit succeeds.
+define can_commit(
+    cap_gen   : BitVec64, obj_gen  : BitVec64,
+    cap_off   : BitVec64, cap_len  : BitVec64,
+    cap_perm  : BitVec4,
+    obj_size  : BitVec64,
+    req_off   : BitVec64, req_width : BitVec64,
+    req_perm  : BitVec4
+) =
+    authorize(cap_gen, obj_gen, cap_off, cap_len, cap_perm,
+              obj_size, req_off, req_width, req_perm)
+    ∧ commit_allowed(cap_gen, obj_gen)
+
 define guarded_write(old : BitVec64, val : BitVec64, committed : Bool) : BitVec64 =
     if committed then val else old
 
 // ═══════════════════════════════════════════════════
 // M1 — Program order preserved in global order
 // ═══════════════════════════════════════════════════
-//
-// Derived from the concrete scheduler G(s, c) = 2s+c.
-// G(a) < G(b) is NOT a premise — it follows from
-// the arithmetic of the round-robin rule.
 
 example "M1 round-robin preserves program order" {
     assert(
-        ∀ sa : BitVec32 . ∀ sb : BitVec32 . ∀ c : BitVec32 .
-        (bvult(c, bvconst(2, 32))
+        ∀ sa : BitVec32 . ∀ sb : BitVec32 . ∀ a : BitVec32 .
+        (bvult(a, NUM_AGENTS)
          ∧ bvult(sa, sb)
-         ∧ bvult(sb, SEQ_BOUND))
-        → bvult(G(sa, c), G(sb, c))
+         ∧ bvult(sb, SLOT_BOUND))
+        → bvult(slot(sa, a), slot(sb, a))
     )
 }
 
 // ═══════════════════════════════════════════════════
 // M2 — Atomic indivisibility
 // ═══════════════════════════════════════════════════
-//
-// XCHG is one transition, not two phases.
-// No intermediate state exists between read and write.
 
-// Two distinct cores at the same round get distinct
-// global slots.  No event can interpose into XCHG
-// because there is no slot between its read and write.
-example "M2 distinct cores get distinct global slots" {
+example "M2 distinct agents get distinct global slots" {
     assert(
-        ∀ s : BitVec32 . ∀ ca : BitVec32 . ∀ cb : BitVec32 .
-        (bvult(s, SEQ_BOUND)
-         ∧ bvult(ca, bvconst(2, 32))
-         ∧ bvult(cb, bvconst(2, 32))
-         ∧ ¬(ca = cb))
-        → ¬(G(s, ca) = G(s, cb))
+        ∀ s : BitVec32 . ∀ a : BitVec32 . ∀ b : BitVec32 .
+        (bvult(s, SLOT_BOUND)
+         ∧ bvult(a, NUM_AGENTS)
+         ∧ bvult(b, NUM_AGENTS)
+         ∧ ¬(a = b))
+        → ¬(slot(s, a) = slot(s, b))
     )
 }
 
-// XCHG as one step: observes old, writes new.
-// If mem_after returned old instead of new_val,
-// this proof would fail.
 example "M2 XCHG reads old and writes new in one step" {
     assert(
         ∀ old : BitVec64 . ∀ new_val : BitVec64 .
@@ -155,8 +184,6 @@ example "M2 XCHG reads old and writes new in one step" {
     )
 }
 
-// 3-event trace: write v1, XCHG with new=v2, read.
-// XCHG observes v1, writes v2.  Final read sees v2.
 example "M2 write-xchg-read trace" {
     assert(
         ∀ s0 : BitVec64 . ∀ v1 : BitVec64 . ∀ v2 : BitVec64 .
@@ -168,66 +195,78 @@ example "M2 write-xchg-read trace" {
 }
 
 // ═══════════════════════════════════════════════════
-// M3 — Protection independent of core identity
+// M3 — Protection independent of agent identity
 // ═══════════════════════════════════════════════════
 //
-// Structural theorem.  authorize_for(core, R)
-// delegates to authorize(R) which has no CoreId
-// argument.  If anyone adds CoreId to authorize,
-// this proof breaks.
+// Structural regression theorem.
+// authorize_for(agent, ...) delegates to authorize(...)
+// which has no agent argument.
 
-example "M3 authorization core-agnostic" {
+example "M3 authorization agent-agnostic" {
     assert(
-        ∀ c0 : BitVec32 . ∀ c1 : BitVec32 .
+        ∀ a0 : BitVec32 . ∀ a1 : BitVec32 .
         ∀ cg : BitVec64 . ∀ og : BitVec64 .
-        ∀ cb : BitVec64 . ∀ cl : BitVec64 .
-        ∀ ro : BitVec64 .
-        ∀ cp : BitVec8 . ∀ rp : BitVec8 .
-        authorize_for(c0, cg, og, cb, cl, ro, cp, rp)
-        = authorize_for(c1, cg, og, cb, cl, ro, cp, rp)
+        ∀ co : BitVec64 . ∀ cl : BitVec64 .
+        ∀ cp : BitVec4 .
+        ∀ os : BitVec64 .
+        ∀ ro : BitVec64 . ∀ rw : BitVec64 .
+        ∀ rp : BitVec4 .
+        authorize_for(a0, cg, og, co, cl, cp, os, ro, rw, rp)
+        = authorize_for(a1, cg, og, co, cl, cp, os, ro, rw, rp)
     )
 }
 
 // ═══════════════════════════════════════════════════
 // M4 — Revocation wins the race
 // ═══════════════════════════════════════════════════
-//
-// Model: authorize at generation g, revoke (g→g+1),
-// then commit.  commit_succeeds checks generation
-// match.  The revoke bumps it, so commit fails.
-//
-// If revoke_gen returned g (no bump), the proof fails.
 
-// Follows the C1 pattern from anka_concurrent_protection.kleis:
-// authorized at g, revoke to g+1, commit fails.
-// No overflow guard needed: g+1 ≠ g for all bitvector values.
 example "M4 revocation between authorize and commit faults" {
     assert(
         ∀ g : BitVec64 .
         generation_match(g, g)
-        → ¬commit_succeeds(g, revoke_gen(g))
+        → ¬commit_allowed(g, revoke_gen(g))
     )
 }
 
-// Memory is unchanged when commit fails.
-// If guarded_write ignored the committed flag,
-// the proof would fail.
 example "M4 revocation preserves memory" {
     assert(
         ∀ g : BitVec64 . ∀ old : BitVec64 . ∀ val : BitVec64 .
-        guarded_write(old, val, commit_succeeds(g, revoke_gen(g))) = old
+        guarded_write(old, val, commit_allowed(g, revoke_gen(g))) = old
     )
 }
 
 // ═══════════════════════════════════════════════════
-// M5 — DMA in the same transition order
+// M5 — DMA participates in the same global order
 // ═══════════════════════════════════════════════════
 //
-// CPU and DMA events use the same mem_after function.
-// Agent identity does not appear in the transition.
-// The ordering depends only on position in the trace.
+// CPU and DMA agents are all assigned slots via
+// slot(seq, agent).  The same mem_after transition
+// applies to every agent.  Agent identity is absent
+// from both the scheduler slot assignment arithmetic
+// and the memory transition.
 
-// CPU writes v1, DMA writes v2, read sees v2.
+// DMA program order is preserved in the global order
+// (same scheduler, same proof).
+example "M5 DMA program order preserved" {
+    assert(
+        ∀ sa : BitVec32 . ∀ sb : BitVec32 .
+        (bvult(sa, sb) ∧ bvult(sb, SLOT_BOUND))
+        → bvult(slot(sa, AGENT_DMA0), slot(sb, AGENT_DMA0))
+    )
+}
+
+// CPU and DMA get distinct slots at the same round.
+example "M5 CPU0 and DMA0 get distinct slots" {
+    assert(
+        ∀ s : BitVec32 .
+        bvult(s, SLOT_BOUND)
+        → ¬(slot(s, AGENT_CPU0) = slot(s, AGENT_DMA0))
+    )
+}
+
+// CPU write → DMA write → CPU read: last writer (DMA) wins.
+// Agent identity appears in comments only — the transition
+// is the same mem_after function for every agent.
 example "M5 CPU-write DMA-write read returns DMA value" {
     assert(
         ∀ s0 : BitVec64 . ∀ v_cpu : BitVec64 . ∀ v_dma : BitVec64 .
@@ -237,7 +276,7 @@ example "M5 CPU-write DMA-write read returns DMA value" {
     )
 }
 
-// Reversed: DMA writes v1, CPU writes v2, read sees v2.
+// Reversed order: DMA first, then CPU.  CPU value wins.
 example "M5 DMA-write CPU-write read returns CPU value" {
     assert(
         ∀ s0 : BitVec64 . ∀ v_dma : BitVec64 . ∀ v_cpu : BitVec64 .
@@ -251,48 +290,40 @@ example "M5 DMA-write CPU-write read returns CPU value" {
 // M6 — Commitment implies authorization
 // ═══════════════════════════════════════════════════
 //
-// The commit transition requires both authorization
-// AND generation match.  This connects Phase 5 to
-// the Phase 0 capability model.
-
-define can_commit(
-    cap_gen  : BitVec64, obj_gen : BitVec64,
-    cap_base : BitVec64, cap_len : BitVec64,
-    req_off  : BitVec64,
-    cap_perm : BitVec8, req_perm : BitVec8
-) =
-    authorize(cap_gen, obj_gen, cap_base, cap_len,
-              req_off, cap_perm, req_perm)
-    ∧ commit_succeeds(cap_gen, obj_gen)
+// Uses the canonical authorize, not a simplified copy.
+// can_commit = authorize ∧ commit_allowed.
 
 // First theorem: committed → authorized.
-// Falls directly out of the transition semantics.
 example "M6 commitment implies authorization" {
     assert(
         ∀ cg : BitVec64 . ∀ og : BitVec64 .
-        ∀ cb : BitVec64 . ∀ cl : BitVec64 .
-        ∀ ro : BitVec64 .
-        ∀ cp : BitVec8 . ∀ rp : BitVec8 .
-        can_commit(cg, og, cb, cl, ro, cp, rp)
-        → authorize(cg, og, cb, cl, ro, cp, rp)
+        ∀ co : BitVec64 . ∀ cl : BitVec64 .
+        ∀ cp : BitVec4 .
+        ∀ os : BitVec64 .
+        ∀ ro : BitVec64 . ∀ rw : BitVec64 .
+        ∀ rp : BitVec4 .
+        can_commit(cg, og, co, cl, cp, os, ro, rw, rp)
+        → authorize(cg, og, co, cl, cp, os, ro, rw, rp)
     )
 }
 
-// Second theorem: committed → valid capability covers
-// the request (range check, permission check).
-// Connects Phase 5 commitment to Phase 0 capability
-// coverage predicates.
-example "M6 commitment implies capability coverage" {
+// Second theorem: committed → canonical capability coverage.
+// Extracts exactly the Phase 0 coverage predicates:
+// generation match, cap within object, request within cap,
+// permission inclusion.
+example "M6 commitment implies canonical capability coverage" {
     assert(
         ∀ cg : BitVec64 . ∀ og : BitVec64 .
-        ∀ cb : BitVec64 . ∀ cl : BitVec64 .
-        ∀ ro : BitVec64 .
-        ∀ cp : BitVec8 . ∀ rp : BitVec8 .
-        can_commit(cg, og, cb, cl, ro, cp, rp)
-        → (cg = og
-           ∧ bvule(cb, ro)
-           ∧ bvult(ro, bvadd(cb, cl))
-           ∧ bvand(rp, cp) = rp)
+        ∀ co : BitVec64 . ∀ cl : BitVec64 .
+        ∀ cp : BitVec4 .
+        ∀ os : BitVec64 .
+        ∀ ro : BitVec64 . ∀ rw : BitVec64 .
+        ∀ rp : BitVec4 .
+        can_commit(cg, og, co, cl, cp, os, ro, rw, rp)
+        → (generation_match(cg, og)
+           ∧ cap_within_object(co, cl, os)
+           ∧ req_within_cap(ro, rw, co, cl)
+           ∧ has_perm(cp, rp))
     )
 }
 
@@ -300,22 +331,26 @@ example "M6 commitment implies capability coverage" {
 // Summary
 // ═══════════════════════════════════════════════════
 //
-// Concrete definitions, not axioms:
-//   G(seq, core)              — round-robin scheduler
-//   mem_after(old, kind, val) — memory transition
-//   observed(mem, kind)       — agent observation
-//   authorize(...)            — capability check (no CoreId)
-//   revoke_gen(g)             — generation bump
-//   commit_succeeds(a, c)     — generation revalidation
-//   guarded_write(old, v, ok) — conditional memory update
+// Concrete definitions (14), not axioms (0):
+//   slot(seq, agent) = 3·seq + agent   — 3-agent scheduler
+//   mem_after(old, kind, val)           — memory transition
+//   observed(mem, kind)                 — agent observation
+//   authorize(9 params)                 — canonical from state_invariants
+//   authorize_for(agent + 9 params)     — core-independence wrapper
+//   revoke_gen(g) = g + 1              — generation bump
+//   commit_allowed(a, c)               — generation revalidation
+//   can_commit(9 params)               — authorize ∧ commit_allowed
+//   guarded_write(old, val, ok)        — conditional memory update
+//   + permission, generation, range helper predicates
 //
-// Derived properties:
-//   M1 — program order preserved (scheduler arithmetic)
-//   M2 — XCHG indivisible (one transition, distinct slots)
-//   M3 — core-agnostic authorization (structural regression)
-//   M4 — revocation wins (gen bump → commit fails → mem unchanged)
-//   M5 — DMA same transition (last writer wins, agent-blind)
-//   M6 — commitment → authorization → capability coverage
+// Agents: CPU0(0), CPU1(1), DMA0(2) — all in the same slot order.
 //
-// Total: 29 instructions, 2 cores, sequential consistency.
-// Total: 0 axioms.
+// Derived properties (13 Z3 proofs):
+//   M1 — program order from scheduler arithmetic
+//   M2 — XCHG indivisible: one transition, distinct slots, trace
+//   M3 — agent-agnostic authorization (structural)
+//   M4 — revocation: gen bump → commit fails → memory unchanged
+//   M5 — DMA program order, distinct slots, last-writer-wins
+//   M6 — commitment → canonical authorization → capability coverage
+//
+// Rule 28: one semantic fact, one authoritative definition.
