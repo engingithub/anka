@@ -1368,6 +1368,20 @@ mod tests {
                         binop(BinOp::Add, var(SRC_BASE), lit(8))
                     )),
 
+                    // ─── Source metadata guard ──────────────────
+                    // Source object = 0x1000 bytes. Header = 8 bytes.
+                    // Max valid text payload = 0x1000 - 8 = 0xFF8 = 4088.
+                    // A malformed header claiming more would cause reads
+                    // beyond the source object into adjacent capabilities.
+                    // Memory authority ≠ source-role authority.
+                    Stmt::If(
+                        binop(BinOp::Lt, lit(0xFF8), var(SRC_LEN)),
+                        vec![
+                            Stmt::Expr(syscall(SYS_EXIT as u8, vec![lit(-1)])),
+                        ],
+                        vec![],
+                    ),
+
                     // Declare loop-scoped variables once (no VarDecl in loop)
                     Stmt::VarDecl(ALIGNED, Type::Int, Some(lit(0))),
                     Stmt::VarDecl(WORD, Type::Int, Some(lit(0))),
@@ -1635,6 +1649,81 @@ mod tests {
         (child_spawned, exit_code)
     }
 
+    /// Raw 6B.0 test: explicit (declared_length, payload) control.
+    ///
+    /// Unlike run_6b0_test, the caller controls the length header
+    /// independently of the actual payload bytes.  This exercises
+    /// the distinction between memory authority and source-role
+    /// semantics.
+    fn run_6b0_test_raw(
+        declared_len: u64,
+        payload: &[u8],
+        expected_exit: u64,
+        expect_child: bool,
+    ) {
+        let mut fabric = Fabric::new(0x400000);
+
+        let text   = fabric.alloc_object("compiler_text",  0x4000, ObjectKind::Memory);
+        let source = fabric.alloc_object("source_data",    0x1000, ObjectKind::Memory);
+        let output = fabric.alloc_object("output_buf",     0x1000, ObjectKind::Memory);
+        let work   = fabric.alloc_object("workspace",      0x1000, ObjectKind::Memory);
+        let stack  = fabric.alloc_object("compiler_stack", 0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text,   0x000000);
+        fabric.place_object(source, 0x010000);
+        fabric.place_object(output, 0x020000);
+        fabric.place_object(work,   0x030000);
+        fabric.place_object(stack,  0x040000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, source, 0, 0x1000, Permissions::READ);
+        fabric.grant(dom, output, 0, 0x1000, Permissions::RWS);
+        fabric.grant(dom, work,   0, 0x1000, Permissions::RW);
+        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+
+        // Write source with explicit length header
+        fabric.write_physical(0x010000, &declared_len.to_le_bytes());
+        let write_len = payload.len().min(0xFF8); // don't overflow object
+        fabric.write_physical(0x010008, &payload[..write_len]);
+
+        install_trap_handler(&mut fabric, 0x000000);
+
+        let compiler_prog = build_6b0_compiler();
+        let asm = cc::compile(&compiler_prog);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x04000, 0x1000, source);
+        core.address_map.add(0x05000, 0x1000, output);
+        core.address_map.add(0x06000, 0x1000, work);
+        core.address_map.add(0x07000, 0x4000, stack);
+        core.r[SP as usize] = 0x07000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x050000;
+        kernel.next_agent = 10;
+        kernel.spawn(core);
+        kernel.run(10000, 10000);
+
+        assert!(kernel.processes[0].exited,
+            "compiler process should have exited");
+        assert_eq!(kernel.processes[0].exit_code, expected_exit,
+            "declared_len={}, payload {:?}: expected exit {}, got {}",
+            declared_len,
+            std::str::from_utf8(payload).unwrap_or("<binary>"),
+            expected_exit, kernel.processes[0].exit_code);
+
+        if expect_child {
+            assert!(kernel.processes.len() >= 2,
+                "expected child process");
+            assert!(kernel.processes[1].exited);
+            assert_eq!(kernel.processes[1].exit_code, expected_exit);
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // 6B.0 / 6B.0a test corpus
     // ═══════════════════════════════════════════════════════════════
@@ -1730,10 +1819,35 @@ mod tests {
 
     #[test]
     fn b0a_length_bounded_trailing_digits() {
-        // Source text is "42" but source object might contain more data.
-        // We rely on the length header (2) to stop scanning.
-        // The test harness writes length=2, so only "42" is scanned.
-        run_6b0_test(b"42", 42, true);
-        eprintln!("6B.0a: length-bounded prevents reading beyond source ✓");
+        // Declared length = 2, but stored payload = "429999999".
+        // The lexer must stop after 2 bytes ("42") because of the
+        // length bound, ignoring the trailing "9999999".
+        // Without the length guard, this would parse 429999999.
+        run_6b0_test_raw(2, b"429999999", 42, true);
+        eprintln!("6B.0a: declared_len=2, payload=\"429999999\" → 42 ✓");
+        eprintln!("       length bound prevents reading beyond source role");
+    }
+
+    // ─── Source metadata guard ──────────────────────────────────
+
+    #[test]
+    fn b0a_hostile_metadata_overlength() {
+        // Declared length = 0x1000 (4096), but source object capacity
+        // after 8-byte header = 0xFF8 (4088).  The guest must reject
+        // the malformed metadata before any out-of-role read.
+        //
+        // Memory authority ≠ source-role authority.
+        run_6b0_test_raw(0x1000, b"42", u64::MAX, false);
+        eprintln!("6B.0a: declared_len=0x1000, capacity=0xFF8 → error ✓");
+        eprintln!("       hostile metadata rejected before out-of-role read");
+    }
+
+    #[test]
+    fn b0a_metadata_exact_capacity() {
+        // Declared length = 0xFF8 (4088) = exact max capacity.
+        // Should be accepted (no overflow), even though the actual
+        // text is just "7".  The guard checks metadata, not content.
+        run_6b0_test_raw(0xFF8, b"7", 7, true);
+        eprintln!("6B.0a: declared_len=0xFF8 (exact capacity) → 7 ✓");
     }
 }
