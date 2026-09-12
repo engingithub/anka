@@ -174,6 +174,7 @@ pub(crate) const TOK_PIPE: i64  = 24;   // |
 pub(crate) const TOK_AMP: i64   = 25;   // &
 pub(crate) const TOK_BANG: i64  = 26;   // ! (only valid before =)
 pub(crate) const TOK_SYSCALL: i64 = 27; // syscall keyword
+pub(crate) const TOK_STRING: i64 = 28;  // string literal "..."
 
 
 // ─── ISA encoding constants ──────────────────────
@@ -747,6 +748,55 @@ pub(crate) fn guest_scan_ident() -> Function {
     }
 }
 
+/// scan_string() — string literal tokenizer.
+///
+/// Precondition: current character is `"` (0x22).
+/// Advances past the opening quote, records the start position,
+/// scans forward byte-by-byte preserving all UTF-8 bytes until
+/// closing `"` or source end.  Records byte length in WS_TOK_NAME_LEN.
+/// No NUL termination.  No escape sequences (7.0).
+///
+/// Architectural invariant: byte length ≠ codepoint count ≠ grapheme count.
+/// The tokenizer operates on raw bytes; UTF-8 validation is a separate layer.
+pub(crate) fn guest_scan_string() -> Function {
+    Function {
+        name: "scan_string".into(),
+        params: vec![],
+        ret_type: Type::Int,
+        locals: vec![(0, Type::Int), (1, Type::Int)],
+        body: vec![
+            // Advance past opening "
+            call_stmt("advance", vec![]),
+            // Record start position (byte offset in source)
+            Stmt::VarDecl(0, Type::Int, Some(deref(lit(WS_POS)))),
+            Stmt::VarDecl(1, Type::Int, Some(lit(0))),
+            // Scan until closing " or EOF
+            Stmt::While(
+                binop(BinOp::Lt, deref(lit(WS_POS)), deref(lit(WS_SRC_LEN))),
+                vec![
+                    Stmt::If(
+                        binop(BinOp::Eq, call("peek_char", vec![]), lit(34)), // "
+                        vec![
+                            deref_assign(lit(WS_TOK_NAME_START), var(0)),
+                            deref_assign(lit(WS_TOK_NAME_LEN), var(1)),
+                            deref_assign(lit(WS_TOK_TYPE), lit(TOK_STRING)),
+                            call_stmt("advance", vec![]),
+                            Stmt::Return(lit(0)),
+                        ],
+                        vec![],
+                    ),
+                    assign(1, binop(BinOp::Add, var(1), lit(1))),
+                    call_stmt("advance", vec![]),
+                ],
+            ),
+            // Unterminated string — set error
+            deref_assign(lit(WS_ERROR), lit(1)),
+            deref_assign(lit(WS_TOK_TYPE), lit(TOK_EOF)),
+            Stmt::Return(lit(0)),
+        ],
+    }
+}
+
 /// Emit: advance, set WS_TOK_TYPE, return 0.
 fn set_type_and_return(tok: i64) -> Vec<Stmt> {
     vec![
@@ -868,6 +918,11 @@ pub(crate) fn guest_next_token() -> Function {
                 ),
             ], vec![]),
 
+            // ─── String literals ──────────────────────
+            Stmt::If(binop(BinOp::Eq, var(0), lit(34)),    // "
+                vec![Stmt::Return(call("scan_string", vec![]))],
+                vec![]),
+
             // ─── Identifiers and numbers ─────────────
             Stmt::If(in_range(var(0), 97, 122),
                 vec![Stmt::Return(call("scan_ident", vec![]))],
@@ -927,6 +982,7 @@ pub(crate) fn guest_lexer() -> Vec<Function> {
         guest_set_char_token(),
         guest_scan_number_direct(),
         guest_scan_ident(),
+        guest_scan_string(),
         guest_classify_kw(),
         guest_names_equal(),
         guest_next_token(),
