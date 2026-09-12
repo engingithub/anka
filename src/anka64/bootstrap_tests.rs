@@ -4962,9 +4962,6 @@ mod tests {
     }
 
     fn canonical_storeliteral() -> String {
-        // Note: the byte-copy loop reads into a local (b) first, then
-        // passes it to writebyte. Nesting readbyte() inside writebyte()
-        // triggers the CC_A caller-saved register clobber bug (6B.4).
         format!(
             "int storeliteral() {{ \
              int start = *{ns}; \
@@ -4974,10 +4971,8 @@ mod tests {
              *(lb + lp) = len; \
              lp = lp + 8; \
              int i = 0; \
-             int b = 0; \
              while (i < len) {{ \
-             b = readbyte(start + i); \
-             writebyte(lb + lp + i, b); \
+             writebyte(lb + lp + i, readbyte(start + i)); \
              i = i + 1; }} \
              i = lp + len; \
              i = (i + 7) & (0 - 8); \

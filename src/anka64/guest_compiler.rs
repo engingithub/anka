@@ -92,7 +92,7 @@ pub(crate) fn enc_s(opcode: i64) -> Expr {
 // so function calls work regardless of the code base address.  Data regions
 // use absolute addresses (LAYOUT_SRC, LAYOUT_OUT, LAYOUT_WS) loaded via MOVI.
 // These must fit in the 18-bit signed immediate: max address ≤ 131071.
-pub(crate) const TEXT_SIZE: i64     = 0x6000;
+pub(crate) const TEXT_SIZE: i64     = 0x7000;
 
 // Data layout (contiguous after TEXT_SIZE):
 //   0x00000 ..TEXT_SIZE  : compiler text  (TEXT_SIZE = 24KB, host only)
@@ -418,11 +418,6 @@ pub(crate) fn guest_write_byte() -> Function {
 /// Architectural invariant: length is metadata, not inferred from contents.
 /// Embedded NUL is legal.  No terminator byte is written.
 ///
-/// Design note: the byte-copy loop reads source bytes FIRST into a local
-/// (var 5), then passes the local to write_byte.  This avoids nesting a
-/// call to read_byte inside the write_byte argument list, which would
-/// trigger the CC_A caller-saved register clobber bug (6B.4): the inner
-/// call clobbers R0 before the outer call uses it.
 pub(crate) fn guest_store_literal() -> Function {
     Function {
         name: "store_literal".into(),
@@ -430,7 +425,7 @@ pub(crate) fn guest_store_literal() -> Function {
         ret_type: Type::Int,
         locals: vec![
             (0, Type::Int), (1, Type::Int), (2, Type::Int),
-            (3, Type::Int), (4, Type::Int), (5, Type::Int),
+            (3, Type::Int), (4, Type::Int),
         ],
         body: vec![
             // start = source byte offset of string content
@@ -449,27 +444,20 @@ pub(crate) fn guest_store_literal() -> Function {
             assign(3, binop(BinOp::Add, var(3), lit(8))),
             // Copy bytes from source to literal buffer
             Stmt::VarDecl(4, Type::Int, Some(lit(0))), // loop index
-            Stmt::VarDecl(5, Type::Int, Some(lit(0))), // temp byte
             Stmt::While(
                 binop(BinOp::Lt, var(4), var(1)),
                 vec![
-                    // Read byte into local FIRST to avoid clobber bug
-                    assign(5, call("read_byte", vec![
-                        binop(BinOp::Add, var(0), var(4))])),
-                    // Then write the byte from the local
                     call_stmt("write_byte", vec![
                         binop(BinOp::Add, var(2),
                             binop(BinOp::Add, var(3), var(4))),
-                        var(5),
+                        call("read_byte", vec![
+                            binop(BinOp::Add, var(0), var(4))]),
                     ]),
                     assign(4, binop(BinOp::Add, var(4), lit(1))),
                 ],
             ),
-            // Return the starting offset (where byte_len header is)
-            // Then advance WS_LIT_POS past data, aligned to 8
-            // new_pos = lit_pos + len, aligned up to 8
+            // Advance WS_LIT_POS past data, aligned to 8
             assign(4, binop(BinOp::Add, var(3), var(1))),
-            // align: (pos + 7) & ~7
             assign(4, binop(BinOp::And,
                 binop(BinOp::Add, var(4), lit(7)),
                 lit(-8))),
