@@ -5200,6 +5200,90 @@ mod tests {
         eprintln!("6B.3.2: if inside while → 3 ✓");
     }
 
+    // ─── 6B.3.3 tests: control-flow regression corpus ──
+
+    #[test]
+    fn b3_both_branches_return() {
+        // Both branches return: exercises real return-path coverage.
+        // The generated code has HALT in both branches.
+        run_6b3_test(
+            b"int x = 5; if (x < 10) { return 42; } else { return 0; }",
+            42, true);
+        eprintln!("6B.3.3: both branches return → 42 ✓");
+    }
+
+    #[test]
+    fn b3_one_branch_returns() {
+        // Only one branch returns — fall-through path must still work.
+        run_6b3_test(
+            b"int x = 5; if (x < 3) { return 99; } return x;",
+            5, true);
+        eprintln!("6B.3.3: one branch returns, fall-through → 5 ✓");
+    }
+
+    #[test]
+    fn b3_deeply_nested_if() {
+        // Three-level nesting to stress forward fixup accounting
+        run_6b3_test(
+            b"int x = 5; if (1) { if (1) { if (x < 10) { return 42; } else { return 0; } } else { return 1; } } else { return 2; }",
+            42, true);
+        eprintln!("6B.3.3: three-level nested if → 42 ✓");
+    }
+
+    #[test]
+    fn b3_while_then_if() {
+        // while followed by if — exercises sequential control flow
+        run_6b3_test(
+            b"int x = 0; while (x < 5) { x = x + 1; } if (x < 10) { return x; } else { return 0; }",
+            5, true);
+        eprintln!("6B.3.3: while then if → 5 ✓");
+    }
+
+    #[test]
+    fn b3_if_then_while() {
+        // if followed by while
+        run_6b3_test(
+            b"int x = 0; if (1) { x = 10; } while (x < 15) { x = x + 1; } return x;",
+            15, true);
+        eprintln!("6B.3.3: if then while → 15 ✓");
+    }
+
+    #[test]
+    fn b3_multiply_in_loop() {
+        // 2^5 = 32 via repeated multiplication
+        run_6b3_test(
+            b"int x = 1; int i = 0; while (i < 5) { x = x * 2; i = i + 1; } return x;",
+            32, true);
+        eprintln!("6B.3.3: 2^5 via loop → 32 ✓");
+    }
+
+    #[test]
+    fn b3_while_immediate_exit() {
+        // while with false condition from the start
+        run_6b3_test(
+            b"int x = 10; while (x < 5) { x = 0; } return x;",
+            10, true);
+        eprintln!("6B.3.3: while immediate exit → 10 ✓");
+    }
+
+    #[test]
+    fn b3_complex_expr_in_condition() {
+        // Expression with arithmetic in while condition
+        run_6b3_test(
+            b"int x = 0; int limit = 3 + 2; while (x < limit) { x = x + 1; } return x;",
+            5, true);
+        eprintln!("6B.3.3: arithmetic in condition → 5 ✓");
+    }
+
+    #[test]
+    fn b3_parens_in_expr() {
+        // Parenthesized expression
+        run_6b3_test(
+            b"return (2 + 3) * 4;",
+            20, true);
+        eprintln!("6B.3.3: (2 + 3) * 4 → 20 ✓");
+    }
+
     /// Adversarial test: inspect emitted instructions and verify that
     /// the generated code contains an actual backward branch, not just
     /// a correct behavioral result from compile-time evaluation.
