@@ -78,45 +78,44 @@ It must survive:
 
 ## 3. Current Vertical Stack
 
-The current stack is approximately:
+The current stack is the Anka64 self-hosted toolchain:
 
 ```text
-C source
-   │
-   ▼
- AnkaCC
-   │
-   ├──────────────┐
-   │              │
-Assembly text     │
-   │              │
-   ▼              │
- AnkaASM          │
-   │              │
-   └──────┬───────┘
-          ▼
-     Asm builder
+Canonical Anka source (15,030 bytes, 42 functions)
           │
           ▼
-     machine code
+  Self-hosted AnkaCC64 (57,176-byte fixed-point compiler)
           │
           ▼
-   Motorola S-record
+  29-instruction Anka64 ISA
           │
           ▼
-      Anka CPU
-          │
-          ▼
-     Protected Bus
+  Protected capability fabric
           │
     ┌─────┴─────┐
     ▼           ▼
-  RAM/MMIO    Devices
+ CPU cores    DMA / agents
     │           │
     └─────┬─────┘
           ▼
-       AnkaOS
+     Secure OS (SYS_EXIT, SYS_WRITE, SYS_SEAL, SYS_EXEC)
 ```
+
+The compiler is self-hosting.  The bootstrap relation is:
+
+```text
+CC_A (host compiler, AST-built) ──compile──→ CC_B (57,176 bytes)
+CC_B (canonical binary)         ──compile──→ CC_C (57,176 bytes)
+                                             CC_B == CC_C  (fixed point)
+```
+
+CC_A is bootstrap-only.  CC_B is the normal compiler artifact.
+CC_C proves CC_B is correct.
+
+The MC68000 stack (AnkaCC, AnkaASM, S-record loader, ROM monitor)
+remains in the codebase as the experimental scaffold from which the
+Anka64 architecture was derived.  It is no longer the primary development
+target.
 
 Formal verification sits beneath and beside the implementation:
 
@@ -285,7 +284,37 @@ The formal work exposed specification and implementation weaknesses including:
 
 Each discovered weakness was fixed in the implementation and converted into a regression test.
 
-At the current stage, the project has **73 tests with zero failures**.
+### Stage 11 — Anka64 state and ISA
+
+A clean 64-bit architecture was designed from the lessons of Stages 1–10.  The ISA uses a table-driven description (`desc.rs`) that serves as the single source of truth for the decoder, assembler, disassembler, and Kleis theory generator.  29 instructions.
+
+### Stage 12 — Single-source ISA and compiler/OS bring-up
+
+AnkaCC64 was built as a Rust AST-to-machine-code compiler targeting the 29-instruction ISA.  The OS kernel (syscalls, process lifecycle, trap handling) was co-developed.  The table-driven ISA description ensured the compiler and CPU agreed on encodings.
+
+### Stage 13 — Multicore, sequential consistency, and atomics
+
+Multiple CPU cores and DMA agents share the capability fabric.  The consistency model is sequential consistency.  XCHG provides atomic read-modify-write.  Per-transaction access context (Rule 20) was implemented.
+
+### Stage 14 — Executable object lifecycle, W⊕X, protected returns
+
+- W⊕X enforcement: Active objects reject EXECUTE grants; Sealed objects reject WRITE grants.  No object is simultaneously writable and executable.
+- SYS_SEAL transitions Active → Sealed with generation bump.
+- Protected return authority: CALL mints a return-stack entry; RET validates against it.  Corrupted LR faults with ControlFlowViolation.  An executable address is not control-flow authority (Rule 29).
+
+### Stage 15 — Guest compiler (Phase 6A–6B.4)
+
+The host compiler compiled user programs to machine code entirely within Anka64.  `int main() { return 42; }` was compiled and executed as a guest process.  The compiler grew through variables, if/else, while, user-defined functions, parameter ABI, recursion, and factorial.
+
+### Stage 16 — Canonical compiler source (Phase 6B.5.0)
+
+All 42 compiler functions were rewritten as canonical Anka source text — ordinary programs in the language the compiler compiles.  The lexer, tokenizer, encoding layer, symbol/function/fixup tables, expression compiler, statement/control-flow compiler, and compiler main all exist as source.
+
+### Stage 17 — Self-hosting fixed point (Phase 6B.5.1)
+
+CC_A compiled canonical source → CC_B (57,176 bytes).  CC_B compiled canonical source → CC_C (57,176 bytes).  CC_B and CC_C are byte-identical.  CC_C passes a permanent 22-program semantic regression corpus.  The compiler is a fixed point of itself.
+
+At the current stage, the project has **284 tests with zero failures**.
 
 ---
 
@@ -1109,76 +1138,61 @@ It is mature when an adversarial client depends on its exact semantics and fails
 
 ---
 
-# 13. Near-Term Anka64 Research Questions
+# 13. Anka64 Research Questions
 
-The next major design questions are:
+Design questions, with current status.
 
-1. **Concurrent authorization and revocation**
-   - What happens if an object is revoked while a memory transaction is in flight?
+### Implemented
 
-2. **Physical translation**
-   - How should `(ObjectId, offset)` map to physical memory?
-   - Is a TLB needed?
-   - Can translation caching remain independent of authority?
+4. **Multicore memory consistency** — Sequential consistency model.  DMA participates through the same capability fabric.
+5. **Atomic operations** — XCHG (atomic exchange) authorized through the standard capability mechanism.
+8. **Executable authority** — W⊕X enforced structurally: Active ⇒ ¬Execute, Sealed ⇒ ¬Write.  SYS_SEAL transitions Active → Sealed with generation bump.  CALL mints return-stack authority; RET validates it.  Code capabilities are attenuated through `derive()`.
+10. **Formal architecture specification (partial)** — Table-driven ISA description (`desc.rs`) is the single source of truth for decoder, assembler, disassembler, and Kleis theory generator.  Compiler backend and full architecture generation remain future work.
 
-3. **Capability representation**
-   - How are capabilities made unforgeable in hardware?
-   - Tagged memory?
-   - Capability registers?
-   - Object handles plus protected metadata?
-   - Hybrid approaches?
+### Open
 
-4. **Multicore memory consistency**
-   - What consistency model does Anka64 expose?
-   - How do DMA and accelerators participate?
+1. **Concurrent authorization and revocation** — What happens if an object is revoked while a memory transaction is in flight?
+2. **Physical translation** — How should `(ObjectId, offset)` map to physical memory?  Is a TLB needed?  Can translation caching remain independent of authority?
+3. **Capability representation** — How are capabilities made unforgeable in hardware?  Tagged memory, capability registers, object handles plus protected metadata, or hybrid approaches?
+6. **Interrupt and exception model** — How are asynchronous events represented per core?  How are privilege changes made precise and restartable?
+7. **Device model** — How are device capabilities delegated?  How are command queues protected?  How are user-space drivers isolated?
+9. **Capability transfer through IPC** — How does the kernel prove that transferred authority was possessed by the sender?
 
-5. **Atomic operations**
-   - Which transaction widths and atomic primitives are required?
-   - How are atomics authorized?
+### New (post-self-hosting)
 
-6. **Interrupt and exception model**
-   - How are asynchronous events represented per core?
-   - How are privilege changes made precise and restartable?
-
-7. **Device model**
-   - How are device capabilities delegated?
-   - How are command queues protected?
-   - How are user-space drivers isolated?
-
-8. **Executable authority**
-   - How are executable objects created?
-   - What is the W⊕X policy?
-   - Can code capabilities be attenuated?
-
-9. **Capability transfer through IPC**
-   - How does the kernel prove that transferred authority was possessed by the sender?
-
-10. **Formal architecture specification**
-    - Can decoder, assembler, compiler backend, and Kleis semantics eventually be generated from one machine description?
+11. **Text and string semantics** — `Bytes ≠ UTF8Text`.  How does the language distinguish byte length, codepoint count, and grapheme count?  The architectural choice is `UTF-8 bytes + explicit byte length`, but the implementation does not yet exist.
+12. **Host independence** — Reducing host-side orchestration for loading, sealing, and launching the self-hosted compiler.  The self-hosted compiler currently depends on a Rust test harness for process setup.
 
 ---
 
 # 14. Long-Term Direction
 
-A possible long-term Anka toolchain is:
+### Single-source ISA — current state
+
+The table-driven ISA description (`desc.rs`) already generates:
 
 ```text
-             Anka machine description
-              /       |       |      \
-             /        |       |       \
-            ▼         ▼       ▼        ▼
-         decoder   assembler compiler  Kleis semantics
-                              backend
+         Anka64 ISA description (desc.rs)
+              /       |       \
+             ▼        ▼        ▼
+         decoder  assembler  Kleis theory
+                disassembler  generator
 ```
 
-This would reduce semantic drift between:
+### Single-source ISA — target state
 
-- implementation,
-- toolchain,
-- documentation,
-- formal verification.
+The eventual goal is full toolchain generation from one description:
 
-The machine description itself could become the authoritative specification of the ISA.
+```text
+         Anka machine description
+          /       |       |      \
+         ▼        ▼       ▼       ▼
+      decoder  assembler compiler Kleis semantics
+             disassembler backend
+
+```
+
+The remaining gap is the compiler backend: the self-hosted compiler currently encodes instructions using its own `enci`/`encr`/`encs`/`encb` functions rather than deriving encodings from the ISA table.  Closing this gap would make the ISA table the single source of truth for all consumers.
 
 ---
 
@@ -1246,13 +1260,75 @@ For quick reference:
 
 ---
 
+# 17. Phase 6B Self-Hosting Result
+
+The canonical Anka compiler source is compiled by the bootstrap compiler into CC_B.  CC_B recompiles the same source into CC_C.  CC_B and CC_C are byte-identical.  CC_C passes the permanent semantic compiler corpus.
+
+```text
+CC_A(source_CC) → CC_B     (host compiles canonical source)
+CC_B(source_CC) → CC_C     (child compiles canonical source)
+assert(CC_B == CC_C)        (binary fixed point)
+```
+
+### Key facts
+
+- **42** canonical functions (lexer, tokenizer, encoding, tables, expression compiler, statement/control-flow, function definitions, compiler main)
+- **15,030** bytes of canonical source text
+- **57,176** bytes — fixed-point compiler binary
+- **29** ISA instructions — no expansion was needed for self-hosting
+- **Stage-2/stage-3 binary identity** — hard assertion, not advisory
+- **22-program permanent semantic corpus** — literals, arithmetic, variables, if/else, while, function calls, recursion, pointer dereference, bitwise, comparisons
+
+### Bugs self-hosting exposed
+
+Self-hosting was the demanding client that exposed two latent bugs:
+
+1. **`encr(0, ...)` — illegal opcode in canonical epilogue**.  Three functions used opcode 0 (illegal) instead of OP_MOV (10) for register moves in the return epilogue.  The code compiled successfully but generated illegal instructions in the grandchild.  The bug only manifested when CC_B's output was executed as real machine code.
+
+2. **Code/data address overlap**.  CC_B (57KB) exceeded TEXT_SIZE (24KB), so loading it at virtual address 0 overlapped with data regions at LAYOUT_SRC (0x6000).  The fix exploited a structural ISA property: CALL and BCC use PC-relative displacements, so the compiler binary is position-independent for code.  CC_B loads at a high virtual base (0x30000) while data regions remain at their canonical addresses.
+
+Both are exactly the class of bugs that self-hosting is designed to find: code paths that were never exercised as generated machine code, and layout assumptions that broke under a real-sized client.
+
+### What self-hosting does not include
+
+- String literals and UTF-8 text facilities
+- Unicode identifiers
+- Removal of host-side orchestration (loading, sealing, launching)
+- Native execution (still requires Rust host)
+
+These are Phase 7+ work.
+
+---
+
+# 18. Current Implementation Facts
+
+| Property | Status |
+|----------|--------|
+| ISA instructions | 29 |
+| Self-hosted compiler | Fixed point (CC_B == CC_C) |
+| Canonical functions | 42 |
+| Compiler binary | 57,176 bytes |
+| Canonical source | 15,030 bytes |
+| Tests | 284 |
+| Multicore | Implemented (SC + XCHG) |
+| DMA | Protected fabric agent |
+| W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
+| Protected CALL/RET | Implemented (return-stack authority) |
+| Table-driven ISA | Decoder, assembler, disassembler, Kleis generator |
+| Host trust boundary | Still present (honest-host assumption) |
+| Strings/Unicode | Not yet implemented |
+
+---
+
 ## Closing
 
-The 68000 prototype has already served its main purpose: it forced the project to encounter real architecture rather than hypothetical architecture.
+The 68000 prototype served its main purpose: it forced the project to encounter real architecture rather than hypothetical architecture.
 
-Anka64 should preserve the lessons that survived those encounters and discard the historical constraints that did not.
+Anka64 preserved the lessons that survived those encounters and discarded the historical constraints that did not.
 
-The project should continue to evolve by the same rule that produced its strongest results so far:
+The self-hosting result (Phase 6B) demonstrated that the 29-instruction ISA is already expressive enough for a nontrivial self-hosted software stack: recursion, variables, pointers, control flow, calls, syscalls, code generation, and a self-reproducing fixed-point compiler.
+
+The project continues to evolve by the same rule that produced its strongest results:
 
 ```text
 design
