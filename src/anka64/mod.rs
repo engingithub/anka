@@ -25,4 +25,7 @@ pub mod isa;
 pub mod core;
 pub mod cc;
 pub mod os;
+pub mod guest_compiler;
+#[cfg(test)]
+mod bootstrap_tests;
 pub mod multicore;
