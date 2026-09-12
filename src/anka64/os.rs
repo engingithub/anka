@@ -24,7 +24,7 @@ pub const SYS_YIELD: u64 = 2;  // yield to other process
 pub const SYS_SEND: u64 = 3;   // send(dest_pid, value)
 pub const SYS_RECV: u64 = 4;   // recv() → value
 pub const SYS_SEAL: u64 = 5;   // seal(addr) — RW→RX, W⊕X enforcement
-pub const SYS_EXEC: u64 = 6;   // exec(code_addr, code_size) → child exit code
+pub const SYS_EXEC: u64 = 6;   // exec(code_addr, code_size, lit_start) → child exit
 
 // ───────────────────────────────────────────────────────────────────
 // Process descriptor
@@ -292,19 +292,28 @@ impl Kernel {
     /// Execute a sealed code object as a new child process.
     ///
     /// R1 = virtual address of sealed code object.
-    /// R2 = code size in bytes.
+    /// R2 = code_size in bytes.
+    /// R3 = lit_start offset within the image (0 = no literals).
     /// Returns: child's exit code in R0, or MAX on error.
     ///
-    /// Three structural checks before the kernel creates anything:
+    /// Structural checks before the kernel creates anything:
     ///   1. Object must be Sealed (W⊕X: no simultaneous W+X)
-    ///   2. Caller must have EXECUTE authority covering the range
-    ///      (range-exact, not object-level)
-    ///   3. Child's authority is derived from parent's capability,
-    ///      not freshly minted — attenuation (I7) applies structurally:
-    ///        Authority(C_child) ⊆ Authority(C_parent)
+    ///   2. If lit_start != 0: code_size <= lit_start < image_size
+    ///      (disjoint code and literal regions)
+    ///   3. Parent must have RX authority covering the code range
+    ///      (searches for READ|EXECUTE so the query matches derivation)
+    ///   4. If literals: parent must have READ covering the literal range
+    ///   5. derive() for both code and literal caps must succeed
+    ///      (transactional: no half-authorized child on failure)
+    ///
+    /// Authority derivation:
+    ///   - Code cap: derive RX from the RX parent (attenuation, I7)
+    ///   - Literal cap: derive R from the R parent (Rule 29:
+    ///     data is not authority to transfer control)
     fn handle_exec(&mut self, idx: usize) {
         let code_vaddr = self.processes[idx].core.r[R1 as usize];
         let code_size = self.processes[idx].core.r[R2 as usize];
+        let lit_start = self.processes[idx].core.r[R3 as usize];
 
         let (code_obj, code_offset) = match self.processes[idx].core.address_map.resolve(code_vaddr) {
             Some(r) => r,
@@ -325,12 +334,40 @@ impl Kernel {
             return;
         }
 
+        // Compute image_size = obj_size - code_offset
+        let obj_size = match self.fabric.objects.get(&code_obj) {
+            Some(o) => o.size,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+        let image_size = obj_size - code_offset;
+
+        // Check 2: validate literal segment geometry (if present)
+        let has_literals = lit_start != 0;
+        if has_literals {
+            // code_size <= lit_start (disjoint regions, empty gap is OK)
+            if lit_start < code_size {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return;
+            }
+            // lit_start < image_size (strict: zero-width literal is meaningless)
+            if image_size <= lit_start {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return;
+            }
+        }
+
         let domain = self.processes[idx].core.domain;
 
-        // Check 2: range-exact EXECUTE authority.
-        // Narrow execute capability cannot authorize a larger range.
-        let parent_cap = match self.fabric.find_authorizing_cap(
-            domain, code_obj, code_offset, code_size, Permissions::EXECUTE
+        // Check 3: range-exact RX authority covering the code range.
+        // Search for READ|EXECUTE (RX) so the query matches what we derive.
+        let code_parent = match self.fabric.find_authorizing_cap(
+            domain, code_obj, code_offset, code_size, Permissions::RX
         ) {
             Some(cap) => cap.clone(),
             None => {
@@ -340,16 +377,54 @@ impl Kernel {
             }
         };
 
-        // --- Child domain: isolated authority container ---
-        // Check 3: derive child's RX from parent's capability (I7).
-        // Authority(C_child) ⊆ Authority(C_parent).
+        // Check 4: if literals, find READ parent covering literal range
+        let lit_parent = if has_literals {
+            let lit_offset = code_offset + lit_start;
+            let lit_length = image_size - lit_start;
+            match self.fabric.find_authorizing_cap(
+                domain, code_obj, lit_offset, lit_length, Permissions::READ
+            ) {
+                Some(cap) => Some(cap.clone()),
+                None => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        // --- Preflight complete: now create child domain ---
+        // Transactional: all checks passed before any domain/object creation.
         let child_dom = self.fabric.create_domain();
-        let child_perms = Permissions(
-            parent_cap.permissions().0 & Permissions::RX.0
-        );
-        self.fabric.derive(
-            child_dom, &parent_cap, code_offset, code_size, child_perms,
-        );
+
+        // Check 5a: derive child's RX from code parent (I7).
+        if self.fabric.derive(
+            child_dom, &code_parent, code_offset, code_size, Permissions::RX,
+        ).is_none() {
+            // Rollback: destroy empty domain
+            self.fabric.destroy_domain(child_dom);
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return;
+        }
+
+        // Check 5b: if literals, derive child's R from literal parent.
+        // Rule 29: data is not authority to transfer control.
+        if has_literals {
+            let lit_offset = code_offset + lit_start;
+            let lit_length = image_size - lit_start;
+            if self.fabric.derive(
+                child_dom, lit_parent.as_ref().unwrap(),
+                lit_offset, lit_length, Permissions::READ,
+            ).is_none() {
+                self.fabric.destroy_domain(child_dom);
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return;
+            }
+        }
 
         // --- Child stack ---
         let stack_size: u64 = 0x4000;
@@ -378,7 +453,16 @@ impl Kernel {
         self.next_agent += 1;
 
         let mut child = Anka64Core::new(child_agent, child_dom);
-        child.address_map.add(0x00000, code_size, code_obj);
+        // Map code at virtual 0 → object offset code_offset
+        child.address_map.add_at(0x00000, code_size, code_obj, code_offset);
+        // Map literal segment at its natural offset within the image.
+        // The child sees the same offsets that MOVI loaded.
+        // Virtual lit_start → object offset code_offset + lit_start.
+        if has_literals {
+            let lit_length = image_size - lit_start;
+            child.address_map.add_at(lit_start, lit_length, code_obj,
+                code_offset + lit_start);
+        }
         child.address_map.add(0x10000, stack_size, stack_obj);
         child.address_map.add(0x20000, trap_size, trap_obj);
         child.r[SP as usize] = 0x10000 + stack_size;

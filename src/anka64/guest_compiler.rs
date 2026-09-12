@@ -111,12 +111,12 @@ pub(crate) const OUTPUT_SIZE: i64  = 0x10000;
 pub(crate) const LAYOUT_WS: i64    = TEXT_SIZE + 0x14000;
 pub(crate) const WS_SIZE: i64      = 0x6000;
 pub(crate) const LAYOUT_STACK: i64 = TEXT_SIZE + 0x1A000;
-// Literal buffer: separate R object for immutable string data.
-// Addressed indirectly via WS_LIT_BASE (same pattern as WS_TEXT_BASE).
-// During compilation: RW (compiler writes literal objects).
-// During child execution: R (child reads literal data).
-pub(crate) const LAYOUT_LIT: i64   = TEXT_SIZE + 0x1E000;
-pub(crate) const LIT_SIZE: i64     = 0x2000;
+// ─── MOVI immediate range ────────────────────────────────
+// MOVI uses an 18-bit signed immediate.  The maximum positive
+// value is (1 << 17) - 1 = 131071.  Literal offsets within the
+// output buffer range from 0 to OUTPUT_SIZE-1 (65535), which fits.
+const MOVI_MAX: i64 = (1 << 17) - 1;
+const _: () = assert!(OUTPUT_SIZE - 1 <= MOVI_MAX);
 
 // ═══════════════════════════════════════════════════════════
 //  Shared workspace layout — addresses within workspace object
@@ -146,13 +146,17 @@ pub(crate) const WS_FIX_COUNT: i64      = LAYOUT_WS + 0x060;
 pub(crate) const WS_SYM_TABLE: i64      = LAYOUT_WS + 0x068;
 // Function table: 64 entries × 32 bytes = 0x800
 pub(crate) const WS_FUNC_TABLE: i64     = LAYOUT_WS + 0x368;
-// Fixup table: 128 entries × 32 bytes = 0x1000
+// Fixup table: 512 entries × 32 bytes = 0x4000
+// Extends from 0xB68 to 0x4B68 within the workspace.
 pub(crate) const WS_FIX_TABLE: i64      = LAYOUT_WS + 0xB68;
-// ─── Literal buffer control (7.1+) ──────────────
-// WS_LIT_BASE: base virtual address of the literal buffer (set by harness).
-// WS_LIT_POS:  current byte offset into the literal buffer.
-pub(crate) const WS_LIT_BASE: i64       = LAYOUT_WS + 0x1B68;
-pub(crate) const WS_LIT_POS: i64        = LAYOUT_WS + 0x1B70;
+// ─── Two-ended image allocator (7.2) ─────────────
+// Code grows upward from offset 0 (tracked by WS_OUT_POS).
+// Literals grow downward from OUTPUT_SIZE (tracked by WS_LIT_POS).
+// Invariant: WS_OUT_POS <= WS_LIT_POS  (disjoint regions).
+// WS_LIT_POS is initialized to OUTPUT_SIZE by the harness.
+// After compilation: code = [0, WS_OUT_POS), lits = [WS_LIT_POS, OUTPUT_SIZE).
+// Placed AFTER the fixup table (0x4B68) to avoid overlap.
+pub(crate) const WS_LIT_POS: i64        = LAYOUT_WS + 0x4B68;
 // ─── Token types (same as 6B.3) ──────────────────
 
 // ─── Token types ──────────────────────────────────
@@ -402,18 +406,22 @@ pub(crate) fn guest_write_byte() -> Function {
     }
 }
 
-/// store_literal() — copy string token bytes to the literal buffer.
+/// store_literal() — copy string token bytes into the output buffer.
 ///
-/// Called after scan_string has set WS_TOK_NAME_START (source byte offset)
-/// and WS_TOK_NAME_LEN (byte length of string content).
+/// Two-ended image allocator (7.2): literals grow downward from
+/// OUTPUT_SIZE within the same output buffer that code grows upward
+/// into.  WS_LIT_POS tracks the current literal frontier.
 ///
-/// Writes to the literal buffer at WS_LIT_BASE + WS_LIT_POS:
+/// Layout of one literal object (at output-buffer offset np):
 ///   [u64 byte_len]        — 8-byte header (number of content bytes)
 ///   [u8  data[byte_len]]  — raw bytes copied from source
+///   [padding to 8-byte alignment]
 ///
-/// Returns the byte offset within the literal buffer where this literal
-/// starts (i.e., the offset of the byte_len header).  Advances WS_LIT_POS
-/// past the stored data, aligned to 8 bytes.
+/// Returns the absolute offset within the output buffer where this
+/// literal starts (the offset of the byte_len header).  This is the
+/// value that MOVI R4 will load.
+///
+/// Underflow-safe: checks lp < size BEFORE the subtraction lp - size.
 ///
 /// Architectural invariant: length is metadata, not inferred from contents.
 /// Embedded NUL is legal.  No terminator byte is written.
@@ -428,42 +436,54 @@ pub(crate) fn guest_store_literal() -> Function {
             (3, Type::Int), (4, Type::Int),
         ],
         body: vec![
-            // start = source byte offset of string content
-            Stmt::VarDecl(0, Type::Int, Some(deref(lit(WS_TOK_NAME_START)))),
             // len = byte length of string content
-            Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_TOK_NAME_LEN)))),
-            // lit_base = *WS_LIT_BASE (base address of literal buffer)
-            Stmt::VarDecl(2, Type::Int, Some(deref(lit(WS_LIT_BASE)))),
-            // lit_pos = *WS_LIT_POS (current offset)
-            Stmt::VarDecl(3, Type::Int, Some(deref(lit(WS_LIT_POS)))),
-            // Write byte_len header: *(lit_base + lit_pos) = len
+            Stmt::VarDecl(0, Type::Int, Some(deref(lit(WS_TOK_NAME_LEN)))),
+            // start = source byte offset of string content
+            Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_TOK_NAME_START)))),
+            // lp = *WS_LIT_POS (current literal frontier, starts at OUTPUT_SIZE)
+            Stmt::VarDecl(2, Type::Int, Some(deref(lit(WS_LIT_POS)))),
+            // aligned = (len + 7) & (-8)
+            Stmt::VarDecl(3, Type::Int, Some(
+                binop(BinOp::And,
+                    binop(BinOp::Add, var(0), lit(7)),
+                    lit(-8)))),
+            // size = aligned + 8 (header)
+            Stmt::VarDecl(4, Type::Int, Some(
+                binop(BinOp::Add, var(3), lit(8)))),
+            // Underflow guard: if (lp < size) { error; return 0; }
+            Stmt::If(binop(BinOp::Lt, var(2), var(4)),
+                vec![
+                    deref_assign(lit(WS_ERROR), lit(1)),
+                    Stmt::Return(lit(0)),
+                ],
+                vec![]),
+            // np = lp - size (new literal frontier)
+            assign(2, binop(BinOp::Sub, var(2), var(4))),
+            // Write header: *(LAYOUT_OUT + np) = len
             deref_assign(
-                binop(BinOp::Add, var(2), var(3)),
-                var(1)),
-            // Advance past header
-            assign(3, binop(BinOp::Add, var(3), lit(8))),
-            // Copy bytes from source to literal buffer
-            Stmt::VarDecl(4, Type::Int, Some(lit(0))), // loop index
+                binop(BinOp::Add, lit(LAYOUT_OUT), var(2)),
+                var(0)),
+            // Compute data base address: LAYOUT_OUT + np + 8
+            assign(4, binop(BinOp::Add,
+                binop(BinOp::Add, lit(LAYOUT_OUT), var(2)),
+                lit(8))),
+            // Copy bytes from source
+            assign(3, lit(0)),  // reuse var(3) as loop index
             Stmt::While(
-                binop(BinOp::Lt, var(4), var(1)),
+                binop(BinOp::Lt, var(3), var(0)),
                 vec![
                     call_stmt("write_byte", vec![
-                        binop(BinOp::Add, var(2),
-                            binop(BinOp::Add, var(3), var(4))),
+                        binop(BinOp::Add, var(4), var(3)),
                         call("read_byte", vec![
-                            binop(BinOp::Add, var(0), var(4))]),
+                            binop(BinOp::Add, var(1), var(3))]),
                     ]),
-                    assign(4, binop(BinOp::Add, var(4), lit(1))),
+                    assign(3, binop(BinOp::Add, var(3), lit(1))),
                 ],
             ),
-            // Advance WS_LIT_POS past data, aligned to 8
-            assign(4, binop(BinOp::Add, var(3), var(1))),
-            assign(4, binop(BinOp::And,
-                binop(BinOp::Add, var(4), lit(7)),
-                lit(-8))),
-            deref_assign(lit(WS_LIT_POS), var(4)),
-            // Return the offset of the byte_len header
-            Stmt::Return(binop(BinOp::Sub, var(3), lit(8))),
+            // Update literal frontier
+            deref_assign(lit(WS_LIT_POS), var(2)),
+            // Return np — the absolute offset of this literal in the output buffer
+            Stmt::Return(var(2)),
         ],
     }
 }
@@ -1170,15 +1190,35 @@ fn kw_byte_chain(start_var: VarId, bytes: &[i64], result: Stmt) -> Stmt {
 
 pub fn build_6b4_compiler() -> Program {
     // ─── emit(word) ────────────────────────────────
+    // emit(word): write one 8-byte instruction pair to the output buffer.
+    // Width-safe collision guard (7.2): the full 8-byte write [pos, pos+8)
+    // must fit below the literal frontier WS_LIT_POS.
+    //   if (lp < 8)       → underflow guard (prevents lp-8 wrap)
+    //   if (lp - 8 < pos) → collision (code would overlap literals)
+    // When no literals exist (lp == OUTPUT_SIZE), this degenerates
+    // to the original check: OUTPUT_SIZE - 8 < pos.
     let fn_emit = Function {
         name: "emit".into(),
         params: vec![(0, Type::Int)],
         ret_type: Type::Int,
-        locals: vec![(1, Type::Int), (2, Type::Int)],
+        locals: vec![(1, Type::Int), (2, Type::Int), (3, Type::Int)],
         body: vec![
             Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_OUT_POS)))),
+            Stmt::VarDecl(3, Type::Int, Some(deref(lit(WS_LIT_POS)))),
+            // Underflow guard: if (lp < 8) { error; }
             Stmt::If(
-                binop(BinOp::Lt, lit(OUTPUT_SIZE - 8), var(1)),
+                binop(BinOp::Lt, var(3), lit(8)),
+                vec![
+                    deref_assign(lit(WS_ERROR), lit(1)),
+                    Stmt::Return(lit(0)),
+                ],
+                vec![],
+            ),
+            // Width-safe collision: if (lp - 8 < pos) { error; }
+            Stmt::If(
+                binop(BinOp::Lt,
+                    binop(BinOp::Sub, var(3), lit(8)),
+                    var(1)),
                 vec![
                     deref_assign(lit(WS_ERROR), lit(1)),
                     Stmt::Return(lit(0)),
@@ -1778,16 +1818,18 @@ pub fn build_6b4_compiler() -> Program {
                         enc_r(OP_MOV, GEN_R4, GEN_R0, 0)]),
                     Stmt::Return(lit(0)),
                 ], vec![]),
-            // ─── STRING LITERAL (7.1) ────────────────
-            // Store the literal in the literal buffer, advance token.
-            // Emit a placeholder MOVI R4, 0 (the literal offset will be
-            // used by 7.2+ to load a reference to the immutable data).
+            // ─── STRING LITERAL (7.2) ────────────────
+            // Store the literal in the output buffer (two-ended
+            // allocator, growing downward).  store_literal returns the
+            // absolute offset within the output buffer.
+            // Emit MOVI R4, offset — the child receives this as a
+            // pointer into its R-only literal segment.
             Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_STRING)),
                 vec![
-                    call_stmt("store_literal", vec![]),
+                    assign(1, call("store_literal", vec![])),
                     call_stmt("next_token", vec![]),
                     call_stmt("emit", vec![
-                        enc_i(OP_MOVI, GEN_R4, 0, lit(0))]),
+                        enc_i(OP_MOVI, GEN_R4, 0, var(1))]),
                     Stmt::Return(lit(0)),
                 ], vec![]),
             deref_assign(lit(WS_ERROR), lit(1)),
@@ -2645,8 +2687,16 @@ pub fn build_6b4_compiler() -> Program {
             // ─── Seal → Exec ─────────────────────────
             Stmt::Expr(syscall(SYS_SEAL as u8, vec![lit(LAYOUT_OUT)])),
             assign(3, deref(lit(WS_OUT_POS))),
+            // Normalize literal segment offset:
+            // If no literals were stored, WS_LIT_POS == OUTPUT_SIZE → pass 0.
+            // Otherwise pass the literal frontier as R3.
+            // Equality, not comparison: corruption should propagate.
+            assign(0, deref(lit(WS_LIT_POS))),
+            Stmt::If(binop(BinOp::Eq, var(0), lit(OUTPUT_SIZE)),
+                vec![assign(0, lit(0))],
+                vec![]),
             assign(4, syscall(SYS_EXEC as u8,
-                vec![lit(LAYOUT_OUT), var(3)])),
+                vec![lit(LAYOUT_OUT), var(3), var(0)])),
             Stmt::Return(var(4)),
         ],
     };

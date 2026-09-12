@@ -149,6 +149,10 @@ impl Fabric {
         id
     }
 
+    pub fn destroy_domain(&mut self, id: DomainId) {
+        self.domains.remove(&id);
+    }
+
     pub fn register_agent(&mut self, id: AgentId, kind: AgentKind, domain: DomainId) {
         self.agents.insert(id, AgentState { id, kind, domain });
     }
