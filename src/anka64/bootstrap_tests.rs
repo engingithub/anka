@@ -4181,9 +4181,9 @@ mod tests {
 
     #[test]
     fn text_size_is_derived() {
-        // TEXT_SIZE must equal align_up(compiled_bytes, 0x1000).
-        // Code size is TEXT_SIZE-independent (only immediate values
-        // change, not instruction count), so this is a stable invariant.
+        // TEXT_SIZE = align_up(host_compiler_bytes, 0x1000).
+        // CC_B (the canonical binary) runs at a separate base address,
+        // so TEXT_SIZE only needs to cover the host compiler.
         let compiler_prog = build_6b4_compiler();
         let asm = cc::compile(&compiler_prog);
         let code_len = asm.to_bytes().len() as i64;
@@ -5139,12 +5139,12 @@ mod tests {
              int pos = *{op}; \
              emit({call} << 26); \
              addfixup(pos, ns, nl, argc); \
-             emit(encr(0, {r4}, {r0}, 0)); \
+             emit(encr({mov}, {r4}, {r0}, 0)); \
              return 0; }} ",
             tt = WS_TOK_TYPE, rp = TOK_RPAREN, comma = TOK_COMMA,
             e = WS_ERROR, op = WS_OUT_POS,
             subi = OP_SUBI, addi = OP_ADDI, st = OP_ST, ld = OP_LD,
-            call = OP_CALL,
+            call = OP_CALL, mov = OP_MOV,
             sp = GEN_SP, r4 = GEN_R4, r0 = GEN_R0)
     }
 
@@ -5204,7 +5204,7 @@ mod tests {
              emit(enci({ld2}, 3, {sp}, 0)); \
              emit(enci({addi}, {sp}, {sp}, 32)); \
              emit(encs({trap})); \
-             emit(encr(0, {r4}, {r0}, 0)); \
+             emit(encr({mov}, {r4}, {r0}, 0)); \
              return 0; }} \
              *{e} = 1; return 0; }} ",
             tt = WS_TOK_TYPE, tv = WS_TOK_VALUE,
@@ -5215,6 +5215,7 @@ mod tests {
             comma = TOK_COMMA, syscall = TOK_SYSCALL,
             movi = OP_MOVI, ld = OP_LD, ld2 = OP_LD,
             subi = OP_SUBI, addi = OP_ADDI, st = OP_ST, trap = OP_TRAP,
+            mov = OP_MOV,
             r4 = GEN_R4, r0 = GEN_R0, fp = GEN_FP, sp = GEN_SP)
     }
 
@@ -5389,8 +5390,8 @@ mod tests {
              compileexpr(); \
              if (*{tt} != {semi}) {{ *{e} = 1; }} \
              nexttoken(); \
-             emit(encr(0, {r0}, {r4}, 0)); \
-             emit(encr(0, {sp}, {fp}, 0)); \
+             emit(encr({mov}, {r0}, {r4}, 0)); \
+             emit(encr({mov}, {sp}, {fp}, 0)); \
              emit(enci({ld}, {fp}, {sp}, 0)); \
              emit(enci({ld}, {lr}, {sp}, 8)); \
              emit(enci({addi}, {sp}, {sp}, 16)); \
@@ -5479,7 +5480,7 @@ mod tests {
             lp = TOK_LPAREN, rp = TOK_RPAREN,
             lb = TOK_LBRACE,
             st = OP_ST, ld = OP_LD, addi = OP_ADDI,
-            cmpi = OP_CMPI, ret = OP_RET,
+            cmpi = OP_CMPI, ret = OP_RET, mov = OP_MOV,
             ceq = COND_EQ, cal = COND_AL,
             r4 = GEN_R4, r5 = GEN_R5, r0 = GEN_R0,
             fp = GEN_FP, lr = GEN_LR, sp = GEN_SP)
@@ -6304,6 +6305,420 @@ mod tests {
         eprintln!("6B.5.0e: resolve_fixups source = {} bytes", src.len());
         run_6b4_test(src.as_bytes(), 42, true);
         eprintln!("6B.5.0e: resolve_fixups (15 functions) compiles ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  6B.5.1 — Compiler equivalence: CC_B compiles programs
+    // ═══════════════════════════════════════════════════════════
+    //
+    //  CC_A (host compiler, AST-built) compiles canonical source → CC_B.
+    //  CC_B (child binary, 57KB) runs as a process, compiles test
+    //  programs, and executes them via SYS_SEAL + SYS_EXEC.
+    //
+    //  CC_B's code is loaded at virtual address CCB_CODE_BASE (0x30000),
+    //  above all data regions.  CALL/BCC are PC-relative, so function
+    //  calls work regardless of code base address.  Data regions remain
+    //  at canonical addresses: source @ LAYOUT_SRC, output @ LAYOUT_OUT,
+    //  workspace @ LAYOUT_WS, stack @ LAYOUT_STACK.
+
+    const CCB_CODE_BASE: u64 = 0x30000;
+
+    /// Extract CC_B binary: CC_A compiles canonical source → output buffer.
+    /// Returns the CC_B code bytes.
+    fn build_ccb() -> Vec<u8> {
+        let mut fabric = Fabric::new(0x400000);
+        let text   = fabric.alloc_object("compiler_text",  TEXT_SIZE as u64, ObjectKind::Memory);
+        let source = fabric.alloc_object("source_data",    SOURCE_SIZE as u64, ObjectKind::Memory);
+        let output = fabric.alloc_object("output_buf",     OUTPUT_SIZE as u64, ObjectKind::Memory);
+        let work   = fabric.alloc_object("workspace",      WS_SIZE as u64, ObjectKind::Memory);
+        let stack  = fabric.alloc_object("compiler_stack", 0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text,   0x000000);
+        fabric.place_object(source, 0x010000);
+        fabric.place_object(output, 0x020000);
+        fabric.place_object(work,   0x030000);
+        fabric.place_object(stack,  0x040000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, source, 0, SOURCE_SIZE as u64, Permissions::READ);
+        fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
+        fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
+        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+
+        let canon_src = canonical_compiler_source();
+        let src_bytes = canon_src.as_bytes();
+        fabric.write_physical(0x010000, &(src_bytes.len() as u64).to_le_bytes());
+        fabric.write_physical(0x010008, src_bytes);
+
+        install_trap_handler(&mut fabric, 0x000000, TEXT_SIZE as u64);
+        let compiler_prog = build_6b4_compiler();
+        let asm = cc::compile(&compiler_prog);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0, TEXT_SIZE as u64, text);
+        core.address_map.add(LAYOUT_SRC as u64,   SOURCE_SIZE as u64, source);
+        core.address_map.add(LAYOUT_OUT as u64,    OUTPUT_SIZE as u64, output);
+        core.address_map.add(LAYOUT_WS as u64,     WS_SIZE as u64, work);
+        core.address_map.add(LAYOUT_STACK as u64,  0x4000, stack);
+        core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
+        core.trap_vector = TEXT_SIZE as u64 - 0x10;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x050000;
+        kernel.next_agent = 10;
+        kernel.spawn(core);
+        kernel.run(2000000, 10);
+
+        assert!(kernel.processes[0].exited,
+            "CC_A did not exit while compiling canonical source");
+
+        // Read output size from workspace
+        let read_ws = |off: u64| -> u64 {
+            let bytes = kernel.fabric.read_physical(0x030000 + off, 8);
+            u64::from_le_bytes(bytes.try_into().unwrap())
+        };
+        let ws_error = read_ws(0x18);
+        let out_pos = read_ws(0x48);
+        let ws_funcs = read_ws(0x58);
+        assert_eq!(ws_error, 0, "CC_A error compiling canonical source");
+        assert_eq!(ws_funcs, 42, "CC_A compiled wrong function count");
+
+        // Extract CC_B binary from output buffer
+        let ccb_bytes = kernel.fabric.read_physical(0x020000, out_pos).to_vec();
+        eprintln!("build_ccb: CC_B = {} bytes ({} functions)",
+            ccb_bytes.len(), ws_funcs);
+        ccb_bytes
+    }
+
+    /// Run CC_B (the canonical compiler binary) on a test program.
+    ///
+    /// CC_B is loaded at CCB_CODE_BASE (0x30000) — above all data regions.
+    /// Data regions sit at canonical addresses derived from TEXT_SIZE=0x6000.
+    /// CC_B compiles the test source, seals output, executes the child.
+    /// The child's exit code propagates through CC_B → returned here.
+    fn run_ccb_test(ccb: &[u8], test_source: &[u8], expected_exit: u64) {
+        let ccb_size = ((ccb.len() + 0xFFF) & !0xFFF) as u64;
+        let mut fabric = Fabric::new(0x800000);
+
+        let code   = fabric.alloc_object("ccb_code",     ccb_size, ObjectKind::Memory);
+        let source = fabric.alloc_object("ccb_source",   SOURCE_SIZE as u64, ObjectKind::Memory);
+        let output = fabric.alloc_object("ccb_output",   OUTPUT_SIZE as u64, ObjectKind::Memory);
+        let work   = fabric.alloc_object("ccb_workspace", WS_SIZE as u64, ObjectKind::Memory);
+        let stack  = fabric.alloc_object("ccb_stack",    0x4000, ObjectKind::Memory);
+
+        // Physical placement — non-overlapping regions
+        fabric.place_object(code,   0x100000);
+        fabric.place_object(source, 0x200000);
+        fabric.place_object(output, 0x210000);
+        fabric.place_object(work,   0x220000);
+        fabric.place_object(stack,  0x230000);
+
+        let dom = fabric.create_domain();
+
+        // Write CC_B code and seal
+        fabric.write_physical(0x100000, ccb);
+        install_trap_handler(&mut fabric, 0x100000, ccb_size);
+        fabric.seal_object(code);
+        fabric.grant(dom, code, 0, ccb_size, Permissions::RX);
+
+        // Grant data regions
+        fabric.grant(dom, source, 0, SOURCE_SIZE as u64, Permissions::READ);
+        fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
+        fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
+        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+
+        // Write test source into source buffer
+        let src_len = test_source.len() as u64;
+        fabric.write_physical(0x200000, &src_len.to_le_bytes());
+        fabric.write_physical(0x200008, test_source);
+
+        // Virtual address map:
+        //   CCB_CODE_BASE → code (CC_B binary)
+        //   LAYOUT_SRC    → source (test program text)
+        //   LAYOUT_OUT    → output (compiled test program)
+        //   LAYOUT_WS     → workspace
+        //   LAYOUT_STACK  → stack
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(CCB_CODE_BASE,          ccb_size, code);
+        core.address_map.add(LAYOUT_SRC as u64,      SOURCE_SIZE as u64, source);
+        core.address_map.add(LAYOUT_OUT as u64,      OUTPUT_SIZE as u64, output);
+        core.address_map.add(LAYOUT_WS as u64,       WS_SIZE as u64, work);
+        core.address_map.add(LAYOUT_STACK as u64,    0x4000, stack);
+        core.pc = CCB_CODE_BASE;
+        core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
+        core.trap_vector = CCB_CODE_BASE + ccb_size - 0x10;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x300000;
+        kernel.next_agent = 10;
+        kernel.spawn(core);
+        kernel.run(4000000, 10);
+
+        let exited = kernel.processes[0].exited;
+        let exit_code = kernel.processes[0].exit_code;
+
+        if !exited {
+            let read_ws = |off: u64| -> u64 {
+                let bytes = kernel.fabric.read_physical(0x220000 + off, 8);
+                u64::from_le_bytes(bytes.try_into().unwrap())
+            };
+            let pc = kernel.processes[0].core.pc;
+            eprintln!("CC_B STUCK: PC={:#x} (offset {:#x})",
+                pc, pc.wrapping_sub(CCB_CODE_BASE));
+            eprintln!("  pos={} tok={} error={} out_pos={} funcs={} fixups={}",
+                read_ws(0x00), read_ws(0x20), read_ws(0x18),
+                read_ws(0x48), read_ws(0x58), read_ws(0x60));
+            let core = &kernel.processes[0].core;
+            eprintln!("  R0={:#x} R4={:#x} R5={:#x} SP={:#x} FP={:#x} LR={:#x}",
+                core.r[0], core.r[4], core.r[5], core.r[15], core.r[13], core.r[14]);
+        }
+        if exited && exit_code != expected_exit {
+            let read_ws = |off: u64| -> u64 {
+                let bytes = kernel.fabric.read_physical(0x220000 + off, 8);
+                u64::from_le_bytes(bytes.try_into().unwrap())
+            };
+            eprintln!("CC_B DIAG: error={} tok={} pos={} out_pos={} funcs={} fixups={}",
+                read_ws(0x18), read_ws(0x20), read_ws(0x00),
+                read_ws(0x48), read_ws(0x58), read_ws(0x60));
+        }
+        assert!(exited, "CC_B did not exit");
+        assert_eq!(exit_code, expected_exit,
+            "CC_B compiled {:?}: expected exit {}, got {}",
+            std::str::from_utf8(test_source).unwrap_or("<invalid>"),
+            expected_exit, exit_code);
+    }
+
+    /// Run CC_B (the canonical compiler) on source text and extract
+    /// the compiled output bytes WITHOUT executing SYS_EXEC.
+    /// Returns (output_bytes, func_count, error_flag).
+    fn compile_with_ccb(ccb: &[u8], source: &[u8]) -> (Vec<u8>, u64, u64) {
+        let ccb_size = ((ccb.len() + 0xFFF) & !0xFFF) as u64;
+        let mut fabric = Fabric::new(0x800000);
+
+        let code   = fabric.alloc_object("ccb_code",     ccb_size, ObjectKind::Memory);
+        let src_obj = fabric.alloc_object("ccb_source",  SOURCE_SIZE as u64, ObjectKind::Memory);
+        let output = fabric.alloc_object("ccb_output",   OUTPUT_SIZE as u64, ObjectKind::Memory);
+        let work   = fabric.alloc_object("ccb_workspace", WS_SIZE as u64, ObjectKind::Memory);
+        let stack  = fabric.alloc_object("ccb_stack",    0x4000, ObjectKind::Memory);
+
+        fabric.place_object(code,    0x100000);
+        fabric.place_object(src_obj, 0x200000);
+        fabric.place_object(output,  0x210000);
+        fabric.place_object(work,    0x220000);
+        fabric.place_object(stack,   0x230000);
+
+        let dom = fabric.create_domain();
+        fabric.write_physical(0x100000, ccb);
+        install_trap_handler(&mut fabric, 0x100000, ccb_size);
+        fabric.seal_object(code);
+        fabric.grant(dom, code, 0, ccb_size, Permissions::RX);
+        fabric.grant(dom, src_obj, 0, SOURCE_SIZE as u64, Permissions::READ);
+        fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
+        fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
+        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+
+        fabric.write_physical(0x200000, &(source.len() as u64).to_le_bytes());
+        fabric.write_physical(0x200008, source);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(CCB_CODE_BASE,          ccb_size, code);
+        core.address_map.add(LAYOUT_SRC as u64,      SOURCE_SIZE as u64, src_obj);
+        core.address_map.add(LAYOUT_OUT as u64,      OUTPUT_SIZE as u64, output);
+        core.address_map.add(LAYOUT_WS as u64,       WS_SIZE as u64, work);
+        core.address_map.add(LAYOUT_STACK as u64,    0x4000, stack);
+        core.pc = CCB_CODE_BASE;
+        core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
+        core.trap_vector = CCB_CODE_BASE + ccb_size - 0x10;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x300000;
+        kernel.next_agent = 10;
+        kernel.spawn(core);
+        kernel.run(4000000, 10);
+
+        assert!(kernel.processes[0].exited, "CC_B did not exit");
+
+        let read_ws = |off: u64| -> u64 {
+            let bytes = kernel.fabric.read_physical(0x220000 + off, 8);
+            u64::from_le_bytes(bytes.try_into().unwrap())
+        };
+        let ws_error = read_ws(0x18);
+        let out_pos = read_ws(0x48);
+        let ws_funcs = read_ws(0x58);
+
+        let output_bytes = if ws_error == 0 && out_pos > 0 {
+            kernel.fabric.read_physical(0x210000, out_pos).to_vec()
+        } else {
+            Vec::new()
+        };
+
+        (output_bytes, ws_funcs, ws_error)
+    }
+
+    #[test]
+    fn b51_ccb_return_literal() {
+        let ccb = build_ccb();
+        run_ccb_test(&ccb, b"int main() { return 42; }", 42);
+        eprintln!("6B.5.1: CC_B compiles 'return 42' → 42 ✓");
+    }
+
+    #[test]
+    fn b51_ccb_arithmetic() {
+        let ccb = build_ccb();
+        run_ccb_test(&ccb, b"int main() { return 3 + 4 * 5; }", 23);
+        run_ccb_test(&ccb, b"int main() { return 100 - 58; }", 42);
+        run_ccb_test(&ccb, b"int main() { return (2 + 3) * (4 + 1); }", 25);
+        eprintln!("6B.5.1: CC_B arithmetic ✓");
+    }
+
+    #[test]
+    fn b51_ccb_variables() {
+        let ccb = build_ccb();
+        run_ccb_test(&ccb,
+            b"int main() { int x = 40; int y = 2; return x + y; }", 42);
+        run_ccb_test(&ccb,
+            b"int main() { int a = 10; int b = 3; int c = a * b + 12; return c; }", 42);
+        eprintln!("6B.5.1: CC_B variables ✓");
+    }
+
+    #[test]
+    fn b51_ccb_if_else() {
+        let ccb = build_ccb();
+        run_ccb_test(&ccb,
+            b"int main() { int x = 5; if (x < 10) { return 42; } else { return 0; } }", 42);
+        run_ccb_test(&ccb,
+            b"int main() { int x = 15; if (x < 10) { return 0; } else { return 42; } }", 42);
+        eprintln!("6B.5.1: CC_B if/else ✓");
+    }
+
+    #[test]
+    fn b51_ccb_while() {
+        let ccb = build_ccb();
+        run_ccb_test(&ccb,
+            b"int main() { int i = 0; int s = 0; while (i < 10) { s = s + i; i = i + 1; } return s; }", 45);
+        eprintln!("6B.5.1: CC_B while loop (sum 0..9 = 45) ✓");
+    }
+
+    #[test]
+    fn b51_ccb_function_calls() {
+        let ccb = build_ccb();
+        run_ccb_test(&ccb,
+            b"int add(int a, int b) { return a + b; } int main() { return add(20, 22); }", 42);
+        run_ccb_test(&ccb,
+            b"int double(int x) { return x + x; } int main() { return double(21); }", 42);
+        eprintln!("6B.5.1: CC_B function calls ✓");
+    }
+
+    #[test]
+    fn b51_ccb_recursion() {
+        let ccb = build_ccb();
+        // Factorial: 5! = 120, but 120 exceeds easy range. Use sum(5) = 15.
+        run_ccb_test(&ccb,
+            b"int sum(int n) { if (n == 0) { return 0; } else { return n + sum(n - 1); } } \
+              int main() { return sum(5); }", 15);
+        eprintln!("6B.5.1: CC_B recursion (sum(5) = 15) ✓");
+    }
+
+    #[test]
+    fn b51_ccb_deref() {
+        let ccb = build_ccb();
+        // The grandchild only has code+stack+trap (from SYS_EXEC).
+        // Stack: virtual 0x10000, 0x4000 bytes. Use low stack as scratch.
+        // SP starts at 0x14000, so 0x10000 is safe scratch space.
+        run_ccb_test(&ccb,
+            b"int main() { int p = 65536; *p = 42; return *p; }", 42);
+        eprintln!("6B.5.1: CC_B deref write+read ✓");
+    }
+
+    #[test]
+    fn b51_ccb_bitwise() {
+        let ccb = build_ccb();
+        run_ccb_test(&ccb, b"int main() { return 6 & 3; }", 2);
+        run_ccb_test(&ccb, b"int main() { return 5 | 2; }", 7);
+        run_ccb_test(&ccb, b"int main() { return 1 << 4; }", 16);
+        run_ccb_test(&ccb, b"int main() { return 32 >> 3; }", 4);
+        eprintln!("6B.5.1: CC_B bitwise operators ✓");
+    }
+
+    #[test]
+    fn b51_ccb_comparison() {
+        let ccb = build_ccb();
+        run_ccb_test(&ccb, b"int main() { return 5 < 10; }", 1);
+        run_ccb_test(&ccb, b"int main() { return 10 < 5; }", 0);
+        run_ccb_test(&ccb, b"int main() { return 5 == 5; }", 1);
+        run_ccb_test(&ccb, b"int main() { return 5 != 5; }", 0);
+        run_ccb_test(&ccb, b"int main() { return 5 <= 5; }", 1);
+        eprintln!("6B.5.1: CC_B comparison operators ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  6B.5.1 — Bootstrap closure: CC_B(source_CC) → CC_C
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn b51_bootstrap_closure() {
+        // Step 1: CC_A(source_CC) → CC_B
+        let ccb = build_ccb();
+        eprintln!("CC_B = {} bytes", ccb.len());
+
+        // Step 2: CC_B(source_CC) → CC_C
+        let canon_src = canonical_compiler_source();
+        let (ccc, ccc_funcs, ccc_error) = compile_with_ccb(&ccb, canon_src.as_bytes());
+        eprintln!("CC_C: {} bytes, {} functions, error={}",
+            ccc.len(), ccc_funcs, ccc_error);
+        assert_eq!(ccc_error, 0, "CC_B failed to compile canonical source");
+        assert_eq!(ccc_funcs, 42, "CC_C has wrong function count");
+        assert!(ccc.len() > 0, "CC_C is empty");
+        eprintln!("6B.5.1: CC_B(source_CC) → CC_C ({} bytes) ✓", ccc.len());
+
+        // Step 3: CC_C compiles the corpus
+        run_ccb_test(&ccc, b"int main() { return 42; }", 42);
+        eprintln!("  CC_C: return 42 ✓");
+        run_ccb_test(&ccc, b"int main() { return 3 + 4 * 5; }", 23);
+        eprintln!("  CC_C: arithmetic ✓");
+        run_ccb_test(&ccc,
+            b"int main() { int x = 40; int y = 2; return x + y; }", 42);
+        eprintln!("  CC_C: variables ✓");
+        run_ccb_test(&ccc,
+            b"int main() { int x = 5; if (x < 10) { return 42; } else { return 0; } }", 42);
+        eprintln!("  CC_C: if/else ✓");
+        run_ccb_test(&ccc,
+            b"int main() { int i = 0; int s = 0; while (i < 10) { s = s + i; i = i + 1; } return s; }", 45);
+        eprintln!("  CC_C: while ✓");
+        run_ccb_test(&ccc,
+            b"int add(int a, int b) { return a + b; } int main() { return add(20, 22); }", 42);
+        eprintln!("  CC_C: function calls ✓");
+        run_ccb_test(&ccc,
+            b"int sum(int n) { if (n == 0) { return 0; } else { return n + sum(n - 1); } } \
+              int main() { return sum(5); }", 15);
+        eprintln!("  CC_C: recursion ✓");
+        eprintln!("6B.5.1: CC_C passes full corpus ✓");
+
+        // Step 4: Fixed-point check — CC_B == CC_C?
+        if ccb == ccc {
+            eprintln!("6B.5.1: FIXED POINT — CC_B == CC_C (binary identical) ✓✓✓");
+        } else {
+            eprintln!("6B.5.1: CC_B ({} bytes) ≠ CC_C ({} bytes) — not yet a fixed point",
+                ccb.len(), ccc.len());
+            // Compare byte-by-byte for diagnostic
+            let min_len = ccb.len().min(ccc.len());
+            let mut first_diff = None;
+            for i in 0..min_len {
+                if ccb[i] != ccc[i] {
+                    first_diff = Some(i);
+                    break;
+                }
+            }
+            if let Some(off) = first_diff {
+                eprintln!("  first difference at byte {:#x}: CC_B={:#04x} CC_C={:#04x}",
+                    off, ccb[off], ccc[off]);
+            } else if ccb.len() != ccc.len() {
+                eprintln!("  same prefix ({} bytes), CC_B is {} bytes longer",
+                    min_len, ccb.len() as i64 - ccc.len() as i64);
+            }
+        }
     }
 
 }
