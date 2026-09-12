@@ -81,10 +81,10 @@ It must survive:
 The current stack is the Anka64 self-hosted toolchain:
 
 ```text
-Canonical Anka source (15,030 bytes, 42 functions)
+Canonical Anka source (~17 KB, 46 functions)
           │
           ▼
-  Self-hosted AnkaCC64 (57,176-byte fixed-point compiler)
+  Self-hosted AnkaCC64 (63,808-byte fixed-point compiler)
           │
           ▼
   29-instruction Anka64 ISA
@@ -104,13 +104,16 @@ Canonical Anka source (15,030 bytes, 42 functions)
 The compiler is self-hosting.  The bootstrap relation is:
 
 ```text
-CC_A (host compiler, AST-built) ──compile──→ CC_B (57,176 bytes)
-CC_B (canonical binary)         ──compile──→ CC_C (57,176 bytes)
-                                             CC_B == CC_C  (fixed point)
+CC_A (bootstrap seed, 45 functions) ──compile──→ CC_B (63,808 bytes, 46 functions)
+CC_B (authoritative compiler)       ──compile──→ CC_C (63,808 bytes, 46 functions)
+                                                 CC_B == CC_C  (fixed point)
 ```
 
-CC_A is bootstrap-only.  CC_B is the normal compiler artifact.
-CC_C proves CC_B is correct.
+CC_A is a frozen bootstrap seed.  It compiles canonical source but does
+not itself implement every compiler semantic.  CC_B is the authoritative
+compiler artifact.  CC_C proves CC_B is correct.  New compiler features
+go into canonical source and are tested through CC_B, not by modifying
+CC_A.
 
 The MC68000 stack (AnkaCC, AnkaASM, S-record loader, ROM monitor)
 remains in the codebase as the experimental scaffold from which the
@@ -314,7 +317,33 @@ All 42 compiler functions were rewritten as canonical Anka source text — ordin
 
 CC_A compiled canonical source → CC_B (57,176 bytes).  CC_B compiled canonical source → CC_C (57,176 bytes).  CC_B and CC_C are byte-identical.  CC_C passes a permanent 22-program semantic regression corpus.  The compiler is a fixed point of itself.
 
-At the current stage, the project has **284 tests with zero failures**.
+### Stage 18 — UTF-8 text literals and byte-buffer I/O (Phase 7)
+
+Phase 7 established the complete text pipeline:
+
+```text
+UTF-8 source → validated string literal → immutable R-only object
+→ pointer + explicit byte length → buffer SYS_WRITE → external UTF-8 bytes
+```
+
+The semantic boundaries are:
+
+- **Bytes ≠ Text**.  String literals are validated RFC 3629 UTF-8.
+- **byte length ≠ codepoint count ≠ grapheme count**.  Only byte length is tracked.
+- **No NUL termination**.  Explicit byte length, embedded NUL is legal.
+- **Validation is a gate, not a transcoder**.  No normalization, no replacement characters.  Input bytes = output bytes.
+
+Key sub-phases:
+
+- **7.0**: String literal tokenization (TOK_STRING, source-slice name representation).
+- **7.1**: Literal object representation (separate R-only buffer, write_byte RMW, store_literal with length header).
+- **7.2**: Two-ended executable image allocator (code grows upward, literals grow downward, disjoint authority via SYS_EXEC).
+- **7.3**: Buffer-based SYS_WRITE with single-capability range authorization, sequential observation, and output-atomic commit.
+- **7.4**: UTF-8 validation gate in canonical source only.  CC_A frozen as bootstrap seed.
+
+Phase 7.4 established a post-self-hosting development process: new compiler semantics are implemented in canonical source and tested through CC_B, without modifying the CC_A bootstrap seed.  This was the first phase to fully embrace the distinction between CC_A (bootstrap seed) and CC_B (authoritative compiler).
+
+At the current stage, the project has **393 tests with zero failures**.
 
 ---
 
@@ -1160,8 +1189,8 @@ Design questions, with current status.
 
 ### New (post-self-hosting)
 
-11. **Text and string semantics** — `Bytes ≠ UTF8Text`.  How does the language distinguish byte length, codepoint count, and grapheme count?  The architectural choice is `UTF-8 bytes + explicit byte length`, but the implementation does not yet exist.
-12. **Host independence** — Reducing host-side orchestration for loading, sealing, and launching the self-hosted compiler.  The self-hosted compiler currently depends on a Rust test harness for process setup.
+11. **Text and string semantics** — **Resolved in Phase 7.**  `Bytes ≠ UTF8Text`.  UTF-8 string literals are validated at compile time (RFC 3629 scalar-value legality).  Representation: explicit byte length, no NUL termination, immutable R-only literal object.  Validation is a gate (not a transcoder): input bytes = output bytes.  Codepoint count and grapheme count are not tracked; only byte length.  No normalization, escapes, or Unicode identifiers yet.
+12. **Host independence** — Reducing host-side orchestration for loading, sealing, and launching the self-hosted compiler.  The self-hosted compiler currently depends on a Rust test harness for process setup.  The next step (Phase 8) is native process/service orchestration: the host boots Anka once; Anka itself launches programs without host harness involvement.
 
 ---
 
@@ -1265,16 +1294,16 @@ For quick reference:
 The canonical Anka compiler source is compiled by the bootstrap compiler into CC_B.  CC_B recompiles the same source into CC_C.  CC_B and CC_C are byte-identical.  CC_C passes the permanent semantic compiler corpus.
 
 ```text
-CC_A(source_CC) → CC_B     (host compiles canonical source)
-CC_B(source_CC) → CC_C     (child compiles canonical source)
+CC_A(source_CC) → CC_B     (bootstrap seed compiles canonical source)
+CC_B(source_CC) → CC_C     (authoritative compiler compiles canonical source)
 assert(CC_B == CC_C)        (binary fixed point)
 ```
 
-### Key facts
+### Key facts (as of Phase 6B; see Section 18 for current numbers)
 
-- **42** canonical functions (lexer, tokenizer, encoding, tables, expression compiler, statement/control-flow, function definitions, compiler main)
-- **15,030** bytes of canonical source text
-- **57,176** bytes — fixed-point compiler binary
+- **42** canonical functions at Phase 6B (now 46 after Phase 7)
+- **15,030** bytes of canonical source text at Phase 6B (now ~17 KB)
+- **57,176** bytes — fixed-point compiler binary at Phase 6B (now 63,808)
 - **29** ISA instructions — no expansion was needed for self-hosting
 - **Stage-2/stage-3 binary identity** — hard assertion, not advisory
 - **22-program permanent semantic corpus** — literals, arithmetic, variables, if/else, while, function calls, recursion, pointer dereference, bitwise, comparisons
@@ -1289,14 +1318,12 @@ Self-hosting was the demanding client that exposed two latent bugs:
 
 Both are exactly the class of bugs that self-hosting is designed to find: code paths that were never exercised as generated machine code, and layout assumptions that broke under a real-sized client.
 
-### What self-hosting does not include
+### What self-hosting does not include (resolved in later phases)
 
-- String literals and UTF-8 text facilities
+- ~~String literals and UTF-8 text facilities~~ → **resolved in Phase 7**
 - Unicode identifiers
 - Removal of host-side orchestration (loading, sealing, launching)
 - Native execution (still requires Rust host)
-
-These are Phase 7+ work.
 
 ---
 
@@ -1306,17 +1333,20 @@ These are Phase 7+ work.
 |----------|--------|
 | ISA instructions | 29 |
 | Self-hosted compiler | Fixed point (CC_B == CC_C) |
-| Canonical functions | 42 |
-| Compiler binary | 57,176 bytes |
-| Canonical source | 15,030 bytes |
-| Tests | 284 |
+| CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
+| CC_B = CC_C | 46 functions, 63,808 bytes |
+| Canonical source | ~17 KB |
+| Tests | 393 |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
 | Protected CALL/RET | Implemented (return-stack authority) |
 | Table-driven ISA | Decoder, assembler, disassembler, Kleis generator |
 | Host trust boundary | Still present (honest-host assumption) |
-| Strings/Unicode | Not yet implemented |
+| UTF-8 text literals | Implemented (RFC 3629 compile-time validation) |
+| SYS_WRITE | Buffer-based, capability-checked, output-atomic |
+| Literal authority | Immutable R-only, two-ended image allocator |
+| Bootstrap development model | CC_A frozen; new features via canonical source + CC_B |
 
 ---
 
@@ -1327,6 +1357,8 @@ The 68000 prototype served its main purpose: it forced the project to encounter 
 Anka64 preserved the lessons that survived those encounters and discarded the historical constraints that did not.
 
 The self-hosting result (Phase 6B) demonstrated that the 29-instruction ISA is already expressive enough for a nontrivial self-hosted software stack: recursion, variables, pointers, control flow, calls, syscalls, code generation, and a self-reproducing fixed-point compiler.
+
+Phase 7 demonstrated that the self-hosted compiler can evolve semantically (UTF-8 validation, buffer I/O) without expanding the ISA or modifying the bootstrap seed.  The canonical compiler is now the authoritative compiler; CC_A is a frozen seed sufficient to construct it.
 
 The project continues to evolve by the same rule that produced its strongest results:
 
