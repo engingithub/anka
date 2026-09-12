@@ -518,6 +518,7 @@ mod tests {
         binop(BinOp::Shl, lit(opcode), lit(26))
     }
 
+
     // ═══════════════════════════════════════════════════════════
     //  Shared workspace layout — lexer-relevant addresses
     //  (identical across 6B.3 and 6B.4)
@@ -6568,14 +6569,15 @@ mod tests {
         // Records function, emits prologue, compiles body.
         // compile_func_def:
         //   int NAME ( [int IDENT [, int IDENT]*] ) { body }
-        // Locals: name(0), param_count(1), param_name(2), offset(3)
+        // Locals: name(0), param_count(1), param_name(2), offset(3),
+        //         prologue_pos(4), frame_size(5)
         let fn_compile_func_def = Function {
             name: "compile_func_def".into(),
             params: vec![],
             ret_type: Type::Int,
             locals: vec![
                 (0, Type::Int), (1, Type::Int), (2, Type::Int),
-                (3, Type::Int),
+                (3, Type::Int), (4, Type::Int), (5, Type::Int),
             ],
             body: vec![
                 // Expect: int
@@ -6610,14 +6612,13 @@ mod tests {
                 deref_assign(lit(WS_EXPR_SP), lit(EXPR_SP_INIT)),
 
                 // Parse parameter list: int IDENT [, int IDENT]*
-                Stmt::VarDecl(1, Type::Int, Some(lit(0))),  // param_count
-                Stmt::VarDecl(2, Type::Int, Some(lit(0))),  // param_name
-                Stmt::VarDecl(3, Type::Int, Some(lit(0))),  // offset (from add_symbol)
+                Stmt::VarDecl(1, Type::Int, Some(lit(0))),
+                Stmt::VarDecl(2, Type::Int, Some(lit(0))),
+                Stmt::VarDecl(3, Type::Int, Some(lit(0))),
                 Stmt::While(
                     binop(BinOp::Eq,
                         deref(lit(WS_TOK_TYPE)), lit(TOK_INT_KW)),
                     vec![
-                        // Reject > 4 params
                         Stmt::If(
                             binop(BinOp::Le, lit(4), var(1)),
                             vec![
@@ -6626,7 +6627,7 @@ mod tests {
                             ],
                             vec![],
                         ),
-                        call_stmt("next_token", vec![]),  // consume 'int'
+                        call_stmt("next_token", vec![]),
                         Stmt::If(
                             binop(BinOp::Ne,
                                 deref(lit(WS_TOK_TYPE)), lit(TOK_IDENT)),
@@ -6634,11 +6635,9 @@ mod tests {
                             vec![],
                         ),
                         assign(2, deref(lit(WS_TOK_VALUE))),
-                        call_stmt("next_token", vec![]),  // consume ident
-                        // add_symbol allocates frame slot
+                        call_stmt("next_token", vec![]),
                         assign(3, call("add_symbol", vec![var(2)])),
                         assign(1, binop(BinOp::Add, var(1), lit(1))),
-                        // Consume comma if present (for next param)
                         Stmt::If(
                             binop(BinOp::Eq,
                                 deref(lit(WS_TOK_TYPE)), lit(TOK_COMMA)),
@@ -6667,22 +6666,18 @@ mod tests {
                 // Record function in table (name, arity)
                 call_stmt("add_func", vec![var(0), var(1)]),
 
-                // Emit prologue:
-                //   SUBI SP, SP, 16
-                //   ST LR, [SP, 8]
-                //   ST FP, [SP, 0]
-                //   MOV FP, SP
-                call_stmt("emit", vec![
-                    enc_i(OP_SUBI, GEN_SP, GEN_SP, lit(16))]),
-                call_stmt("emit", vec![
-                    enc_i(OP_ST, GEN_LR, GEN_SP, lit(8))]),
-                call_stmt("emit", vec![
-                    enc_i(OP_ST, GEN_FP, GEN_SP, lit(0))]),
-                call_stmt("emit", vec![
-                    enc_r(OP_MOV, GEN_FP, GEN_SP, 0)]),
+                // ─── Prologue placeholder (backpatched after body) ──
+                // Save prologue position for backpatch.
+                Stmt::VarDecl(4, Type::Int, Some(
+                    deref(lit(WS_OUT_POS)))),
+                // Emit 4 NOP placeholders (will be overwritten)
+                call_stmt("emit", vec![enc_s(OP_NOP)]),
+                call_stmt("emit", vec![enc_s(OP_NOP)]),
+                call_stmt("emit", vec![enc_s(OP_NOP)]),
+                call_stmt("emit", vec![enc_s(OP_NOP)]),
 
                 // Spill parameters R0..Rn into their frame slots.
-                // param 0 → [FP, -8], param 1 → [FP, -16], etc.
+                // Offsets from add_symbol: param 0 → [FP, -8], etc.
                 Stmt::If(binop(BinOp::Lt, lit(0), var(1)), vec![
                     call_stmt("emit", vec![
                         enc_i(OP_ST, GEN_R0, GEN_FP, lit(-8))]),
@@ -6702,6 +6697,45 @@ mod tests {
 
                 // Compile body statements until }
                 call_stmt("compile_block", vec![]),
+
+                // ─── Backpatch prologue with actual frame size ──
+                // frame_size = 16 + 8 * sym_count
+                Stmt::VarDecl(5, Type::Int, Some(
+                    binop(BinOp::Add, lit(16),
+                        binop(BinOp::Mul,
+                            deref(lit(WS_SYM_COUNT)), lit(8))))),
+                // NOP high-word constant in var(3)
+                assign(3, binop(BinOp::Shl,
+                    binop(BinOp::Shl, lit(OP_NOP), lit(26)),
+                    lit(32))),
+                // Base output address in var(1)
+                assign(1, binop(BinOp::Add, lit(0x5000), var(4))),
+
+                // Instruction 0: SUBI SP, SP, frame_size
+                assign(2, enc_i(OP_SUBI, GEN_SP, GEN_SP, var(5))),
+                assign(2, binop(BinOp::Or, var(2), var(3))),
+                deref_assign(var(1), var(2)),
+
+                // Instruction 1: ST LR, [SP, frame_size - 8]
+                assign(1, binop(BinOp::Add, var(1), lit(8))),
+                assign(2, enc_i(OP_ST, GEN_LR, GEN_SP,
+                    binop(BinOp::Sub, var(5), lit(8)))),
+                assign(2, binop(BinOp::Or, var(2), var(3))),
+                deref_assign(var(1), var(2)),
+
+                // Instruction 2: ST FP, [SP, frame_size - 16]
+                assign(1, binop(BinOp::Add, var(1), lit(8))),
+                assign(2, enc_i(OP_ST, GEN_FP, GEN_SP,
+                    binop(BinOp::Sub, var(5), lit(16)))),
+                assign(2, binop(BinOp::Or, var(2), var(3))),
+                deref_assign(var(1), var(2)),
+
+                // Instruction 3: ADDI FP, SP, frame_size - 16
+                assign(1, binop(BinOp::Add, var(1), lit(8))),
+                assign(2, enc_i(OP_ADDI, GEN_FP, GEN_SP,
+                    binop(BinOp::Sub, var(5), lit(16)))),
+                assign(2, binop(BinOp::Or, var(2), var(3))),
+                deref_assign(var(1), var(2)),
 
                 Stmt::Return(lit(0)),
             ],
@@ -7219,5 +7253,85 @@ mod tests {
             b"int id(int x) { return x; } int main() { return id(6) * 7; }",
             42, true);
         eprintln!("6B.4.2b: id(6) * 7 → 42 ✓");
+    }
+
+    // ─── 6B.4.3a: dynamic frame sizing ─────────────────
+
+    #[test]
+    fn b43a_local_survives_call() {
+        // x must survive the call to get42(). With fixed 16-byte
+        // frames, get42's saved LR/FP would overwrite x.
+        run_6b4_test(
+            b"int get42() { return 42; } int f() { int x = 10; int y = get42(); return x + y; } int main() { return f(); }",
+            52, true);
+        eprintln!("6B.4.3a: local survives call → 52 ✓");
+    }
+
+    #[test]
+    fn b43a_two_locals_survive_call() {
+        // Both x and y must survive the call to g().
+        run_6b4_test(
+            b"int g() { return 2; } int f() { int x = 20; int y = 22; int z = g(); return x + y - z; } int main() { return f(); }",
+            40, true);
+        eprintln!("6B.4.3a: two locals survive call → 40 ✓");
+    }
+
+    #[test]
+    fn b43a_different_frame_sizes() {
+        // big() has 4 locals, small() has 0. Both must work.
+        run_6b4_test(
+            b"int small() { return 2; } int big() { int a = 10; int b = 20; int c = small(); int d = 10; return a + b + c + d; } int main() { return big(); }",
+            42, true);
+        eprintln!("6B.4.3a: different frame sizes → 42 ✓");
+    }
+
+    #[test]
+    fn b43a_param_survives_call() {
+        // Parameter a must survive the call to get2().
+        run_6b4_test(
+            b"int get2() { return 2; } int f(int a) { int b = get2(); return a + b; } int main() { return f(40); }",
+            42, true);
+        eprintln!("6B.4.3a: param survives call → 42 ✓");
+    }
+
+    // ─── 6B.4.3b: simple recursion ─────────────────────
+
+    #[test]
+    fn b43b_dec_recursion() {
+        // Isolates frame nesting + argument passing + CALL/RET
+        // without needing preservation of a local across the call.
+        run_6b4_test(
+            b"int dec(int n) { if (n < 1) { return 42; } return dec(n - 1); } int main() { return dec(5); }",
+            42, true);
+        eprintln!("6B.4.3b: dec(5) → 42 ✓");
+    }
+
+    // ─── 6B.4.3c: recursive preservation ────────────────
+
+    #[test]
+    fn b43c_factorial() {
+        // n must survive the recursive call (frame separation).
+        run_6b4_test(
+            b"int fact(int n) { if (n < 2) { return 1; } return n * fact(n - 1); } int main() { return fact(5); }",
+            120, true);
+        eprintln!("6B.4.3c: fact(5) → 120 ✓");
+    }
+
+    #[test]
+    fn b43c_local_per_activation() {
+        // Each activation has its own x.
+        run_6b4_test(
+            b"int f(int n) { int x = n; if (n < 1) { return x; } return f(n - 1) + x; } int main() { return f(4); }",
+            10, true);
+        eprintln!("6B.4.3c: f(4) per-activation local → 10 ✓");
+    }
+
+    #[test]
+    fn b43c_separate_recursive_trees() {
+        // fact(3) + fact(4) — no frame leakage between trees.
+        run_6b4_test(
+            b"int fact(int n) { if (n < 2) { return 1; } return n * fact(n - 1); } int main() { return fact(3) + fact(4); }",
+            30, true);
+        eprintln!("6B.4.3c: fact(3)+fact(4) → 30 ✓");
     }
 }
