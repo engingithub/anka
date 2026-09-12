@@ -512,7 +512,7 @@ mod tests {
         let mut fabric = Fabric::new(0x400000);
         let (core, _dom, _text, _data, _stack) =
             create_process(&mut fabric, CPU0, "proc0", 0x000000, 0x010000, 0x020000);
-        install_trap_handler(&mut fabric, 0x000000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
 
         // Build program — must be written before sealing text object
         //   syscall_write(42): R0=SYS_WRITE, R1=42, TRAP #0
@@ -571,13 +571,13 @@ mod tests {
         let (core_a, dom_a, text_a, _d, _s) =
             create_process(&mut fabric, AgentId(0), "procA",
                 0x000000, 0x010000, 0x020000);
-        install_trap_handler(&mut fabric, 0x000000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
 
         // Process B at physical 0x100000..
         let (core_b, dom_b, text_b, _d, _s) =
             create_process(&mut fabric, AgentId(1), "procB",
                 0x100000, 0x110000, 0x120000);
-        install_trap_handler(&mut fabric, 0x100000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
 
         // Process A code: send(pid=1, value=42), exit(0)
         let mut asm_a = Asm64::new();
@@ -687,7 +687,7 @@ mod tests {
         fabric.grant(dom, output, 0, 0x1000, Permissions::RWS);
         fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
 
-        install_trap_handler(&mut fabric, 0x000000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
 
         // Write valid code to output buffer
         let mut code = Asm64::new();
@@ -742,7 +742,7 @@ mod tests {
         fabric.grant(dom, rw_only, 0, 0x1000, Permissions::RW); // no SEAL!
         fabric.grant(dom, stack,   0, 0x4000, Permissions::RW);
 
-        install_trap_handler(&mut fabric, 0x000000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
 
         // Program: SYS_SEAL on the RW-only object
         build_syscall_program(&mut fabric, 0x000000, SYS_SEAL,
@@ -846,7 +846,7 @@ mod tests {
         fabric.grant(dom, buffer, 0x100, 0x20, Permissions::SEAL);
         fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
 
-        install_trap_handler(&mut fabric, 0x000000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
 
         build_syscall_program(&mut fabric, 0x000000, SYS_SEAL,
             0x5000, 0);
@@ -901,7 +901,7 @@ mod tests {
         // Grant only narrow EXECUTE: [0, 0x10) — 4 instructions worth
         fabric.grant(dom, code, 0, 0x10, Permissions::RX);
 
-        install_trap_handler(&mut fabric, 0x000000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
 
         // Program: SYS_EXEC with code_size=0x100 (larger than authority)
         build_syscall_program(&mut fabric, 0x000000, SYS_EXEC,
@@ -958,7 +958,7 @@ mod tests {
         // Parent gets whole-object RX (post-seal)
         fabric.grant(dom, code, 0, 0x1000, Permissions::RX);
 
-        install_trap_handler(&mut fabric, 0x000000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
 
         // SYS_EXEC with code_size = 16 (within parent's [0, 0x1000))
         build_syscall_program(&mut fabric, 0x000000, SYS_EXEC,

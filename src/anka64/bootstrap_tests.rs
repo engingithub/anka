@@ -60,7 +60,7 @@ mod tests {
         fabric.write_physical(0x010000, &42u64.to_le_bytes());
 
         // Trap handler at offset 0x3FF0 in text object
-        install_trap_handler(&mut fabric, 0x000000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
 
         // ─── The guest compiler: a C program ──────────────────
         //
@@ -619,7 +619,7 @@ mod tests {
         fabric.write_physical(0x010008, source_text);
 
         // Trap handler
-        install_trap_handler(&mut fabric, 0x000000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
 
         // Compile the guest compiler from AST
         let compiler_prog = build_6b0_compiler();
@@ -701,7 +701,7 @@ mod tests {
         let write_len = payload.len().min(0xFF8); // don't overflow object
         fabric.write_physical(0x010008, &payload[..write_len]);
 
-        install_trap_handler(&mut fabric, 0x000000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
 
         let compiler_prog = build_6b0_compiler();
         let asm = cc::compile(&compiler_prog);
@@ -1333,7 +1333,7 @@ mod tests {
         fabric.write_physical(0x010000, &src_len.to_le_bytes());
         fabric.write_physical(0x010008, source_text);
 
-        install_trap_handler(&mut fabric, 0x000000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
 
         let compiler_prog = build_6b1_compiler();
         let asm = cc::compile(&compiler_prog);
@@ -2355,7 +2355,7 @@ mod tests {
         fabric.write_physical(0x010000, &src_len.to_le_bytes());
         fabric.write_physical(0x010008, source_text);
 
-        install_trap_handler(&mut fabric, 0x000000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
 
         let compiler_prog = build_6b2_compiler();
         let asm = cc::compile(&compiler_prog);
@@ -2659,12 +2659,11 @@ mod tests {
     // ═══════════════════════════════════════════════════════════
 
     fn build_6b3_compiler() -> Program {
-        // Workspace addresses shared at module level (WS_POS .. WS_KW_WHILE).
-        // Phase-specific workspace slots:
-        const WS_SYM_COUNT: i64  = 0x6058;
-        const WS_OUT_POS: i64    = 0x6060;
-        const WS_EXPR_SP: i64    = 0x6068;
-        const WS_SYM_TABLE: i64  = 0x6070;
+        // 6B.3 phase-specific workspace slots — relative to shared LAYOUT_WS.
+        const WS_SYM_COUNT: i64  = LAYOUT_WS + 0x058;
+        const WS_OUT_POS: i64    = LAYOUT_WS + 0x060;
+        const WS_EXPR_SP: i64    = LAYOUT_WS + 0x068;
+        const WS_SYM_TABLE: i64  = LAYOUT_WS + 0x070;
 
         // ─── Token type constants ────────────────────
         const TOK_EOF: i64    = 0;
@@ -3547,6 +3546,7 @@ mod tests {
     }
 
     /// Run a 6B.3 test case: guest code generator → expected result.
+    /// 6B.3's text fits in 0x4000 but shares workspace layout with 6B.4+.
     fn run_6b3_test(source_text: &[u8], expected_exit: u64, expect_child: bool) {
         let mut fabric = Fabric::new(0x400000);
 
@@ -3574,7 +3574,7 @@ mod tests {
         fabric.write_physical(0x010008, source_text);
 
         // Trap handler
-        install_trap_handler(&mut fabric, 0x000000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
 
         // Compile the guest compiler from AST
         let compiler_prog = build_6b3_compiler();
@@ -3582,14 +3582,16 @@ mod tests {
         fabric.write_physical(0x000000, &asm.to_bytes());
         seal_code_object(&mut fabric, text, dom);
 
-        // Set up process
+        // 6B.3 keeps source/output at 0x4000/0x5000 (hardcoded
+        // in build_6b3_compiler) but workspace must be at LAYOUT_WS
+        // because the shared lexer uses WS_* absolute addresses.
         let mut core = Anka64Core::new(AgentId(0), dom);
         core.address_map.add(0x00000, 0x4000, text);
         core.address_map.add(0x04000, 0x1000, source);
         core.address_map.add(0x05000, 0x1000, output);
-        core.address_map.add(0x06000, 0x1000, work);
-        core.address_map.add(0x07000, 0x4000, stack);
-        core.r[SP as usize] = 0x07000 + 0x4000;
+        core.address_map.add(LAYOUT_WS as u64, 0x1000, work);
+        core.address_map.add(LAYOUT_STACK as u64, 0x4000, stack);
+        core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
         core.trap_vector = 0x3FF0;
 
         let mut kernel = Kernel::new(fabric);
@@ -3962,7 +3964,7 @@ mod tests {
         fabric.write_physical(0x010000, &src_len.to_le_bytes());
         fabric.write_physical(0x010008, src);
 
-        install_trap_handler(&mut fabric, 0x000000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
 
         let compiler_prog = build_6b3_compiler();
         let asm = cc::compile(&compiler_prog);
@@ -3973,9 +3975,9 @@ mod tests {
         core.address_map.add(0x00000, 0x4000, text);
         core.address_map.add(0x04000, 0x1000, source);
         core.address_map.add(0x05000, 0x1000, output);
-        core.address_map.add(0x06000, 0x1000, work);
-        core.address_map.add(0x07000, 0x4000, stack);
-        core.r[SP as usize] = 0x07000 + 0x4000;
+        core.address_map.add(LAYOUT_WS as u64, 0x1000, work);
+        core.address_map.add(LAYOUT_STACK as u64, 0x4000, stack);
+        core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
         core.trap_vector = 0x3FF0;
 
         let mut kernel = Kernel::new(fabric);
@@ -3992,7 +3994,7 @@ mod tests {
         // Read output buffer and scan for a B instruction
         // with negative displacement.
         let out_pos_bytes = kernel.fabric.read_physical(
-            0x030000 + 0x60, 8);   // WS_OUT_POS at workspace+0x60
+            0x030000 + 0x48, 8);   // WS_OUT_POS at workspace offset 0x48
         let out_bytes = u64::from_le_bytes(
             out_pos_bytes[..8].try_into().unwrap()) as usize;
 
@@ -4031,7 +4033,7 @@ mod tests {
     fn run_6b4_test(source_text: &[u8], expected_exit: u64, expect_child: bool) {
         let mut fabric = Fabric::new(0x400000);
 
-        let text   = fabric.alloc_object("compiler_text",  0x4000, ObjectKind::Memory);
+        let text   = fabric.alloc_object("compiler_text",  TEXT_SIZE as u64, ObjectKind::Memory);
         let source = fabric.alloc_object("source_data",    0x1000, ObjectKind::Memory);
         let output = fabric.alloc_object("output_buf",     0x1000, ObjectKind::Memory);
         let work   = fabric.alloc_object("workspace",      0x1000, ObjectKind::Memory);
@@ -4054,8 +4056,8 @@ mod tests {
         fabric.write_physical(0x010000, &src_len.to_le_bytes());
         fabric.write_physical(0x010008, source_text);
 
-        // Trap handler
-        install_trap_handler(&mut fabric, 0x000000);
+        // Trap handler at end of TEXT_SIZE text object
+        install_trap_handler(&mut fabric, 0x000000, TEXT_SIZE as u64);
 
         // Compile the guest compiler from AST
         let compiler_prog = build_6b4_compiler();
@@ -4064,21 +4066,21 @@ mod tests {
         let code_len = code_bytes.len();
         eprintln!("6B.4 guest compiler: {} bytes ({} insns, {:#x})",
             code_len, code_len / 4, code_len);
-        assert!(code_len <= 0x4000,
-            "compiled guest compiler is {} bytes, exceeds 0x4000 text object",
-            code_len);
+        assert!(code_len <= TEXT_SIZE as usize,
+            "compiled guest compiler is {} bytes, exceeds {:#x} text object",
+            code_len, TEXT_SIZE);
         fabric.write_physical(0x000000, &code_bytes);
         seal_code_object(&mut fabric, text, dom);
 
-        // Set up process
+        // Set up process — virtual layout derived from TEXT_SIZE
         let mut core = Anka64Core::new(AgentId(0), dom);
-        core.address_map.add(0x00000, 0x4000, text);
-        core.address_map.add(0x04000, 0x1000, source);
-        core.address_map.add(0x05000, 0x1000, output);
-        core.address_map.add(0x06000, 0x1000, work);
-        core.address_map.add(0x07000, 0x4000, stack);
-        core.r[SP as usize] = 0x07000 + 0x4000;
-        core.trap_vector = 0x3FF0;
+        core.address_map.add(0, TEXT_SIZE as u64, text);
+        core.address_map.add(LAYOUT_SRC as u64,   0x1000, source);
+        core.address_map.add(LAYOUT_OUT as u64,    0x1000, output);
+        core.address_map.add(LAYOUT_WS as u64,     0x1000, work);
+        core.address_map.add(LAYOUT_STACK as u64,  0x4000, stack);
+        core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
+        core.trap_vector = TEXT_SIZE as u64 - 0x10;
 
         let mut kernel = Kernel::new(fabric);
         kernel.next_phys = 0x050000;
@@ -4108,7 +4110,7 @@ mod tests {
             // Decode instructions around PC
             for off in [0i64, -8, -16, 4, 8, 12] {
                 let addr = (pc as i64 + off) as u64;
-                if addr < 0x4000 {
+                if addr < TEXT_SIZE as u64 {
                     let bytes = kernel.fabric.read_physical(addr, 4);
                     let word = u32::from_le_bytes(bytes.try_into().unwrap());
                     let insn = decode(word);
@@ -4595,6 +4597,228 @@ mod tests {
         source.extend_from_slice(prog);
         run_6b4_test(&source, 42, true);
         eprintln!("6B.5.0a.1: boundary ident (near byte 0xFF7) ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════
+    //  6B.5.0b: complete expression language
+    // ═══════════════════════════════════════════════════════
+
+    // ─── Maximal-munch tokenizer tests ───────────────────
+
+    #[test]
+    fn b50b_eq_vs_eqeq() {
+        // == is equality, = is assignment
+        run_6b4_test(
+            b"int main() { int x = 5; return x == 5; }",
+            1, true);
+        run_6b4_test(
+            b"int main() { int x = 5; return x == 6; }",
+            0, true);
+        eprintln!("6B.5.0b: == (equality) ✓");
+    }
+
+    #[test]
+    fn b50b_ne() {
+        run_6b4_test(
+            b"int main() { return 3 != 4; }",
+            1, true);
+        run_6b4_test(
+            b"int main() { return 3 != 3; }",
+            0, true);
+        eprintln!("6B.5.0b: != ✓");
+    }
+
+    #[test]
+    fn b50b_le() {
+        run_6b4_test(
+            b"int main() { return 3 <= 4; }",
+            1, true);
+        run_6b4_test(
+            b"int main() { return 4 <= 4; }",
+            1, true);
+        run_6b4_test(
+            b"int main() { return 5 <= 4; }",
+            0, true);
+        eprintln!("6B.5.0b: <= ✓");
+    }
+
+    #[test]
+    fn b50b_shl_shr() {
+        run_6b4_test(
+            b"int main() { return 1 << 3; }",
+            8, true);
+        run_6b4_test(
+            b"int main() { return 16 >> 2; }",
+            4, true);
+        eprintln!("6B.5.0b: << >> ✓");
+    }
+
+    #[test]
+    fn b50b_pipe_amp() {
+        run_6b4_test(
+            b"int main() { return 5 | 3; }",
+            7, true);    // 0b101 | 0b011 = 0b111
+        run_6b4_test(
+            b"int main() { return 7 & 5; }",
+            5, true);    // 0b111 & 0b101 = 0b101
+        eprintln!("6B.5.0b: | & ✓");
+    }
+
+    // ─── Precedence chain tests ──────────────────────────
+
+    #[test]
+    fn b50b_precedence_mul_before_add() {
+        run_6b4_test(
+            b"int main() { return 2 + 3 * 4; }",
+            14, true);
+        eprintln!("6B.5.0b: 2+3*4=14 ✓");
+    }
+
+    #[test]
+    fn b50b_precedence_shift_after_add() {
+        // << binds lower than +: 1 << (2+1) = 1<<3 = 8
+        run_6b4_test(
+            b"int main() { return 1 << 2 + 1; }",
+            8, true);
+        // >> binds lower than +: 8 >> (1+1) = 8>>2 = 2
+        run_6b4_test(
+            b"int main() { return 8 >> 1 + 1; }",
+            2, true);
+        eprintln!("6B.5.0b: shift vs add precedence ✓");
+    }
+
+    #[test]
+    fn b50b_precedence_and_after_shift() {
+        // & binds lower than <<: (2*3) << 1 = 12,
+        // then 12 & 15 = 12
+        run_6b4_test(
+            b"int main() { return 2 * 3 << 1 & 15; }",
+            12, true);
+        eprintln!("6B.5.0b: & vs << precedence ✓");
+    }
+
+    #[test]
+    fn b50b_precedence_or_after_and() {
+        // | binds lower than &: 1 | (2 & 4) = 1 | 0 = 1
+        run_6b4_test(
+            b"int main() { return 1 | 2 & 4; }",
+            1, true);
+        eprintln!("6B.5.0b: | vs & precedence ✓");
+    }
+
+    #[test]
+    fn b50b_precedence_relational_after_or() {
+        // < binds lower than |: (1 | 2) < (4 | 1) → 3 < 5 = 1
+        run_6b4_test(
+            b"int main() { return 1 | 2 < 4 | 1; }",
+            1, true);
+        eprintln!("6B.5.0b: relational vs bitwise precedence ✓");
+    }
+
+    #[test]
+    fn b50b_precedence_equality_lowest() {
+        // == binds lowest: (1 + 2) == (4 - 1) → 3 == 3 = 1
+        run_6b4_test(
+            b"int main() { return 1 + 2 == 4 - 1; }",
+            1, true);
+        eprintln!("6B.5.0b: equality lowest precedence ✓");
+    }
+
+    // ─── Compiler-realistic encoding expression ──────────
+
+    #[test]
+    fn b50b_isa_encoding_expr() {
+        // (3 << 26) | (4 << 22) | 42
+        // = 201326592 | 16777216 | 42 = 218103850
+        // This is similar to how the guest compiler encodes instructions.
+        run_6b4_test(
+            b"int main() { return (3 << 26) | (4 << 22) | 42; }",
+            218103850, true);
+        eprintln!("6B.5.0b: ISA encoding expression ✓");
+    }
+
+    // ─── Unary dereference (read) ────────────────────────
+
+    #[test]
+    fn b50b_deref_read() {
+        // Child process layout (from SYS_EXEC in os.rs):
+        //   0x00000 : code (RX)
+        //   0x10000 : stack (RW, 0x4000 bytes)
+        //   0x20000 : trap handler (RX)
+        //
+        // Write a value to the stack, then dereference it.
+        // 0x10000 = 65536: bottom of child's stack (writable).
+        run_6b4_test(
+            b"int main() { *65536 = 77; return *65536; }",
+            77, true);
+        eprintln!("6B.5.0b: *addr dereference read ✓");
+    }
+
+    // ─── Dereference assignment (*addr = value;) ─────────
+
+    #[test]
+    fn b50b_deref_write() {
+        // Write to child stack memory (0x10000 = 65536) and read back.
+        run_6b4_test(
+            b"int main() { *65536 = 99; return *65536; }",
+            99, true);
+        eprintln!("6B.5.0b: *addr = value; dereference write ✓");
+    }
+
+    #[test]
+    fn b50b_deref_write_computed() {
+        // *(base + offset) = value; with expressions
+        // 65544 = 0x10008 (child stack + 8)
+        run_6b4_test(
+            b"int main() { int a = 65544; *a = 42; return *a; }",
+            42, true);
+        eprintln!("6B.5.0b: deref write via variable ✓");
+    }
+
+    // ─── Range-check conjunction using & ─────────────────
+
+    #[test]
+    fn b50b_range_check_conjunction() {
+        // Bootstrap idiom: (48 <= ch) & (ch <= 57)
+        // Tests that & works as bitwise AND on 0/1 boolean values.
+        run_6b4_test(
+            b"int main() { int ch = 50; return (48 <= ch) & (ch <= 57); }",
+            1, true);
+        run_6b4_test(
+            b"int main() { int ch = 65; return (48 <= ch) & (ch <= 57); }",
+            0, true);
+        eprintln!("6B.5.0b: & as boolean conjunction ✓");
+    }
+
+    // ─── Chained comparisons ─────────────────────────────
+
+    #[test]
+    fn b50b_chained_equality() {
+        // a == b == c parses as (a == b) == c
+        run_6b4_test(
+            b"int main() { return 3 == 3 == 1; }",
+            1, true);    // (3==3)=1, 1==1=1
+        run_6b4_test(
+            b"int main() { return 3 == 3 == 0; }",
+            0, true);    // (3==3)=1, 1==0=0
+        eprintln!("6B.5.0b: chained == ✓");
+    }
+
+    // ─── Complex compiler-realistic expression ───────────
+
+    #[test]
+    fn b50b_complex_encode_decode() {
+        // Encode an instruction word, then decode fields
+        run_6b4_test(
+            b"int main() { int w = (3 << 26) | (4 << 22) | 42; return w >> 26; }",
+            3, true);   // extract opcode
+        run_6b4_test(
+            b"int main() { int w = (3 << 26) | (4 << 22) | 42; return (w >> 22) & 15; }",
+            4, true);   // extract rd
+        run_6b4_test(
+            b"int main() { int w = (3 << 26) | (4 << 22) | 42; return w & 63; }",
+            42, true);  // extract low 6 bits (immediate)
+        eprintln!("6B.5.0b: encode/decode field extraction ✓");
     }
 
 }
