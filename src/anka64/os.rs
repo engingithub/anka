@@ -4225,6 +4225,18 @@ mod tests {
             ],
             body: vec![
                 Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_OUT_POS)))),
+                // Capacity guard: output buffer is 0x1000 bytes,
+                // each emit writes 8 bytes, so last legal pos is 0xFF8.
+                // Without this, overflow enters the RW workspace at 0x6000
+                // — memory authority ≠ output-object role.
+                Stmt::If(
+                    binop(BinOp::Lt, lit(0xFF8), var(1)),
+                    vec![
+                        deref_assign(lit(WS_ERROR), lit(1)),
+                        Stmt::Return(lit(0)),
+                    ],
+                    vec![],
+                ),
                 // padded = word | (NOP << 32)
                 //        = word | ((63 << 26) << 32)
                 Stmt::VarDecl(2, Type::Int, Some(
@@ -5282,6 +5294,27 @@ mod tests {
             b"return (2 + 3) * 4;",
             20, true);
         eprintln!("6B.3.3: (2 + 3) * 4 → 20 ✓");
+    }
+
+    #[test]
+    fn b3_emit_capacity_guard() {
+        // Output buffer is 0x1000 = 4096 bytes.  Each instruction
+        // occupies 8 bytes (NOP-padded).  Last legal start position
+        // is 0xFF8.  We force overflow via repeated assignments:
+        //   int v = 0;    → 2 insns (MOVI + ST)  = 16 bytes
+        //   v = 0; × 254  → 508 insns             = 4064 bytes
+        //   return v;     → 3 insns (LD + MOV + HALT) = 24 bytes
+        //   Total: 513 insns = 4104 > 4096
+        // The 512th instruction (at pos 0x1000) should trip the guard.
+        // One symbol → stays within the 250-entry table limit.
+        let mut src = Vec::new();
+        src.extend_from_slice(b"int v = 0; ");
+        for _ in 0..254 {
+            src.extend_from_slice(b"v = 0; ");
+        }
+        src.extend_from_slice(b"return v;");
+        run_6b3_test(&src, u64::MAX, false);
+        eprintln!("6B.3.3: emit capacity guard → error ✓");
     }
 
     /// Adversarial test: inspect emitted instructions and verify that
