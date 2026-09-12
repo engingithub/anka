@@ -7459,4 +7459,63 @@ mod tests {
         eprintln!("     The bootstrap fixed point survives the allocator redesign.");
     }
 
+    // ═══════════════════════════════════════════════════════════
+    // Phase 8.0: Boot contract
+    //
+    // The test creates a machine, creates a sealed code object,
+    // calls kernel.boot(), then kernel.run().  The test NEVER
+    // constructs an Anka64Core or Process directly — that is
+    // the entire point: the host owns machine instantiation,
+    // Anka owns process instantiation.
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p80_boot_return_42() {
+        // Host creates the machine
+        let mut fabric = Fabric::new(0x100000);
+
+        // Host creates and places a code object
+        let code_obj = fabric.alloc_object("init_code", 0x1000, ObjectKind::Memory);
+        fabric.place_object(code_obj, 0x0000);
+
+        // Host writes a trivial program: MOVI R0, 42; HALT
+        let mut asm = Asm64::new();
+        asm.movi(R0, 42);
+        asm.halt();
+        let code_bytes = asm.to_bytes();
+        let code_size = code_bytes.len() as u64;
+        fabric.initialize_object(code_obj, 0, &code_bytes);
+
+        // Host seals the object — it is now immutable
+        fabric.seal_object(code_obj);
+
+        // Host constructs the boot descriptor
+        let info = BootInfo {
+            image: BootImage {
+                obj: code_obj,
+                code_offset: 0,
+                code_size,
+                entry: 0,
+                lit_start: 0,
+            },
+            grants: vec![],
+            maps: vec![],
+        };
+
+        // Host creates the kernel and boots it
+        let mut kernel = Kernel::new(fabric);
+        let result = kernel.boot(&info);
+        assert_eq!(result, Ok(()), "boot() should succeed");
+
+        // Host runs the kernel — scheduling is the host's responsibility
+        kernel.run(1000, 100);
+
+        // Verify init exited with 42
+        assert_eq!(kernel.processes.len(), 1, "exactly one process (init)");
+        assert!(kernel.processes[0].exited, "init should have exited");
+        assert_eq!(kernel.processes[0].exit_code, 42,
+            "init should exit with 42");
+        eprintln!("8.0: boot(return 42) succeeded — test never constructed a core ✓");
+    }
+
 }
