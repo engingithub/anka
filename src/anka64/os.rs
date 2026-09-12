@@ -118,15 +118,22 @@ impl Kernel {
             match result {
                 super::core::StepResult::Continue => {}
                 super::core::StepResult::Halted => {
-                    if self.processes[idx].core.privilege
-                        == Privilege::Supervisor
+                    let core = &self.processes[idx].core;
+                    if core.privilege == Privilege::Supervisor
+                        && core.pc == core.trap_vector
                     {
-                        // HALT in Supervisor mode: reached through
-                        // TRAP → trap handler → HALT.  R0 = syscall number.
+                        // Supervisor HALT at the trap gate: TRAP → handler
+                        // → HALT.  R0 = syscall number.
                         self.handle_syscall(idx);
+                    } else if core.privilege == Privilege::Supervisor {
+                        // Supervisor HALT elsewhere: kernel halt/panic.
+                        eprintln!("Process {} supervisor halt at {:#x} (not trap gate {:#x})",
+                            self.processes[idx].pid, core.pc, core.trap_vector);
+                        self.processes[idx].exited = true;
+                        self.processes[idx].exit_code = 0xDEAD;
                     } else {
-                        // HALT in User mode: _start's HALT after main
-                        // returns.  Implicit SYS_EXIT with exit_code = R0.
+                        // User HALT: _start's HALT after main returns.
+                        // Implicit SYS_EXIT with exit_code = R0.
                         let proc = &mut self.processes[idx];
                         proc.exit_code = proc.core.r[R0 as usize];
                         proc.exited = true;
@@ -366,10 +373,15 @@ impl Kernel {
             match result {
                 super::core::StepResult::Continue => {}
                 super::core::StepResult::Halted => {
-                    if self.processes[idx].core.privilege
-                        == Privilege::Supervisor
+                    let core = &self.processes[idx].core;
+                    if core.privilege == Privilege::Supervisor
+                        && core.pc == core.trap_vector
                     {
                         self.handle_syscall(idx);
+                    } else if core.privilege == Privilege::Supervisor {
+                        self.processes[idx].exited = true;
+                        self.processes[idx].exit_code = 0xDEAD;
+                        return;
                     } else {
                         let proc = &mut self.processes[idx];
                         proc.exit_code = proc.core.r[R0 as usize];
@@ -3630,5 +3642,49 @@ mod tests {
         // after removing the ch==0 check.
         run_6b2_test(b"return 42;", 42, true);
         eprintln!("6B.2a: true EOF still works ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // StepResult::Halted disambiguation — three distinct outcomes
+    // ═══════════════════════════════════════════════════════════
+
+    /// User HALT → exit(R0).  The normal path: _start's HALT after
+    /// main returns.  This is the same path exercised by all kernel
+    /// tests, but we verify the exit code explicitly.
+    #[test]
+    fn halt_user_exit() {
+        run_6b1_test(b"return 42;", 42, true);
+        eprintln!("halt: user HALT → exit(42) ✓");
+    }
+
+    /// Illegal instruction → Fault(IllegalInstruction), not Halted.
+    /// Writes a single illegal opcode word into the code object and
+    /// runs the kernel.  The process must exit with 0xDEAD (fault),
+    /// not with R0 (user HALT).
+    #[test]
+    fn halt_illegal_instruction_faults() {
+        let mut fabric = Fabric::new(0x400000);
+        let text = fabric.alloc_object("text", 0x1000, ObjectKind::Memory);
+        fabric.place_object(text, 0x0000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, text, 0, 0x1000, Permissions::READ);
+
+        // Write a single illegal word (opcode 0 → no desc-table match).
+        // NOTE: 0xFFFFFFFF maps to opcode 0x3F = NOP, not illegal.
+        fabric.write_physical(0x0000, &0x00000001u32.to_le_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x0000, 0x1000, text);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.run(100, 100);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, 0xDEAD,
+            "illegal instruction must produce fault exit (0xDEAD), not user HALT");
+        eprintln!("halt: illegal opcode → IllegalInstruction fault → exit 0xDEAD ✓");
     }
 }
