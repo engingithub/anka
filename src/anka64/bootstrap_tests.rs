@@ -10,6 +10,12 @@ mod tests {
     use super::super::isa::*;
     use super::super::state::*;
 
+    // ─── Bootstrap function counts ────────────────────────────
+    // CC_A: bootstrap seed (Rust AST compiler), frozen at 7.3 semantics.
+    // Canonical source: authoritative compiler definition (7.4+).
+    const CCA_FUNC_COUNT: u64 = 45;
+    const CANONICAL_FUNC_COUNT: u64 = 46;  // CCA + validateutf8
+
     // ═══════════════════════════════════════════════════════════
     // P20: Guest-hosted compilation — int main() { return 42; }
     //
@@ -4031,6 +4037,13 @@ mod tests {
 
     /// Run a 6B.4 test case: guest compiler with functions → expected result.
     fn run_6b4_test(source_text: &[u8], expected_exit: u64, expect_child: bool) {
+        let kernel = run_6b4_harness(source_text, expected_exit, expect_child);
+        // Discard kernel — caller doesn't need it.
+        drop(kernel);
+    }
+
+    /// Run the 6B.4 harness and return the Kernel for output inspection.
+    fn run_6b4_harness(source_text: &[u8], expected_exit: u64, expect_child: bool) -> Kernel {
         let mut fabric = Fabric::new(0x400000);
 
         let text   = fabric.alloc_object("compiler_text",  TEXT_SIZE as u64, ObjectKind::Memory);
@@ -4055,6 +4068,11 @@ mod tests {
         let src_len = source_text.len() as u64;
         fabric.write_physical(0x010000, &src_len.to_le_bytes());
         fabric.write_physical(0x010008, source_text);
+
+        // Initialize two-ended allocator: WS_LIT_POS = OUTPUT_SIZE
+        fabric.write_physical(
+            0x030000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            &(OUTPUT_SIZE as u64).to_le_bytes());
 
         // Trap handler at end of TEXT_SIZE text object
         install_trap_handler(&mut fabric, 0x000000, TEXT_SIZE as u64);
@@ -4173,6 +4191,7 @@ mod tests {
             assert!(kernel.processes[1].exited);
             assert_eq!(kernel.processes[1].exit_code, expected_exit);
         }
+        kernel
     }
 
     // ═══════════════════════════════════════════════════════
@@ -4917,6 +4936,50 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════
+    //  7.3 — Buffer-based SYS_WRITE through guest compiler
+    // ═══════════════════════════════════════════════════════
+    //
+    // The demanding client for 7.3:
+    //   int main() { int s = "İzmir"; syscall(1, s + 8, *s, 0); return 0; }
+    //
+    // Observable result: six UTF-8 bytes C4 B0 7A 6D 69 72.
+
+    #[test]
+    fn p73_write_hello() {
+        // "hello" → 5 ASCII bytes: 68 65 6C 6C 6F
+        // Uses return-expression form: compile_stmt handles return,
+        // compile_expr handles syscall().  SYS_WRITE returns 0 on success.
+        let kernel = run_6b4_harness(
+            b"int main() { int s = \"hello\"; return syscall(1, s + 8, *s, 0); }",
+            0, true);
+        assert_eq!(&kernel.byte_output, b"hello",
+            "byte_output should be ASCII \"hello\"");
+        eprintln!("7.3: write_hello → {:?} ✓", &kernel.byte_output);
+    }
+
+    #[test]
+    fn p73_write_empty() {
+        // "" → length 0 → SYS_WRITE(addr, 0, 0) → no output, success
+        let kernel = run_6b4_harness(
+            b"int main() { int s = \"\"; return syscall(1, s + 8, *s, 0); }",
+            0, true);
+        assert!(kernel.byte_output.is_empty(),
+            "empty string should produce no output");
+        eprintln!("7.3: write_empty → {:?} ✓", &kernel.byte_output);
+    }
+
+    #[test]
+    fn p73_write_izmir() {
+        // "İzmir" → 6 UTF-8 bytes: C4 B0 7A 6D 69 72
+        let kernel = run_6b4_harness(
+            b"int main() { int s = \"\xC4\xB0zmir\"; return syscall(1, s + 8, *s, 0); }",
+            0, true);
+        assert_eq!(&kernel.byte_output, b"\xC4\xB0zmir",
+            "byte_output should be UTF-8 İzmir");
+        eprintln!("7.3: write_izmir → {:02X?} ✓", &kernel.byte_output);
+    }
+
+    // ═══════════════════════════════════════════════════════
     //  6B.5.0e — Canonical compiler source (bottom-up)
     // ═══════════════════════════════════════════════════════
     //
@@ -4935,6 +4998,44 @@ mod tests {
              int shift = (pos & 7) * 8; \
              return (word >> shift) & 255; }} ",
             WS_TEXT_BASE)
+    }
+
+    fn canonical_writebyte() -> String {
+        format!(
+            "int writebyte(int addr, int byte) {{ \
+             int aligned = addr & (0 - 8); \
+             int shift = (addr & 7) * 8; \
+             int word = *(aligned); \
+             int mask = 255 << shift; \
+             word = (word & ((0 - 1) - mask)) | ((byte & 255) << shift); \
+             *(aligned) = word; \
+             return 0; }} ")
+    }
+
+    fn canonical_storeliteral() -> String {
+        // Two-ended image allocator (7.2): literals grow downward from
+        // OUTPUT_SIZE within the output buffer.  Returns the absolute
+        // offset of the literal header within the output buffer.
+        // Underflow-safe: checks lp < size before lp - size.
+        format!(
+            "int storeliteral() {{ \
+             int len = *{nl}; \
+             int start = *{ns}; \
+             int lp = *{litp}; \
+             int aligned = (len + 7) & (0 - 8); \
+             int sz = aligned + 8; \
+             if (lp < sz) {{ *{e} = 1; return 0; }} \
+             lp = lp - sz; \
+             *({out} + lp) = len; \
+             int db = {out} + lp + 8; \
+             int i = 0; \
+             while (i < len) {{ \
+             writebyte(db + i, readbyte(start + i)); \
+             i = i + 1; }} \
+             *{litp} = lp; \
+             return lp; }} ",
+            ns = WS_TOK_NAME_START, nl = WS_TOK_NAME_LEN,
+            litp = WS_LIT_POS, e = WS_ERROR, out = LAYOUT_OUT)
     }
 
     fn canonical_peekchar() -> String {
@@ -5065,6 +5166,71 @@ mod tests {
             tt = WS_TOK_TYPE)
     }
 
+    /// RFC 3629 scalar-value validation (7.4).
+    ///
+    /// Pure function: validateutf8(start, len) -> 0 valid / 1 invalid.
+    /// Uses need/lo/hi state machine with one continuation loop.
+    ///
+    /// Overflow-safe: i < len <= SOURCE_SIZE, need <= 3,
+    /// so i + need + 1 cannot overflow 64-bit arithmetic.
+    fn canonical_validateutf8() -> String {
+        "int validateutf8(int start, int len) { \
+         int i = 0; int b = 0; int need = 0; \
+         int lo = 0; int hi = 0; int j = 0; int c = 0; \
+         while (i < len) { \
+         b = readbyte(start + i); \
+         if (b <= 127) { i = i + 1; } \
+         else { \
+         need = 0; lo = 128; hi = 191; \
+         if ((194 <= b) & (b <= 223)) { need = 1; } \
+         else { if (b == 224) { need = 2; lo = 160; } \
+         else { if ((225 <= b) & (b <= 236)) { need = 2; } \
+         else { if (b == 237) { need = 2; hi = 159; } \
+         else { if ((238 <= b) & (b <= 239)) { need = 2; } \
+         else { if (b == 240) { need = 3; lo = 144; } \
+         else { if ((241 <= b) & (b <= 243)) { need = 3; } \
+         else { if (b == 244) { need = 3; hi = 143; } \
+         else { return 1; \
+         } } } } } } } } \
+         if (len < i + need + 1) { return 1; } \
+         c = readbyte(start + i + 1); \
+         if (c < lo) { return 1; } \
+         if (hi < c) { return 1; } \
+         j = 2; \
+         while (j <= need) { \
+         c = readbyte(start + i + j); \
+         if (c < 128) { return 1; } \
+         if (191 < c) { return 1; } \
+         j = j + 1; } \
+         i = i + need + 1; \
+         } } \
+         return 0; } ".into()
+    }
+
+    /// scanstring (7.4): advance past opening quote, scan to closing quote,
+    /// advance past closing quote (scanner always makes progress),
+    /// then validate UTF-8.  Lexical failure -> ERROR + TOK_EOF.
+    fn canonical_scanstring() -> String {
+        format!(
+            "int scanstring() {{ \
+             advance(); \
+             int start = *{pos}; \
+             int len = 0; \
+             while (*{pos} < *{sl}) {{ \
+             if (peekchar() == 34) {{ \
+             advance(); \
+             if (validateutf8(start, len) != 0) {{ \
+             *{e} = 1; *{tt} = {eof}; return 0; }} \
+             *{ns} = start; *{nl} = len; \
+             *{tt} = {str}; return 0; }} \
+             len = len + 1; advance(); }} \
+             *{e} = 1; *{tt} = {eof}; return 0; }} ",
+            pos = WS_POS, sl = WS_SRC_LEN,
+            ns = WS_TOK_NAME_START, nl = WS_TOK_NAME_LEN,
+            tt = WS_TOK_TYPE, e = WS_ERROR,
+            str = TOK_STRING, eof = TOK_EOF)
+    }
+
     fn canonical_nexttoken() -> String {
         format!(
             "int nexttoken() {{ \
@@ -5095,6 +5261,7 @@ mod tests {
              if (ch == 33) {{ advance(); \
              if (peekchar() == 61) {{ advance(); *{tt} = {ne}; return 0; }} \
              *{e} = 1; *{tt} = {eof}; return 0; }} \
+             if (ch == 34) {{ return scanstring(); }} \
              if ((97 <= ch) & (ch <= 122)) {{ return scanident(); }} \
              if ((48 <= ch) & (ch <= 57)) {{ return scannumber(); }} \
              *{e} = 1; *{tt} = {eof}; return 0; }} ",
@@ -5206,11 +5373,17 @@ mod tests {
              emit(encs({trap})); \
              emit(encr({mov}, {r4}, {r0}, 0)); \
              return 0; }} \
+             if (tok == {str}) {{ \
+             int litoff = storeliteral(); \
+             nexttoken(); \
+             emit(enci({movi}, {r4}, 0, litoff)); \
+             return 0; }} \
              *{e} = 1; return 0; }} ",
             tt = WS_TOK_TYPE, tv = WS_TOK_VALUE,
             tns = WS_TOK_NAME_START, tnl = WS_TOK_NAME_LEN,
             e = WS_ERROR,
             num = TOK_NUMBER, ident = TOK_IDENT,
+            str = TOK_STRING,
             lp = TOK_LPAREN, rp = TOK_RPAREN,
             comma = TOK_COMMA, syscall = TOK_SYSCALL,
             movi = OP_MOVI, ld = OP_LD, ld2 = OP_LD,
@@ -5597,6 +5770,10 @@ mod tests {
     }
 
     fn canonical_compilermain() -> String {
+        // After compilation, normalize literal segment offset:
+        // lp == OUTPUT_SIZE → no literals → pass 0 as R3.
+        // Otherwise pass lp (the literal frontier) as R3.
+        // Equality check, not comparison: corruption should propagate.
         format!(
             "int main() {{ \
              int src = {layout_src}; \
@@ -5624,7 +5801,9 @@ mod tests {
              if (*{e} != 0) {{ return 0 - 1; }} \
              int seal = syscall(5, {layout_out}, 0, 0); \
              int sz = *{op}; \
-             return syscall(6, {layout_out}, sz, 0); }} ",
+             int lp = *{litp}; \
+             if (lp == {outsize}) {{ lp = 0; }} \
+             return syscall(6, {layout_out}, sz, lp); }} ",
             layout_src = LAYOUT_SRC,
             srclimit = SOURCE_SIZE - 8,
             layout_out = LAYOUT_OUT,
@@ -5633,6 +5812,7 @@ mod tests {
             esp = WS_EXPR_SP, espabs = -EXPR_SP_INIT,
             fc = WS_FUNC_COUNT, fxc = WS_FIX_COUNT,
             tt = WS_TOK_TYPE, eof = TOK_EOF,
+            litp = WS_LIT_POS, outsize = OUTPUT_SIZE,
             call = OP_CALL, halt = OP_HALT)
     }
 
@@ -5673,16 +5853,23 @@ mod tests {
     }
 
     fn canonical_emit() -> String {
+        // Width-safe collision guard (7.2): the full 8-byte write
+        // must fit below the literal frontier WS_LIT_POS.
+        //   if (lp < 8) → underflow guard
+        //   if (lp - 8 < pos) → collision
+        // When no literals (lp == OUTPUT_SIZE), degenerates to original.
         format!(
             "int emit(int word) {{ \
              int pos = *{op}; \
-             if ({limit} < pos) {{ *{e} = 1; return 0; }} \
+             int lp = *{litp}; \
+             if (lp < 8) {{ *{e} = 1; return 0; }} \
+             if (lp - 8 < pos) {{ *{e} = 1; return 0; }} \
              int padded = word | (({nop} << 26) << 32); \
              *({out} + pos) = padded; \
              *{op} = pos + 8; \
              return 0; }} ",
             op = WS_OUT_POS,
-            limit = OUTPUT_SIZE - 8,
+            litp = WS_LIT_POS,
             e = WS_ERROR,
             nop = OP_NOP,
             out = LAYOUT_OUT)
@@ -5923,11 +6110,13 @@ mod tests {
 
     #[test]
     fn b50e_full_lexer_compiles() {
-        // Complete lexer: all 10 functions.
+        // Complete lexer: 14 functions (7.4: +validateutf8, called by scanstring).
         let src = format!(
-            "{}{}{}{}{}{}{}{}{}\
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}\
              int main() {{ return 42; }}",
             canonical_readbyte(),
+            canonical_writebyte(),
+            canonical_storeliteral(),
             canonical_peekchar(),
             canonical_advance(),
             canonical_skipws(),
@@ -5936,19 +6125,23 @@ mod tests {
             canonical_setchartok(),
             canonical_scannumber(),
             canonical_scanident(),
+            canonical_validateutf8(),
+            canonical_scanstring(),
             );
         eprintln!("6B.5.0e: full lexer source = {} bytes", src.len());
         run_6b4_test(src.as_bytes(), 42, true);
-        eprintln!("6B.5.0e: full lexer (9 functions) compiles ✓");
+        eprintln!("6B.5.0e: full lexer (14 functions) compiles ✓");
     }
 
     #[test]
     fn b50e_nexttoken_compiles() {
-        // Complete lexer + tokenizer.
+        // Complete lexer + tokenizer (15 functions).
         let src = format!(
-            "{}{}{}{}{}{}{}{}{}{}\
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}\
              int main() {{ return 42; }}",
             canonical_readbyte(),
+            canonical_writebyte(),
+            canonical_storeliteral(),
             canonical_peekchar(),
             canonical_advance(),
             canonical_skipws(),
@@ -5957,11 +6150,13 @@ mod tests {
             canonical_setchartok(),
             canonical_scannumber(),
             canonical_scanident(),
+            canonical_validateutf8(),
+            canonical_scanstring(),
             canonical_nexttoken(),
             );
         eprintln!("6B.5.0e: lexer+tokenizer source = {} bytes", src.len());
         run_6b4_test(src.as_bytes(), 42, true);
-        eprintln!("6B.5.0e: complete tokenizer (10 functions) compiles ✓");
+        eprintln!("6B.5.0e: complete tokenizer (15 functions) compiles ✓");
     }
 
     // ─── Emit/encoding layer tests ──────────────────
@@ -6032,8 +6227,10 @@ mod tests {
     /// Helper: all canonical functions needed for expression compilation.
     fn canonical_expr_prelude() -> String {
         format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
             canonical_readbyte(),
+            canonical_writebyte(),
+            canonical_storeliteral(),
             canonical_peekchar(),
             canonical_advance(),
             canonical_skipws(),
@@ -6042,6 +6239,8 @@ mod tests {
             canonical_setchartok(),
             canonical_scannumber(),
             canonical_scanident(),
+            canonical_validateutf8(),
+            canonical_scanstring(),
             canonical_nexttoken(),
             canonical_enci(),
             canonical_encr(),
@@ -6123,7 +6322,7 @@ mod tests {
 
     #[test]
     fn b50e_full_compiler_compiles() {
-        // Full canonical compiler: all 42 functions compile without error.
+        // Full canonical compiler: all CANONICAL_FUNC_COUNT functions compile without error.
         // The child binary IS the compiler — its main reads source from
         // the buffer, which still holds the canonical text. It tries to
         // self-compile (CC_B), which may succeed or fail depending on
@@ -6157,6 +6356,9 @@ mod tests {
         let src_len = src_bytes.len() as u64;
         fabric.write_physical(0x010000, &src_len.to_le_bytes());
         fabric.write_physical(0x010008, src_bytes);
+        fabric.write_physical(
+            0x030000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            &(OUTPUT_SIZE as u64).to_le_bytes());
         install_trap_handler(&mut fabric, 0x000000, TEXT_SIZE as u64);
         fabric.write_physical(0x000000, &code_bytes);
         seal_code_object(&mut fabric, text, dom);
@@ -6188,8 +6390,10 @@ mod tests {
         eprintln!("6B.5.0e: host compiled {} functions, {} bytes output, error={}",
             ws_funcs, ws_out, ws_error);
         assert_eq!(ws_error, 0, "host compiler reported error");
-        assert_eq!(ws_funcs, 42, "expected 42 canonical functions");
-        eprintln!("6B.5.0e: canonical full compiler (42 functions) ✓");
+        assert_eq!(ws_funcs, CANONICAL_FUNC_COUNT,
+            "expected {} canonical functions", CANONICAL_FUNC_COUNT);
+        eprintln!("6B.5.0e: canonical full compiler ({} functions) ✓",
+            CANONICAL_FUNC_COUNT);
     }
 
     #[test]
@@ -6217,6 +6421,329 @@ mod tests {
         run_6b4_test(b"int main() { return 1 << 4; }", 16, true);
         run_6b4_test(b"int main() { return 32 >> 3; }", 4, true);
         eprintln!("6B.5 expr: bitwise operators ✓");
+    }
+
+    // ─── Phase 7 — String literal tokenization ───────────
+
+    #[test]
+    fn p70_string_token_recognized() {
+        // The tokenizer recognizes "hello" as TOK_STRING (28).
+        // compileprimary stores the literal in the output buffer
+        // (two-ended allocator) and emits MOVI R4, literal_offset.
+        // The child returns the offset (pointer to the literal).
+        //
+        // "hello" = 5 bytes → aligned 8 → total 16 bytes → np = 0xFFF0.
+        //
+        // Architectural invariant: Bytes ≠ Text.
+        // String literals are arbitrary UTF-8 bytes + explicit byte
+        // length.  No NUL termination.  Byte length ≠ codepoint count
+        // ≠ grapheme count.
+        let expected_np: u64 = OUTPUT_SIZE as u64 - 16;
+        let src = br#"int main() { return "hello"; }"#;
+        run_6b4_test(src, expected_np, true);
+        eprintln!("7.2: string literal → offset 0x{:X} ✓", expected_np);
+    }
+
+    #[test]
+    fn p70_string_token_utf8() {
+        // UTF-8 string literal: "İzmir" is 6 bytes (İ = 0xC4 0xB0,
+        // z = 0x7A, m = 0x6D, i = 0x69, r = 0x72).
+        // The tokenizer preserves all UTF-8 bytes verbatim.
+        // byte_length("İzmir") = 6 ≠ codepoint_count = 5 ≠ grapheme_count = 5.
+        // 6 bytes → aligned 8 → total 16 → np = 0xFFF0.
+        let expected_np: u64 = OUTPUT_SIZE as u64 - 16;
+        let src = "int main() { return \"İzmir\"; }";
+        run_6b4_test(src.as_bytes(), expected_np, true);
+        eprintln!("7.2: UTF-8 string literal → offset 0x{:X} ✓", expected_np);
+    }
+
+    #[test]
+    fn p70_string_token_workspace_state() {
+        // Verify the tokenizer sets WS_TOK_TYPE, WS_TOK_NAME_START,
+        // WS_TOK_NAME_LEN correctly for a string literal.
+        // The compiler should succeed and the literal is stored in
+        // the output buffer (two-ended allocator, 7.2).
+        let src = br#"int main() { return "hello"; }"#;
+        let mut fabric = Fabric::new(0x400000);
+
+        let text   = fabric.alloc_object("text",   TEXT_SIZE as u64, ObjectKind::Memory);
+        let source = fabric.alloc_object("source", SOURCE_SIZE as u64, ObjectKind::Memory);
+        let output = fabric.alloc_object("output", OUTPUT_SIZE as u64, ObjectKind::Memory);
+        let work   = fabric.alloc_object("ws",     WS_SIZE as u64, ObjectKind::Memory);
+        let stack  = fabric.alloc_object("stack",  0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text,   0x000000);
+        fabric.place_object(source, 0x010000);
+        fabric.place_object(output, 0x020000);
+        fabric.place_object(work,   0x030000);
+        fabric.place_object(stack,  0x040000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, source, 0, SOURCE_SIZE as u64, Permissions::READ);
+        fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
+        fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
+        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+
+        let src_len = src.len() as u64;
+        fabric.write_physical(0x010000, &src_len.to_le_bytes());
+        fabric.write_physical(0x010008, src);
+
+        // Initialize two-ended allocator: WS_LIT_POS = OUTPUT_SIZE
+        fabric.write_physical(
+            0x030000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            &(OUTPUT_SIZE as u64).to_le_bytes());
+
+        install_trap_handler(&mut fabric, 0x000000, TEXT_SIZE as u64);
+
+        let compiler_prog = build_6b4_compiler();
+        let asm = cc::compile(&compiler_prog);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0, TEXT_SIZE as u64, text);
+        core.address_map.add(LAYOUT_SRC as u64,   SOURCE_SIZE as u64, source);
+        core.address_map.add(LAYOUT_OUT as u64,    OUTPUT_SIZE as u64, output);
+        core.address_map.add(LAYOUT_WS as u64,     WS_SIZE as u64, work);
+        core.address_map.add(LAYOUT_STACK as u64,  0x4000, stack);
+        core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
+        core.trap_vector = TEXT_SIZE as u64 - 0x10;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x050000;
+        kernel.next_agent = 10;
+        kernel.spawn(core);
+        kernel.run(2000000, 10);
+
+        assert!(kernel.processes[0].exited, "compiler should exit");
+
+        // Read workspace state
+        let read = |off: u64| -> u64 {
+            let bytes = kernel.fabric.read_physical(0x030000 + off, 8);
+            u64::from_le_bytes(bytes.try_into().unwrap())
+        };
+
+        let ws_error = read(0x18);  // WS_ERROR
+
+        // compileprimary now handles TOK_STRING by calling storeliteral.
+        // The compiler should succeed.
+        assert_eq!(ws_error, 0, "compiler should succeed with string literal");
+        eprintln!("7.0: string literal workspace state verified ✓");
+    }
+
+    #[test]
+    fn p70_string_unterminated_error() {
+        // Unterminated string literal sets error.
+        let src = br#"int main() { return "hello; }"#;
+        run_6b4_test(src, u64::MAX, false);
+        eprintln!("7.0: unterminated string literal → error ✓");
+    }
+
+    #[test]
+    fn p70_string_empty() {
+        // Empty string "" → byte_len = 0, no data bytes.
+        // aligned(0) = 0, total = 8.  np = OUTPUT_SIZE - 8.
+        let expected_np: u64 = OUTPUT_SIZE as u64 - 8;
+        let src = br#"int main() { return ""; }"#;
+        run_6b4_test(src, expected_np, true);
+        eprintln!("7.2: empty string literal → offset 0x{:X} ✓", expected_np);
+    }
+
+    #[test]
+    fn p70_string_embedded_nul() {
+        // ByteString allows embedded NUL: "a\0b" (using raw bytes).
+        // 3 bytes → aligned 8 → total 16 → np = OUTPUT_SIZE - 16.
+        let expected_np: u64 = OUTPUT_SIZE as u64 - 16;
+        let mut src = Vec::from(&b"int main() { return \""[..]);
+        src.push(b'a');
+        src.push(0x00);
+        src.push(b'b');
+        src.extend_from_slice(b"\"; }");
+        run_6b4_test(&src, expected_np, true);
+        eprintln!("7.2: embedded NUL in ByteString → offset 0x{:X} ✓", expected_np);
+    }
+
+    #[test]
+    fn p70_string_multibyte_utf8() {
+        // "şarap" — ş is 2 bytes (0xC5 0x9F), total 6 bytes, 5 codepoints.
+        // 6 bytes → aligned 8 → total 16 → np = OUTPUT_SIZE - 16.
+        let expected_np: u64 = OUTPUT_SIZE as u64 - 16;
+        let src = "int main() { return \"şarap\"; }";
+        let src_bytes = src.as_bytes();
+        let sarap = "şarap";
+        assert_eq!(sarap.len(), 6, "şarap is 6 UTF-8 bytes");
+        assert_eq!(sarap.chars().count(), 5, "şarap is 5 codepoints");
+        run_6b4_test(src_bytes, expected_np, true);
+        eprintln!("7.2: multi-byte UTF-8 string (şarap) → offset 0x{:X} ✓", expected_np);
+    }
+
+    // ─── Phase 7.1 — Literal object representation ───────
+
+    #[test]
+    fn p71_store_literal_hello() {
+        // Compile a program containing "hello" as a string literal.
+        // Two-ended allocator (7.2): literal stored at top of output buffer.
+        // "hello" = 5 bytes → aligned 8 → total 16 bytes (header + data).
+        // np = OUTPUT_SIZE - 16 = 0xFFF0 = 65520.
+        // After compilation, inspect the output buffer at that offset.
+        let src = br#"int main() { return "hello"; }"#;
+
+        let mut fabric = Fabric::new(0x400000);
+        let text   = fabric.alloc_object("text",   TEXT_SIZE as u64, ObjectKind::Memory);
+        let source = fabric.alloc_object("source", SOURCE_SIZE as u64, ObjectKind::Memory);
+        let output = fabric.alloc_object("output", OUTPUT_SIZE as u64, ObjectKind::Memory);
+        let work   = fabric.alloc_object("ws",     WS_SIZE as u64, ObjectKind::Memory);
+        let stack  = fabric.alloc_object("stack",  0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text,   0x000000);
+        fabric.place_object(source, 0x010000);
+        fabric.place_object(output, 0x020000);
+        fabric.place_object(work,   0x030000);
+        fabric.place_object(stack,  0x040000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, source, 0, SOURCE_SIZE as u64, Permissions::READ);
+        fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
+        fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
+        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+
+        fabric.write_physical(0x010000, &(src.len() as u64).to_le_bytes());
+        fabric.write_physical(0x010008, src.as_ref());
+
+        // Initialize two-ended allocator: WS_LIT_POS = OUTPUT_SIZE
+        fabric.write_physical(
+            0x030000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            &(OUTPUT_SIZE as u64).to_le_bytes());
+
+        install_trap_handler(&mut fabric, 0x000000, TEXT_SIZE as u64);
+        let compiler_prog = build_6b4_compiler();
+        let asm = cc::compile(&compiler_prog);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0, TEXT_SIZE as u64, text);
+        core.address_map.add(LAYOUT_SRC as u64,   SOURCE_SIZE as u64, source);
+        core.address_map.add(LAYOUT_OUT as u64,    OUTPUT_SIZE as u64, output);
+        core.address_map.add(LAYOUT_WS as u64,     WS_SIZE as u64, work);
+        core.address_map.add(LAYOUT_STACK as u64,  0x4000, stack);
+        core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
+        core.trap_vector = TEXT_SIZE as u64 - 0x10;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x050000;
+        kernel.next_agent = 10;
+        kernel.spawn(core);
+        kernel.run(2000000, 10);
+
+        assert!(kernel.processes[0].exited, "compiler should exit");
+
+        let read_ws = |off: u64| -> u64 {
+            let bytes = kernel.fabric.read_physical(0x030000 + off, 8);
+            u64::from_le_bytes(bytes.try_into().unwrap())
+        };
+        let ws_error = read_ws(0x18);
+        assert_eq!(ws_error, 0, "compiler should succeed with string literal");
+
+        // Two-ended allocator: "hello" stored at output buffer offset 0xFFF0.
+        // Output buffer physical base = 0x020000.
+        let lit_pos = read_ws((WS_LIT_POS - LAYOUT_WS) as u64);
+        let expected_np: u64 = OUTPUT_SIZE as u64 - 16; // 0xFFF0
+        assert_eq!(lit_pos, expected_np,
+            "WS_LIT_POS should be 0x{:X} (OUTPUT_SIZE - 16)", expected_np);
+
+        // Read header at output buffer + np
+        let out_phys: u64 = 0x020000;
+        let lit_header = kernel.fabric.read_physical(out_phys + expected_np, 8);
+        let byte_len = u64::from_le_bytes(lit_header.try_into().unwrap());
+        assert_eq!(byte_len, 5, "byte_len should be 5 for \"hello\"");
+
+        // Read data bytes
+        let lit_data = kernel.fabric.read_physical(out_phys + expected_np + 8, 5);
+        assert_eq!(&lit_data[..], b"hello",
+            "literal data should contain 'hello'");
+
+        eprintln!("7.2: literal object at output+0x{:X} [u64 byte_len=5][hello] ✓",
+            expected_np);
+        eprintln!("     two-ended allocator: code grows up, literals grow down");
+    }
+
+    #[test]
+    fn p71_store_literal_utf8_izmir() {
+        // "İzmir" is 6 UTF-8 bytes: C4 B0 7A 6D 69 72.
+        // byte_length(6) ≠ codepoint_count(5) ≠ grapheme_count(5).
+        // Literal stored at output buffer top via two-ended allocator.
+        // "İzmir" = 6 bytes → aligned 8 → total 16 bytes → np = 0xFFF0.
+        // Child returns np (the literal offset, not its content).
+        let expected_np: u64 = OUTPUT_SIZE as u64 - 16; // 0xFFF0
+        let src = "int main() { return \"İzmir\"; }";
+        run_6b4_test(src.as_bytes(), expected_np, true);
+        eprintln!("7.2: İzmir literal at offset 0x{:X} ✓", expected_np);
+    }
+
+    #[test]
+    fn p71_store_literal_empty() {
+        // Empty string "" → byte_len = 0, no data bytes.
+        // aligned(0) = 0, total = 8 (header only).  np = 0xFFF8.
+        let expected_np: u64 = OUTPUT_SIZE as u64 - 8;
+        let src = br#"int main() { return ""; }"#;
+        run_6b4_test(src, expected_np, true);
+        eprintln!("7.2: empty string literal at offset 0x{:X} ✓", expected_np);
+    }
+
+    #[test]
+    fn p71_two_literals() {
+        // Two string literals: "hello" (first compiled, in foo) and
+        // "world" (second, in main).  Each gets 16 bytes in the
+        // output buffer.  "hello" is compiled first → np=0xFFF0.
+        // "world" is compiled second → np=0xFFE0.
+        // main returns the "world" literal offset.
+        let expected_np: u64 = OUTPUT_SIZE as u64 - 32; // 0xFFE0
+        let src = br#"int foo() { return "hello"; } int main() { return "world"; }"#;
+        run_6b4_test(src, expected_np, true);
+        eprintln!("7.2: two literals compiled (world at 0x{:X}) ✓", expected_np);
+    }
+
+    // ─── Phase 7.2 — Semantic dereference tests ────────────
+    // The child process receives R-only authority on the literal
+    // segment [lit_start, OUTPUT_SIZE).  Dereferencing a string
+    // literal reads the byte_len header: *"hello" → 5.
+    // Rule 29: the child has READ but not EXECUTE on literals.
+
+    #[test]
+    fn p72_deref_hello() {
+        // *"hello" → dereference the literal pointer, reads byte_len = 5.
+        // The literal header is at output offset 0xFFF0, and its first
+        // 8 bytes contain the u64 byte_len = 5.
+        let src = br#"int main() { return *"hello"; }"#;
+        run_6b4_test(src, 5, true);
+        eprintln!("7.2: *\"hello\" = 5 (byte_len via R-only literal segment) ✓");
+    }
+
+    #[test]
+    fn p72_deref_izmir() {
+        // *"İzmir" → 6 (UTF-8 byte count, not codepoint count).
+        let src = "int main() { return *\"İzmir\"; }";
+        run_6b4_test(src.as_bytes(), 6, true);
+        eprintln!("7.2: *\"İzmir\" = 6 (byte_len, Bytes ≠ Text) ✓");
+    }
+
+    #[test]
+    fn p72_deref_empty() {
+        // *"" → 0 (empty string has byte_len = 0).
+        let src = br#"int main() { return *""; }"#;
+        run_6b4_test(src, 0, true);
+        eprintln!("7.2: *\"\" = 0 (empty literal dereference) ✓");
+    }
+
+    #[test]
+    fn p72_deref_two_literals() {
+        // Two literals, dereference the second.
+        // "hello" compiled first (foo), "world" compiled second (main).
+        // *"world" → 5.
+        let src = br#"int foo() { return *"hello"; } int main() { return *"world"; }"#;
+        run_6b4_test(src, 5, true);
+        eprintln!("7.2: *\"world\" = 5 (second literal deref) ✓");
     }
 
     #[test]
@@ -6350,6 +6877,11 @@ mod tests {
         fabric.write_physical(0x010000, &(src_bytes.len() as u64).to_le_bytes());
         fabric.write_physical(0x010008, src_bytes);
 
+        // Initialize two-ended allocator: WS_LIT_POS = OUTPUT_SIZE
+        fabric.write_physical(
+            0x030000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            &(OUTPUT_SIZE as u64).to_le_bytes());
+
         install_trap_handler(&mut fabric, 0x000000, TEXT_SIZE as u64);
         let compiler_prog = build_6b4_compiler();
         let asm = cc::compile(&compiler_prog);
@@ -6383,7 +6915,8 @@ mod tests {
         let out_pos = read_ws(0x48);
         let ws_funcs = read_ws(0x58);
         assert_eq!(ws_error, 0, "CC_A error compiling canonical source");
-        assert_eq!(ws_funcs, 42, "CC_A compiled wrong function count");
+        assert_eq!(ws_funcs, CANONICAL_FUNC_COUNT,
+            "CC_A compiled wrong function count (expected {})", CANONICAL_FUNC_COUNT);
 
         // Extract CC_B binary from output buffer
         let ccb_bytes = kernel.fabric.read_physical(0x020000, out_pos).to_vec();
@@ -6399,6 +6932,12 @@ mod tests {
     /// CC_B compiles the test source, seals output, executes the child.
     /// The child's exit code propagates through CC_B → returned here.
     fn run_ccb_test(ccb: &[u8], test_source: &[u8], expected_exit: u64) {
+        let kernel = run_ccb_harness(ccb, test_source, expected_exit);
+        drop(kernel);
+    }
+
+    /// CC_B harness returning the Kernel for byte_output inspection.
+    fn run_ccb_harness(ccb: &[u8], test_source: &[u8], expected_exit: u64) -> Kernel {
         let ccb_size = ((ccb.len() + 0xFFF) & !0xFFF) as u64;
         let mut fabric = Fabric::new(0x800000);
 
@@ -6408,7 +6947,6 @@ mod tests {
         let work   = fabric.alloc_object("ccb_workspace", WS_SIZE as u64, ObjectKind::Memory);
         let stack  = fabric.alloc_object("ccb_stack",    0x4000, ObjectKind::Memory);
 
-        // Physical placement — non-overlapping regions
         fabric.place_object(code,   0x100000);
         fabric.place_object(source, 0x200000);
         fabric.place_object(output, 0x210000);
@@ -6417,29 +6955,25 @@ mod tests {
 
         let dom = fabric.create_domain();
 
-        // Write CC_B code and seal
         fabric.write_physical(0x100000, ccb);
         install_trap_handler(&mut fabric, 0x100000, ccb_size);
         fabric.seal_object(code);
         fabric.grant(dom, code, 0, ccb_size, Permissions::RX);
 
-        // Grant data regions
         fabric.grant(dom, source, 0, SOURCE_SIZE as u64, Permissions::READ);
         fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
         fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
         fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
 
-        // Write test source into source buffer
         let src_len = test_source.len() as u64;
         fabric.write_physical(0x200000, &src_len.to_le_bytes());
         fabric.write_physical(0x200008, test_source);
 
-        // Virtual address map:
-        //   CCB_CODE_BASE → code (CC_B binary)
-        //   LAYOUT_SRC    → source (test program text)
-        //   LAYOUT_OUT    → output (compiled test program)
-        //   LAYOUT_WS     → workspace
-        //   LAYOUT_STACK  → stack
+        // Initialize two-ended allocator: WS_LIT_POS = OUTPUT_SIZE
+        fabric.write_physical(
+            0x220000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            &(OUTPUT_SIZE as u64).to_le_bytes());
+
         let mut core = Anka64Core::new(AgentId(0), dom);
         core.address_map.add(CCB_CODE_BASE,          ccb_size, code);
         core.address_map.add(LAYOUT_SRC as u64,      SOURCE_SIZE as u64, source);
@@ -6488,6 +7022,7 @@ mod tests {
             "CC_B compiled {:?}: expected exit {}, got {}",
             std::str::from_utf8(test_source).unwrap_or("<invalid>"),
             expected_exit, exit_code);
+        kernel
     }
 
     /// Run CC_B (the canonical compiler) on source text and extract
@@ -6521,6 +7056,11 @@ mod tests {
 
         fabric.write_physical(0x200000, &(source.len() as u64).to_le_bytes());
         fabric.write_physical(0x200008, source);
+
+        // Initialize two-ended allocator: WS_LIT_POS = OUTPUT_SIZE
+        fabric.write_physical(
+            0x220000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            &(OUTPUT_SIZE as u64).to_le_bytes());
 
         let mut core = Anka64Core::new(AgentId(0), dom);
         core.address_map.add(CCB_CODE_BASE,          ccb_size, code);
@@ -6717,15 +7257,18 @@ mod tests {
     fn b51_bootstrap_closure() {
         // ── Stage 1: CC_A(source_CC) → CC_B ──
         let ccb = build_ccb();
-        eprintln!("stage 1: CC_A → CC_B = {} bytes (42 functions)", ccb.len());
+        eprintln!("stage 1: CC_A → CC_B = {} bytes ({} functions)",
+            ccb.len(), CANONICAL_FUNC_COUNT);
 
         // ── Stage 2: CC_B(source_CC) → CC_C ──
         let canon_src = canonical_compiler_source();
         let (ccc, ccc_funcs, ccc_error) = compile_with_ccb(&ccb, canon_src.as_bytes());
         assert_eq!(ccc_error, 0, "CC_B failed to compile canonical source");
-        assert_eq!(ccc_funcs, 42, "CC_C has wrong function count");
+        assert_eq!(ccc_funcs, CANONICAL_FUNC_COUNT,
+            "CC_C has wrong function count (expected {})", CANONICAL_FUNC_COUNT);
         assert!(!ccc.is_empty(), "CC_C is empty");
-        eprintln!("stage 2: CC_B → CC_C = {} bytes (42 functions)", ccc.len());
+        eprintln!("stage 2: CC_B → CC_C = {} bytes ({} functions)",
+            ccc.len(), CANONICAL_FUNC_COUNT);
 
         // ── Fixed-point assertion: CC_B == CC_C ──
         assert_eq!(ccb, ccc,
@@ -6737,6 +7280,183 @@ mod tests {
         run_compiler_corpus(&ccc, "CC_C");
         eprintln!("6B.5.1: bootstrap closure complete — \
             CC_A → CC_B → CC_C, CC_B == CC_C, corpus ✓");
+    }
+
+    // ─── 7.2g: Adversarial regression ─────────────────────────
+    // CC_B is ~59KB (>0x8000).  When CC_B compiles a program with
+    // a string literal, the output image has code in the lower region
+    // and the literal in the upper region.  This test verifies:
+    //   1. CC_B code_end > 0x8000 (the old fixed boundary)
+    //   2. The child can dereference the literal (READ authority)
+    //   3. The literal offset and byte_len are correct
+
+    #[test]
+    fn p72g_adversarial_large_code_with_literal() {
+        let ccb = build_ccb();
+        eprintln!("7.2g: CC_B = {} bytes ({:#x})", ccb.len(), ccb.len());
+
+        // Assert: CC_B code exceeds old 0x8000 boundary
+        assert!(ccb.len() > 0x8000,
+            "CC_B should exceed 0x8000 ({:#x}); \
+             adversarial test is only meaningful if code overlaps \
+             the old fixed literal boundary",
+            ccb.len());
+        eprintln!("7.2g: CC_B > 0x8000 ✓ (old boundary would have overlapped)");
+
+        // CC_B compiles `return *"hello"` → child dereferences literal
+        // *"hello" reads byte_len = 5 from the literal header.
+        run_ccb_test(&ccb, br#"int main() { return *"hello"; }"#, 5);
+        eprintln!("7.2g: CC_B + *\"hello\" = 5 ✓ (child reads literal via R cap)");
+
+        // CC_B compiles `return *"İzmir"` → byte_len = 6 (UTF-8)
+        let src = "int main() { return *\"İzmir\"; }";
+        run_ccb_test(&ccb, src.as_bytes(), 6);
+        eprintln!("7.2g: CC_B + *\"İzmir\" = 6 ✓ (UTF-8 literal, Bytes ≠ Text)");
+
+        // CC_B compiles a program with two literals
+        run_ccb_test(&ccb,
+            br#"int foo() { return *"abc"; } int main() { return *"world"; }"#,
+            5);
+        eprintln!("7.2g: CC_B + two literals ✓");
+    }
+
+    // ─── 7.3g: CC_B + İzmir through buffer write ────────────────
+    // CC_B runs at base > 0x8000. Compile the İzmir demanding client
+    // through the guest-compiled compiler; SYS_WRITE produces 6 bytes.
+
+    #[test]
+    fn p73g_ccb_write_izmir() {
+        let ccb = build_ccb();
+        assert!(ccb.len() > 0x8000,
+            "CC_B should exceed 0x8000 for this test to be meaningful");
+
+        let src = "int main() { int s = \"İzmir\"; return syscall(1, s + 8, *s, 0); }";
+        let kernel = run_ccb_harness(&ccb, src.as_bytes(), 0);
+        assert_eq!(&kernel.byte_output, b"\xC4\xB0zmir",
+            "CC_B + İzmir → expected 6 UTF-8 bytes");
+        eprintln!("7.3g: CC_B + İzmir → {:02X?} ✓", &kernel.byte_output);
+    }
+
+    // ─── 7.4: UTF-8 validation gate ─────────────────────────────
+    //
+    // validateutf8() exists only in canonical source (CC_B), not in CC_A.
+    // Tests use compile_with_ccb() to feed raw byte sequences as string
+    // literals.  Valid UTF-8 compiles normally; invalid UTF-8 sets the
+    // error flag and produces no executable child.
+
+    /// Build source bytes with an embedded literal from raw bytes.
+    /// The template is: int main() { return *"<bytes>"; }
+    /// The dereference (*) reads the length header, giving a small integer
+    /// that proves the literal was stored, without requiring child execution.
+    fn source_with_literal(bytes: &[u8]) -> Vec<u8> {
+        let mut src = b"int main() { return *\"".to_vec();
+        src.extend_from_slice(bytes);
+        src.extend_from_slice(b"\"; }");
+        src
+    }
+
+    #[test]
+    fn p74_utf8_valid_boundary_cases() {
+        let ccb = build_ccb();
+
+        // Each entry: (label, literal bytes, expected success)
+        let valid_cases: &[(&str, &[u8])] = &[
+            ("NUL",               &[0x00]),
+            ("DEL",               &[0x7F]),
+            ("C2 80",             &[0xC2, 0x80]),
+            ("DF BF",             &[0xDF, 0xBF]),
+            ("E0 A0 80",          &[0xE0, 0xA0, 0x80]),
+            ("ED 9F BF",          &[0xED, 0x9F, 0xBF]),
+            ("EE 80 80",          &[0xEE, 0x80, 0x80]),
+            ("EF BF BF",          &[0xEF, 0xBF, 0xBF]),
+            ("F0 90 80 80",       &[0xF0, 0x90, 0x80, 0x80]),
+            ("F4 8F BF BF",       &[0xF4, 0x8F, 0xBF, 0xBF]),
+            ("İzmir",             &[0xC4, 0xB0, 0x7A, 0x6D, 0x69, 0x72]),
+        ];
+
+        for (label, bytes) in valid_cases {
+            let src = source_with_literal(bytes);
+            let (_output, _funcs, error) = compile_with_ccb(&ccb, &src);
+            assert_eq!(error, 0,
+                "valid UTF-8 '{}' should compile without error", label);
+            eprintln!("7.4: valid '{}' ✓", label);
+        }
+    }
+
+    #[test]
+    fn p74_utf8_invalid_boundary_cases() {
+        let ccb = build_ccb();
+
+        // Each entry: (label, literal bytes)
+        // All must produce error == 1 and no child execution.
+        let invalid_cases: &[(&str, &[u8])] = &[
+            ("standalone continuation 80",     &[0x80]),
+            ("overlong C0 80",                 &[0xC0, 0x80]),
+            ("overlong C1 BF",                 &[0xC1, 0xBF]),
+            ("truncated 2-byte C2",            &[0xC2]),
+            ("overlong 3-byte E0 9F BF",       &[0xE0, 0x9F, 0xBF]),
+            ("truncated E0 A0",                &[0xE0, 0xA0]),
+            ("truncated 3-byte E1 80",         &[0xE1, 0x80]),
+            ("surrogate ED A0 80",             &[0xED, 0xA0, 0x80]),
+            ("overlong 4-byte F0 8F BF BF",    &[0xF0, 0x8F, 0xBF, 0xBF]),
+            ("truncated F4 8F BF",             &[0xF4, 0x8F, 0xBF]),
+            ("above U+10FFFF F4 90 80 80",     &[0xF4, 0x90, 0x80, 0x80]),
+            ("invalid lead F5 80 80 80",       &[0xF5, 0x80, 0x80, 0x80]),
+            ("invalid lead FF",                &[0xFF]),
+        ];
+
+        for (label, bytes) in invalid_cases {
+            let src = source_with_literal(bytes);
+            let (_output, _funcs, error) = compile_with_ccb(&ccb, &src);
+            assert_eq!(error, 1,
+                "invalid UTF-8 '{}' should produce compile error", label);
+            eprintln!("7.4: invalid '{}' rejected ✓", label);
+        }
+    }
+
+    /// 7.4 preservation: validation is a gate, not a transcoder.
+    /// Valid UTF-8 input bytes == literal output bytes.
+    #[test]
+    fn p74_utf8_validation_preserves_bytes() {
+        let ccb = build_ccb();
+
+        // İzmir: C4 B0 7A 6D 69 72
+        let src = "int main() { int s = \"İzmir\"; return syscall(1, s + 8, *s, 0); }";
+        let kernel = run_ccb_harness(&ccb, src.as_bytes(), 0);
+        assert_eq!(&kernel.byte_output, b"\xC4\xB0zmir",
+            "validation must preserve bytes: no normalization, no replacement");
+        eprintln!("7.4: İzmir bytes preserved through validation gate ✓");
+    }
+
+    // ─── 7.2h: Bootstrap fixed-point regression ────────────────
+    // After the allocator redesign, CC_B must still equal CC_C.
+    // This is a stronger check than b51_bootstrap_closure because it
+    // explicitly names the 7.2 allocator change as the potential
+    // regression source.
+
+    #[test]
+    fn p72h_bootstrap_fixed_point_survives_allocator() {
+        let ccb = build_ccb();
+        eprintln!("7.2h: CC_B = {} bytes", ccb.len());
+
+        let canon_src = canonical_compiler_source();
+        let (ccc, ccc_funcs, ccc_error) =
+            compile_with_ccb(&ccb, canon_src.as_bytes());
+
+        assert_eq!(ccc_error, 0,
+            "CC_B failed to compile canonical source after 7.2 allocator change");
+        assert_eq!(ccc_funcs, CANONICAL_FUNC_COUNT,
+            "CC_C should have {} functions", CANONICAL_FUNC_COUNT);
+        assert!(!ccc.is_empty(), "CC_C is empty");
+        eprintln!("7.2h: CC_C = {} bytes ({} functions)", ccc.len(), ccc_funcs);
+
+        assert_eq!(ccb, ccc,
+            "7.2h FIXED POINT VIOLATION: \
+             CC_B ({} bytes) ≠ CC_C ({} bytes) \
+             after two-ended allocator change",
+            ccb.len(), ccc.len());
+        eprintln!("7.2h: CC_B == CC_C after two-ended allocator ✓");
+        eprintln!("     The bootstrap fixed point survives the allocator redesign.");
     }
 
 }

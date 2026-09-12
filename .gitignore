@@ -3,3 +3,4 @@
 /dist
 *.srec
 src.zip
+.DS_Store

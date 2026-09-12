@@ -437,17 +437,23 @@ impl Compiler {
                 }
             }
             Expr::Call(name, args) => {
-                // Push arguments into R0–R3
-                for (i, arg) in args.iter().enumerate() {
-                    if i < 4 {
-                        self.compile_expr(arg, i as u8);
-                    }
+                // Evaluate each argument and push to stack.  This matches
+                // the canonical compiler's compilecall pattern and avoids
+                // register clobber: a nested call in argN cannot overwrite
+                // the already-pushed arg0..argN-1.
+                let argc = args.len().min(4);
+                for arg in args.iter().take(4) {
+                    self.compile_expr(arg, R4);
+                    self.asm.subi(SP, SP, 8);
+                    self.asm.st(R4, SP, 0);
                 }
-                // BUG (6B.4): caller-saved registers are not preserved.
-                // A call inside a larger expression (e.g. x + f(y)) will
-                // clobber R4–R6 intermediates held by the enclosing BinOp.
-                // Not a problem until the source language has user-defined
-                // functions (6B.4); record now to avoid rediscovery.
+                // Pop into R0–R3 (arg0 is deepest on the stack).
+                for i in 0..argc {
+                    self.asm.ld(i as u8, SP, ((argc - 1 - i) * 8) as i32);
+                }
+                if argc > 0 {
+                    self.asm.addi(SP, SP, (argc * 8) as i32);
+                }
                 let call_pos = self.asm.here();
                 self.asm.call(0); // placeholder
                 self.call_fixups.push((call_pos as usize, name.clone()));

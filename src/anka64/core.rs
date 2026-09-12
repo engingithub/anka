@@ -24,6 +24,7 @@ pub struct AddressMapEntry {
     pub virt_base: u64,
     pub size: u64,
     pub object: ObjectId,
+    pub obj_offset: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -35,13 +36,20 @@ impl AddressMap {
     pub fn new() -> Self { Self { entries: Vec::new() } }
 
     pub fn add(&mut self, virt_base: u64, size: u64, object: ObjectId) {
-        self.entries.push(AddressMapEntry { virt_base, size, object });
+        self.entries.push(AddressMapEntry { virt_base, size, object, obj_offset: 0 });
+    }
+
+    /// Map a virtual range to a non-zero offset within an object.
+    /// Used when the mapped region does not start at the beginning
+    /// of the object (e.g., literal segment within a sealed image).
+    pub fn add_at(&mut self, virt_base: u64, size: u64, object: ObjectId, obj_offset: u64) {
+        self.entries.push(AddressMapEntry { virt_base, size, object, obj_offset });
     }
 
     pub fn resolve(&self, addr: u64) -> Option<(ObjectId, u64)> {
         for e in &self.entries {
             if addr >= e.virt_base && addr < e.virt_base + e.size {
-                return Some((e.object, addr - e.virt_base));
+                return Some((e.object, e.obj_offset + (addr - e.virt_base)));
             }
         }
         None
