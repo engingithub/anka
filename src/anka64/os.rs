@@ -3706,10 +3706,11 @@ mod tests {
         const WS_KW_RETURN: i64  = 0x6038;
         const WS_KW_IF: i64      = 0x6040;
         const WS_KW_ELSE: i64    = 0x6048;
-        const WS_SYM_COUNT: i64  = 0x6050;
-        const WS_OUT_POS: i64    = 0x6058;
-        const WS_EXPR_SP: i64    = 0x6060;
-        const WS_SYM_TABLE: i64  = 0x6068;
+        const WS_KW_WHILE: i64   = 0x6050;
+        const WS_SYM_COUNT: i64  = 0x6058;
+        const WS_OUT_POS: i64    = 0x6060;
+        const WS_EXPR_SP: i64    = 0x6068;
+        const WS_SYM_TABLE: i64  = 0x6070;
 
         // ─── Token type constants ────────────────────
         const TOK_EOF: i64    = 0;
@@ -3729,6 +3730,7 @@ mod tests {
         const TOK_LBRACE: i64 = 14;
         const TOK_RBRACE: i64 = 15;
         const TOK_LT: i64     = 16;
+        const TOK_WHILE: i64  = 17;
 
         // ─── ISA encoding constants (opcode values) ──
         const OP_ADD: i64  = 1;
@@ -4017,6 +4019,14 @@ mod tests {
                     binop(BinOp::Eq, var(0), deref(lit(WS_KW_ELSE))),
                     vec![
                         deref_assign(lit(WS_TOK_TYPE), lit(TOK_ELSE)),
+                        Stmt::Return(lit(0)),
+                    ],
+                    vec![],
+                ),
+                Stmt::If(
+                    binop(BinOp::Eq, var(0), deref(lit(WS_KW_WHILE))),
+                    vec![
+                        deref_assign(lit(WS_TOK_TYPE), lit(TOK_WHILE)),
                         Stmt::Return(lit(0)),
                     ],
                     vec![],
@@ -4661,6 +4671,79 @@ mod tests {
                     Stmt::Return(lit(0)),
                 ], vec![]),
 
+                // ── while (expr) { stmts } ──
+                Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_WHILE)), vec![
+                    call_stmt("next_token", vec![]),
+                    // expect '('
+                    Stmt::If(
+                        binop(BinOp::Ne,
+                            deref(lit(WS_TOK_TYPE)), lit(TOK_LPAREN)),
+                        vec![deref_assign(lit(WS_ERROR), lit(1))],
+                        vec![],
+                    ),
+                    call_stmt("next_token", vec![]),
+                    // loop_start = current output position
+                    assign(3, deref(lit(WS_OUT_POS))),
+                    // compile condition → R4
+                    call_stmt("compile_expr", vec![]),
+                    // expect ')'
+                    Stmt::If(
+                        binop(BinOp::Ne,
+                            deref(lit(WS_TOK_TYPE)), lit(TOK_RPAREN)),
+                        vec![deref_assign(lit(WS_ERROR), lit(1))],
+                        vec![],
+                    ),
+                    call_stmt("next_token", vec![]),
+                    // emit CMPI R4, 0
+                    call_stmt("emit", vec![
+                        enc_i(OP_CMPI, 0, GEN_R4, lit(0))]),
+                    // emit BEQ placeholder → loop_end (forward)
+                    assign(4, deref(lit(WS_OUT_POS))),
+                    call_stmt("emit", vec![
+                        enc_b(COND_EQ, lit(0))]),
+                    // expect '{'
+                    Stmt::If(
+                        binop(BinOp::Ne,
+                            deref(lit(WS_TOK_TYPE)), lit(TOK_LBRACE)),
+                        vec![deref_assign(lit(WS_ERROR), lit(1))],
+                        vec![],
+                    ),
+                    call_stmt("next_token", vec![]),
+                    // compile loop body
+                    Stmt::While(
+                        binop(BinOp::And,
+                            binop(BinOp::Ne,
+                                deref(lit(WS_TOK_TYPE)), lit(TOK_RBRACE)),
+                            binop(BinOp::Ne,
+                                deref(lit(WS_TOK_TYPE)), lit(TOK_EOF))),
+                        vec![call_stmt("compile_stmt", vec![])],
+                    ),
+                    // expect '}'
+                    Stmt::If(
+                        binop(BinOp::Ne,
+                            deref(lit(WS_TOK_TYPE)), lit(TOK_RBRACE)),
+                        vec![deref_assign(lit(WS_ERROR), lit(1))],
+                        vec![],
+                    ),
+                    call_stmt("next_token", vec![]),
+                    // emit BAL loop_start (backward branch)
+                    // disp = -(current_pos - loop_start) / 4
+                    // Computed into var(1) to stay within 3 scratch regs.
+                    assign(1, binop(BinOp::Sub, lit(0),
+                        binop(BinOp::Shr,
+                            binop(BinOp::Sub,
+                                deref(lit(WS_OUT_POS)),
+                                var(3)),
+                            lit(2)))),
+                    call_stmt("emit", vec![
+                        enc_b(COND_AL, var(1))]),
+                    // patch BEQ → loop_end (here)
+                    call_stmt("patch_branch", vec![
+                        var(4), lit(COND_EQ),
+                        deref(lit(WS_OUT_POS))]),
+                    Stmt::Return(lit(0)),
+                ], vec![]),
+
                 // ── IDENT = expr ; (assignment) ──
                 Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_IDENT)), vec![
                     assign(1, deref(lit(WS_TOK_VALUE))),
@@ -4778,6 +4861,22 @@ mod tests {
                     binop(BinOp::Shl, var(4), lit(8)),
                     lit(0x65))),
                 deref_assign(lit(WS_KW_ELSE), var(4)),
+
+                // "while": 'w','h','i','l','e'
+                assign(3, lit(0x77)),
+                assign(3, binop(BinOp::Or,
+                    binop(BinOp::Shl, var(3), lit(8)),
+                    lit(0x68))),
+                assign(3, binop(BinOp::Or,
+                    binop(BinOp::Shl, var(3), lit(8)),
+                    lit(0x69))),
+                assign(3, binop(BinOp::Or,
+                    binop(BinOp::Shl, var(3), lit(8)),
+                    lit(0x6C))),
+                assign(3, binop(BinOp::Or,
+                    binop(BinOp::Shl, var(3), lit(8)),
+                    lit(0x65))),
+                deref_assign(lit(WS_KW_WHILE), var(3)),
 
                 // ─── Prime the lexer ─────────────────────
                 call_stmt("next_token", vec![]),
@@ -5051,6 +5150,138 @@ mod tests {
             b"int x = 0; int y = 5; if (y < 3) { x = 10; } else { x = 42; } return x;",
             42, true);
         eprintln!("6B.3.1: if-else assign → 42 ✓");
+    }
+
+    // ─── 6B.3.2 tests: while + backward branches ───────
+
+    #[test]
+    fn b3_while_zero_iterations() {
+        // while (0) body should never execute
+        run_6b3_test(
+            b"int x = 42; while (0) { x = 0; } return x;",
+            42, true);
+        eprintln!("6B.3.2: while (0) → 42 (zero iterations) ✓");
+    }
+
+    #[test]
+    fn b3_while_count() {
+        // while (x < 3) { x = x + 1; } — three iterations
+        run_6b3_test(
+            b"int x = 0; while (x < 3) { x = x + 1; } return x;",
+            3, true);
+        eprintln!("6B.3.2: while (x < 3) x++ → 3 ✓");
+    }
+
+    #[test]
+    fn b3_while_sum() {
+        // Sum 1+2+3+4+5 = 15
+        run_6b3_test(
+            b"int s = 0; int i = 1; while (i < 6) { s = s + i; i = i + 1; } return s;",
+            15, true);
+        eprintln!("6B.3.2: sum 1..5 → 15 ✓");
+    }
+
+    #[test]
+    fn b3_while_nested() {
+        // Nested loops: inner counts to 3 each time outer iterates
+        // outer: 2 iterations, inner: 3 each → total = 6
+        run_6b3_test(
+            b"int t = 0; int i = 0; while (i < 2) { int j = 0; while (j < 3) { t = t + 1; j = j + 1; } i = i + 1; } return t;",
+            6, true);
+        eprintln!("6B.3.2: nested while → 6 ✓");
+    }
+
+    #[test]
+    fn b3_while_if_inside() {
+        // if inside while body
+        run_6b3_test(
+            b"int x = 0; int s = 0; while (x < 5) { if (x < 3) { s = s + 1; } x = x + 1; } return s;",
+            3, true);
+        eprintln!("6B.3.2: if inside while → 3 ✓");
+    }
+
+    /// Adversarial test: inspect emitted instructions and verify that
+    /// the generated code contains an actual backward branch, not just
+    /// a correct behavioral result from compile-time evaluation.
+    #[test]
+    fn b3_while_has_backward_branch() {
+        use super::super::isa::{decode, Cond};
+
+        let mut fabric = Fabric::new(0x400000);
+
+        let text   = fabric.alloc_object("compiler_text",  0x4000, ObjectKind::Memory);
+        let source = fabric.alloc_object("source_data",    0x1000, ObjectKind::Memory);
+        let output = fabric.alloc_object("output_buf",     0x1000, ObjectKind::Memory);
+        let work   = fabric.alloc_object("workspace",      0x1000, ObjectKind::Memory);
+        let stack  = fabric.alloc_object("compiler_stack", 0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text,   0x000000);
+        fabric.place_object(source, 0x010000);
+        fabric.place_object(output, 0x020000);
+        fabric.place_object(work,   0x030000);
+        fabric.place_object(stack,  0x040000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, source, 0, 0x1000, Permissions::READ);
+        fabric.grant(dom, output, 0, 0x1000, Permissions::RWS);
+        fabric.grant(dom, work,   0, 0x1000, Permissions::RW);
+        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+
+        let src = b"int x = 0; while (x < 3) { x = x + 1; } return x;";
+        let src_len = src.len() as u64;
+        fabric.write_physical(0x010000, &src_len.to_le_bytes());
+        fabric.write_physical(0x010008, src);
+
+        install_trap_handler(&mut fabric, 0x000000);
+
+        let compiler_prog = build_6b3_compiler();
+        let asm = cc::compile(&compiler_prog);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x04000, 0x1000, source);
+        core.address_map.add(0x05000, 0x1000, output);
+        core.address_map.add(0x06000, 0x1000, work);
+        core.address_map.add(0x07000, 0x4000, stack);
+        core.r[SP as usize] = 0x07000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x050000;
+        kernel.next_agent = 10;
+        kernel.spawn(core);
+        kernel.run(100000, 100000);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, 3,
+            "while loop should produce x=3");
+
+        // ── Inspect generated code for backward branch ──
+        // Read output buffer and scan for a B instruction
+        // with negative displacement.
+        let out_pos_bytes = kernel.fabric.read_physical(
+            0x030000 + 0x60, 8);   // WS_OUT_POS at workspace+0x60
+        let out_bytes = u64::from_le_bytes(
+            out_pos_bytes[..8].try_into().unwrap()) as usize;
+
+        let mut found_backward_branch = false;
+        for off in (0..out_bytes).step_by(4) {
+            let word_bytes = kernel.fabric.read_physical(
+                0x020000 + off as u64, 4);
+            let word = u32::from_le_bytes(
+                word_bytes[..4].try_into().unwrap());
+            let insn = decode(word);
+            if insn.desc.name == "b" && insn.imm < 0 {
+                found_backward_branch = true;
+                break;
+            }
+        }
+        assert!(found_backward_branch,
+            "generated code must contain an actual backward branch \
+             (not compile-time loop evaluation)");
+        eprintln!("6B.3.2: adversarial — backward branch present ✓");
     }
 
     // ═══════════════════════════════════════════════════════════
