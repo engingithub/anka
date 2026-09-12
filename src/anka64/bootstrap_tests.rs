@@ -10,6 +10,12 @@ mod tests {
     use super::super::isa::*;
     use super::super::state::*;
 
+    // ─── Bootstrap function counts ────────────────────────────
+    // CC_A: bootstrap seed (Rust AST compiler), frozen at 7.3 semantics.
+    // Canonical source: authoritative compiler definition (7.4+).
+    const CCA_FUNC_COUNT: u64 = 45;
+    const CANONICAL_FUNC_COUNT: u64 = 46;  // CCA + validateutf8
+
     // ═══════════════════════════════════════════════════════════
     // P20: Guest-hosted compilation — int main() { return 42; }
     //
@@ -5160,6 +5166,50 @@ mod tests {
             tt = WS_TOK_TYPE)
     }
 
+    /// RFC 3629 scalar-value validation (7.4).
+    ///
+    /// Pure function: validateutf8(start, len) -> 0 valid / 1 invalid.
+    /// Uses need/lo/hi state machine with one continuation loop.
+    ///
+    /// Overflow-safe: i < len <= SOURCE_SIZE, need <= 3,
+    /// so i + need + 1 cannot overflow 64-bit arithmetic.
+    fn canonical_validateutf8() -> String {
+        "int validateutf8(int start, int len) { \
+         int i = 0; int b = 0; int need = 0; \
+         int lo = 0; int hi = 0; int j = 0; int c = 0; \
+         while (i < len) { \
+         b = readbyte(start + i); \
+         if (b <= 127) { i = i + 1; } \
+         else { \
+         need = 0; lo = 128; hi = 191; \
+         if ((194 <= b) & (b <= 223)) { need = 1; } \
+         else { if (b == 224) { need = 2; lo = 160; } \
+         else { if ((225 <= b) & (b <= 236)) { need = 2; } \
+         else { if (b == 237) { need = 2; hi = 159; } \
+         else { if ((238 <= b) & (b <= 239)) { need = 2; } \
+         else { if (b == 240) { need = 3; lo = 144; } \
+         else { if ((241 <= b) & (b <= 243)) { need = 3; } \
+         else { if (b == 244) { need = 3; hi = 143; } \
+         else { return 1; \
+         } } } } } } } } \
+         if (len < i + need + 1) { return 1; } \
+         c = readbyte(start + i + 1); \
+         if (c < lo) { return 1; } \
+         if (hi < c) { return 1; } \
+         j = 2; \
+         while (j <= need) { \
+         c = readbyte(start + i + j); \
+         if (c < 128) { return 1; } \
+         if (191 < c) { return 1; } \
+         j = j + 1; } \
+         i = i + need + 1; \
+         } } \
+         return 0; } ".into()
+    }
+
+    /// scanstring (7.4): advance past opening quote, scan to closing quote,
+    /// advance past closing quote (scanner always makes progress),
+    /// then validate UTF-8.  Lexical failure -> ERROR + TOK_EOF.
     fn canonical_scanstring() -> String {
         format!(
             "int scanstring() {{ \
@@ -5168,8 +5218,11 @@ mod tests {
              int len = 0; \
              while (*{pos} < *{sl}) {{ \
              if (peekchar() == 34) {{ \
+             advance(); \
+             if (validateutf8(start, len) != 0) {{ \
+             *{e} = 1; *{tt} = {eof}; return 0; }} \
              *{ns} = start; *{nl} = len; \
-             *{tt} = {str}; advance(); return 0; }} \
+             *{tt} = {str}; return 0; }} \
              len = len + 1; advance(); }} \
              *{e} = 1; *{tt} = {eof}; return 0; }} ",
             pos = WS_POS, sl = WS_SRC_LEN,
@@ -6057,31 +6110,7 @@ mod tests {
 
     #[test]
     fn b50e_full_lexer_compiles() {
-        // Complete lexer: all 13 functions (including scanstring, writebyte, storeliteral).
-        let src = format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}\
-             int main() {{ return 42; }}",
-            canonical_readbyte(),
-            canonical_writebyte(),
-            canonical_storeliteral(),
-            canonical_peekchar(),
-            canonical_advance(),
-            canonical_skipws(),
-            canonical_nameseq(),
-            canonical_classifykw(),
-            canonical_setchartok(),
-            canonical_scannumber(),
-            canonical_scanident(),
-            canonical_scanstring(),
-            );
-        eprintln!("6B.5.0e: full lexer source = {} bytes", src.len());
-        run_6b4_test(src.as_bytes(), 42, true);
-        eprintln!("6B.5.0e: full lexer (13 functions) compiles ✓");
-    }
-
-    #[test]
-    fn b50e_nexttoken_compiles() {
-        // Complete lexer + tokenizer (14 functions).
+        // Complete lexer: 14 functions (7.4: +validateutf8, called by scanstring).
         let src = format!(
             "{}{}{}{}{}{}{}{}{}{}{}{}{}\
              int main() {{ return 42; }}",
@@ -6096,12 +6125,38 @@ mod tests {
             canonical_setchartok(),
             canonical_scannumber(),
             canonical_scanident(),
+            canonical_validateutf8(),
+            canonical_scanstring(),
+            );
+        eprintln!("6B.5.0e: full lexer source = {} bytes", src.len());
+        run_6b4_test(src.as_bytes(), 42, true);
+        eprintln!("6B.5.0e: full lexer (14 functions) compiles ✓");
+    }
+
+    #[test]
+    fn b50e_nexttoken_compiles() {
+        // Complete lexer + tokenizer (15 functions).
+        let src = format!(
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}\
+             int main() {{ return 42; }}",
+            canonical_readbyte(),
+            canonical_writebyte(),
+            canonical_storeliteral(),
+            canonical_peekchar(),
+            canonical_advance(),
+            canonical_skipws(),
+            canonical_nameseq(),
+            canonical_classifykw(),
+            canonical_setchartok(),
+            canonical_scannumber(),
+            canonical_scanident(),
+            canonical_validateutf8(),
             canonical_scanstring(),
             canonical_nexttoken(),
             );
         eprintln!("6B.5.0e: lexer+tokenizer source = {} bytes", src.len());
         run_6b4_test(src.as_bytes(), 42, true);
-        eprintln!("6B.5.0e: complete tokenizer (14 functions) compiles ✓");
+        eprintln!("6B.5.0e: complete tokenizer (15 functions) compiles ✓");
     }
 
     // ─── Emit/encoding layer tests ──────────────────
@@ -6172,7 +6227,7 @@ mod tests {
     /// Helper: all canonical functions needed for expression compilation.
     fn canonical_expr_prelude() -> String {
         format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
             canonical_readbyte(),
             canonical_writebyte(),
             canonical_storeliteral(),
@@ -6184,6 +6239,7 @@ mod tests {
             canonical_setchartok(),
             canonical_scannumber(),
             canonical_scanident(),
+            canonical_validateutf8(),
             canonical_scanstring(),
             canonical_nexttoken(),
             canonical_enci(),
@@ -6266,7 +6322,7 @@ mod tests {
 
     #[test]
     fn b50e_full_compiler_compiles() {
-        // Full canonical compiler: all 45 functions compile without error.
+        // Full canonical compiler: all CANONICAL_FUNC_COUNT functions compile without error.
         // The child binary IS the compiler — its main reads source from
         // the buffer, which still holds the canonical text. It tries to
         // self-compile (CC_B), which may succeed or fail depending on
@@ -6334,8 +6390,10 @@ mod tests {
         eprintln!("6B.5.0e: host compiled {} functions, {} bytes output, error={}",
             ws_funcs, ws_out, ws_error);
         assert_eq!(ws_error, 0, "host compiler reported error");
-        assert_eq!(ws_funcs, 45, "expected 45 canonical functions");
-        eprintln!("6B.5.0e: canonical full compiler (45 functions) ✓");
+        assert_eq!(ws_funcs, CANONICAL_FUNC_COUNT,
+            "expected {} canonical functions", CANONICAL_FUNC_COUNT);
+        eprintln!("6B.5.0e: canonical full compiler ({} functions) ✓",
+            CANONICAL_FUNC_COUNT);
     }
 
     #[test]
@@ -6857,7 +6915,8 @@ mod tests {
         let out_pos = read_ws(0x48);
         let ws_funcs = read_ws(0x58);
         assert_eq!(ws_error, 0, "CC_A error compiling canonical source");
-        assert_eq!(ws_funcs, 45, "CC_A compiled wrong function count");
+        assert_eq!(ws_funcs, CANONICAL_FUNC_COUNT,
+            "CC_A compiled wrong function count (expected {})", CANONICAL_FUNC_COUNT);
 
         // Extract CC_B binary from output buffer
         let ccb_bytes = kernel.fabric.read_physical(0x020000, out_pos).to_vec();
@@ -7198,15 +7257,18 @@ mod tests {
     fn b51_bootstrap_closure() {
         // ── Stage 1: CC_A(source_CC) → CC_B ──
         let ccb = build_ccb();
-        eprintln!("stage 1: CC_A → CC_B = {} bytes (45 functions)", ccb.len());
+        eprintln!("stage 1: CC_A → CC_B = {} bytes ({} functions)",
+            ccb.len(), CANONICAL_FUNC_COUNT);
 
         // ── Stage 2: CC_B(source_CC) → CC_C ──
         let canon_src = canonical_compiler_source();
         let (ccc, ccc_funcs, ccc_error) = compile_with_ccb(&ccb, canon_src.as_bytes());
         assert_eq!(ccc_error, 0, "CC_B failed to compile canonical source");
-        assert_eq!(ccc_funcs, 45, "CC_C has wrong function count");
+        assert_eq!(ccc_funcs, CANONICAL_FUNC_COUNT,
+            "CC_C has wrong function count (expected {})", CANONICAL_FUNC_COUNT);
         assert!(!ccc.is_empty(), "CC_C is empty");
-        eprintln!("stage 2: CC_B → CC_C = {} bytes (45 functions)", ccc.len());
+        eprintln!("stage 2: CC_B → CC_C = {} bytes ({} functions)",
+            ccc.len(), CANONICAL_FUNC_COUNT);
 
         // ── Fixed-point assertion: CC_B == CC_C ──
         assert_eq!(ccb, ccc,
@@ -7275,6 +7337,97 @@ mod tests {
         eprintln!("7.3g: CC_B + İzmir → {:02X?} ✓", &kernel.byte_output);
     }
 
+    // ─── 7.4: UTF-8 validation gate ─────────────────────────────
+    //
+    // validateutf8() exists only in canonical source (CC_B), not in CC_A.
+    // Tests use compile_with_ccb() to feed raw byte sequences as string
+    // literals.  Valid UTF-8 compiles normally; invalid UTF-8 sets the
+    // error flag and produces no executable child.
+
+    /// Build source bytes with an embedded literal from raw bytes.
+    /// The template is: int main() { return *"<bytes>"; }
+    /// The dereference (*) reads the length header, giving a small integer
+    /// that proves the literal was stored, without requiring child execution.
+    fn source_with_literal(bytes: &[u8]) -> Vec<u8> {
+        let mut src = b"int main() { return *\"".to_vec();
+        src.extend_from_slice(bytes);
+        src.extend_from_slice(b"\"; }");
+        src
+    }
+
+    #[test]
+    fn p74_utf8_valid_boundary_cases() {
+        let ccb = build_ccb();
+
+        // Each entry: (label, literal bytes, expected success)
+        let valid_cases: &[(&str, &[u8])] = &[
+            ("NUL",               &[0x00]),
+            ("DEL",               &[0x7F]),
+            ("C2 80",             &[0xC2, 0x80]),
+            ("DF BF",             &[0xDF, 0xBF]),
+            ("E0 A0 80",          &[0xE0, 0xA0, 0x80]),
+            ("ED 9F BF",          &[0xED, 0x9F, 0xBF]),
+            ("EE 80 80",          &[0xEE, 0x80, 0x80]),
+            ("EF BF BF",          &[0xEF, 0xBF, 0xBF]),
+            ("F0 90 80 80",       &[0xF0, 0x90, 0x80, 0x80]),
+            ("F4 8F BF BF",       &[0xF4, 0x8F, 0xBF, 0xBF]),
+            ("İzmir",             &[0xC4, 0xB0, 0x7A, 0x6D, 0x69, 0x72]),
+        ];
+
+        for (label, bytes) in valid_cases {
+            let src = source_with_literal(bytes);
+            let (_output, _funcs, error) = compile_with_ccb(&ccb, &src);
+            assert_eq!(error, 0,
+                "valid UTF-8 '{}' should compile without error", label);
+            eprintln!("7.4: valid '{}' ✓", label);
+        }
+    }
+
+    #[test]
+    fn p74_utf8_invalid_boundary_cases() {
+        let ccb = build_ccb();
+
+        // Each entry: (label, literal bytes)
+        // All must produce error == 1 and no child execution.
+        let invalid_cases: &[(&str, &[u8])] = &[
+            ("standalone continuation 80",     &[0x80]),
+            ("overlong C0 80",                 &[0xC0, 0x80]),
+            ("overlong C1 BF",                 &[0xC1, 0xBF]),
+            ("truncated 2-byte C2",            &[0xC2]),
+            ("overlong 3-byte E0 9F BF",       &[0xE0, 0x9F, 0xBF]),
+            ("truncated E0 A0",                &[0xE0, 0xA0]),
+            ("truncated 3-byte E1 80",         &[0xE1, 0x80]),
+            ("surrogate ED A0 80",             &[0xED, 0xA0, 0x80]),
+            ("overlong 4-byte F0 8F BF BF",    &[0xF0, 0x8F, 0xBF, 0xBF]),
+            ("truncated F4 8F BF",             &[0xF4, 0x8F, 0xBF]),
+            ("above U+10FFFF F4 90 80 80",     &[0xF4, 0x90, 0x80, 0x80]),
+            ("invalid lead F5 80 80 80",       &[0xF5, 0x80, 0x80, 0x80]),
+            ("invalid lead FF",                &[0xFF]),
+        ];
+
+        for (label, bytes) in invalid_cases {
+            let src = source_with_literal(bytes);
+            let (_output, _funcs, error) = compile_with_ccb(&ccb, &src);
+            assert_eq!(error, 1,
+                "invalid UTF-8 '{}' should produce compile error", label);
+            eprintln!("7.4: invalid '{}' rejected ✓", label);
+        }
+    }
+
+    /// 7.4 preservation: validation is a gate, not a transcoder.
+    /// Valid UTF-8 input bytes == literal output bytes.
+    #[test]
+    fn p74_utf8_validation_preserves_bytes() {
+        let ccb = build_ccb();
+
+        // İzmir: C4 B0 7A 6D 69 72
+        let src = "int main() { int s = \"İzmir\"; return syscall(1, s + 8, *s, 0); }";
+        let kernel = run_ccb_harness(&ccb, src.as_bytes(), 0);
+        assert_eq!(&kernel.byte_output, b"\xC4\xB0zmir",
+            "validation must preserve bytes: no normalization, no replacement");
+        eprintln!("7.4: İzmir bytes preserved through validation gate ✓");
+    }
+
     // ─── 7.2h: Bootstrap fixed-point regression ────────────────
     // After the allocator redesign, CC_B must still equal CC_C.
     // This is a stronger check than b51_bootstrap_closure because it
@@ -7292,7 +7445,8 @@ mod tests {
 
         assert_eq!(ccc_error, 0,
             "CC_B failed to compile canonical source after 7.2 allocator change");
-        assert_eq!(ccc_funcs, 45, "CC_C should have 45 functions");
+        assert_eq!(ccc_funcs, CANONICAL_FUNC_COUNT,
+            "CC_C should have {} functions", CANONICAL_FUNC_COUNT);
         assert!(!ccc.is_empty(), "CC_C is empty");
         eprintln!("7.2h: CC_C = {} bytes ({} functions)", ccc.len(), ccc_funcs);
 

@@ -95,26 +95,29 @@ pub(crate) fn enc_s(opcode: i64) -> Expr {
 pub(crate) const TEXT_SIZE: i64     = 0x7000;
 
 // Data layout (contiguous after TEXT_SIZE):
-//   0x00000 ..TEXT_SIZE  : compiler text  (TEXT_SIZE = 24KB, host only)
-//   TEXT_SIZE+0x00000    : source         (0x4000 = 16KB)
-//   TEXT_SIZE+0x04000    : output         (0x10000 = 64KB)
-//   TEXT_SIZE+0x14000    : workspace      (0x6000 = 24KB)
-//   TEXT_SIZE+0x1A000    : stack          (0x4000 = 16KB)
-// Stack/source/output addresses are NOT loaded via MOVI — they are set
-// by the host harness or derived from workspace slots.  Only workspace
-// addresses (up to WS_FIX_TABLE end ≈ 0x1FB68 = 129,896) must fit in
-// the 18-bit signed immediate range.
+//   0x00000 ..TEXT_SIZE  : compiler text  (TEXT_SIZE = 28KB, host only)
+//   TEXT_SIZE+0x00000    : source         (0x5000 = 20KB)
+//   TEXT_SIZE+0x05000    : workspace      (0x6000 = 24KB)
+//   TEXT_SIZE+0x0B000    : output         (0x10000 = 64KB)
+//   TEXT_SIZE+0x1B000    : stack          (0x4000 = 16KB)
+//
+// Workspace is placed BEFORE output so that workspace addresses
+// (up to WS_LIT_POS ≈ 0x10B68) stay well within the MOVI 18-bit
+// signed immediate range (max 131071).  Source, output, and stack
+// addresses are set by the harness or derived from workspace slots
+// and are NOT loaded via MOVI.
 pub(crate) const LAYOUT_SRC: i64   = TEXT_SIZE;
-pub(crate) const SOURCE_SIZE: i64  = 0x4000;
-pub(crate) const LAYOUT_OUT: i64   = TEXT_SIZE + 0x4000;
-pub(crate) const OUTPUT_SIZE: i64  = 0x10000;
-pub(crate) const LAYOUT_WS: i64    = TEXT_SIZE + 0x14000;
+pub(crate) const SOURCE_SIZE: i64  = 0x5000;
+pub(crate) const LAYOUT_WS: i64    = TEXT_SIZE + 0x5000;
 pub(crate) const WS_SIZE: i64      = 0x6000;
-pub(crate) const LAYOUT_STACK: i64 = TEXT_SIZE + 0x1A000;
+pub(crate) const LAYOUT_OUT: i64   = TEXT_SIZE + 0xB000;
+pub(crate) const OUTPUT_SIZE: i64  = 0x10000;
+pub(crate) const LAYOUT_STACK: i64 = TEXT_SIZE + 0x1B000;
 // ─── MOVI immediate range ────────────────────────────────
 // MOVI uses an 18-bit signed immediate.  The maximum positive
 // value is (1 << 17) - 1 = 131071.  Literal offsets within the
 // output buffer range from 0 to OUTPUT_SIZE-1 (65535), which fits.
+// WS_LIT_POS must also fit (asserted below, after WS_LIT_POS def).
 const MOVI_MAX: i64 = (1 << 17) - 1;
 const _: () = assert!(OUTPUT_SIZE - 1 <= MOVI_MAX);
 
@@ -157,6 +160,7 @@ pub(crate) const WS_FIX_TABLE: i64      = LAYOUT_WS + 0xB68;
 // After compilation: code = [0, WS_OUT_POS), lits = [WS_LIT_POS, OUTPUT_SIZE).
 // Placed AFTER the fixup table (0x4B68) to avoid overlap.
 pub(crate) const WS_LIT_POS: i64        = LAYOUT_WS + 0x4B68;
+const _: () = assert!(WS_LIT_POS <= MOVI_MAX);
 // ─── Token types (same as 6B.3) ──────────────────
 
 // ─── Token types ──────────────────────────────────
