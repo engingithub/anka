@@ -2714,7 +2714,12 @@ mod tests {
         // is_alnum = is_alpha | is_digit must be computed in
         // two steps — Or(And(Le,Le), And(Le,Le)) is 3 levels of
         // BinOp nesting, which clobbers R5 during the RHS Le.
-        // Locals: name(0), running(1), ch(2), is_alnum(3), is_dig(4)
+        //
+        // Identifier length bounded to 8: after 8 characters,
+        // high bytes shift out of u64, causing distinct identifiers
+        // to alias.  Reject and halt rather than silently alias.
+        // Locals: name(0), running(1), ch(2), is_alnum(3),
+        //         is_dig(4), len(5)
         let fn_scan_ident = Function {
             name: "scan_ident".into(),
             params: vec![],
@@ -2722,7 +2727,7 @@ mod tests {
             locals: vec![
                 (0, Type::Int), (1, Type::Int),
                 (2, Type::Int), (3, Type::Int),
-                (4, Type::Int),
+                (4, Type::Int), (5, Type::Int),
             ],
             body: vec![
                 Stmt::VarDecl(0, Type::Int, Some(lit(0))),
@@ -2730,6 +2735,7 @@ mod tests {
                 Stmt::VarDecl(2, Type::Int, Some(lit(0))),
                 Stmt::VarDecl(3, Type::Int, Some(lit(0))),
                 Stmt::VarDecl(4, Type::Int, Some(lit(0))),
+                Stmt::VarDecl(5, Type::Int, Some(lit(0))),
                 Stmt::While(var(1), vec![
                     assign(2, call("peek_char", vec![])),
                     // is_alpha: 'a' <= ch <= 'z'  (2 levels, safe into R4)
@@ -2749,11 +2755,23 @@ mod tests {
                             binop(BinOp::Shl, var(0), lit(8)),
                             var(2),
                         )),
+                        assign(5, binop(BinOp::Add, var(5), lit(1))),
                         call_stmt("advance", vec![]),
                     ], vec![
                         assign(1, lit(0)),
                     ]),
                 ]),
+                // Reject identifiers longer than 8 characters:
+                // after 8 chars, high bytes shift out of u64 → aliasing.
+                Stmt::If(
+                    binop(BinOp::Lt, lit(8), var(5)),
+                    vec![
+                        deref_assign(lit(WS_ERROR), lit(1)),
+                        deref_assign(lit(WS_TOK_TYPE), lit(TOK_EOF)),
+                        Stmt::Return(lit(0)),
+                    ],
+                    vec![],
+                ),
                 // Keyword check: compare packed name against stored constants
                 Stmt::If(
                     binop(BinOp::Eq, var(0), deref(lit(WS_KW_INT))),
@@ -2777,65 +2795,74 @@ mod tests {
 
         // ─── next_token() ──────────────────────────────────
         // Lexer dispatch: skip whitespace, classify first char.
-        // Locals: ch(0), is_d(1), is_a(2)
+        //
+        // EOF is determined by position (pos ≥ src_len), NOT by
+        // the byte value 0x00.  A NUL byte inside the declared
+        // source is an invalid character, not EOF.
+        // Locals: pos(0), slen(1), ch(2), is_d(3), is_a(4)
         let fn_next_token = Function {
             name: "next_token".into(),
             params: vec![],
             ret_type: Type::Int,
             locals: vec![
                 (0, Type::Int), (1, Type::Int), (2, Type::Int),
+                (3, Type::Int), (4, Type::Int),
             ],
             body: vec![
                 call_stmt("skip_ws", vec![]),
-                Stmt::VarDecl(0, Type::Int, Some(call("peek_char", vec![]))),
-                // EOF
-                Stmt::If(binop(BinOp::Eq, var(0), lit(0)), vec![
+                // Position-based EOF: pos ≥ src_len
+                Stmt::VarDecl(0, Type::Int, Some(deref(lit(WS_POS)))),
+                Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_SRC_LEN)))),
+                Stmt::If(binop(BinOp::Le, var(1), var(0)), vec![
                     deref_assign(lit(WS_TOK_TYPE), lit(TOK_EOF)),
                     Stmt::Return(lit(0)),
                 ], vec![
+                // Read character (guaranteed within source bounds)
+                Stmt::VarDecl(2, Type::Int, Some(call("peek_char", vec![]))),
                 // Digit → scan_number
-                Stmt::VarDecl(1, Type::Int, Some(binop(BinOp::And,
-                    binop(BinOp::Le, lit(48), var(0)),
-                    binop(BinOp::Le, var(0), lit(57)),
+                Stmt::VarDecl(3, Type::Int, Some(binop(BinOp::And,
+                    binop(BinOp::Le, lit(48), var(2)),
+                    binop(BinOp::Le, var(2), lit(57)),
                 ))),
-                Stmt::If(var(1), vec![
+                Stmt::If(var(3), vec![
                     call_stmt("scan_number", vec![]),
                     Stmt::Return(lit(0)),
                 ], vec![
                 // Alpha → scan_ident
-                Stmt::VarDecl(2, Type::Int, Some(binop(BinOp::And,
-                    binop(BinOp::Le, lit(97), var(0)),
-                    binop(BinOp::Le, var(0), lit(122)),
+                Stmt::VarDecl(4, Type::Int, Some(binop(BinOp::And,
+                    binop(BinOp::Le, lit(97), var(2)),
+                    binop(BinOp::Le, var(2), lit(122)),
                 ))),
-                Stmt::If(var(2), vec![
+                Stmt::If(var(4), vec![
                     call_stmt("scan_ident", vec![]),
                     Stmt::Return(lit(0)),
                 ], vec![
                 // Single-character tokens
-                Stmt::If(binop(BinOp::Eq, var(0), lit(43)), vec![   // '+'
+                Stmt::If(binop(BinOp::Eq, var(2), lit(43)), vec![   // '+'
                     Stmt::Return(call("set_char_token", vec![lit(TOK_PLUS)])),
                 ], vec![
-                Stmt::If(binop(BinOp::Eq, var(0), lit(45)), vec![   // '-'
+                Stmt::If(binop(BinOp::Eq, var(2), lit(45)), vec![   // '-'
                     Stmt::Return(call("set_char_token", vec![lit(TOK_MINUS)])),
                 ], vec![
-                Stmt::If(binop(BinOp::Eq, var(0), lit(42)), vec![   // '*'
+                Stmt::If(binop(BinOp::Eq, var(2), lit(42)), vec![   // '*'
                     Stmt::Return(call("set_char_token", vec![lit(TOK_STAR)])),
                 ], vec![
-                Stmt::If(binop(BinOp::Eq, var(0), lit(40)), vec![   // '('
+                Stmt::If(binop(BinOp::Eq, var(2), lit(40)), vec![   // '('
                     Stmt::Return(call("set_char_token", vec![lit(TOK_LPAREN)])),
                 ], vec![
-                Stmt::If(binop(BinOp::Eq, var(0), lit(41)), vec![   // ')'
+                Stmt::If(binop(BinOp::Eq, var(2), lit(41)), vec![   // ')'
                     Stmt::Return(call("set_char_token", vec![lit(TOK_RPAREN)])),
                 ], vec![
-                Stmt::If(binop(BinOp::Eq, var(0), lit(61)), vec![   // '='
+                Stmt::If(binop(BinOp::Eq, var(2), lit(61)), vec![   // '='
                     Stmt::Return(call("set_char_token", vec![lit(TOK_EQ)])),
                 ], vec![
-                Stmt::If(binop(BinOp::Eq, var(0), lit(59)), vec![   // ';'
+                Stmt::If(binop(BinOp::Eq, var(2), lit(59)), vec![   // ';'
                     Stmt::Return(call("set_char_token", vec![lit(TOK_SEMI)])),
                 ], vec![
-                    // Unknown character → error + force EOF
+                    // Unknown character (including NUL) → error + force EOF
                     deref_assign(lit(WS_ERROR), lit(1)),
                     deref_assign(lit(WS_TOK_TYPE), lit(TOK_EOF)),
+                    Stmt::Return(lit(0)),
                 ]),
                 ]),
                 ]),
@@ -2974,7 +3001,14 @@ mod tests {
 
         // ─── add_symbol(name, value) ────────────────────────
         // Add name→value to the fixed symbol table.
-        // Rejects duplicates by setting error.
+        // Rejects duplicates and enforces capacity bound.
+        //
+        // Capacity: workspace is 0x1000 bytes at virtual 0x6000.
+        // Symbol table starts at 0x6048, each entry is 16 bytes.
+        // (0x7000 − 0x6048) / 16 = 251 entries (indices 0–250).
+        // Entry 251 would write its value at 0x7000 — outside
+        // the workspace, into the stack mapping.
+        //
         // Params: name(0), value(1)
         // Locals: count(2), i(3), addr(4), entry_name(5)
         let fn_add_symbol = Function {
@@ -2990,6 +3024,15 @@ mod tests {
                 Stmt::VarDecl(3, Type::Int, Some(lit(0))),
                 Stmt::VarDecl(4, Type::Int, Some(lit(0))),
                 Stmt::VarDecl(5, Type::Int, Some(lit(0))),
+                // Capacity guard: count must be < 251
+                Stmt::If(
+                    binop(BinOp::Le, lit(251), var(2)),
+                    vec![
+                        deref_assign(lit(WS_ERROR), lit(1)),
+                        Stmt::Return(lit(0)),
+                    ],
+                    vec![],
+                ),
                 // Duplicate check: scan existing entries
                 Stmt::While(binop(BinOp::Lt, var(3), var(2)), vec![
                     assign(4, binop(BinOp::Add, lit(WS_SYM_TABLE),
@@ -3496,5 +3539,85 @@ mod tests {
     fn b2_multiline() {
         run_6b2_test(b"int x = 40;\nint y = 2;\nreturn x + y;", 42, true);
         eprintln!("6B.2: multiline source → 42 ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Phase 6B.2a — boundary guards
+    // ═══════════════════════════════════════════════════════════
+
+    // ── Identifier length guard ─────────────────────────────
+
+    #[test]
+    fn b2a_ident_8_chars_ok() {
+        // 8-char identifier is at the packed-u64 limit: accepted.
+        run_6b2_test(b"int abcdefgh = 42; return abcdefgh;", 42, true);
+        eprintln!("6B.2a: 8-char identifier → 42 ✓");
+    }
+
+    #[test]
+    fn b2a_ident_9_chars_error() {
+        // 9-char identifier overflows packed u64 → compile error.
+        run_6b2_test(b"int abcdefghi = 42; return abcdefghi;", u64::MAX, false);
+        eprintln!("6B.2a: 9-char identifier → error ✓");
+    }
+
+    #[test]
+    fn b2a_ident_alias_caught() {
+        // Without the length guard, "aabcdefgh" and "babcdefgh"
+        // would alias (both pack to the same final 8 bytes).
+        // The guard rejects both at 9 chars before aliasing occurs.
+        run_6b2_test(
+            b"int aabcdefgh = 1; return babcdefgh;",
+            u64::MAX,
+            false,
+        );
+        eprintln!("6B.2a: 9-char aliasing pair → error ✓");
+    }
+
+    // ── Symbol-table capacity guard ──────────────────────────
+
+    #[test]
+    fn b2a_symtab_overflow() {
+        // Generate 252 unique variable declarations — one past
+        // the workspace capacity of 251 entries.
+        //
+        // Names: a..z (26), then aa..zz two-letter combos.
+        // Each declaration is ~12 bytes; 252 × 12 + 9 ≈ 3033,
+        // within the 4088-byte source limit.
+        let mut src = Vec::new();
+        for i in 0u32..252 {
+            let name: String = if i < 26 {
+                String::from((b'a' + i as u8) as char)
+            } else {
+                let first = (b'a' + ((i - 26) / 26) as u8) as char;
+                let second = (b'a' + ((i - 26) % 26) as u8) as char;
+                format!("{}{}", first, second)
+            };
+            src.extend_from_slice(format!("int {} = 0; ", name).as_bytes());
+        }
+        src.extend_from_slice(b"return 0;");
+        run_6b2_test(&src, u64::MAX, false);
+        eprintln!("6B.2a: 252 variables → capacity error ✓");
+    }
+
+    // ── NUL ≠ EOF ────────────────────────────────────────────
+
+    #[test]
+    fn b2a_nul_in_source() {
+        // A NUL byte (0x00) embedded inside the declared source
+        // must NOT be treated as EOF.  It is an invalid character.
+        // Old code: peek_char() returns 0 for NUL → matches EOF check.
+        // New code: position-based EOF; NUL falls to unknown-char error.
+        let src = b"return 42;\x00garbage";
+        run_6b2_test(src, u64::MAX, false);
+        eprintln!("6B.2a: embedded NUL → error (not silent EOF) ✓");
+    }
+
+    #[test]
+    fn b2a_true_eof_still_works() {
+        // Verify that legitimate EOF (pos ≥ src_len) is still recognized
+        // after removing the ch==0 check.
+        run_6b2_test(b"return 42;", 42, true);
+        eprintln!("6B.2a: true EOF still works ✓");
     }
 }

@@ -83,6 +83,55 @@ pub struct Program {
 }
 
 // ───────────────────────────────────────────────────────────────────
+// Scratch-register depth analysis
+//
+// The backend evaluates BinOp expressions using R4, R5, R6 as scratch
+// registers.  For BinOp(op, lhs, rhs), lhs is compiled into `dest`,
+// rhs into `tmp`:
+//     tmp = if dest == R5 { R6 } else { R5 }
+//
+// The register chain from R4 is: R4 → R5 → R6 → R5 (wraps).
+// At the third right-spine step, R5 is reused, clobbering a live
+// intermediate.  Maximum safe scratch depth from R4 is 3 registers.
+//
+// scratch_regs(expr) computes the number of scratch registers needed.
+// Invariant: scratch_regs(expr) ≤ SCRATCH_REGS for every expression
+// compiled from a statement root (dest = R0 or R4).
+// ───────────────────────────────────────────────────────────────────
+
+const SCRATCH_REGS: usize = 3;
+
+/// Number of scratch registers needed to evaluate `expr` without
+/// clobbering a live intermediate.
+pub fn scratch_regs(expr: &Expr) -> usize {
+    match expr {
+        Expr::IntLit(_) | Expr::Var(_) | Expr::AddrOf(_) => 1,
+        Expr::BinOp(_, lhs, rhs) => {
+            std::cmp::max(scratch_regs(lhs), 1 + scratch_regs(rhs))
+        }
+        Expr::Deref(inner) => scratch_regs(inner),
+        Expr::Call(_, args) => {
+            args.iter().map(|a| scratch_regs(a)).max().unwrap_or(1)
+        }
+        Expr::Assign(_, val) => scratch_regs(val),
+        Expr::DerefAssign(ptr, val) => {
+            // val compiled into dest, ptr into tmp
+            std::cmp::max(scratch_regs(val), 1 + scratch_regs(ptr))
+        }
+        Expr::Syscall(_, args) => {
+            args.iter().map(|a| scratch_regs(a)).max().unwrap_or(1)
+        }
+    }
+}
+
+fn assert_scratch(expr: &Expr) {
+    let depth = scratch_regs(expr);
+    assert!(depth <= SCRATCH_REGS,
+        "expression needs {} scratch registers (backend has {})",
+        depth, SCRATCH_REGS);
+}
+
+// ───────────────────────────────────────────────────────────────────
 // Compiler state
 // ───────────────────────────────────────────────────────────────────
 
@@ -195,20 +244,24 @@ impl Compiler {
     fn compile_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Return(expr) => {
+                assert_scratch(expr);
                 self.compile_expr(expr, R0); // result → R0
                 self.emit_epilogue();
             }
             Stmt::Expr(expr) => {
+                assert_scratch(expr);
                 self.compile_expr(expr, R4); // discard into R4
             }
             Stmt::VarDecl(id, _ty, init) => {
                 if let Some(expr) = init {
+                    assert_scratch(expr);
                     self.compile_expr(expr, R4);
                     let offset = self.var_offset(*id);
                     self.asm.st(R4, FP, offset);
                 }
             }
             Stmt::If(cond, then_body, else_body) => {
+                assert_scratch(cond);
                 self.compile_expr(cond, R4);
                 self.asm.cmpi(R4, 0);
                 let branch_pos = self.asm.here();
@@ -238,6 +291,7 @@ impl Compiler {
                 }
             }
             Stmt::While(cond, body) => {
+                assert_scratch(cond);
                 let loop_top = self.asm.here();
                 self.compile_expr(cond, R4);
                 self.asm.cmpi(R4, 0);
@@ -617,5 +671,83 @@ mod tests {
         let (core, _fabric) = run_program(&prog);
         assert_eq!(core.r[R0 as usize], 99);
         eprintln!("P13: *p=99, x={} ✓", core.r[R0 as usize]);
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Scratch-register depth check
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn scratch_depth_safe_at_3() {
+        // And(Le(a, b), Le(c, d)) needs 3 scratch registers.
+        // This must compile without panic.
+        let expr = Expr::BinOp(BinOp::And,
+            Box::new(Expr::BinOp(BinOp::Le,
+                Box::new(Expr::IntLit(48)),
+                Box::new(Expr::Var(0)),
+            )),
+            Box::new(Expr::BinOp(BinOp::Le,
+                Box::new(Expr::Var(0)),
+                Box::new(Expr::IntLit(57)),
+            )),
+        );
+        assert_eq!(scratch_regs(&expr), 3);
+        let prog = Program {
+            functions: vec![Function {
+                name: "main".into(),
+                params: vec![],
+                ret_type: Type::Int,
+                locals: vec![(0, Type::Int)],
+                body: vec![
+                    Stmt::VarDecl(0, Type::Int, Some(Expr::IntLit(50))),
+                    Stmt::Return(expr),
+                ],
+            }],
+        };
+        let _asm = compile(&prog);
+        eprintln!("scratch_depth: depth=3 accepted ✓");
+    }
+
+    #[test]
+    #[should_panic(expected = "scratch registers")]
+    fn scratch_depth_rejects_4() {
+        // Or(And(Le, Le), And(Le, Le)) needs 4 scratch registers.
+        // This is the expression that caused the R5 clobbering bug.
+        let expr = Expr::BinOp(BinOp::Or,
+            Box::new(Expr::BinOp(BinOp::And,
+                Box::new(Expr::BinOp(BinOp::Le,
+                    Box::new(Expr::IntLit(97)),
+                    Box::new(Expr::Var(0)),
+                )),
+                Box::new(Expr::BinOp(BinOp::Le,
+                    Box::new(Expr::Var(0)),
+                    Box::new(Expr::IntLit(122)),
+                )),
+            )),
+            Box::new(Expr::BinOp(BinOp::And,
+                Box::new(Expr::BinOp(BinOp::Le,
+                    Box::new(Expr::IntLit(48)),
+                    Box::new(Expr::Var(0)),
+                )),
+                Box::new(Expr::BinOp(BinOp::Le,
+                    Box::new(Expr::Var(0)),
+                    Box::new(Expr::IntLit(57)),
+                )),
+            )),
+        );
+        assert_eq!(scratch_regs(&expr), 4);
+        let prog = Program {
+            functions: vec![Function {
+                name: "main".into(),
+                params: vec![],
+                ret_type: Type::Int,
+                locals: vec![(0, Type::Int)],
+                body: vec![
+                    Stmt::VarDecl(0, Type::Int, Some(Expr::IntLit(50))),
+                    Stmt::Return(expr),
+                ],
+            }],
+        };
+        compile(&prog); // must panic
     }
 }
