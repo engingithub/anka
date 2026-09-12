@@ -132,6 +132,43 @@ fn assert_scratch(expr: &Expr) {
 }
 
 // ───────────────────────────────────────────────────────────────────
+// Return-coverage analysis
+//
+// A non-void function must not have a fall-through path: every
+// reachable execution path through the body must reach a Return
+// statement.  Without this check, a missing Return silently falls
+// off the end of the function into whatever code follows, producing
+// a ControlFlowViolation at runtime (if R is non-empty) or silent
+// wrong behavior (if R is empty).
+//
+// The predicate is structural over the AST — no CFG required:
+//
+//   definitely_returns(Return(_))       = true
+//   definitely_returns(If(_, A, B))     = defs(A) ∧ defs(B)
+//   definitely_returns(While(_, _))     = false  (conservative)
+//   definitely_returns(Expr|VarDecl|…)  = false
+//   definitely_returns([s₁, …, sₙ])    = ∃i. definitely_returns(sᵢ)
+//
+// This is conservative: it may reject functions that always return
+// dynamically but whose coverage isn't provable structurally.
+// ───────────────────────────────────────────────────────────────────
+
+fn definitely_returns(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| stmt_definitely_returns(s))
+}
+
+fn stmt_definitely_returns(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(_) => true,
+        Stmt::If(_, then_body, else_body) => {
+            definitely_returns(then_body) && definitely_returns(else_body)
+        }
+        Stmt::While(_, _) => false,
+        Stmt::Expr(_) | Stmt::VarDecl(..) | Stmt::Trap(_) => false,
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────
 // Compiler state
 // ───────────────────────────────────────────────────────────────────
 
@@ -174,7 +211,13 @@ impl Compiler {
     // ─── Code generation ────────────────────────────────────────
 
     fn compile_program(&mut self, prog: &Program) {
-        // Emit _start: call main, halt
+        // Emit _start: call main; halt
+        //
+        // After main Returns, R0 holds the return value.
+        // HALT in User mode is treated as implicit SYS_EXIT by the
+        // kernel, with exit_code = R0.  (HALT in Supervisor mode,
+        // reached through TRAP → trap handler, is a syscall where
+        // R0 encodes the syscall number.)
         self.asm.call(0); // placeholder — will fixup
         let start_call_idx = (self.asm.here() - 1) as usize;
         self.call_fixups.push((start_call_idx, "main".to_string()));
@@ -221,12 +264,20 @@ impl Compiler {
             self.asm.subi(SP, SP, self.frame_size);
         }
 
+        // Non-void functions must have complete return coverage.
+        // Every reachable path through the body must hit a Return.
+        if !matches!(func.ret_type, Type::Void) {
+            assert!(definitely_returns(&func.body),
+                "non-void function '{}' has a fall-through path without Return",
+                func.name);
+        }
+
         // Compile body
         for stmt in &func.body {
             self.compile_stmt(stmt);
         }
 
-        // Implicit return 0 for void functions
+        // Implicit return for void functions
         if matches!(func.ret_type, Type::Void) {
             self.emit_epilogue();
         }
@@ -392,8 +443,11 @@ impl Compiler {
                         self.compile_expr(arg, i as u8);
                     }
                 }
-                // Save caller-saved registers if dest is not R0
-                // (simplified: we trust the convention)
+                // BUG (6B.4): caller-saved registers are not preserved.
+                // A call inside a larger expression (e.g. x + f(y)) will
+                // clobber R4–R6 intermediates held by the enclosing BinOp.
+                // Not a problem until the source language has user-defined
+                // functions (6B.4); record now to avoid rediscovery.
                 let call_pos = self.asm.here();
                 self.asm.call(0); // placeholder
                 self.call_fixups.push((call_pos as usize, name.clone()));
@@ -749,5 +803,91 @@ mod tests {
             }],
         };
         compile(&prog); // must panic
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Return-coverage check
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn returns_coverage_accepted() {
+        // A non-void function with Return on every path compiles.
+        let prog = Program {
+            functions: vec![Function {
+                name: "main".into(),
+                params: vec![],
+                ret_type: Type::Int,
+                locals: vec![(0, Type::Int)],
+                body: vec![
+                    Stmt::VarDecl(0, Type::Int, Some(Expr::IntLit(1))),
+                    Stmt::If(
+                        Expr::Var(0),
+                        vec![Stmt::Return(Expr::IntLit(1))],
+                        vec![Stmt::Return(Expr::IntLit(0))],
+                    ),
+                ],
+            }],
+        };
+        let _asm = compile(&prog);
+        eprintln!("definitely_returns: If with both arms returning → accepted ✓");
+    }
+
+    #[test]
+    #[should_panic(expected = "fall-through path")]
+    fn returns_coverage_rejects_missing() {
+        // A non-void function without Return on every path is rejected.
+        let prog = Program {
+            functions: vec![Function {
+                name: "main".into(),
+                params: vec![],
+                ret_type: Type::Int,
+                locals: vec![],
+                body: vec![
+                    Stmt::Expr(Expr::IntLit(42)),
+                ],
+            }],
+        };
+        compile(&prog); // must panic: no Return
+    }
+
+    #[test]
+    #[should_panic(expected = "fall-through path")]
+    fn returns_coverage_rejects_one_arm() {
+        // If with Return only in the then-branch is rejected.
+        let prog = Program {
+            functions: vec![Function {
+                name: "main".into(),
+                params: vec![],
+                ret_type: Type::Int,
+                locals: vec![(0, Type::Int)],
+                body: vec![
+                    Stmt::VarDecl(0, Type::Int, Some(Expr::IntLit(1))),
+                    Stmt::If(
+                        Expr::Var(0),
+                        vec![Stmt::Return(Expr::IntLit(1))],
+                        vec![], // no Return in else
+                    ),
+                ],
+            }],
+        };
+        compile(&prog); // must panic
+    }
+
+    #[test]
+    fn returns_void_no_check() {
+        // A void function is allowed to fall through.
+        let prog = Program {
+            functions: vec![Function {
+                name: "main".into(),
+                params: vec![],
+                ret_type: Type::Void,
+                locals: vec![],
+                body: vec![
+                    Stmt::Expr(Expr::IntLit(0)),
+                ],
+            }],
+        };
+        let _asm = compile(&prog);
+        eprintln!("definitely_returns: Void function → no check ✓");
     }
 }
