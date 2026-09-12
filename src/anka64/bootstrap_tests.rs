@@ -4100,9 +4100,9 @@ mod tests {
             let ws_error = read(0x18);
             let ws_tok   = read(0x20);
             let ws_pos   = read(0x00);
-            let ws_out   = read(0x60);
-            let ws_func  = read(0x70);
-            let ws_fix   = read(0x78);
+            let ws_out   = read(0x48);
+            let ws_func  = read(0x58);
+            let ws_fix   = read(0x60);
             eprintln!("STUCK: PC={:#x} pos={} tok={} error={} out_pos={} funcs={} fixups={}",
                 pc, ws_pos, ws_tok, ws_error, ws_out, ws_func, ws_fix);
             // Decode instructions around PC
@@ -4129,25 +4129,27 @@ mod tests {
                 u64::from_le_bytes(bytes.try_into().unwrap())
             };
             eprintln!("DIAG: error={} tok={} pos={} out_pos={}",
-                read(0x18), read(0x20), read(0x00), read(0x60));
-            eprintln!("DIAG: funcs={} fixups={}", read(0x70), read(0x78));
-            let func_count = read(0x70) as usize;
+                read(0x18), read(0x20), read(0x00), read(0x48));
+            eprintln!("DIAG: funcs={} fixups={}", read(0x58), read(0x60));
+            let func_count = read(0x58) as usize;
             for i in 0..func_count.min(4) {
-                let base = 0x288 + i as u64 * 24;
-                eprintln!("  func[{}]: name={:#x} addr={} arity={}",
-                    i, read(base), read(base + 8), read(base + 16));
+                let base = 0x368 + i as u64 * 32;
+                eprintln!("  func[{}]: ns={} nl={} addr={} arity={}",
+                    i, read(base), read(base + 8),
+                    read(base + 16), read(base + 24));
             }
-            let fix_count = read(0x78) as usize;
+            let fix_count = read(0x60) as usize;
             for i in 0..fix_count.min(4) {
-                let base = 0x408 + i as u64 * 24;
-                eprintln!("  fix[{}]: call_pos={} name={:#x} argc={}",
-                    i, read(base), read(base + 8), read(base + 16));
+                let base = 0x568 + i as u64 * 32;
+                eprintln!("  fix[{}]: call_pos={} ns={} nl={} argc={}",
+                    i, read(base), read(base + 8),
+                    read(base + 16), read(base + 24));
             }
-            let sym_count = read(0x80) as usize;
+            let sym_count = read(0x40) as usize;
             for i in 0..sym_count.min(8) {
-                let base = 0x88 + i as u64 * 16;
-                eprintln!("  sym[{}]: name={:#x} offset={}",
-                    i, read(base), read(base + 8) as i64);
+                let base = 0x68 + i as u64 * 24;
+                eprintln!("  sym[{}]: ns={} nl={} offset={}",
+                    i, read(base), read(base + 8), read(base + 16) as i64);
             }
         }
         assert!(exited, "compiler process should have exited");
@@ -4531,6 +4533,40 @@ mod tests {
             b"int f() { int x = 42; } int main() { return 42; }",
             u64::MAX, false);
         eprintln!("6B.4.4: reject fall-through ✓");
+    }
+
+    // ─── 6B.5.0a tests — source-slice names ─────────────────
+
+    #[test]
+    fn b50a_long_function_name() {
+        run_6b4_test(
+            b"int longfunction() { return 42; } int main() { return longfunction(); }",
+            42, true);
+        eprintln!("6B.5.0a: long function name (>8 chars) ✓");
+    }
+
+    #[test]
+    fn b50a_common_prefix() {
+        run_6b4_test(
+            b"int comp() { return 1; } int compile() { return 2; } int main() { return comp() + compile(); }",
+            3, true);
+        eprintln!("6B.5.0a: common prefix distinguishes comp/compile ✓");
+    }
+
+    #[test]
+    fn b50a_names_differ_after_byte8() {
+        run_6b4_test(
+            b"int abcdefghi() { return 1; } int abcdefghj() { return 2; } int main() { return abcdefghi() + abcdefghj(); }",
+            3, true);
+        eprintln!("6B.5.0a: names differ after byte 8 ✓");
+    }
+
+    #[test]
+    fn b50a_long_variable_names() {
+        run_6b4_test(
+            b"int main() { int longname1 = 10; int longname2 = 32; return longname1 + longname2; }",
+            42, true);
+        eprintln!("6B.5.0a: long variable names ✓");
     }
 
 }
