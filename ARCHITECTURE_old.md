@@ -226,17 +226,17 @@ Timer interrupts introduced asynchronous events.
 
 The machine ceased to be merely:
 
-```text
-S[n+1] = I(S[n])
-```
+\[
+S_{n+1} = I(S_n)
+\]
 
 and became conceptually:
 
-```text
-S[n+1] = F(S[n], I[n], E[n])
-```
+\[
+S_{n+1} = F(S_n, I_n, E_n)
+\]
 
-where `E_n` includes external asynchronous events such as interrupts.
+where \(E_n\) includes external asynchronous events such as interrupts.
 
 Two independent C programs were preemptively scheduled without yielding.
 
@@ -324,9 +324,15 @@ consistency   = when do other agents observe the operation?
 
 Formally:
 
-```text
-authority != translation != coherence/consistency
-```
+\[
+\boxed{
+\text{authority}
+\neq
+\text{translation}
+\neq
+\text{coherence/consistency}
+}
+\]
 
 Traditional paging often entangles all three.
 
@@ -363,9 +369,11 @@ struct AccessContext {
 
 The authorization function is conceptually:
 
-```text
-authorize(R) in {allow, deny}
-```
+\[
+\operatorname{authorize}(R)
+\in
+\{\text{allow},\text{deny}\}
+\]
 
 before translation or physical access occurs.
 
@@ -375,31 +383,39 @@ before translation or physical access occurs.
 
 The central noninterference invariant is:
 
-```text
-if !authorize(R):
-    ordinary_state_after(R) = ordinary_state_before(R)
-```
+\[
+\boxed{
+\neg authorize(R)
+\Rightarrow
+\text{ordinary state after }R
+=
+\text{ordinary state before }R
+}
+\]
 
 except for fault metadata.
 
 More explicitly:
 
-```text
-if !authorize(R):
-    M' = M
-    D' = D
-    O' = O
-    C' = C
-    L' = L ++ [fault(R)]
-```
+\[
+\neg authorize(R)
+\Rightarrow
+\begin{cases}
+M' = M\\
+D' = D\\
+O' = O\\
+C' = C\\
+L' = L \mathbin{+\!\!+} [fault(R)]
+\end{cases}
+\]
 
 where:
 
-- `M` = memory state,
-- `D` = device state,
-- `O` = object/translation state,
-- `C` = architectural control state,
-- `L` = fault log.
+- \(M\) = memory state,
+- \(D\) = device state,
+- \(O\) = object/translation state,
+- \(C\) = architectural control state,
+- \(L\) = fault log.
 
 This property is foundational.
 
@@ -454,17 +470,17 @@ A capability identifies authority over an object.
 
 Conceptually:
 
-```text
-C = (O, g, o, length, permissions)
-```
+\[
+C = (O,g,o,\ell,\pi)
+\]
 
 where:
 
-- `O` = object identity,
-- `g` = generation / revocation epoch,
-- `o` = offset within the object,
-- `length` = extent,
-- `permissions` = permissions.
+- \(O\) = object identity,
+- \(g\) = generation / revocation epoch,
+- \(o\) = offset within the object,
+- \(\ell\) = extent,
+- \(\pi\) = permissions.
 
 Permissions include at least:
 
@@ -482,9 +498,13 @@ and may later include domain-specific rights.
 
 Delegation must obey:
 
-```text
-Authority(C_child) <= Authority(C_parent)
-```
+\[
+\boxed{
+Authority(C_{child})
+\subseteq
+Authority(C_{parent})
+}
+\]
 
 A derived capability may:
 
@@ -501,10 +521,11 @@ It may not:
 
 The formal principle is:
 
-```text
-C' <- derive(C)
-therefore Authority(C') <= Authority(C)
-```
+\[
+C' \leftarrow derive(C)
+\Rightarrow
+Authority(C') \subseteq Authority(C)
+\]
 
 ---
 
@@ -516,7 +537,9 @@ Capability creation must be controlled.
 
 The architectural invariant is:
 
-> **Authority cannot arise from nowhere.**
+\[
+\boxed{\text{authority cannot arise from nowhere}}
+\]
 
 Capability construction must therefore be mediated by trusted minting/derivation operations or by hardware-backed unforgeable representations.
 
@@ -528,24 +551,27 @@ Objects possess generations.
 
 A capability is valid only when:
 
-```text
+\[
 g_C = g_O
-```
+\]
 
 Revocation changes the object's generation:
 
-```text
-g_O <- g_O + 1
-```
+\[
+g_O \leftarrow g_O + 1
+\]
 
 making all old capabilities stale.
 
 Thus:
 
-```text
-if g_C != g_O:
-    access denied
-```
+\[
+\boxed{
+g_C \neq g_O
+\Rightarrow
+\text{access denied}
+}
+\]
 
 This rule applies equally to:
 
@@ -564,9 +590,11 @@ Authority should therefore reference logical object identity.
 
 Translation later resolves:
 
-```text
-(O, offset) -> physical location
-```
+\[
+(O,\text{offset})
+\rightarrow
+\text{physical location}
+\]
 
 Physical placement is not itself authority.
 
@@ -594,9 +622,13 @@ A correct capability mechanism can faithfully enforce a bad policy.
 
 Therefore:
 
-```text
-mechanism correctness !=> policy correctness
-```
+\[
+\boxed{
+\text{mechanism correctness}
+\not\Rightarrow
+\text{policy correctness}
+}
+\]
 
 The OS must be tested for what authority it actually delegates.
 
@@ -608,10 +640,14 @@ For example, kernel scheduler state must never be delegated writable to ordinary
 
 If a domain contains multiple capabilities, authorization is existential:
 
-```text
-authorize(D, R) iff there exists C in D such that:
-    valid(C) and C authorizes R
-```
+\[
+\boxed{
+authorize(D,R)
+\iff
+\exists C\in D:
+valid(C)\land C\vdash R
+}
+\]
 
 Capability ordering must not change authority.
 
@@ -619,11 +655,11 @@ Adding a capability must not revoke authority granted by another valid capabilit
 
 Monotonicity should hold:
 
-```text
-Authority(D1) <= Authority(D2)
-    implies
-Allowed(D1) <= Allowed(D2)
-```
+\[
+Authority(D_1)\subseteq Authority(D_2)
+\Rightarrow
+Allowed(D_1)\subseteq Allowed(D_2)
+\]
 
 unless an explicit deny/revocation mechanism is separately defined.
 
@@ -635,9 +671,13 @@ A transaction must have a nonzero width and a real operation.
 
 For the current model:
 
-```text
-width > 0 and operation != none
-```
+\[
+\boxed{
+width > 0
+\land
+operation \neq \varnothing
+}
+\]
 
 Zero-length or zero-operation accesses are rejected before range checking.
 
@@ -667,7 +707,11 @@ This enables real execute permission and meaningful W⊕X policy.
 
 The architectural invariant is:
 
-> **Privilege/authority validation precedes all architecturally visible operand access.**
+\[
+\boxed{
+\text{privilege/authority validation precedes all architecturally visible operand access}
+}
+\]
 
 A faulting or privileged instruction must not partially alter state before the fault is recognized.
 
@@ -717,9 +761,11 @@ A device receives delegated authority to a buffer/object.
 
 Example:
 
-```text
-C_DMA = (O_buffer, g, 0, 4096, {Write})
-```
+\[
+C_{DMA}
+=
+(O_{buffer},g,0,4096,\{Write\})
+\]
 
 The device may write only through that capability.
 
@@ -771,7 +817,11 @@ may all coexist simultaneously.
 
 The eventual concurrent invariant is stronger than single-core protection:
 
-> **No agent can increase its authority through concurrency.**
+\[
+\boxed{
+\text{No agent can increase its authority through concurrency}
+}
+\]
 
 In particular, Anka64 must define the interaction between:
 
@@ -795,7 +845,12 @@ That choice must then be formalized.
 
 A likely target invariant is:
 
-> **No transaction authorized under generation `g` may commit after revocation to `g + 1`.**
+\[
+\boxed{
+\text{No transaction authorized under generation }g
+\text{ may commit after revocation to }g+1
+}
+\]
 
 unless the architecture explicitly defines grandfathered in-flight transactions.
 
@@ -975,68 +1030,6 @@ The goal is to make forbidden state transitions **architecturally impossible**.
 
 ---
 
-## Current Host Trust Boundary
-
-The present Anka64 implementation runs as software on a host operating system. Therefore the host is currently part of the trusted computing base. Anka can enforce its architectural rules among modeled agents only so long as the host faithfully executes the emulator/runtime.
-
-Inside the Anka model, requests follow the intended chain:
-
-```text
-Core / DMA / Agent
-        -> Fabric
-        -> Capability and generation checks
-        -> Commit or fault
-```
-
-But the host sits outside that model. A hostile or compromised host can potentially inspect or modify Anka process memory, patch the emulator, alter generated code, forge device input, bypass a guard, roll back state, or otherwise change execution without Anka being able to observe the violation.
-
-Therefore the current security claim must be stated precisely:
-
-> **Current Anka64 proves/enforces its architecture under an honest-host assumption.**
-
-This does **not** invalidate the internal authority model. It identifies the present lower boundary of enforcement. An additional check inside Anka cannot solve this problem, because a hostile host can bypass the check itself. The enforcement point must eventually move below the host's authority.
-
-A natural progression is:
-
-```text
-ordinary host process
-    -> confidential VM / TEE
-    -> native Anka hardware
-```
-
-A confidential-computing environment can protect the Anka runtime from an untrusted host or hypervisor, while Anka continues to protect its own agents from one another. The composition is conceptually:
-
-```text
-TEE protects Anka from the host
-+
-Anka protects agents through explicit authority
-```
-
-The strongest realization is native hardware in which every CPU, DMA, or accelerator transaction must pass through the capability fabric before memory commit. At that point a compromised kernel cannot simply skip the authorization function because authorization is below software.
-
-This yields three distinct implementation stages:
-
-| Stage | Security meaning |
-| --- | --- |
-| Current Anka | Architectural security model under a trusted host |
-| Anka in a TEE | Host-isolated realization of that model |
-| Anka hardware | Hardware-enforced realization of the model |
-
-The long-term confidential-computing opportunity is therefore not merely an enclave. It is the composition of host isolation, measured/attested execution, and Anka's fine-grained object authority:
-
-```text
-capability fabric
-+ memory confidentiality
-+ measured execution
-+ remote attestation
-```
-
-The architectural lesson is:
-
-> **A security invariant is only as strong as the lowest layer capable of bypassing its enforcement point.**
-
----
-
 # 11. What Anka64 Should Avoid
 
 Anka64 should avoid inheriting complexity without evidence that the software needs it.
@@ -1201,11 +1194,19 @@ to shape the hardware model together.
 
 The guiding principle is:
 
-> **Build the software early enough that it can tell you what the hardware should be.**
+\[
+\boxed{
+\text{Build the software early enough that it can tell you what the hardware should be.}
+}
+\]
 
 And the security counterpart is:
 
-> **Design forbidden state transitions so they cannot occur, rather than merely making them difficult to exploit.**
+\[
+\boxed{
+\text{Design forbidden state transitions so they cannot occur, rather than merely making them difficult to exploit.}
+}
+\]
 
 ---
 
@@ -1240,9 +1241,6 @@ For quick reference:
 25. **Formal counterexamples become implementation regression tests.**
 26. **The architecture assumes fully informed hostile software.**
 27. **Build vertically; let higher layers adversarially test lower ones.**
-28. **One semantic fact has one authoritative definition.**
-29. **Data that names executable code is not authority to transfer control to it.**
-30. **A security invariant is only as strong as the lowest layer capable of bypassing its enforcement point.**
 
 ---
 
