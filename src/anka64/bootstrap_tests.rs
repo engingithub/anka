@@ -4035,8 +4035,8 @@ mod tests {
 
         let text   = fabric.alloc_object("compiler_text",  TEXT_SIZE as u64, ObjectKind::Memory);
         let source = fabric.alloc_object("source_data",    0x1000, ObjectKind::Memory);
-        let output = fabric.alloc_object("output_buf",     0x1000, ObjectKind::Memory);
-        let work   = fabric.alloc_object("workspace",      0x1000, ObjectKind::Memory);
+        let output = fabric.alloc_object("output_buf",     OUTPUT_SIZE as u64, ObjectKind::Memory);
+        let work   = fabric.alloc_object("workspace",      WS_SIZE as u64, ObjectKind::Memory);
         let stack  = fabric.alloc_object("compiler_stack", 0x4000, ObjectKind::Memory);
 
         fabric.place_object(text,   0x000000);
@@ -4047,8 +4047,8 @@ mod tests {
 
         let dom = fabric.create_domain();
         fabric.grant(dom, source, 0, 0x1000, Permissions::READ);
-        fabric.grant(dom, output, 0, 0x1000, Permissions::RWS);
-        fabric.grant(dom, work,   0, 0x1000, Permissions::RW);
+        fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
+        fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
         fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
 
         // Write source: [u64 length][text bytes]
@@ -4082,8 +4082,8 @@ mod tests {
         let mut core = Anka64Core::new(AgentId(0), dom);
         core.address_map.add(0, TEXT_SIZE as u64, text);
         core.address_map.add(LAYOUT_SRC as u64,   0x1000, source);
-        core.address_map.add(LAYOUT_OUT as u64,    0x1000, output);
-        core.address_map.add(LAYOUT_WS as u64,     0x1000, work);
+        core.address_map.add(LAYOUT_OUT as u64,    OUTPUT_SIZE as u64, output);
+        core.address_map.add(LAYOUT_WS as u64,     WS_SIZE as u64, work);
         core.address_map.add(LAYOUT_STACK as u64,  0x4000, stack);
         core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
         core.trap_vector = TEXT_SIZE as u64 - 0x10;
@@ -4148,7 +4148,7 @@ mod tests {
             }
             let fix_count = read(0x60) as usize;
             for i in 0..fix_count.min(4) {
-                let base = 0x568 + i as u64 * 32;
+                let base = 0x768 + i as u64 * 32;
                 eprintln!("  fix[{}]: call_pos={} ns={} nl={} argc={}",
                     i, read(base), read(base + 8),
                     read(base + 16), read(base + 24));
@@ -4914,6 +4914,316 @@ mod tests {
             b"int main() { return syscall(0, syscall(1, 55, 0, 0) + 33, 0, 0); }",
             33, true);
         eprintln!("6B.5.0d: nested syscall ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════
+    //  6B.5.0e — Canonical compiler source (bottom-up)
+    // ═══════════════════════════════════════════════════════
+    //
+    // Functions generate source text with workspace addresses
+    // derived from the module-level WS_* constants.  When
+    // TEXT_SIZE changes the canonical source auto-updates.
+    //
+    // Naming: no underscores (bootstrap lexer is [a-z]+[0-9]*).
+    // Negatives: (0 - N) since the language has no unary minus.
+
+    fn canonical_readbyte() -> String {
+        format!(
+            "int readbyte(int pos) {{ \
+             int aligned = pos & (0 - 8); \
+             int word = *(*{} + aligned); \
+             int shift = (pos & 7) * 8; \
+             return (word >> shift) & 255; }} ",
+            WS_TEXT_BASE)
+    }
+
+    fn canonical_peekchar() -> String {
+        format!(
+            "int peekchar() {{ \
+             int p = *{}; \
+             if (*{} <= p) {{ return 0; }} \
+             return readbyte(p); }} ",
+            WS_POS, WS_SRC_LEN)
+    }
+
+    fn canonical_advance() -> String {
+        format!(
+            "int advance() {{ \
+             *{} = *{} + 1; \
+             return 0; }} ",
+            WS_POS, WS_POS)
+    }
+
+    fn canonical_skipws() -> String {
+        "int skipws() { \
+         int ch = peekchar(); \
+         while ((0 < ch) & (ch <= 32)) { \
+         advance(); \
+         ch = peekchar(); } \
+         return 0; } ".to_string()
+    }
+
+    fn canonical_nameseq() -> String {
+        "int nameseq(int sa, int la, int sb, int lb) { \
+         if (la != lb) { return 0; } \
+         int i = 0; \
+         int a = 0; \
+         int b = 0; \
+         while (i < la) { \
+         a = readbyte(sa + i); \
+         b = readbyte(sb + i); \
+         if (a != b) { return 0; } \
+         i = i + 1; } \
+         return 1; } ".to_string()
+    }
+
+    fn canonical_classifykw() -> String {
+        // Token constants (decimal):
+        //   TOK_IDENT=13 TOK_IF=14 TOK_INT_KW=15 TOK_ELSE=16
+        //   TOK_WHILE=17 TOK_RETURN=18 TOK_SYSCALL=27
+        // Keyword bytes: if=105,102  int=105,110,116
+        //   else=101,108,115,101  while=119,104,105,108,101
+        //   return=114,101,116,117,114,110
+        //   syscall=115,121,115,99,97,108,108
+        "int classifykw(int s, int l) { \
+         if (l == 2) { \
+         if (readbyte(s) == 105) { \
+         if (readbyte(s + 1) == 102) { return 14; } } } \
+         if (l == 3) { \
+         if (readbyte(s) == 105) { \
+         if (readbyte(s + 1) == 110) { \
+         if (readbyte(s + 2) == 116) { return 15; } } } } \
+         if (l == 4) { \
+         if (readbyte(s) == 101) { \
+         if (readbyte(s + 1) == 108) { \
+         if (readbyte(s + 2) == 115) { \
+         if (readbyte(s + 3) == 101) { return 16; } } } } } \
+         if (l == 5) { \
+         if (readbyte(s) == 119) { \
+         if (readbyte(s + 1) == 104) { \
+         if (readbyte(s + 2) == 105) { \
+         if (readbyte(s + 3) == 108) { \
+         if (readbyte(s + 4) == 101) { return 17; } } } } } } \
+         if (l == 6) { \
+         if (readbyte(s) == 114) { \
+         if (readbyte(s + 1) == 101) { \
+         if (readbyte(s + 2) == 116) { \
+         if (readbyte(s + 3) == 117) { \
+         if (readbyte(s + 4) == 114) { \
+         if (readbyte(s + 5) == 110) { return 18; } } } } } } } \
+         if (l == 7) { \
+         if (readbyte(s) == 115) { \
+         if (readbyte(s + 1) == 121) { \
+         if (readbyte(s + 2) == 115) { \
+         if (readbyte(s + 3) == 99) { \
+         if (readbyte(s + 4) == 97) { \
+         if (readbyte(s + 5) == 108) { \
+         if (readbyte(s + 6) == 108) { return 27; } } } } } } } } \
+         return 13; } ".to_string()
+    }
+
+    fn canonical_setchartok() -> String {
+        format!(
+            "int setchartok(int t, int v) {{ \
+             *{} = t; *{} = v; \
+             advance(); return 0; }} ",
+            WS_TOK_TYPE, WS_TOK_VALUE)
+    }
+
+    fn canonical_scannumber() -> String {
+        format!(
+            "int scannumber() {{ \
+             int v = 0; \
+             int ch = peekchar(); \
+             while ((48 <= ch) & (ch <= 57)) {{ \
+             v = v * 10 + (ch - 48); \
+             if (131071 < v) {{ *{e} = 1; ch = 0; }} \
+             else {{ advance(); ch = peekchar(); }} }} \
+             *{t} = {num}; *{tv} = v; return 0; }} ",
+            e = WS_ERROR,
+            t = WS_TOK_TYPE,
+            num = TOK_NUMBER,
+            tv = WS_TOK_VALUE)
+    }
+
+    fn canonical_scanident() -> String {
+        format!(
+            "int scanident() {{ \
+             int ch = peekchar(); \
+             int start = *{pos}; \
+             int len = 0; \
+             while ((97 <= ch) & (ch <= 122)) {{ \
+             len = len + 1; advance(); ch = peekchar(); }} \
+             while ((48 <= ch) & (ch <= 57)) {{ \
+             len = len + 1; advance(); ch = peekchar(); }} \
+             *{ns} = start; *{nl} = len; \
+             *{tt} = classifykw(start, len); return 0; }} ",
+            pos = WS_POS,
+            ns = WS_TOK_NAME_START,
+            nl = WS_TOK_NAME_LEN,
+            tt = WS_TOK_TYPE)
+    }
+
+    fn canonical_nexttoken() -> String {
+        format!(
+            "int nexttoken() {{ \
+             skipws(); \
+             if (*{sl} <= *{pos}) {{ *{tt} = {eof}; return 0; }} \
+             int ch = peekchar(); \
+             if (ch == 43) {{ return setchartok({plus}, 43); }} \
+             if (ch == 45) {{ return setchartok({minus}, 45); }} \
+             if (ch == 42) {{ return setchartok({star}, 42); }} \
+             if (ch == 59) {{ return setchartok({semi}, 59); }} \
+             if (ch == 44) {{ return setchartok({comma}, 44); }} \
+             if (ch == 40) {{ return setchartok({lp}, 40); }} \
+             if (ch == 41) {{ return setchartok({rp}, 41); }} \
+             if (ch == 123) {{ return setchartok({lb}, 123); }} \
+             if (ch == 125) {{ return setchartok({rb}, 125); }} \
+             if (ch == 124) {{ return setchartok({pipe}, 124); }} \
+             if (ch == 38) {{ return setchartok({amp}, 38); }} \
+             if (ch == 61) {{ advance(); \
+             if (peekchar() == 61) {{ advance(); *{tt} = {eqeq}; return 0; }} \
+             *{tt} = {eq}; return 0; }} \
+             if (ch == 60) {{ advance(); ch = peekchar(); \
+             if (ch == 61) {{ advance(); *{tt} = {le}; return 0; }} \
+             if (ch == 60) {{ advance(); *{tt} = {shl}; return 0; }} \
+             *{tt} = {lt}; return 0; }} \
+             if (ch == 62) {{ advance(); \
+             if (peekchar() == 62) {{ advance(); *{tt} = {shr}; return 0; }} \
+             *{e} = 1; *{tt} = {eof}; return 0; }} \
+             if (ch == 33) {{ advance(); \
+             if (peekchar() == 61) {{ advance(); *{tt} = {ne}; return 0; }} \
+             *{e} = 1; *{tt} = {eof}; return 0; }} \
+             if ((97 <= ch) & (ch <= 122)) {{ return scanident(); }} \
+             if ((48 <= ch) & (ch <= 57)) {{ return scannumber(); }} \
+             *{e} = 1; *{tt} = {eof}; return 0; }} ",
+            pos = WS_POS, sl = WS_SRC_LEN, tt = WS_TOK_TYPE,
+            e = WS_ERROR,
+            eof = TOK_EOF, plus = TOK_PLUS, minus = TOK_MINUS,
+            star = TOK_STAR, semi = TOK_SEMI, comma = TOK_COMMA,
+            lp = TOK_LPAREN, rp = TOK_RPAREN,
+            lb = TOK_LBRACE, rb = TOK_RBRACE,
+            pipe = TOK_PIPE, amp = TOK_AMP,
+            eq = TOK_EQ, eqeq = TOK_EQEQ, ne = TOK_NE,
+            le = TOK_LE, lt = TOK_LT,
+            shl = TOK_SHL, shr = TOK_SHR)
+    }
+
+    #[test]
+    fn b50e_readbyte_compiles() {
+        let src = format!(
+            "{}int main() {{ return 42; }}",
+            canonical_readbyte());
+        run_6b4_test(src.as_bytes(), 42, true);
+        eprintln!("6B.5.0e: readbyte() compiles ✓");
+    }
+
+    #[test]
+    fn b50e_peekchar_compiles() {
+        let src = format!(
+            "{}{}int main() {{ return 42; }}",
+            canonical_readbyte(),
+            canonical_peekchar());
+        run_6b4_test(src.as_bytes(), 42, true);
+        eprintln!("6B.5.0e: peekchar() compiles ✓");
+    }
+
+    #[test]
+    fn b50e_advance_compiles() {
+        let src = format!(
+            "{}int main() {{ return 42; }}",
+            canonical_advance());
+        run_6b4_test(src.as_bytes(), 42, true);
+        eprintln!("6B.5.0e: advance() compiles ✓");
+    }
+
+    #[test]
+    fn b50e_skipws_compiles() {
+        // All four lexer primitives together.
+        let src = format!(
+            "{}{}{}{}int main() {{ return 42; }}",
+            canonical_readbyte(),
+            canonical_peekchar(),
+            canonical_advance(),
+            canonical_skipws());
+        run_6b4_test(src.as_bytes(), 42, true);
+        eprintln!("6B.5.0e: skipws() (all 4 lexer primitives) compiles ✓");
+    }
+
+    #[test]
+    fn b50e_readbyte_expressions() {
+        // Verify the arithmetic patterns used in readbyte compile
+        // and evaluate correctly in child.
+        // (5 & (0 - 8)) = 0  [align down]
+        // ((37 & 7) * 8) = 40  [shift calc]
+        let src = format!(
+            "{}int main() {{ return (5 & (0 - 8)) + ((37 & 7) * 8); }}",
+            canonical_readbyte());
+        run_6b4_test(src.as_bytes(), 40, true);
+        eprintln!("6B.5.0e: readbyte expression patterns ✓");
+    }
+
+    #[test]
+    fn b50e_nameseq_compiles() {
+        let src = format!(
+            "{}{}int main() {{ return 42; }}",
+            canonical_readbyte(),
+            canonical_nameseq());
+        run_6b4_test(src.as_bytes(), 42, true);
+        eprintln!("6B.5.0e: nameseq() compiles ✓");
+    }
+
+    #[test]
+    fn b50e_classifykw_compiles() {
+        let src = format!(
+            "{}{}int main() {{ return 42; }}",
+            canonical_readbyte(),
+            canonical_classifykw());
+        run_6b4_test(src.as_bytes(), 42, true);
+        eprintln!("6B.5.0e: classifykw() compiles ✓");
+    }
+
+    #[test]
+    fn b50e_full_lexer_compiles() {
+        // Complete lexer: all 10 functions.
+        let src = format!(
+            "{}{}{}{}{}{}{}{}{}\
+             int main() {{ return 42; }}",
+            canonical_readbyte(),
+            canonical_peekchar(),
+            canonical_advance(),
+            canonical_skipws(),
+            canonical_nameseq(),
+            canonical_classifykw(),
+            canonical_setchartok(),
+            canonical_scannumber(),
+            canonical_scanident(),
+            );
+        eprintln!("6B.5.0e: full lexer source = {} bytes", src.len());
+        run_6b4_test(src.as_bytes(), 42, true);
+        eprintln!("6B.5.0e: full lexer (9 functions) compiles ✓");
+    }
+
+    #[test]
+    fn b50e_nexttoken_compiles() {
+        // Complete lexer + tokenizer.
+        let src = format!(
+            "{}{}{}{}{}{}{}{}{}{}\
+             int main() {{ return 42; }}",
+            canonical_readbyte(),
+            canonical_peekchar(),
+            canonical_advance(),
+            canonical_skipws(),
+            canonical_nameseq(),
+            canonical_classifykw(),
+            canonical_setchartok(),
+            canonical_scannumber(),
+            canonical_scanident(),
+            canonical_nexttoken(),
+            );
+        eprintln!("6B.5.0e: lexer+tokenizer source = {} bytes", src.len());
+        run_6b4_test(src.as_bytes(), 42, true);
+        eprintln!("6B.5.0e: complete tokenizer (10 functions) compiles ✓");
     }
 
 }
