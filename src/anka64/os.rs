@@ -303,6 +303,173 @@ impl Kernel {
         pid
     }
 
+    // ─── Boot contract ─────────────────────────────────────────
+    //
+    // boot() establishes the first runnable Anka process (init).
+    // It validates the boot descriptor, creates init's domain,
+    // grants image authority from trusted boot state, and calls
+    // prepare_process() to create stack/trap/core/address map.
+    //
+    // boot() does NOT call run().  It installs init as runnable
+    // and returns Ok(()).  The host calls kernel.run() afterward.
+    //
+    // One-success-only: a successful boot sets the booted flag.
+    // Failed preparation leaves no reachable domain, capability,
+    // mapping, runnable process, or live allocated object.
+
+    /// Boot the kernel with the given boot descriptor.
+    ///
+    /// On success, init is installed as a runnable process and the
+    /// method returns `Ok(())`.  The caller then invokes `run()`.
+    ///
+    /// On failure, nothing is mutated (transactional rejection).
+    pub fn boot(&mut self, info: &BootInfo) -> Result<(), BootError> {
+        // ── One-success-only ──
+        if self.booted {
+            return Err(BootError::AlreadyBooted);
+        }
+
+        // ── Validate image object ──
+        let img = &info.image;
+        let obj = self.fabric.objects.get(&img.obj)
+            .ok_or(BootError::ImageNotFound)?;
+        if obj.state != ObjectState::Sealed {
+            return Err(BootError::ImageNotSealed);
+        }
+        if img.code_size == 0 {
+            return Err(BootError::ZeroCode);
+        }
+        if img.entry >= img.code_size {
+            return Err(BootError::InvalidEntry);
+        }
+        let obj_size = obj.size;
+        if img.code_offset > obj_size {
+            return Err(BootError::InvalidEntry);
+        }
+        let image_size = obj_size - img.code_offset;
+        if img.code_size > image_size {
+            return Err(BootError::ZeroCode);
+        }
+
+        // ── Validate literal geometry ──
+        if img.lit_start != 0 {
+            if img.lit_start < img.code_size {
+                return Err(BootError::InvalidLiterals);
+            }
+            if img.lit_start >= image_size {
+                return Err(BootError::InvalidLiterals);
+            }
+        }
+
+        // Image backing range: [code_offset .. code_offset + image_size)
+        let img_back_start = img.code_offset;
+        let img_back_end = img.code_offset + image_size;
+
+        // ── Validate grants ──
+        for g in &info.grants {
+            let gobj = self.fabric.objects.get(&g.obj)
+                .ok_or(BootError::GrantObjectNotFound)?;
+            if g.size > gobj.size || g.offset > gobj.size - g.size {
+                return Err(BootError::GrantOutOfBounds);
+            }
+            // Grant must not overlap image backing range (same object)
+            if g.obj == img.obj {
+                let g_end = g.offset + g.size;
+                if g.offset < img_back_end && g_end > img_back_start {
+                    return Err(BootError::GrantOverlapsImage);
+                }
+            }
+        }
+
+        // ── Validate maps ──
+        // Collect implicit virtual ranges: code, literals, stack, trap.
+        let stack_vaddr: u64 = 0x10000;
+        let stack_size: u64 = 0x4000;
+        let trap_vaddr: u64 = 0x20000;
+        let trap_size: u64 = 0x1000;
+
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        // Code: [0 .. code_size)
+        ranges.push((0, img.code_size));
+        // Literals: [lit_start .. lit_start + lit_length)
+        if img.lit_start != 0 {
+            let lit_length = image_size - img.lit_start;
+            ranges.push((img.lit_start, img.lit_start + lit_length));
+        }
+        // Stack and trap
+        ranges.push((stack_vaddr, stack_vaddr + stack_size));
+        ranges.push((trap_vaddr, trap_vaddr + trap_size));
+
+        for m in &info.maps {
+            let mobj = self.fabric.objects.get(&m.obj)
+                .ok_or(BootError::MapObjectNotFound)?;
+            if m.size > mobj.size || m.obj_offset > mobj.size - m.size {
+                return Err(BootError::MapOutOfBounds);
+            }
+            let m_end = m.vaddr + m.size;
+            // Check against all existing ranges
+            for &(rs, re) in &ranges {
+                if m.vaddr < re && m_end > rs {
+                    return Err(BootError::OverlappingMaps);
+                }
+            }
+            ranges.push((m.vaddr, m_end));
+        }
+
+        // ── All validation passed — now mutate ──
+        let dom = self.fabric.create_domain();
+
+        // Grant image authority: RX for code
+        if self.fabric.grant(
+            dom, img.obj, img.code_offset, img.code_size, Permissions::RX,
+        ).is_none() {
+            self.fabric.destroy_domain(dom);
+            return Err(BootError::ImageNotSealed);
+        }
+
+        // Grant image authority: R for literals
+        if img.lit_start != 0 {
+            let lit_offset = img.code_offset + img.lit_start;
+            let lit_length = image_size - img.lit_start;
+            if self.fabric.grant(
+                dom, img.obj, lit_offset, lit_length, Permissions::READ,
+            ).is_none() {
+                self.fabric.destroy_domain(dom);
+                return Err(BootError::ImageNotSealed);
+            }
+        }
+
+        // Additional grants
+        for g in &info.grants {
+            if self.fabric.grant(dom, g.obj, g.offset, g.size, g.perms).is_none() {
+                self.fabric.destroy_domain(dom);
+                return Err(BootError::GrantOutOfBounds);
+            }
+        }
+
+        // Create process via shared primitive
+        let desc = ProcessImageDesc {
+            code_obj: img.obj,
+            code_offset: img.code_offset,
+            code_size: img.code_size,
+            lit_start: img.lit_start,
+            image_size,
+            entry: img.entry,
+        };
+        let _init_pid = self.prepare_process(dom, &desc);
+
+        // Additional address maps
+        for m in &info.maps {
+            let init_idx = _init_pid as usize;
+            self.processes[init_idx].core.address_map.add_at(
+                m.vaddr, m.size, m.obj, m.obj_offset,
+            );
+        }
+
+        self.booted = true;
+        Ok(())
+    }
+
     /// Run all processes in round-robin until all exit.
     /// Each process gets `quantum` steps per turn.
     pub fn run(&mut self, quantum: usize, max_rounds: usize) {
