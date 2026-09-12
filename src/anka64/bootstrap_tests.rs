@@ -4038,23 +4038,34 @@ mod tests {
         let output = fabric.alloc_object("output_buf",     OUTPUT_SIZE as u64, ObjectKind::Memory);
         let work   = fabric.alloc_object("workspace",      WS_SIZE as u64, ObjectKind::Memory);
         let stack  = fabric.alloc_object("compiler_stack", 0x4000, ObjectKind::Memory);
+        let lits   = fabric.alloc_object("literal_buf",    LIT_SIZE as u64, ObjectKind::Memory);
 
         fabric.place_object(text,   0x000000);
         fabric.place_object(source, 0x010000);
         fabric.place_object(output, 0x020000);
         fabric.place_object(work,   0x030000);
         fabric.place_object(stack,  0x040000);
+        fabric.place_object(lits,   0x050000);
 
         let dom = fabric.create_domain();
         fabric.grant(dom, source, 0, SOURCE_SIZE as u64, Permissions::READ);
         fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
         fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
         fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+        fabric.grant(dom, lits,   0, LIT_SIZE as u64, Permissions::RW);
 
         // Write source: [u64 length][text bytes]
         let src_len = source_text.len() as u64;
         fabric.write_physical(0x010000, &src_len.to_le_bytes());
         fabric.write_physical(0x010008, source_text);
+
+        // Initialize literal buffer workspace slots
+        fabric.write_physical(
+            0x030000 + (WS_LIT_BASE - LAYOUT_WS) as u64,
+            &(LAYOUT_LIT as u64).to_le_bytes());
+        fabric.write_physical(
+            0x030000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            &0u64.to_le_bytes());
 
         // Trap handler at end of TEXT_SIZE text object
         install_trap_handler(&mut fabric, 0x000000, TEXT_SIZE as u64);
@@ -4085,11 +4096,12 @@ mod tests {
         core.address_map.add(LAYOUT_OUT as u64,    OUTPUT_SIZE as u64, output);
         core.address_map.add(LAYOUT_WS as u64,     WS_SIZE as u64, work);
         core.address_map.add(LAYOUT_STACK as u64,  0x4000, stack);
+        core.address_map.add(LAYOUT_LIT as u64,    LIT_SIZE as u64, lits);
         core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
         core.trap_vector = TEXT_SIZE as u64 - 0x10;
 
         let mut kernel = Kernel::new(fabric);
-        kernel.next_phys = 0x050000;
+        kernel.next_phys = 0x060000;
         kernel.next_agent = 10;
         kernel.spawn(core);
         kernel.run(2000000, 10);
@@ -4937,6 +4949,44 @@ mod tests {
             WS_TEXT_BASE)
     }
 
+    fn canonical_writebyte() -> String {
+        format!(
+            "int writebyte(int addr, int byte) {{ \
+             int aligned = addr & (0 - 8); \
+             int shift = (addr & 7) * 8; \
+             int word = *(aligned); \
+             int mask = 255 << shift; \
+             word = (word & ((0 - 1) - mask)) | ((byte & 255) << shift); \
+             *(aligned) = word; \
+             return 0; }} ")
+    }
+
+    fn canonical_storeliteral() -> String {
+        // Note: the byte-copy loop reads into a local (b) first, then
+        // passes it to writebyte. Nesting readbyte() inside writebyte()
+        // triggers the CC_A caller-saved register clobber bug (6B.4).
+        format!(
+            "int storeliteral() {{ \
+             int start = *{ns}; \
+             int len = *{nl}; \
+             int lb = *{litb}; \
+             int lp = *{litp}; \
+             *(lb + lp) = len; \
+             lp = lp + 8; \
+             int i = 0; \
+             int b = 0; \
+             while (i < len) {{ \
+             b = readbyte(start + i); \
+             writebyte(lb + lp + i, b); \
+             i = i + 1; }} \
+             i = lp + len; \
+             i = (i + 7) & (0 - 8); \
+             *{litp} = i; \
+             return lp - 8; }} ",
+            ns = WS_TOK_NAME_START, nl = WS_TOK_NAME_LEN,
+            litb = WS_LIT_BASE, litp = WS_LIT_POS)
+    }
+
     fn canonical_peekchar() -> String {
         format!(
             "int peekchar() {{ \
@@ -5225,11 +5275,17 @@ mod tests {
              emit(encs({trap})); \
              emit(encr({mov}, {r4}, {r0}, 0)); \
              return 0; }} \
+             if (tok == {str}) {{ \
+             storeliteral(); \
+             nexttoken(); \
+             emit(enci({movi}, {r4}, 0, 0)); \
+             return 0; }} \
              *{e} = 1; return 0; }} ",
             tt = WS_TOK_TYPE, tv = WS_TOK_VALUE,
             tns = WS_TOK_NAME_START, tnl = WS_TOK_NAME_LEN,
             e = WS_ERROR,
             num = TOK_NUMBER, ident = TOK_IDENT,
+            str = TOK_STRING,
             lp = TOK_LPAREN, rp = TOK_RPAREN,
             comma = TOK_COMMA, syscall = TOK_SYSCALL,
             movi = OP_MOVI, ld = OP_LD, ld2 = OP_LD,
@@ -5942,11 +5998,13 @@ mod tests {
 
     #[test]
     fn b50e_full_lexer_compiles() {
-        // Complete lexer: all 11 functions (including scanstring).
+        // Complete lexer: all 13 functions (including scanstring, writebyte, storeliteral).
         let src = format!(
-            "{}{}{}{}{}{}{}{}{}{}\
+            "{}{}{}{}{}{}{}{}{}{}{}{}\
              int main() {{ return 42; }}",
             canonical_readbyte(),
+            canonical_writebyte(),
+            canonical_storeliteral(),
             canonical_peekchar(),
             canonical_advance(),
             canonical_skipws(),
@@ -5959,16 +6017,18 @@ mod tests {
             );
         eprintln!("6B.5.0e: full lexer source = {} bytes", src.len());
         run_6b4_test(src.as_bytes(), 42, true);
-        eprintln!("6B.5.0e: full lexer (9 functions) compiles ✓");
+        eprintln!("6B.5.0e: full lexer (13 functions) compiles ✓");
     }
 
     #[test]
     fn b50e_nexttoken_compiles() {
-        // Complete lexer + tokenizer (11 functions including scanstring).
+        // Complete lexer + tokenizer (14 functions).
         let src = format!(
-            "{}{}{}{}{}{}{}{}{}{}{}\
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}\
              int main() {{ return 42; }}",
             canonical_readbyte(),
+            canonical_writebyte(),
+            canonical_storeliteral(),
             canonical_peekchar(),
             canonical_advance(),
             canonical_skipws(),
@@ -5982,7 +6042,7 @@ mod tests {
             );
         eprintln!("6B.5.0e: lexer+tokenizer source = {} bytes", src.len());
         run_6b4_test(src.as_bytes(), 42, true);
-        eprintln!("6B.5.0e: complete tokenizer (11 functions) compiles ✓");
+        eprintln!("6B.5.0e: complete tokenizer (14 functions) compiles ✓");
     }
 
     // ─── Emit/encoding layer tests ──────────────────
@@ -6053,8 +6113,10 @@ mod tests {
     /// Helper: all canonical functions needed for expression compilation.
     fn canonical_expr_prelude() -> String {
         format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
             canonical_readbyte(),
+            canonical_writebyte(),
+            canonical_storeliteral(),
             canonical_peekchar(),
             canonical_advance(),
             canonical_skipws(),
@@ -6145,7 +6207,7 @@ mod tests {
 
     #[test]
     fn b50e_full_compiler_compiles() {
-        // Full canonical compiler: all 43 functions compile without error.
+        // Full canonical compiler: all 45 functions compile without error.
         // The child binary IS the compiler — its main reads source from
         // the buffer, which still holds the canonical text. It tries to
         // self-compile (CC_B), which may succeed or fail depending on
@@ -6165,20 +6227,29 @@ mod tests {
         let output = fabric.alloc_object("output_buf",     OUTPUT_SIZE as u64, ObjectKind::Memory);
         let work   = fabric.alloc_object("workspace",      WS_SIZE as u64, ObjectKind::Memory);
         let stack  = fabric.alloc_object("compiler_stack", 0x4000, ObjectKind::Memory);
+        let lits   = fabric.alloc_object("literal_buf",    LIT_SIZE as u64, ObjectKind::Memory);
         fabric.place_object(text,   0x000000);
         fabric.place_object(source, 0x010000);
         fabric.place_object(output, 0x020000);
         fabric.place_object(work,   0x030000);
         fabric.place_object(stack,  0x040000);
+        fabric.place_object(lits,   0x050000);
         let dom = fabric.create_domain();
         fabric.grant(dom, source, 0, SOURCE_SIZE as u64, Permissions::READ);
         fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
         fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
         fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+        fabric.grant(dom, lits,   0, LIT_SIZE as u64, Permissions::RW);
         let src_bytes = src.as_bytes();
         let src_len = src_bytes.len() as u64;
         fabric.write_physical(0x010000, &src_len.to_le_bytes());
         fabric.write_physical(0x010008, src_bytes);
+        fabric.write_physical(
+            0x030000 + (WS_LIT_BASE - LAYOUT_WS) as u64,
+            &(LAYOUT_LIT as u64).to_le_bytes());
+        fabric.write_physical(
+            0x030000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            &0u64.to_le_bytes());
         install_trap_handler(&mut fabric, 0x000000, TEXT_SIZE as u64);
         fabric.write_physical(0x000000, &code_bytes);
         seal_code_object(&mut fabric, text, dom);
@@ -6188,10 +6259,11 @@ mod tests {
         core.address_map.add(LAYOUT_OUT as u64, OUTPUT_SIZE as u64, output);
         core.address_map.add(LAYOUT_WS as u64,  WS_SIZE as u64, work);
         core.address_map.add(LAYOUT_STACK as u64, 0x4000, stack);
+        core.address_map.add(LAYOUT_LIT as u64, LIT_SIZE as u64, lits);
         core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
         core.trap_vector = TEXT_SIZE as u64 - 0x10;
         let mut kernel = Kernel::new(fabric);
-        kernel.next_phys = 0x050000;
+        kernel.next_phys = 0x060000;
         kernel.next_agent = 10;
         kernel.spawn(core);
         kernel.run(2000000, 10);
@@ -6210,8 +6282,8 @@ mod tests {
         eprintln!("6B.5.0e: host compiled {} functions, {} bytes output, error={}",
             ws_funcs, ws_out, ws_error);
         assert_eq!(ws_error, 0, "host compiler reported error");
-        assert_eq!(ws_funcs, 43, "expected 43 canonical functions");
-        eprintln!("6B.5.0e: canonical full compiler (43 functions) ✓");
+        assert_eq!(ws_funcs, 45, "expected 45 canonical functions");
+        eprintln!("6B.5.0e: canonical full compiler (45 functions) ✓");
     }
 
     #[test]
@@ -6246,18 +6318,16 @@ mod tests {
     #[test]
     fn p70_string_token_recognized() {
         // The tokenizer recognizes "hello" as TOK_STRING (28).
-        // compileprimary does not handle TOK_STRING yet, so the
-        // compiler sets the error flag and exits with -1 (wraps to
-        // u64::MAX).  This test validates the tokenizer, not code
-        // generation.
+        // compileprimary stores the literal and emits a placeholder.
+        // The child returns 0 (the placeholder MOVI R4, 0 value).
         //
         // Architectural invariant: Bytes ≠ Text.
         // String literals are arbitrary UTF-8 bytes + explicit byte
         // length.  No NUL termination.  Byte length ≠ codepoint count
         // ≠ grapheme count.
         let src = br#"int main() { return "hello"; }"#;
-        run_6b4_test(src, u64::MAX, false);
-        eprintln!("7.0: string literal tokenized — compiler rejects (no codegen yet) ✓");
+        run_6b4_test(src, 0, true);
+        eprintln!("7.0: string literal tokenized and compiled ✓");
     }
 
     #[test]
@@ -6267,7 +6337,7 @@ mod tests {
         // The tokenizer preserves all UTF-8 bytes verbatim.
         // byte_length("İzmir") = 6 ≠ codepoint_count = 5 ≠ grapheme_count = 5.
         let src = "int main() { return \"İzmir\"; }";
-        run_6b4_test(src.as_bytes(), u64::MAX, false);
+        run_6b4_test(src.as_bytes(), 0, true);
         eprintln!("7.0: UTF-8 string literal tokenized (İzmir) ✓");
     }
 
@@ -6275,10 +6345,9 @@ mod tests {
     fn p70_string_token_workspace_state() {
         // Verify the tokenizer sets WS_TOK_TYPE, WS_TOK_NAME_START,
         // WS_TOK_NAME_LEN correctly for a string literal.
-        // We compile source that starts with a function whose first
-        // token after `{` is a string literal.  The compiler will
-        // error at compileprimary, but we can read the workspace state.
-        let src = br#"int main() { "hello"; }"#;
+        // Now that compileprimary handles TOK_STRING, we verify the
+        // compilation succeeds and the literal buffer is populated.
+        let src = br#"int main() { return "hello"; }"#;
         let mut fabric = Fabric::new(0x400000);
 
         let text   = fabric.alloc_object("text",   TEXT_SIZE as u64, ObjectKind::Memory);
@@ -6286,22 +6355,33 @@ mod tests {
         let output = fabric.alloc_object("output", OUTPUT_SIZE as u64, ObjectKind::Memory);
         let work   = fabric.alloc_object("ws",     WS_SIZE as u64, ObjectKind::Memory);
         let stack  = fabric.alloc_object("stack",  0x4000, ObjectKind::Memory);
+        let lits   = fabric.alloc_object("lits",   LIT_SIZE as u64, ObjectKind::Memory);
 
         fabric.place_object(text,   0x000000);
         fabric.place_object(source, 0x010000);
         fabric.place_object(output, 0x020000);
         fabric.place_object(work,   0x030000);
         fabric.place_object(stack,  0x040000);
+        fabric.place_object(lits,   0x050000);
 
         let dom = fabric.create_domain();
         fabric.grant(dom, source, 0, SOURCE_SIZE as u64, Permissions::READ);
         fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
         fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
         fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+        fabric.grant(dom, lits,   0, LIT_SIZE as u64, Permissions::RW);
 
         let src_len = src.len() as u64;
         fabric.write_physical(0x010000, &src_len.to_le_bytes());
         fabric.write_physical(0x010008, src);
+
+        // Initialize literal buffer workspace slots
+        fabric.write_physical(
+            0x030000 + (WS_LIT_BASE - LAYOUT_WS) as u64,
+            &(LAYOUT_LIT as u64).to_le_bytes());
+        fabric.write_physical(
+            0x030000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            &0u64.to_le_bytes());
 
         install_trap_handler(&mut fabric, 0x000000, TEXT_SIZE as u64);
 
@@ -6316,11 +6396,12 @@ mod tests {
         core.address_map.add(LAYOUT_OUT as u64,    OUTPUT_SIZE as u64, output);
         core.address_map.add(LAYOUT_WS as u64,     WS_SIZE as u64, work);
         core.address_map.add(LAYOUT_STACK as u64,  0x4000, stack);
+        core.address_map.add(LAYOUT_LIT as u64,    LIT_SIZE as u64, lits);
         core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
         core.trap_vector = TEXT_SIZE as u64 - 0x10;
 
         let mut kernel = Kernel::new(fabric);
-        kernel.next_phys = 0x050000;
+        kernel.next_phys = 0x060000;
         kernel.next_agent = 10;
         kernel.spawn(core);
         kernel.run(2000000, 10);
@@ -6341,11 +6422,9 @@ mod tests {
         eprintln!("7.0 workspace: tok_type={} start={} len={} error={}",
             tok_type, tok_start, tok_len, ws_error);
 
-        // The compiler errored because compileprimary doesn't handle
-        // TOK_STRING.  But we can verify the last token seen was the
-        // string literal (or a subsequent token after it).
-        // The error flag should be set.
-        assert_eq!(ws_error, 1, "compiler should set error for unhandled string literal");
+        // compileprimary now handles TOK_STRING by calling storeliteral.
+        // The compiler should succeed.
+        assert_eq!(ws_error, 0, "compiler should succeed with string literal");
         eprintln!("7.0: string literal workspace state verified ✓");
     }
 
@@ -6361,8 +6440,8 @@ mod tests {
     fn p70_string_empty() {
         // Empty string "" should tokenize to TOK_STRING with length 0.
         let src = br#"int main() { return ""; }"#;
-        run_6b4_test(src, u64::MAX, false);
-        eprintln!("7.0: empty string literal tokenized ✓");
+        run_6b4_test(src, 0, true);
+        eprintln!("7.0: empty string literal compiled ✓");
     }
 
     #[test]
@@ -6375,7 +6454,7 @@ mod tests {
         src.push(0x00); // embedded NUL
         src.push(b'b');
         src.extend_from_slice(b"\"; }");
-        run_6b4_test(&src, u64::MAX, false);
+        run_6b4_test(&src, 0, true);
         eprintln!("7.0: embedded NUL in ByteString ✓");
     }
 
@@ -6388,8 +6467,130 @@ mod tests {
         let sarap = "şarap";
         assert_eq!(sarap.len(), 6, "şarap is 6 UTF-8 bytes");
         assert_eq!(sarap.chars().count(), 5, "şarap is 5 codepoints");
-        run_6b4_test(src_bytes, u64::MAX, false);
+        run_6b4_test(src_bytes, 0, true);
         eprintln!("7.0: multi-byte UTF-8 string (şarap, 6 bytes, 5 codepoints) ✓");
+    }
+
+    // ─── Phase 7.1 — Literal object representation ───────
+
+    #[test]
+    fn p71_store_literal_hello() {
+        // Compile a program containing "hello" as a string literal.
+        // compileprimary now calls storeliteral() for TOK_STRING,
+        // writing {u64 byte_len=5, "hello"} to the literal buffer.
+        // The child runs and returns 0 (placeholder from MOVI R4, 0).
+        //
+        // After compilation, we inspect the literal buffer to verify
+        // the representation: [u64 byte_len][data bytes], no NUL.
+        let src = br#"int main() { return "hello"; }"#;
+
+        let mut fabric = Fabric::new(0x400000);
+        let text   = fabric.alloc_object("text",   TEXT_SIZE as u64, ObjectKind::Memory);
+        let source = fabric.alloc_object("source", SOURCE_SIZE as u64, ObjectKind::Memory);
+        let output = fabric.alloc_object("output", OUTPUT_SIZE as u64, ObjectKind::Memory);
+        let work   = fabric.alloc_object("ws",     WS_SIZE as u64, ObjectKind::Memory);
+        let stack  = fabric.alloc_object("stack",  0x4000, ObjectKind::Memory);
+        let lits   = fabric.alloc_object("lits",   LIT_SIZE as u64, ObjectKind::Memory);
+
+        fabric.place_object(text,   0x000000);
+        fabric.place_object(source, 0x010000);
+        fabric.place_object(output, 0x020000);
+        fabric.place_object(work,   0x030000);
+        fabric.place_object(stack,  0x040000);
+        fabric.place_object(lits,   0x050000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, source, 0, SOURCE_SIZE as u64, Permissions::READ);
+        fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
+        fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
+        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+        fabric.grant(dom, lits,   0, LIT_SIZE as u64, Permissions::RW);
+
+        fabric.write_physical(0x010000, &(src.len() as u64).to_le_bytes());
+        fabric.write_physical(0x010008, src.as_ref());
+
+        fabric.write_physical(
+            0x030000 + (WS_LIT_BASE - LAYOUT_WS) as u64,
+            &(LAYOUT_LIT as u64).to_le_bytes());
+        fabric.write_physical(
+            0x030000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            &0u64.to_le_bytes());
+
+        install_trap_handler(&mut fabric, 0x000000, TEXT_SIZE as u64);
+        let compiler_prog = build_6b4_compiler();
+        let asm = cc::compile(&compiler_prog);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0, TEXT_SIZE as u64, text);
+        core.address_map.add(LAYOUT_SRC as u64,   SOURCE_SIZE as u64, source);
+        core.address_map.add(LAYOUT_OUT as u64,    OUTPUT_SIZE as u64, output);
+        core.address_map.add(LAYOUT_WS as u64,     WS_SIZE as u64, work);
+        core.address_map.add(LAYOUT_STACK as u64,  0x4000, stack);
+        core.address_map.add(LAYOUT_LIT as u64,    LIT_SIZE as u64, lits);
+        core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
+        core.trap_vector = TEXT_SIZE as u64 - 0x10;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x060000;
+        kernel.next_agent = 10;
+        kernel.spawn(core);
+        kernel.run(2000000, 10);
+
+        assert!(kernel.processes[0].exited, "compiler should exit");
+
+        // Verify the compiler succeeded (error flag = 0)
+        let read_ws = |off: u64| -> u64 {
+            let bytes = kernel.fabric.read_physical(0x030000 + off, 8);
+            u64::from_le_bytes(bytes.try_into().unwrap())
+        };
+        let ws_error = read_ws(0x18);
+        assert_eq!(ws_error, 0, "compiler should succeed with string literal");
+
+        // Read the literal buffer: [u64 byte_len][data]
+        let lit_header = kernel.fabric.read_physical(0x050000, 8);
+        let byte_len = u64::from_le_bytes(lit_header.try_into().unwrap());
+        assert_eq!(byte_len, 5, "byte_len should be 5 for \"hello\"");
+
+        let lit_data = kernel.fabric.read_physical(0x050008, 5);
+        assert_eq!(&lit_data[..], b"hello",
+            "literal buffer should contain 'hello'");
+
+        // Verify WS_LIT_POS advanced: 8 (header) + 5 (data) = 13, aligned to 16
+        let lit_pos = read_ws((WS_LIT_POS - LAYOUT_WS) as u64);
+        assert_eq!(lit_pos, 16,
+            "WS_LIT_POS should be 16 (8+5 rounded to 8-byte alignment)");
+
+        eprintln!("7.1: literal object [u64 byte_len=5][hello] ✓");
+        eprintln!("     length is metadata, not inferred from contents");
+    }
+
+    #[test]
+    fn p71_store_literal_utf8_izmir() {
+        // "İzmir" is 6 UTF-8 bytes: C4 B0 7A 6D 69 72.
+        // byte_length(6) ≠ codepoint_count(5) ≠ grapheme_count(5).
+        // The literal buffer must preserve all 6 bytes exactly.
+        let src = "int main() { return \"İzmir\"; }";
+        run_6b4_test(src.as_bytes(), 0, true);
+        eprintln!("7.1: İzmir literal compiled (child returns 0 placeholder) ✓");
+    }
+
+    #[test]
+    fn p71_store_literal_empty() {
+        // Empty string "" → byte_len = 0, no data bytes.
+        let src = br#"int main() { return ""; }"#;
+        run_6b4_test(src, 0, true);
+        eprintln!("7.1: empty string literal compiled ✓");
+    }
+
+    #[test]
+    fn p71_two_literals() {
+        // Two string literals in one program (separate functions).
+        // Each gets its own literal object in the buffer.
+        let src = br#"int foo() { return "hello"; } int main() { return "world"; }"#;
+        run_6b4_test(src, 0, true);
+        eprintln!("7.1: two string literals compiled ✓");
     }
 
     #[test]
@@ -6505,23 +6706,34 @@ mod tests {
         let output = fabric.alloc_object("output_buf",     OUTPUT_SIZE as u64, ObjectKind::Memory);
         let work   = fabric.alloc_object("workspace",      WS_SIZE as u64, ObjectKind::Memory);
         let stack  = fabric.alloc_object("compiler_stack", 0x4000, ObjectKind::Memory);
+        let lits   = fabric.alloc_object("literal_buf",    LIT_SIZE as u64, ObjectKind::Memory);
 
         fabric.place_object(text,   0x000000);
         fabric.place_object(source, 0x010000);
         fabric.place_object(output, 0x020000);
         fabric.place_object(work,   0x030000);
         fabric.place_object(stack,  0x040000);
+        fabric.place_object(lits,   0x050000);
 
         let dom = fabric.create_domain();
         fabric.grant(dom, source, 0, SOURCE_SIZE as u64, Permissions::READ);
         fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
         fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
         fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+        fabric.grant(dom, lits,   0, LIT_SIZE as u64, Permissions::RW);
 
         let canon_src = canonical_compiler_source();
         let src_bytes = canon_src.as_bytes();
         fabric.write_physical(0x010000, &(src_bytes.len() as u64).to_le_bytes());
         fabric.write_physical(0x010008, src_bytes);
+
+        // Initialize literal buffer workspace slots
+        fabric.write_physical(
+            0x030000 + (WS_LIT_BASE - LAYOUT_WS) as u64,
+            &(LAYOUT_LIT as u64).to_le_bytes());
+        fabric.write_physical(
+            0x030000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            &0u64.to_le_bytes());
 
         install_trap_handler(&mut fabric, 0x000000, TEXT_SIZE as u64);
         let compiler_prog = build_6b4_compiler();
@@ -6535,11 +6747,12 @@ mod tests {
         core.address_map.add(LAYOUT_OUT as u64,    OUTPUT_SIZE as u64, output);
         core.address_map.add(LAYOUT_WS as u64,     WS_SIZE as u64, work);
         core.address_map.add(LAYOUT_STACK as u64,  0x4000, stack);
+        core.address_map.add(LAYOUT_LIT as u64,    LIT_SIZE as u64, lits);
         core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
         core.trap_vector = TEXT_SIZE as u64 - 0x10;
 
         let mut kernel = Kernel::new(fabric);
-        kernel.next_phys = 0x050000;
+        kernel.next_phys = 0x060000;
         kernel.next_agent = 10;
         kernel.spawn(core);
         kernel.run(2000000, 10);
@@ -6556,7 +6769,7 @@ mod tests {
         let out_pos = read_ws(0x48);
         let ws_funcs = read_ws(0x58);
         assert_eq!(ws_error, 0, "CC_A error compiling canonical source");
-        assert_eq!(ws_funcs, 43, "CC_A compiled wrong function count");
+        assert_eq!(ws_funcs, 45, "CC_A compiled wrong function count");
 
         // Extract CC_B binary from output buffer
         let ccb_bytes = kernel.fabric.read_physical(0x020000, out_pos).to_vec();
@@ -6580,6 +6793,7 @@ mod tests {
         let output = fabric.alloc_object("ccb_output",   OUTPUT_SIZE as u64, ObjectKind::Memory);
         let work   = fabric.alloc_object("ccb_workspace", WS_SIZE as u64, ObjectKind::Memory);
         let stack  = fabric.alloc_object("ccb_stack",    0x4000, ObjectKind::Memory);
+        let lits   = fabric.alloc_object("ccb_lits",     LIT_SIZE as u64, ObjectKind::Memory);
 
         // Physical placement — non-overlapping regions
         fabric.place_object(code,   0x100000);
@@ -6587,6 +6801,7 @@ mod tests {
         fabric.place_object(output, 0x210000);
         fabric.place_object(work,   0x220000);
         fabric.place_object(stack,  0x230000);
+        fabric.place_object(lits,   0x240000);
 
         let dom = fabric.create_domain();
 
@@ -6601,11 +6816,20 @@ mod tests {
         fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
         fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
         fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+        fabric.grant(dom, lits,   0, LIT_SIZE as u64, Permissions::RW);
 
         // Write test source into source buffer
         let src_len = test_source.len() as u64;
         fabric.write_physical(0x200000, &src_len.to_le_bytes());
         fabric.write_physical(0x200008, test_source);
+
+        // Initialize literal buffer workspace slots
+        fabric.write_physical(
+            0x220000 + (WS_LIT_BASE - LAYOUT_WS) as u64,
+            &(LAYOUT_LIT as u64).to_le_bytes());
+        fabric.write_physical(
+            0x220000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            &0u64.to_le_bytes());
 
         // Virtual address map:
         //   CCB_CODE_BASE → code (CC_B binary)
@@ -6613,12 +6837,14 @@ mod tests {
         //   LAYOUT_OUT    → output (compiled test program)
         //   LAYOUT_WS     → workspace
         //   LAYOUT_STACK  → stack
+        //   LAYOUT_LIT    → literal buffer
         let mut core = Anka64Core::new(AgentId(0), dom);
         core.address_map.add(CCB_CODE_BASE,          ccb_size, code);
         core.address_map.add(LAYOUT_SRC as u64,      SOURCE_SIZE as u64, source);
         core.address_map.add(LAYOUT_OUT as u64,      OUTPUT_SIZE as u64, output);
         core.address_map.add(LAYOUT_WS as u64,       WS_SIZE as u64, work);
         core.address_map.add(LAYOUT_STACK as u64,    0x4000, stack);
+        core.address_map.add(LAYOUT_LIT as u64,      LIT_SIZE as u64, lits);
         core.pc = CCB_CODE_BASE;
         core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
         core.trap_vector = CCB_CODE_BASE + ccb_size - 0x10;
@@ -6675,12 +6901,14 @@ mod tests {
         let output = fabric.alloc_object("ccb_output",   OUTPUT_SIZE as u64, ObjectKind::Memory);
         let work   = fabric.alloc_object("ccb_workspace", WS_SIZE as u64, ObjectKind::Memory);
         let stack  = fabric.alloc_object("ccb_stack",    0x4000, ObjectKind::Memory);
+        let lits   = fabric.alloc_object("ccb_lits",     LIT_SIZE as u64, ObjectKind::Memory);
 
         fabric.place_object(code,    0x100000);
         fabric.place_object(src_obj, 0x200000);
         fabric.place_object(output,  0x210000);
         fabric.place_object(work,    0x220000);
         fabric.place_object(stack,   0x230000);
+        fabric.place_object(lits,    0x240000);
 
         let dom = fabric.create_domain();
         fabric.write_physical(0x100000, ccb);
@@ -6691,9 +6919,18 @@ mod tests {
         fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
         fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
         fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+        fabric.grant(dom, lits,   0, LIT_SIZE as u64, Permissions::RW);
 
         fabric.write_physical(0x200000, &(source.len() as u64).to_le_bytes());
         fabric.write_physical(0x200008, source);
+
+        // Initialize literal buffer workspace slots
+        fabric.write_physical(
+            0x220000 + (WS_LIT_BASE - LAYOUT_WS) as u64,
+            &(LAYOUT_LIT as u64).to_le_bytes());
+        fabric.write_physical(
+            0x220000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            &0u64.to_le_bytes());
 
         let mut core = Anka64Core::new(AgentId(0), dom);
         core.address_map.add(CCB_CODE_BASE,          ccb_size, code);
@@ -6701,6 +6938,7 @@ mod tests {
         core.address_map.add(LAYOUT_OUT as u64,      OUTPUT_SIZE as u64, output);
         core.address_map.add(LAYOUT_WS as u64,       WS_SIZE as u64, work);
         core.address_map.add(LAYOUT_STACK as u64,    0x4000, stack);
+        core.address_map.add(LAYOUT_LIT as u64,      LIT_SIZE as u64, lits);
         core.pc = CCB_CODE_BASE;
         core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
         core.trap_vector = CCB_CODE_BASE + ccb_size - 0x10;
@@ -6890,15 +7128,15 @@ mod tests {
     fn b51_bootstrap_closure() {
         // ── Stage 1: CC_A(source_CC) → CC_B ──
         let ccb = build_ccb();
-        eprintln!("stage 1: CC_A → CC_B = {} bytes (43 functions)", ccb.len());
+        eprintln!("stage 1: CC_A → CC_B = {} bytes (45 functions)", ccb.len());
 
         // ── Stage 2: CC_B(source_CC) → CC_C ──
         let canon_src = canonical_compiler_source();
         let (ccc, ccc_funcs, ccc_error) = compile_with_ccb(&ccb, canon_src.as_bytes());
         assert_eq!(ccc_error, 0, "CC_B failed to compile canonical source");
-        assert_eq!(ccc_funcs, 43, "CC_C has wrong function count");
+        assert_eq!(ccc_funcs, 45, "CC_C has wrong function count");
         assert!(!ccc.is_empty(), "CC_C is empty");
-        eprintln!("stage 2: CC_B → CC_C = {} bytes (43 functions)", ccc.len());
+        eprintln!("stage 2: CC_B → CC_C = {} bytes (45 functions)", ccc.len());
 
         // ── Fixed-point assertion: CC_B == CC_C ──
         assert_eq!(ccb, ccc,

@@ -168,7 +168,10 @@ impl Kernel {
                     return;
                 }
                 super::core::StepResult::Fault(f) => {
-                    eprintln!("Process {} faulted: {:?}", self.processes[idx].pid, f.reason);
+                    eprintln!("Process {} faulted: {:?} obj={:?} off={:#x} kind={:?} pc={:#x}",
+                        self.processes[idx].pid, f.reason,
+                        f.object, f.offset, f.kind,
+                        self.processes[idx].core.pc);
                     self.processes[idx].exited = true;
                     self.processes[idx].exit_code = 0xDEAD;
                     return;

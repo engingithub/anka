@@ -111,6 +111,12 @@ pub(crate) const OUTPUT_SIZE: i64  = 0x10000;
 pub(crate) const LAYOUT_WS: i64    = TEXT_SIZE + 0x14000;
 pub(crate) const WS_SIZE: i64      = 0x6000;
 pub(crate) const LAYOUT_STACK: i64 = TEXT_SIZE + 0x1A000;
+// Literal buffer: separate R object for immutable string data.
+// Addressed indirectly via WS_LIT_BASE (same pattern as WS_TEXT_BASE).
+// During compilation: RW (compiler writes literal objects).
+// During child execution: R (child reads literal data).
+pub(crate) const LAYOUT_LIT: i64   = TEXT_SIZE + 0x1E000;
+pub(crate) const LIT_SIZE: i64     = 0x2000;
 
 // ═══════════════════════════════════════════════════════════
 //  Shared workspace layout — addresses within workspace object
@@ -142,6 +148,11 @@ pub(crate) const WS_SYM_TABLE: i64      = LAYOUT_WS + 0x068;
 pub(crate) const WS_FUNC_TABLE: i64     = LAYOUT_WS + 0x368;
 // Fixup table: 128 entries × 32 bytes = 0x1000
 pub(crate) const WS_FIX_TABLE: i64      = LAYOUT_WS + 0xB68;
+// ─── Literal buffer control (7.1+) ──────────────
+// WS_LIT_BASE: base virtual address of the literal buffer (set by harness).
+// WS_LIT_POS:  current byte offset into the literal buffer.
+pub(crate) const WS_LIT_BASE: i64       = LAYOUT_WS + 0x1B68;
+pub(crate) const WS_LIT_POS: i64        = LAYOUT_WS + 0x1B70;
 // ─── Token types (same as 6B.3) ──────────────────
 
 // ─── Token types ──────────────────────────────────
@@ -341,6 +352,130 @@ pub(crate) fn guest_read_byte() -> Function {
                 binop(BinOp::And,
                     binop(BinOp::Shr, var(2), var(3)),
                     lit(0xFF))),
+        ],
+    }
+}
+
+/// write_byte(addr, byte) — write one byte at an arbitrary address.
+///
+/// Uses read-modify-write on the 8-byte-aligned word containing the
+/// target byte.  The mask is constructed as: ~(0xFF << shift) =
+/// (0 - 1) - (0xFF << shift), avoiding the need for a bitwise NOT
+/// instruction.
+///
+/// This is the inverse of read_byte: where read_byte extracts one byte
+/// from an aligned word, write_byte patches one byte into an aligned word.
+pub(crate) fn guest_write_byte() -> Function {
+    Function {
+        name: "write_byte".into(),
+        params: vec![(0, Type::Int), (1, Type::Int)],   // addr, byte
+        ret_type: Type::Int,
+        locals: vec![
+            (2, Type::Int), (3, Type::Int), (4, Type::Int), (5, Type::Int),
+        ],
+        body: vec![
+            // aligned = addr & ~7
+            Stmt::VarDecl(2, Type::Int, Some(
+                binop(BinOp::And, var(0), lit(-8)))),
+            // shift = (addr & 7) * 8
+            Stmt::VarDecl(3, Type::Int, Some(
+                binop(BinOp::Mul,
+                    binop(BinOp::And, var(0), lit(7)),
+                    lit(8)))),
+            // word = *(aligned)
+            Stmt::VarDecl(4, Type::Int, Some(deref(var(2)))),
+            // mask = 0xFF << shift
+            Stmt::VarDecl(5, Type::Int, Some(
+                binop(BinOp::Shl, lit(0xFF), var(3)))),
+            // word = (word & ~mask) | ((byte & 0xFF) << shift)
+            //      = (word & ((0-1) - mask)) | ((byte & 0xFF) << shift)
+            assign(4, binop(BinOp::Or,
+                binop(BinOp::And, var(4),
+                    binop(BinOp::Sub, lit(-1), var(5))),
+                binop(BinOp::Shl,
+                    binop(BinOp::And, var(1), lit(0xFF)),
+                    var(3)))),
+            // *(aligned) = word
+            deref_assign(var(2), var(4)),
+            Stmt::Return(lit(0)),
+        ],
+    }
+}
+
+/// store_literal() — copy string token bytes to the literal buffer.
+///
+/// Called after scan_string has set WS_TOK_NAME_START (source byte offset)
+/// and WS_TOK_NAME_LEN (byte length of string content).
+///
+/// Writes to the literal buffer at WS_LIT_BASE + WS_LIT_POS:
+///   [u64 byte_len]        — 8-byte header (number of content bytes)
+///   [u8  data[byte_len]]  — raw bytes copied from source
+///
+/// Returns the byte offset within the literal buffer where this literal
+/// starts (i.e., the offset of the byte_len header).  Advances WS_LIT_POS
+/// past the stored data, aligned to 8 bytes.
+///
+/// Architectural invariant: length is metadata, not inferred from contents.
+/// Embedded NUL is legal.  No terminator byte is written.
+///
+/// Design note: the byte-copy loop reads source bytes FIRST into a local
+/// (var 5), then passes the local to write_byte.  This avoids nesting a
+/// call to read_byte inside the write_byte argument list, which would
+/// trigger the CC_A caller-saved register clobber bug (6B.4): the inner
+/// call clobbers R0 before the outer call uses it.
+pub(crate) fn guest_store_literal() -> Function {
+    Function {
+        name: "store_literal".into(),
+        params: vec![],
+        ret_type: Type::Int,
+        locals: vec![
+            (0, Type::Int), (1, Type::Int), (2, Type::Int),
+            (3, Type::Int), (4, Type::Int), (5, Type::Int),
+        ],
+        body: vec![
+            // start = source byte offset of string content
+            Stmt::VarDecl(0, Type::Int, Some(deref(lit(WS_TOK_NAME_START)))),
+            // len = byte length of string content
+            Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_TOK_NAME_LEN)))),
+            // lit_base = *WS_LIT_BASE (base address of literal buffer)
+            Stmt::VarDecl(2, Type::Int, Some(deref(lit(WS_LIT_BASE)))),
+            // lit_pos = *WS_LIT_POS (current offset)
+            Stmt::VarDecl(3, Type::Int, Some(deref(lit(WS_LIT_POS)))),
+            // Write byte_len header: *(lit_base + lit_pos) = len
+            deref_assign(
+                binop(BinOp::Add, var(2), var(3)),
+                var(1)),
+            // Advance past header
+            assign(3, binop(BinOp::Add, var(3), lit(8))),
+            // Copy bytes from source to literal buffer
+            Stmt::VarDecl(4, Type::Int, Some(lit(0))), // loop index
+            Stmt::VarDecl(5, Type::Int, Some(lit(0))), // temp byte
+            Stmt::While(
+                binop(BinOp::Lt, var(4), var(1)),
+                vec![
+                    // Read byte into local FIRST to avoid clobber bug
+                    assign(5, call("read_byte", vec![
+                        binop(BinOp::Add, var(0), var(4))])),
+                    // Then write the byte from the local
+                    call_stmt("write_byte", vec![
+                        binop(BinOp::Add, var(2),
+                            binop(BinOp::Add, var(3), var(4))),
+                        var(5),
+                    ]),
+                    assign(4, binop(BinOp::Add, var(4), lit(1))),
+                ],
+            ),
+            // Return the starting offset (where byte_len header is)
+            // Then advance WS_LIT_POS past data, aligned to 8
+            // new_pos = lit_pos + len, aligned up to 8
+            assign(4, binop(BinOp::Add, var(3), var(1))),
+            // align: (pos + 7) & ~7
+            assign(4, binop(BinOp::And,
+                binop(BinOp::Add, var(4), lit(7)),
+                lit(-8))),
+            deref_assign(lit(WS_LIT_POS), var(4)),
+            // Return the offset of the byte_len header
+            Stmt::Return(binop(BinOp::Sub, var(3), lit(8))),
         ],
     }
 }
@@ -976,6 +1111,7 @@ pub(crate) fn guest_find_main() -> Function {
 pub(crate) fn guest_lexer() -> Vec<Function> {
     vec![
         guest_read_byte(),
+        guest_write_byte(),
         guest_peek_char(),
         guest_advance(),
         guest_skip_ws(),
@@ -983,6 +1119,7 @@ pub(crate) fn guest_lexer() -> Vec<Function> {
         guest_scan_number_direct(),
         guest_scan_ident(),
         guest_scan_string(),
+        guest_store_literal(),
         guest_classify_kw(),
         guest_names_equal(),
         guest_next_token(),
@@ -1651,6 +1788,18 @@ pub fn build_6b4_compiler() -> Program {
                     // Result: R0 → R4
                     call_stmt("emit", vec![
                         enc_r(OP_MOV, GEN_R4, GEN_R0, 0)]),
+                    Stmt::Return(lit(0)),
+                ], vec![]),
+            // ─── STRING LITERAL (7.1) ────────────────
+            // Store the literal in the literal buffer, advance token.
+            // Emit a placeholder MOVI R4, 0 (the literal offset will be
+            // used by 7.2+ to load a reference to the immutable data).
+            Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_STRING)),
+                vec![
+                    call_stmt("store_literal", vec![]),
+                    call_stmt("next_token", vec![]),
+                    call_stmt("emit", vec![
+                        enc_i(OP_MOVI, GEN_R4, 0, lit(0))]),
                     Stmt::Return(lit(0)),
                 ], vec![]),
             deref_assign(lit(WS_ERROR), lit(1)),
