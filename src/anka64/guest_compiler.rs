@@ -93,15 +93,17 @@ pub(crate) const TEXT_SIZE: i64     = 0x6000;
 //   TEXT_SIZE : source data    (0x1000)
 //   TEXT_SIZE+0x00000 : source   (0x4000)  — 16KB canonical source text
 //   TEXT_SIZE+0x04000 : output   (0x10000) — 64KB compiled child binary
-//   TEXT_SIZE+0x14000 : workspace (0x4000)  — 16KB, includes fixup table
-//   TEXT_SIZE+0x18000 : stack    (0x4000)
+//   TEXT_SIZE+0x00000 : source   (0x4000)  — 16KB canonical source text
+//   TEXT_SIZE+0x04000 : output   (0x10000) — 64KB compiled child binary
+//   TEXT_SIZE+0x14000 : workspace (0x6000)  — 24KB, includes fixup table
+//   TEXT_SIZE+0x1A000 : stack    (0x4000)
 pub(crate) const LAYOUT_SRC: i64   = TEXT_SIZE;
 pub(crate) const SOURCE_SIZE: i64  = 0x4000;
 pub(crate) const LAYOUT_OUT: i64   = TEXT_SIZE + 0x4000;
 pub(crate) const OUTPUT_SIZE: i64  = 0x10000;
 pub(crate) const LAYOUT_WS: i64    = TEXT_SIZE + 0x14000;
-pub(crate) const WS_SIZE: i64      = 0x4000;
-pub(crate) const LAYOUT_STACK: i64 = TEXT_SIZE + 0x18000;
+pub(crate) const WS_SIZE: i64      = 0x6000;
+pub(crate) const LAYOUT_STACK: i64 = TEXT_SIZE + 0x1A000;
 
 // ═══════════════════════════════════════════════════════════
 //  Shared workspace layout — addresses within workspace object
@@ -1213,7 +1215,7 @@ pub fn build_6b4_compiler() -> Program {
         body: vec![
             Stmt::VarDecl(4, Type::Int, Some(deref(lit(WS_FIX_COUNT)))),
             Stmt::If(
-                binop(BinOp::Le, lit(256), var(4)),
+                binop(BinOp::Le, lit(512), var(4)),
                 vec![
                     deref_assign(lit(WS_ERROR), lit(1)),
                     Stmt::Return(lit(0)),

@@ -4978,48 +4978,49 @@ mod tests {
     }
 
     fn canonical_classifykw() -> String {
-        // Token constants (decimal):
-        //   TOK_IDENT=13 TOK_IF=14 TOK_INT_KW=15 TOK_ELSE=16
-        //   TOK_WHILE=17 TOK_RETURN=18 TOK_SYSCALL=27
         // Keyword bytes: if=105,102  int=105,110,116
         //   else=101,108,115,101  while=119,104,105,108,101
         //   return=114,101,116,117,114,110
         //   syscall=115,121,115,99,97,108,108
-        "int classifykw(int s, int l) { \
-         if (l == 2) { \
-         if (readbyte(s) == 105) { \
-         if (readbyte(s + 1) == 102) { return 14; } } } \
-         if (l == 3) { \
-         if (readbyte(s) == 105) { \
-         if (readbyte(s + 1) == 110) { \
-         if (readbyte(s + 2) == 116) { return 15; } } } } \
-         if (l == 4) { \
-         if (readbyte(s) == 101) { \
-         if (readbyte(s + 1) == 108) { \
-         if (readbyte(s + 2) == 115) { \
-         if (readbyte(s + 3) == 101) { return 16; } } } } } \
-         if (l == 5) { \
-         if (readbyte(s) == 119) { \
-         if (readbyte(s + 1) == 104) { \
-         if (readbyte(s + 2) == 105) { \
-         if (readbyte(s + 3) == 108) { \
-         if (readbyte(s + 4) == 101) { return 17; } } } } } } \
-         if (l == 6) { \
-         if (readbyte(s) == 114) { \
-         if (readbyte(s + 1) == 101) { \
-         if (readbyte(s + 2) == 116) { \
-         if (readbyte(s + 3) == 117) { \
-         if (readbyte(s + 4) == 114) { \
-         if (readbyte(s + 5) == 110) { return 18; } } } } } } } \
-         if (l == 7) { \
-         if (readbyte(s) == 115) { \
-         if (readbyte(s + 1) == 121) { \
-         if (readbyte(s + 2) == 115) { \
-         if (readbyte(s + 3) == 99) { \
-         if (readbyte(s + 4) == 97) { \
-         if (readbyte(s + 5) == 108) { \
-         if (readbyte(s + 6) == 108) { return 27; } } } } } } } } \
-         return 13; } ".to_string()
+        format!(
+            "int classifykw(int s, int l) {{ \
+             if (l == 2) {{ \
+             if (readbyte(s) == 105) {{ \
+             if (readbyte(s + 1) == 102) {{ return {kw_if}; }} }} }} \
+             if (l == 3) {{ \
+             if (readbyte(s) == 105) {{ \
+             if (readbyte(s + 1) == 110) {{ \
+             if (readbyte(s + 2) == 116) {{ return {kw_int}; }} }} }} }} \
+             if (l == 4) {{ \
+             if (readbyte(s) == 101) {{ \
+             if (readbyte(s + 1) == 108) {{ \
+             if (readbyte(s + 2) == 115) {{ \
+             if (readbyte(s + 3) == 101) {{ return {kw_else}; }} }} }} }} }} \
+             if (l == 5) {{ \
+             if (readbyte(s) == 119) {{ \
+             if (readbyte(s + 1) == 104) {{ \
+             if (readbyte(s + 2) == 105) {{ \
+             if (readbyte(s + 3) == 108) {{ \
+             if (readbyte(s + 4) == 101) {{ return {kw_while}; }} }} }} }} }} }} \
+             if (l == 6) {{ \
+             if (readbyte(s) == 114) {{ \
+             if (readbyte(s + 1) == 101) {{ \
+             if (readbyte(s + 2) == 116) {{ \
+             if (readbyte(s + 3) == 117) {{ \
+             if (readbyte(s + 4) == 114) {{ \
+             if (readbyte(s + 5) == 110) {{ return {kw_return}; }} }} }} }} }} }} }} \
+             if (l == 7) {{ \
+             if (readbyte(s) == 115) {{ \
+             if (readbyte(s + 1) == 121) {{ \
+             if (readbyte(s + 2) == 115) {{ \
+             if (readbyte(s + 3) == 99) {{ \
+             if (readbyte(s + 4) == 97) {{ \
+             if (readbyte(s + 5) == 108) {{ \
+             if (readbyte(s + 6) == 108) {{ return {kw_syscall}; }} }} }} }} }} }} }} }} \
+             return {ident}; }} ",
+            kw_if = TOK_IF, kw_int = TOK_INT_KW, kw_else = TOK_ELSE,
+            kw_while = TOK_WHILE, kw_return = TOK_RETURN,
+            kw_syscall = TOK_SYSCALL, ident = TOK_IDENT)
     }
 
     fn canonical_setchartok() -> String {
@@ -5362,6 +5363,278 @@ mod tests {
         "int compileexpr() { return compileeq(); } ".to_string()
     }
 
+    fn canonical_compilestmt() -> String {
+        format!(
+            "int compilestmt() {{ \
+             int tok = *{tt}; \
+             int ns = 0; \
+             int nl = 0; \
+             int bp = 0; \
+             int sp2 = 0; \
+             if (tok == {kw_int}) {{ \
+             nexttoken(); \
+             if (*{tt} != {ident}) {{ *{e} = 1; }} \
+             ns = *{tns}; nl = *{tnl}; \
+             nexttoken(); \
+             if (*{tt} != {eq}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             compileexpr(); \
+             if (*{tt} != {semi}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             sp2 = addsymbol(ns, nl); \
+             emit(enci({st}, {r4}, {fp}, sp2)); \
+             return 0; }} \
+             if (tok == {kw_return}) {{ \
+             nexttoken(); \
+             compileexpr(); \
+             if (*{tt} != {semi}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             emit(encr(0, {r0}, {r4}, 0)); \
+             emit(encr(0, {sp}, {fp}, 0)); \
+             emit(enci({ld}, {fp}, {sp}, 0)); \
+             emit(enci({ld}, {lr}, {sp}, 8)); \
+             emit(enci({addi}, {sp}, {sp}, 16)); \
+             emit(encs({ret})); \
+             return 1; }} \
+             if (tok == {kw_if}) {{ \
+             nexttoken(); \
+             if (*{tt} != {lp}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             compileexpr(); \
+             if (*{tt} != {rp}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             emit(enci({cmpi}, 0, {r4}, 0)); \
+             bp = *{op}; \
+             emit(encb({ceq}, 0)); \
+             if (*{tt} != {lb}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             ns = compileblock(); \
+             if (*{tt} == {kw_else}) {{ \
+             nexttoken(); \
+             sp2 = *{op}; \
+             emit(encb({cal}, 0)); \
+             patchbranch(bp, {ceq}, *{op}); \
+             if (*{tt} != {lb}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             nl = compileblock(); \
+             patchbranch(sp2, {cal}, *{op}); \
+             return ns & nl; \
+             }} else {{ \
+             patchbranch(bp, {ceq}, *{op}); \
+             return 0; }} \
+             return 0; }} \
+             if (tok == {kw_while}) {{ \
+             nexttoken(); \
+             if (*{tt} != {lp}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             bp = *{op}; \
+             compileexpr(); \
+             if (*{tt} != {rp}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             emit(enci({cmpi}, 0, {r4}, 0)); \
+             sp2 = *{op}; \
+             emit(encb({ceq}, 0)); \
+             if (*{tt} != {lb}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             compileblock(); \
+             ns = 0 - ((*{op} - bp) >> 2); \
+             emit(encb({cal}, ns)); \
+             patchbranch(sp2, {ceq}, *{op}); \
+             return 0; }} \
+             if (tok == {star}) {{ \
+             nexttoken(); \
+             compileexpr(); \
+             exprsave(); \
+             if (*{tt} != {eq}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             compileexpr(); \
+             exprrestore(); \
+             if (*{tt} != {semi}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             emit(enci({st}, {r4}, {r5}, 0)); \
+             return 0; }} \
+             if (tok == {ident}) {{ \
+             ns = *{tns}; nl = *{tnl}; \
+             nexttoken(); \
+             if (*{tt} == {lp}) {{ \
+             compilecall(ns, nl); \
+             if (*{tt} != {semi}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             return 0; }} \
+             if (*{tt} != {eq}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             compileexpr(); \
+             if (*{tt} != {semi}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             sp2 = lookupsymbol(ns, nl); \
+             emit(enci({st}, {r4}, {fp}, sp2)); \
+             return 0; }} \
+             *{e} = 1; return 0; }} ",
+            tt = WS_TOK_TYPE, tns = WS_TOK_NAME_START, tnl = WS_TOK_NAME_LEN,
+            e = WS_ERROR, op = WS_OUT_POS,
+            kw_int = TOK_INT_KW, kw_return = TOK_RETURN,
+            kw_if = TOK_IF, kw_else = TOK_ELSE, kw_while = TOK_WHILE,
+            ident = TOK_IDENT, star = TOK_STAR,
+            eq = TOK_EQ, semi = TOK_SEMI,
+            lp = TOK_LPAREN, rp = TOK_RPAREN,
+            lb = TOK_LBRACE,
+            st = OP_ST, ld = OP_LD, addi = OP_ADDI,
+            cmpi = OP_CMPI, ret = OP_RET,
+            ceq = COND_EQ, cal = COND_AL,
+            r4 = GEN_R4, r5 = GEN_R5, r0 = GEN_R0,
+            fp = GEN_FP, lr = GEN_LR, sp = GEN_SP)
+    }
+
+    fn canonical_compilefuncdef() -> String {
+        format!(
+            "int compilefuncdef() {{ \
+             if (*{tt} != {kw_int}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             if (*{tt} != {ident}) {{ *{e} = 1; }} \
+             int ns = *{tns}; \
+             int fnl = *{tnl}; \
+             nexttoken(); \
+             if (*{tt} != {lp}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             *{sc} = 0; \
+             *{esp} = (0 - {espabs}); \
+             int pc = 0; \
+             int pns = 0; \
+             int pnl = 0; \
+             while (*{tt} == {kw_int}) {{ \
+             if (4 <= pc) {{ *{e} = 1; return 0; }} \
+             nexttoken(); \
+             if (*{tt} != {ident}) {{ *{e} = 1; }} \
+             pns = *{tns}; pnl = *{tnl}; \
+             nexttoken(); \
+             addsymbol(pns, pnl); \
+             pc = pc + 1; \
+             if (*{tt} == {comma}) {{ nexttoken(); }} }} \
+             if (*{tt} != {rp}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             if (*{tt} != {lb}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             addfunc(ns, fnl, pc); \
+             int pp = *{op}; \
+             emit(encs({nop})); \
+             emit(encs({nop})); \
+             emit(encs({nop})); \
+             emit(encs({nop})); \
+             if (0 < pc) {{ emit(enci({st_op}, {r0}, {fp}, 0 - 8)); }} \
+             if (1 < pc) {{ emit(enci({st_op}, 1, {fp}, 0 - 16)); }} \
+             if (2 < pc) {{ emit(enci({st_op}, 2, {fp}, 0 - 24)); }} \
+             if (3 < pc) {{ emit(enci({st_op}, 3, {fp}, 0 - 32)); }} \
+             ns = compileblock(); \
+             int fs = 16 + *{sc} * 8; \
+             int npad = ({nop} << 26) << 32; \
+             int base = {out} + pp; \
+             *base = enci({subi}, {sp}, {sp}, fs) | npad; \
+             *(base + 8) = enci({st_op}, {lr}, {sp}, fs - 8) | npad; \
+             *(base + 16) = enci({st_op}, {fp}, {sp}, fs - 16) | npad; \
+             *(base + 24) = enci({addi}, {fp}, {sp}, fs - 16) | npad; \
+             if (ns == 0) {{ *{e} = 1; }} \
+             return 0; }} ",
+            tt = WS_TOK_TYPE, tns = WS_TOK_NAME_START, tnl = WS_TOK_NAME_LEN,
+            e = WS_ERROR, op = WS_OUT_POS, sc = WS_SYM_COUNT,
+            esp = WS_EXPR_SP, espabs = -EXPR_SP_INIT,
+            out = LAYOUT_OUT,
+            kw_int = TOK_INT_KW, ident = TOK_IDENT,
+            lp = TOK_LPAREN, rp = TOK_RPAREN,
+            comma = TOK_COMMA, lb = TOK_LBRACE,
+            nop = OP_NOP, subi = OP_SUBI, addi = OP_ADDI,
+            st_op = OP_ST,
+            r0 = GEN_R0, fp = GEN_FP, lr = GEN_LR, sp = GEN_SP)
+    }
+
+    fn canonical_findmain() -> String {
+        // "main" = 109, 97, 105, 110
+        format!(
+            "int findmain() {{ \
+             int cnt = *{fc}; \
+             int i = 0; \
+             int base = 0; \
+             int ns = 0; \
+             int nl = 0; \
+             while (i < cnt) {{ \
+             base = {ft} + i * 32; \
+             ns = *base; nl = *(base + 8); \
+             if (nl == 4) {{ \
+             if (readbyte(ns) == 109) {{ \
+             if (readbyte(ns + 1) == 97) {{ \
+             if (readbyte(ns + 2) == 105) {{ \
+             if (readbyte(ns + 3) == 110) {{ \
+             return *(base + 16); }} }} }} }} }} \
+             i = i + 1; }} \
+             *{e} = 1; return 0; }} ",
+            fc = WS_FUNC_COUNT, ft = WS_FUNC_TABLE,
+            e = WS_ERROR)
+    }
+
+    fn canonical_compileblock() -> String {
+        format!(
+            "int compileblock() {{ \
+             int ret = 0; \
+             while (((*{tt} != {rb}) & (*{tt} != {eof})) & (*{e} == 0)) {{ \
+             ret = ret | compilestmt(); }} \
+             if (*{e} != 0) {{ return ret; }} \
+             if (*{tt} == {eof}) {{ *{e} = 1; return ret; }} \
+             nexttoken(); \
+             return ret; }} ",
+            tt = WS_TOK_TYPE, e = WS_ERROR,
+            rb = TOK_RBRACE, eof = TOK_EOF)
+    }
+
+    /// Full canonical compiler: all functions including main entry point.
+    fn canonical_compiler_source() -> String {
+        format!(
+            "{}{}{}{}{}{}{}",
+            canonical_stmt_prelude(),
+            canonical_compilefuncdef(),
+            canonical_findmain(),
+            canonical_compilermain(),
+            "", "", "")
+    }
+
+    fn canonical_compilermain() -> String {
+        format!(
+            "int main() {{ \
+             int src = {layout_src}; \
+             int slen = *src; \
+             int sbase = src + 8; \
+             if ({srclimit} < slen) {{ return 0 - 1; }} \
+             *{pos} = 0; \
+             *{sl} = slen; \
+             *{tb} = sbase; \
+             *{e} = 0; \
+             *{sc} = 0; \
+             *{op} = 0; \
+             *{esp} = (0 - {espabs}); \
+             *{fc} = 0; \
+             *{fxc} = 0; \
+             nexttoken(); \
+             int sp = *{op}; \
+             emit({call} << 26); \
+             emit(encs({halt})); \
+             while ((*{tt} != {eof}) & (*{e} == 0)) {{ \
+             compilefuncdef(); }} \
+             resolvefixups(); \
+             int ma = findmain(); \
+             patchcall(sp, ma); \
+             if (*{e} != 0) {{ return 0 - 1; }} \
+             int seal = syscall(5, {layout_out}, 0, 0); \
+             int sz = *{op}; \
+             return syscall(6, {layout_out}, sz, 0); }} ",
+            layout_src = LAYOUT_SRC,
+            srclimit = SOURCE_SIZE - 8,
+            layout_out = LAYOUT_OUT,
+            pos = WS_POS, sl = WS_SRC_LEN, tb = WS_TEXT_BASE,
+            e = WS_ERROR, sc = WS_SYM_COUNT, op = WS_OUT_POS,
+            esp = WS_EXPR_SP, espabs = -EXPR_SP_INIT,
+            fc = WS_FUNC_COUNT, fxc = WS_FIX_COUNT,
+            tt = WS_TOK_TYPE, eof = TOK_EOF,
+            call = OP_CALL, halt = OP_HALT)
+    }
+
     fn canonical_compileunary() -> String {
         format!(
             "int compileunary() {{ \
@@ -5536,7 +5809,7 @@ mod tests {
         format!(
             "int addfixup(int cp, int ns, int nl, int argc) {{ \
              int cnt = *{xc}; \
-             if (256 <= cnt) {{ *{e} = 1; return 0; }} \
+             if (512 <= cnt) {{ *{e} = 1; return 0; }} \
              int base = {xt} + cnt * 32; \
              *base = cp; *(base + 8) = ns; \
              *(base + 16) = nl; *(base + 24) = argc; \
@@ -5796,6 +6069,19 @@ mod tests {
         )
     }
 
+    /// Helper: all canonical functions through compile_block (stmt layer).
+    fn canonical_stmt_prelude() -> String {
+        format!(
+            "{}{}{}{}{}{}{}",
+            canonical_expr_prelude(),
+            canonical_compilerel(),
+            canonical_compileeq(),
+            canonical_compileexpr(),
+            canonical_compilestmt(),
+            canonical_compileblock(),
+            "")
+    }
+
     #[test]
     fn b50e_expr_compiles() {
         // Full expression compiler: all 10 precedence levels.
@@ -5808,6 +6094,101 @@ mod tests {
         eprintln!("6B.5.0e: expr compiler source = {} bytes", src.len());
         run_6b4_test(src.as_bytes(), 42, true);
         eprintln!("6B.5.0e: canonical expression closure (37 functions) ✓");
+    }
+
+    #[test]
+    fn b50e_stmt_compiles() {
+        // Stmt layer: compile_stmt + compile_block on top of expr closure.
+        let src = format!(
+            "{}int main() {{ return 42; }}",
+            canonical_stmt_prelude());
+        eprintln!("6B.5.0e: stmt compiler source = {} bytes", src.len());
+        run_6b4_test(src.as_bytes(), 42, true);
+        eprintln!("6B.5.0e: canonical stmt+block (39 functions) ✓");
+    }
+
+    #[test]
+    fn b50e_funcdef_compiles() {
+        // Stmt prelude + compilefuncdef + findmain (no canonical main).
+        let src = format!(
+            "{}{}{}int main() {{ return 42; }}",
+            canonical_stmt_prelude(),
+            canonical_compilefuncdef(),
+            canonical_findmain());
+        eprintln!("6B.5.0e: funcdef+findmain source = {} bytes", src.len());
+        run_6b4_test(src.as_bytes(), 42, true);
+        eprintln!("6B.5.0e: canonical funcdef+findmain (41 functions) ✓");
+    }
+
+    #[test]
+    fn b50e_full_compiler_compiles() {
+        // Full canonical compiler: all 42 functions compile without error.
+        // The child binary IS the compiler — its main reads source from
+        // the buffer, which still holds the canonical text. It tries to
+        // self-compile (CC_B), which may succeed or fail depending on
+        // cycles/memory. We only verify the HOST compilation succeeds.
+        let src = canonical_compiler_source();
+        eprintln!("6B.5.0e: full compiler source = {} bytes", src.len());
+
+        // Compile with the host compiler; don't validate child exit
+        // (the child IS a compiler, not a simple program).
+        let compiler_prog = build_6b4_compiler();
+        let asm = cc::compile(&compiler_prog);
+        let code_bytes = asm.to_bytes();
+
+        let mut fabric = Fabric::new(0x400000);
+        let text   = fabric.alloc_object("compiler_text",  TEXT_SIZE as u64, ObjectKind::Memory);
+        let source = fabric.alloc_object("source_data",    SOURCE_SIZE as u64, ObjectKind::Memory);
+        let output = fabric.alloc_object("output_buf",     OUTPUT_SIZE as u64, ObjectKind::Memory);
+        let work   = fabric.alloc_object("workspace",      WS_SIZE as u64, ObjectKind::Memory);
+        let stack  = fabric.alloc_object("compiler_stack", 0x4000, ObjectKind::Memory);
+        fabric.place_object(text,   0x000000);
+        fabric.place_object(source, 0x010000);
+        fabric.place_object(output, 0x020000);
+        fabric.place_object(work,   0x030000);
+        fabric.place_object(stack,  0x040000);
+        let dom = fabric.create_domain();
+        fabric.grant(dom, source, 0, SOURCE_SIZE as u64, Permissions::READ);
+        fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
+        fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
+        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+        let src_bytes = src.as_bytes();
+        let src_len = src_bytes.len() as u64;
+        fabric.write_physical(0x010000, &src_len.to_le_bytes());
+        fabric.write_physical(0x010008, src_bytes);
+        install_trap_handler(&mut fabric, 0x000000, TEXT_SIZE as u64);
+        fabric.write_physical(0x000000, &code_bytes);
+        seal_code_object(&mut fabric, text, dom);
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0, TEXT_SIZE as u64, text);
+        core.address_map.add(LAYOUT_SRC as u64, SOURCE_SIZE as u64, source);
+        core.address_map.add(LAYOUT_OUT as u64, OUTPUT_SIZE as u64, output);
+        core.address_map.add(LAYOUT_WS as u64,  WS_SIZE as u64, work);
+        core.address_map.add(LAYOUT_STACK as u64, 0x4000, stack);
+        core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
+        core.trap_vector = TEXT_SIZE as u64 - 0x10;
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x050000;
+        kernel.next_agent = 10;
+        kernel.spawn(core);
+        kernel.run(2000000, 10);
+
+        assert!(kernel.processes[0].exited,
+            "host compiler did not exit");
+
+        // Read workspace diagnostics
+        let read = |off: u64| -> u64 {
+            let bytes = kernel.fabric.read_physical(0x030000 + off, 8);
+            u64::from_le_bytes(bytes.try_into().unwrap())
+        };
+        let ws_error = read(0x18);
+        let ws_funcs = read(0x58);
+        let ws_out   = read(0x48);
+        eprintln!("6B.5.0e: host compiled {} functions, {} bytes output, error={}",
+            ws_funcs, ws_out, ws_error);
+        assert_eq!(ws_error, 0, "host compiler reported error");
+        assert_eq!(ws_funcs, 42, "expected 42 canonical functions");
+        eprintln!("6B.5.0e: canonical full compiler (42 functions) ✓");
     }
 
     #[test]
