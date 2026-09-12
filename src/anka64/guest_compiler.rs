@@ -203,26 +203,61 @@ pub(crate) struct TokMap {
 //  semantic fact, one guest-compiler implementation.
 // ═══════════════════════════════════════════════════════════
 
+/// read_byte(pos) — the single canonical byte-extraction primitive.
+///
+/// Uses aligned 8-byte load + shift/mask so the underlying machine
+/// access never crosses an object boundary:
+///   aligned = text_base + (pos & ~7)
+///   word    = *aligned
+///   shift   = (pos & 7) * 8
+///   byte    = (word >> shift) & 0xFF
+pub(crate) fn guest_read_byte() -> Function {
+    Function {
+        name: "read_byte".into(),
+        params: vec![(0, Type::Int)],
+        ret_type: Type::Int,
+        locals: vec![
+            (1, Type::Int), (2, Type::Int), (3, Type::Int),
+        ],
+        body: vec![
+            // aligned_pos = pos & (-8)   (i.e. pos & ~7)
+            Stmt::VarDecl(1, Type::Int, Some(
+                binop(BinOp::And, var(0), lit(-8)))),
+            // word = *(text_base + aligned_pos)
+            Stmt::VarDecl(2, Type::Int, Some(
+                deref(binop(BinOp::Add,
+                    deref(lit(WS_TEXT_BASE)),
+                    var(1))))),
+            // shift = (pos & 7) * 8
+            Stmt::VarDecl(3, Type::Int, Some(
+                binop(BinOp::Mul,
+                    binop(BinOp::And, var(0), lit(7)),
+                    lit(8)))),
+            // byte = (word >> shift) & 0xFF
+            Stmt::Return(
+                binop(BinOp::And,
+                    binop(BinOp::Shr, var(2), var(3)),
+                    lit(0xFF))),
+        ],
+    }
+}
+
+/// peek_char() — read current source byte.
+/// Delegates to read_byte(*WS_POS) with bounds check.
 pub(crate) fn guest_peek_char() -> Function {
     Function {
         name: "peek_char".into(),
         params: vec![],
         ret_type: Type::Int,
-        locals: vec![(0, Type::Int), (1, Type::Int), (2, Type::Int)],
+        locals: vec![(0, Type::Int)],
         body: vec![
             Stmt::VarDecl(0, Type::Int, Some(deref(lit(WS_POS)))),
-            Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_SRC_LEN)))),
             Stmt::If(
-                binop(BinOp::Le, var(1), var(0)),
+                binop(BinOp::Le, deref(lit(WS_SRC_LEN)), var(0)),
                 vec![Stmt::Return(lit(0))],
                 vec![],
             ),
-            Stmt::VarDecl(2, Type::Int, Some(
-                deref(binop(BinOp::Add,
-                    deref(lit(WS_TEXT_BASE)),
-                    var(0))))),
-            Stmt::Return(binop(BinOp::Shr,
-                binop(BinOp::Shl, var(2), lit(56)), lit(56))),
+            Stmt::Return(call("read_byte", vec![var(0)])),
         ],
     }
 }
@@ -241,6 +276,9 @@ pub(crate) fn guest_advance() -> Function {
     }
 }
 
+/// skip_ws() — skip ASCII whitespace: space, tab, newline, CR.
+/// Condition: 0 < ch ≤ 32  (covers all standard ASCII whitespace
+/// while excluding NUL, which is an error character).
 pub(crate) fn guest_skip_ws() -> Function {
     Function {
         name: "skip_ws".into(),
@@ -250,7 +288,9 @@ pub(crate) fn guest_skip_ws() -> Function {
         body: vec![
             Stmt::VarDecl(0, Type::Int, Some(call("peek_char", vec![]))),
             Stmt::While(
-                binop(BinOp::Eq, var(0), lit(32)),
+                binop(BinOp::And,
+                    binop(BinOp::Lt, lit(0), var(0)),
+                    binop(BinOp::Le, var(0), lit(32))),
                 vec![
                     call_stmt("advance", vec![]),
                     assign(0, call("peek_char", vec![])),
@@ -311,7 +351,21 @@ pub(crate) fn guest_scan_number(tc: &TokMap) -> Function {
     }
 }
 
-pub(crate) fn guest_scan_ident(tc: &TokMap) -> Function {
+/// scan_number with direct TOK_NUMBER constant (no TokMap).
+pub(crate) fn guest_scan_number_direct() -> Function {
+    guest_scan_number(&TokMap {
+        eof: TOK_EOF, number: TOK_NUMBER, ident: TOK_IDENT,
+        plus: TOK_PLUS, minus: TOK_MINUS, star: TOK_STAR,
+        eq: TOK_EQ, semi: TOK_SEMI, comma: TOK_COMMA,
+        int_kw: TOK_INT_KW, return_kw: TOK_RETURN,
+        lparen: TOK_LPAREN, rparen: TOK_RPAREN,
+        if_kw: TOK_IF, else_kw: TOK_ELSE, while_kw: TOK_WHILE,
+        lbrace: TOK_LBRACE, rbrace: TOK_RBRACE, lt: TOK_LT,
+    })
+}
+
+/// Frozen packed-name scan_ident for legacy 6B.3 builder.
+pub(crate) fn guest_scan_ident_packed(tc: &TokMap) -> Function {
     Function {
         name: "scan_ident".into(),
         params: vec![],
@@ -394,7 +448,8 @@ pub(crate) fn guest_scan_ident(tc: &TokMap) -> Function {
 ///
 /// EOF is pos ≥ src_len.  A NUL byte (0x00) inside the declared source
 /// length falls through to the invalid-character error handler.
-pub(crate) fn guest_next_token(tc: &TokMap) -> Function {
+/// Frozen packed-name next_token for legacy 6B.3 builder.
+pub(crate) fn guest_next_token_packed(tc: &TokMap) -> Function {
     Function {
         name: "next_token".into(),
         params: vec![],
@@ -461,106 +516,28 @@ pub(crate) fn guest_next_token(tc: &TokMap) -> Function {
 }
 
 /// Build the complete shared lexer function set for any phase.
-pub(crate) fn guest_lexer(tc: &TokMap) -> Vec<Function> {
+/// Frozen packed-name lexer for legacy 6B.3 builder.
+pub(crate) fn guest_lexer_packed(tc: &TokMap) -> Vec<Function> {
     vec![
+        guest_read_byte(),
         guest_peek_char(),
         guest_advance(),
         guest_skip_ws(),
         guest_set_char_token(),
         guest_scan_number(tc),
-        guest_scan_ident(tc),
-        guest_next_token(tc),
+        guest_scan_ident_packed(tc),
+        guest_next_token_packed(tc),
     ]
 }
 
-pub(crate) fn install_trap_handler(fabric: &mut Fabric, text_phys: u64) {
-    let mut handler = Asm64::new();
-    handler.halt();
-    fabric.write_physical(text_phys + 0x3FF0, &handler.to_bytes());
-}
+// ═══════════════════════════════════════════════════════════
+//  Canonical source-slice lexer — shared by 6B.4+
+// ═══════════════════════════════════════════════════════════
 
-/// Seal an object and grant RX to a domain.
-/// W⊕X lifecycle: Active(write) → Sealed(fetch).
-pub(crate) fn seal_code_object(fabric: &mut Fabric, obj: ObjectId, dom: DomainId) {
-    fabric.seal_object(obj);
-    let size = fabric.objects[&obj].size;
-    fabric.grant(dom, obj, 0, size, Permissions::RX);
-}
-
-// ════════════════════════════════════════════════════════════
-//  6B.4  User-defined functions
-// ════════════════════════════════════════════════════════════
-//
-//  6B.4.0: _start, function table, direct CALL, prologue/
-//          epilogue, RET.  Target program:
-//
-//    int f() { return 42; }
-//    int main() { return f(); }
-//
-//  Generated child layout:
-//    _start: CALL main; HALT
-//    f:      prologue; MOVI R4,42; MOV R0,R4; epilogue; RET
-//    main:   prologue; CALL f; MOV R4,R0; MOV R0,R4; epilogue; RET
-//
-//  Prologue:  SUBI SP,SP,16; ST LR,[SP,8]; ST FP,[SP,0]; MOV FP,SP
-//  Epilogue:  MOV SP,FP; LD FP,[SP,0]; LD LR,[SP,8]; ADDI SP,SP,16; RET
-
-/// Build a nested If chain that checks source bytes against a known keyword.
-///
-/// Produces: if (read_byte(start+0)==b0) { if (read_byte(start+1)==b1) { ... result } }
-fn kw_byte_chain(start_var: VarId, bytes: &[i64], result: Stmt) -> Stmt {
-    bytes.iter().enumerate().rfold(
-        result,
-        |inner, (i, &byte)| {
-            Stmt::If(
-                binop(BinOp::Eq,
-                    call("read_byte", vec![
-                        binop(BinOp::Add, var(start_var), lit(i as i64))]),
-                    lit(byte)),
-                vec![inner],
-                vec![],
-            )
-        }
-    )
-}
-
-pub fn build_6b4_compiler() -> Program {
-    // ─── Shared lexer functions (unchanged) ──────────
-    // peek_char, advance, skip_ws, set_char_token, scan_number
-    // use the shared builders; scan_ident and next_token are
-    // replaced with source-slice versions below.
-    let tok4 = TokMap {
-        eof: TOK_EOF, number: TOK_NUMBER, ident: TOK_IDENT,
-        plus: TOK_PLUS, minus: TOK_MINUS, star: TOK_STAR,
-        eq: TOK_EQ, semi: TOK_SEMI, comma: TOK_COMMA,
-        int_kw: TOK_INT_KW, return_kw: TOK_RETURN,
-        lparen: TOK_LPAREN, rparen: TOK_RPAREN,
-        if_kw: TOK_IF, else_kw: TOK_ELSE, while_kw: TOK_WHILE,
-        lbrace: TOK_LBRACE, rbrace: TOK_RBRACE, lt: TOK_LT,
-    };
-
-    // ─── read_byte(pos) → byte value ───────────────
-    // Same logic as peek_char but pos is a parameter.
-    let fn_read_byte = Function {
-        name: "read_byte".into(),
-        params: vec![(0, Type::Int)],
-        ret_type: Type::Int,
-        locals: vec![(1, Type::Int)],
-        body: vec![
-            Stmt::VarDecl(1, Type::Int, Some(
-                deref(binop(BinOp::Add,
-                    deref(lit(WS_TEXT_BASE)),
-                    var(0))))),
-            Stmt::Return(binop(BinOp::Shr,
-                binop(BinOp::Shl, var(1), lit(56)), lit(56))),
-        ],
-    };
-
-    // ─── names_equal(sa, la, sb, lb) → 0 or 1 ─────
-    // Byte-by-byte comparison of two source slices.
-    // Call results are saved to locals to avoid scratch register
-    // conflicts (CALL clobbers R4-R6).
-    let fn_names_equal = Function {
+/// names_equal(sa, la, sb, lb) → 0 or 1.
+/// Byte-by-byte comparison of two source slices.
+pub(crate) fn guest_names_equal() -> Function {
+    Function {
         name: "names_equal".into(),
         params: vec![(0, Type::Int), (1, Type::Int),
                      (2, Type::Int), (3, Type::Int)],
@@ -589,86 +566,48 @@ pub fn build_6b4_compiler() -> Program {
             ]),
             Stmt::Return(lit(1)),
         ],
-    };
+    }
+}
 
-    // ─── classify_kw(start, len) → token type ──────
-    // Length-first dispatch + byte-by-byte comparison.
-    // Params: (0: start, 1: len).
-    let fn_classify_kw = Function {
+/// classify_kw(start, len) → token type.
+/// Length-first dispatch + byte-by-byte comparison.
+pub(crate) fn guest_classify_kw() -> Function {
+    Function {
         name: "classify_kw".into(),
         params: vec![(0, Type::Int), (1, Type::Int)],
         ret_type: Type::Int,
         locals: vec![],
         body: vec![
-            // len 2: "if" (105, 102)
             Stmt::If(binop(BinOp::Eq, var(1), lit(2)), vec![
                 kw_byte_chain(0, &[105, 102],
                     Stmt::Return(lit(TOK_IF))),
             ], vec![]),
-            // len 3: "int" (105, 110, 116)
             Stmt::If(binop(BinOp::Eq, var(1), lit(3)), vec![
                 kw_byte_chain(0, &[105, 110, 116],
                     Stmt::Return(lit(TOK_INT_KW))),
             ], vec![]),
-            // len 4: "else" (101, 108, 115, 101)
             Stmt::If(binop(BinOp::Eq, var(1), lit(4)), vec![
                 kw_byte_chain(0, &[101, 108, 115, 101],
                     Stmt::Return(lit(TOK_ELSE))),
             ], vec![]),
-            // len 5: "while" (119, 104, 105, 108, 101)
             Stmt::If(binop(BinOp::Eq, var(1), lit(5)), vec![
                 kw_byte_chain(0, &[119, 104, 105, 108, 101],
                     Stmt::Return(lit(TOK_WHILE))),
             ], vec![]),
-            // len 6: "return" (114, 101, 116, 117, 114, 110)
             Stmt::If(binop(BinOp::Eq, var(1), lit(6)), vec![
                 kw_byte_chain(0, &[114, 101, 116, 117, 114, 110],
                     Stmt::Return(lit(TOK_RETURN))),
             ], vec![]),
             Stmt::Return(lit(TOK_IDENT)),
         ],
-    };
+    }
+}
 
-    // ─── find_main() → address ─────────────────────
-    // Scans function table for a 4-byte name spelling "main".
-    // Params: none. Locals: count(0), i(1), base(2), ns(3), nl(4).
-    let fn_find_main = Function {
-        name: "find_main".into(),
-        params: vec![],
-        ret_type: Type::Int,
-        locals: vec![
-            (0, Type::Int), (1, Type::Int), (2, Type::Int),
-            (3, Type::Int), (4, Type::Int),
-        ],
-        body: vec![
-            Stmt::VarDecl(0, Type::Int, Some(deref(lit(WS_FUNC_COUNT)))),
-            Stmt::VarDecl(1, Type::Int, Some(lit(0))),
-            Stmt::VarDecl(2, Type::Int, Some(lit(0))),
-            Stmt::VarDecl(3, Type::Int, Some(lit(0))),
-            Stmt::VarDecl(4, Type::Int, Some(lit(0))),
-            Stmt::While(binop(BinOp::Lt, var(1), var(0)), vec![
-                assign(2, binop(BinOp::Add, lit(WS_FUNC_TABLE),
-                    binop(BinOp::Mul, var(1), lit(32)))),
-                assign(3, deref(var(2))),
-                assign(4, deref(binop(BinOp::Add, var(2), lit(8)))),
-                Stmt::If(binop(BinOp::Eq, var(4), lit(4)), vec![
-                    // "main" = 109, 97, 105, 110
-                    kw_byte_chain(3, &[109, 97, 105, 110],
-                        Stmt::Return(deref(
-                            binop(BinOp::Add, var(2), lit(16))))),
-                ], vec![]),
-                assign(1, binop(BinOp::Add, var(1), lit(1))),
-            ]),
-            deref_assign(lit(WS_ERROR), lit(1)),
-            Stmt::Return(lit(0)),
-        ],
-    };
-
-    // ─── scan_ident() — source-slice version ───────
-    // Records (start, len) in WS_TOK_NAME_START/LEN,
-    // calls classify_kw for keyword classification.
-    // Vars: ch(0), start(1), len(2).
-    let fn_scan_ident = Function {
+/// scan_ident() — source-slice version.
+/// Records (start, len) in WS_TOK_NAME_START/LEN,
+/// calls classify_kw for keyword classification.
+pub(crate) fn guest_scan_ident() -> Function {
+    Function {
         name: "scan_ident".into(),
         params: vec![],
         ret_type: Type::Int,
@@ -677,7 +616,6 @@ pub fn build_6b4_compiler() -> Program {
             Stmt::VarDecl(0, Type::Int, Some(call("peek_char", vec![]))),
             Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_POS)))),
             Stmt::VarDecl(2, Type::Int, Some(lit(0))),
-            // Letter loop: 97 ≤ ch ≤ 122
             Stmt::While(
                 in_range(var(0), 97, 122),
                 vec![
@@ -686,7 +624,6 @@ pub fn build_6b4_compiler() -> Program {
                     assign(0, call("peek_char", vec![])),
                 ],
             ),
-            // Digit suffix loop: 48 ≤ ch ≤ 57
             Stmt::While(
                 in_range(var(0), 48, 57),
                 vec![
@@ -701,11 +638,12 @@ pub fn build_6b4_compiler() -> Program {
                 call("classify_kw", vec![var(1), var(2)])),
             Stmt::Return(lit(0)),
         ],
-    };
+    }
+}
 
-    // ─── next_token() — direct TOK_* constants ─────
-    // Position-based EOF. Uses source-slice scan_ident.
-    let fn_next_token = Function {
+/// next_token() — source-slice version with direct TOK_* constants.
+pub(crate) fn guest_next_token() -> Function {
+    Function {
         name: "next_token".into(),
         params: vec![],
         ret_type: Type::Int,
@@ -762,8 +700,112 @@ pub fn build_6b4_compiler() -> Program {
             deref_assign(lit(WS_TOK_TYPE), lit(TOK_EOF)),
             Stmt::Return(lit(0)),
         ],
-    };
+    }
+}
 
+/// find_main() — scan function table for "main" by source bytes.
+pub(crate) fn guest_find_main() -> Function {
+    Function {
+        name: "find_main".into(),
+        params: vec![],
+        ret_type: Type::Int,
+        locals: vec![
+            (0, Type::Int), (1, Type::Int), (2, Type::Int),
+            (3, Type::Int), (4, Type::Int),
+        ],
+        body: vec![
+            Stmt::VarDecl(0, Type::Int, Some(deref(lit(WS_FUNC_COUNT)))),
+            Stmt::VarDecl(1, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(2, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(3, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(4, Type::Int, Some(lit(0))),
+            Stmt::While(binop(BinOp::Lt, var(1), var(0)), vec![
+                assign(2, binop(BinOp::Add, lit(WS_FUNC_TABLE),
+                    binop(BinOp::Mul, var(1), lit(32)))),
+                assign(3, deref(var(2))),
+                assign(4, deref(binop(BinOp::Add, var(2), lit(8)))),
+                Stmt::If(binop(BinOp::Eq, var(4), lit(4)), vec![
+                    kw_byte_chain(3, &[109, 97, 105, 110],
+                        Stmt::Return(deref(
+                            binop(BinOp::Add, var(2), lit(16))))),
+                ], vec![]),
+                assign(1, binop(BinOp::Add, var(1), lit(1))),
+            ]),
+            deref_assign(lit(WS_ERROR), lit(1)),
+            Stmt::Return(lit(0)),
+        ],
+    }
+}
+
+/// Canonical source-slice lexer for 6B.4+.
+pub(crate) fn guest_lexer() -> Vec<Function> {
+    vec![
+        guest_read_byte(),
+        guest_peek_char(),
+        guest_advance(),
+        guest_skip_ws(),
+        guest_set_char_token(),
+        guest_scan_number_direct(),
+        guest_scan_ident(),
+        guest_classify_kw(),
+        guest_names_equal(),
+        guest_next_token(),
+        guest_find_main(),
+    ]
+}
+
+pub(crate) fn install_trap_handler(fabric: &mut Fabric, text_phys: u64) {
+    let mut handler = Asm64::new();
+    handler.halt();
+    fabric.write_physical(text_phys + 0x3FF0, &handler.to_bytes());
+}
+
+/// Seal an object and grant RX to a domain.
+/// W⊕X lifecycle: Active(write) → Sealed(fetch).
+pub(crate) fn seal_code_object(fabric: &mut Fabric, obj: ObjectId, dom: DomainId) {
+    fabric.seal_object(obj);
+    let size = fabric.objects[&obj].size;
+    fabric.grant(dom, obj, 0, size, Permissions::RX);
+}
+
+// ════════════════════════════════════════════════════════════
+//  6B.4  User-defined functions
+// ════════════════════════════════════════════════════════════
+//
+//  6B.4.0: _start, function table, direct CALL, prologue/
+//          epilogue, RET.  Target program:
+//
+//    int f() { return 42; }
+//    int main() { return f(); }
+//
+//  Generated child layout:
+//    _start: CALL main; HALT
+//    f:      prologue; MOVI R4,42; MOV R0,R4; epilogue; RET
+//    main:   prologue; CALL f; MOV R4,R0; MOV R0,R4; epilogue; RET
+//
+//  Prologue:  SUBI SP,SP,16; ST LR,[SP,8]; ST FP,[SP,0]; MOV FP,SP
+//  Epilogue:  MOV SP,FP; LD FP,[SP,0]; LD LR,[SP,8]; ADDI SP,SP,16; RET
+
+/// Build a nested If chain that checks source bytes against a known keyword.
+///
+/// Produces: if (read_byte(start+0)==b0) { if (read_byte(start+1)==b1) { ... result } }
+fn kw_byte_chain(start_var: VarId, bytes: &[i64], result: Stmt) -> Stmt {
+    bytes.iter().enumerate().rfold(
+        result,
+        |inner, (i, &byte)| {
+            Stmt::If(
+                binop(BinOp::Eq,
+                    call("read_byte", vec![
+                        binop(BinOp::Add, var(start_var), lit(i as i64))]),
+                    lit(byte)),
+                vec![inner],
+                vec![],
+            )
+        }
+    )
+}
+
+pub fn build_6b4_compiler() -> Program {
     // ─── emit(word) ────────────────────────────────
     let fn_emit = Function {
         name: "emit".into(),
@@ -1956,19 +1998,7 @@ pub fn build_6b4_compiler() -> Program {
     };
 
     let mut functions = vec![fn_main];
-    functions.extend(vec![
-        guest_peek_char(),
-        guest_advance(),
-        guest_skip_ws(),
-        guest_set_char_token(),
-        guest_scan_number(&tok4),
-        fn_scan_ident,
-        fn_next_token,
-        fn_read_byte,
-        fn_names_equal,
-        fn_classify_kw,
-        fn_find_main,
-    ]);
+    functions.extend(guest_lexer());
     functions.extend(vec![
         fn_compile_primary, fn_compile_mult, fn_compile_add,
         fn_compile_cmp, fn_compile_expr,

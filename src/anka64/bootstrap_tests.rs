@@ -2729,7 +2729,7 @@ mod tests {
             if_kw: TOK_IF, else_kw: TOK_ELSE, while_kw: TOK_WHILE,
             lbrace: TOK_LBRACE, rbrace: TOK_RBRACE, lt: TOK_LT,
         };
-        let lexer_fns = guest_lexer(&tok3);
+        let lexer_fns = guest_lexer_packed(&tok3);
 
         // ─── add_symbol(name) → offset ─────────────────
         // In 6B.3, the symbol table maps name → stack offset.
@@ -4567,6 +4567,34 @@ mod tests {
             b"int main() { int longname1 = 10; int longname2 = 32; return longname1 + longname2; }",
             42, true);
         eprintln!("6B.5.0a: long variable names ✓");
+    }
+
+    #[test]
+    fn b50a1_multiline_source() {
+        // Newlines and tabs are now valid whitespace.
+        run_6b4_test(
+            b"int main() {\n\tint x = 40;\n\tint y = 2;\n\treturn x + y;\n}\n",
+            42, true);
+        eprintln!("6B.5.0a.1: multiline source with tabs/newlines ✓");
+    }
+
+    #[test]
+    fn b50a1_boundary_ident() {
+        // Source placed so the identifier ends near byte 0xFF7.
+        // Tests that read_byte uses aligned extraction and does
+        // not cross the source object boundary.
+        //
+        // Source object is 0x1000 bytes: [u64 length][text...].
+        // text_base = source_base + 8, so text starts at byte 8.
+        // Maximum usable text area: 0x1000 - 8 = 0xFF8 bytes.
+        // Place a short program right-justified so "main" spans
+        // the last bytes.
+        let prog = b"int f() { return 42; } int main() { return f(); }";
+        let pad_len = 0xFF8 - prog.len();
+        let mut source = vec![b' '; pad_len];
+        source.extend_from_slice(prog);
+        run_6b4_test(&source, 42, true);
+        eprintln!("6B.5.0a.1: boundary ident (near byte 0xFF7) ✓");
     }
 
 }
