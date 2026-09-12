@@ -2498,4 +2498,1003 @@ mod tests {
         run_6b1_test(b"return 131070 + 2;", u64::MAX, false);
         eprintln!("6B.1a: \"return 131070 + 2;\" → error (expr overflow) ✓");
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 6B.2: Tokenizer with lexical identity, symbol table, locals
+    //
+    // Grammar:
+    //   program → { var_decl } return_stmt
+    //   var_decl → "int" IDENT "=" expr ";"
+    //   return_stmt → "return" expr ";"
+    //   expr → additive
+    //   additive → multiplicative { ('+'|'-') multiplicative }
+    //   multiplicative → primary { '*' primary }
+    //   primary → NUMBER | IDENT | '(' expr ')'
+    //
+    // Token set: {INT_KW, RETURN, NUMBER, IDENT, +, -, *, (, ), =, ;}
+    // Maximal-munch: "return42" scans as one IDENT, not RETURN+NUMBER.
+    // ═══════════════════════════════════════════════════════════════
+
+    fn build_6b2_compiler() -> Program {
+        // ─── Workspace layout ────────────────────────────
+        const WS_POS: i64       = 0x6000;
+        const WS_SRC_LEN: i64   = 0x6008;
+        const WS_TEXT_BASE: i64  = 0x6010;
+        const WS_ERROR: i64      = 0x6018;
+        const WS_TOK_TYPE: i64   = 0x6020;
+        const WS_TOK_VALUE: i64  = 0x6028;
+        const WS_KW_INT: i64     = 0x6030;
+        const WS_KW_RETURN: i64  = 0x6038;
+        const WS_SYM_COUNT: i64  = 0x6040;
+        const WS_SYM_TABLE: i64  = 0x6048;
+
+        // ─── Token type constants ────────────────────────
+        const TOK_EOF: i64    = 0;
+        const TOK_INT_KW: i64 = 1;
+        const TOK_RETURN: i64 = 2;
+        const TOK_NUMBER: i64 = 3;
+        const TOK_IDENT: i64  = 4;
+        const TOK_PLUS: i64   = 5;
+        const TOK_MINUS: i64  = 6;
+        const TOK_STAR: i64   = 7;
+        const TOK_LPAREN: i64 = 8;
+        const TOK_RPAREN: i64 = 9;
+        const TOK_EQ: i64     = 10;
+        const TOK_SEMI: i64   = 11;
+
+        fn lit(v: i64) -> Expr { Expr::IntLit(v) }
+        fn var(id: VarId) -> Expr { Expr::Var(id) }
+        fn binop(op: BinOp, a: Expr, b: Expr) -> Expr {
+            Expr::BinOp(op, Box::new(a), Box::new(b))
+        }
+        fn assign(id: VarId, e: Expr) -> Stmt {
+            Stmt::Expr(Expr::Assign(id, Box::new(e)))
+        }
+        fn deref(addr: Expr) -> Expr { Expr::Deref(Box::new(addr)) }
+        fn deref_assign(addr: Expr, val: Expr) -> Stmt {
+            Stmt::Expr(Expr::DerefAssign(Box::new(addr), Box::new(val)))
+        }
+        fn syscall(num: u8, args: Vec<Expr>) -> Expr {
+            Expr::Syscall(num, args)
+        }
+        fn call(name: &str, args: Vec<Expr>) -> Expr {
+            Expr::Call(name.into(), args)
+        }
+        fn call_stmt(name: &str, args: Vec<Expr>) -> Stmt {
+            Stmt::Expr(Expr::Call(name.into(), args))
+        }
+
+        // ─── peek_char() → int ─────────────────────────────
+        // Returns byte at current position, or 0 at end.
+        // Locals: pos(0), src_len(1), text_base(2),
+        //         aligned(3), word(4), byte_shift(5)
+        let fn_peek_char = Function {
+            name: "peek_char".into(),
+            params: vec![],
+            ret_type: Type::Int,
+            locals: vec![
+                (0, Type::Int), (1, Type::Int), (2, Type::Int),
+                (3, Type::Int), (4, Type::Int), (5, Type::Int),
+            ],
+            body: vec![
+                Stmt::VarDecl(0, Type::Int, Some(deref(lit(WS_POS)))),
+                Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_SRC_LEN)))),
+                Stmt::If(
+                    binop(BinOp::Le, var(1), var(0)),
+                    vec![Stmt::Return(lit(0))],
+                    vec![],
+                ),
+                Stmt::VarDecl(2, Type::Int, Some(deref(lit(WS_TEXT_BASE)))),
+                Stmt::VarDecl(3, Type::Int, Some(
+                    binop(BinOp::Add, var(2),
+                        binop(BinOp::And, var(0), lit(-8)))
+                )),
+                Stmt::VarDecl(4, Type::Int, Some(deref(var(3)))),
+                Stmt::VarDecl(5, Type::Int, Some(
+                    binop(BinOp::Mul,
+                        binop(BinOp::And, var(0), lit(7)),
+                        lit(8))
+                )),
+                Stmt::Return(binop(BinOp::And,
+                    binop(BinOp::Shr, var(4), var(5)),
+                    lit(0xFF),
+                )),
+            ],
+        };
+
+        // ─── advance() ─────────────────────────────────────
+        // Locals: pos(0)
+        let fn_advance = Function {
+            name: "advance".into(),
+            params: vec![],
+            ret_type: Type::Int,
+            locals: vec![(0, Type::Int)],
+            body: vec![
+                Stmt::VarDecl(0, Type::Int, Some(deref(lit(WS_POS)))),
+                deref_assign(lit(WS_POS),
+                    binop(BinOp::Add, var(0), lit(1))),
+                Stmt::Return(lit(0)),
+            ],
+        };
+
+        // ─── skip_ws() ─────────────────────────────────────
+        // Whitespace: ASCII 1–32 (space, tab, newline, CR).
+        // Locals: running(0), ch(1)
+        let fn_skip_ws = Function {
+            name: "skip_ws".into(),
+            params: vec![],
+            ret_type: Type::Int,
+            locals: vec![(0, Type::Int), (1, Type::Int)],
+            body: vec![
+                Stmt::VarDecl(0, Type::Int, Some(lit(1))),
+                Stmt::VarDecl(1, Type::Int, Some(lit(0))),
+                Stmt::While(var(0), vec![
+                    assign(1, call("peek_char", vec![])),
+                    Stmt::If(
+                        binop(BinOp::And,
+                            binop(BinOp::Le, lit(1), var(1)),
+                            binop(BinOp::Le, var(1), lit(32)),
+                        ),
+                        vec![call_stmt("advance", vec![])],
+                        vec![assign(0, lit(0))],
+                    ),
+                ]),
+                Stmt::Return(lit(0)),
+            ],
+        };
+
+        // ─── set_char_token(tok) ────────────────────────────
+        // Advance past single-char token, store its type.
+        // Params: tok(0)
+        let fn_set_char_token = Function {
+            name: "set_char_token".into(),
+            params: vec![(0, Type::Int)],
+            ret_type: Type::Int,
+            locals: vec![],
+            body: vec![
+                call_stmt("advance", vec![]),
+                deref_assign(lit(WS_TOK_TYPE), var(0)),
+                Stmt::Return(lit(0)),
+            ],
+        };
+
+        // ─── scan_number() ─────────────────────────────────
+        // Scan decimal digits, store TOK_NUMBER + value.
+        // Overflow guard: Lt(131071, value) after each digit.
+        // Locals: value(0), running(1), ch(2), is_digit(3)
+        let fn_scan_number = Function {
+            name: "scan_number".into(),
+            params: vec![],
+            ret_type: Type::Int,
+            locals: vec![
+                (0, Type::Int), (1, Type::Int),
+                (2, Type::Int), (3, Type::Int),
+            ],
+            body: vec![
+                Stmt::VarDecl(0, Type::Int, Some(lit(0))),
+                Stmt::VarDecl(1, Type::Int, Some(lit(1))),
+                Stmt::VarDecl(2, Type::Int, Some(lit(0))),
+                Stmt::VarDecl(3, Type::Int, Some(lit(0))),
+                Stmt::While(var(1), vec![
+                    assign(2, call("peek_char", vec![])),
+                    assign(3, binop(BinOp::And,
+                        binop(BinOp::Le, lit(48), var(2)),
+                        binop(BinOp::Le, var(2), lit(57)),
+                    )),
+                    Stmt::If(var(3), vec![
+                        assign(0, binop(BinOp::Add,
+                            binop(BinOp::Mul, var(0), lit(10)),
+                            binop(BinOp::Sub, var(2), lit(48)),
+                        )),
+                        Stmt::If(
+                            binop(BinOp::Lt, lit(131071), var(0)),
+                            vec![
+                                deref_assign(lit(WS_ERROR), lit(1)),
+                                assign(1, lit(0)),
+                            ],
+                            vec![
+                                call_stmt("advance", vec![]),
+                            ],
+                        ),
+                    ], vec![
+                        assign(1, lit(0)),
+                    ]),
+                ]),
+                deref_assign(lit(WS_TOK_TYPE), lit(TOK_NUMBER)),
+                deref_assign(lit(WS_TOK_VALUE), var(0)),
+                Stmt::Return(lit(0)),
+            ],
+        };
+
+        // ─── scan_ident() ──────────────────────────────────
+        // Scan alphanumeric identifier, check keywords.
+        // Maximal munch: consumes all [a-z0-9] chars.
+        // Packed name: (name << 8) | ch per character.
+        //
+        // is_alnum = is_alpha | is_digit must be computed in
+        // two steps — Or(And(Le,Le), And(Le,Le)) is 3 levels of
+        // BinOp nesting, which clobbers R5 during the RHS Le.
+        // Locals: name(0), running(1), ch(2), is_alnum(3), is_dig(4)
+        let fn_scan_ident = Function {
+            name: "scan_ident".into(),
+            params: vec![],
+            ret_type: Type::Int,
+            locals: vec![
+                (0, Type::Int), (1, Type::Int),
+                (2, Type::Int), (3, Type::Int),
+                (4, Type::Int),
+            ],
+            body: vec![
+                Stmt::VarDecl(0, Type::Int, Some(lit(0))),
+                Stmt::VarDecl(1, Type::Int, Some(lit(1))),
+                Stmt::VarDecl(2, Type::Int, Some(lit(0))),
+                Stmt::VarDecl(3, Type::Int, Some(lit(0))),
+                Stmt::VarDecl(4, Type::Int, Some(lit(0))),
+                Stmt::While(var(1), vec![
+                    assign(2, call("peek_char", vec![])),
+                    // is_alpha: 'a' <= ch <= 'z'  (2 levels, safe into R4)
+                    assign(3, binop(BinOp::And,
+                        binop(BinOp::Le, lit(97), var(2)),
+                        binop(BinOp::Le, var(2), lit(122)),
+                    )),
+                    // is_digit: '0' <= ch <= '9'  (2 levels, safe into R4)
+                    assign(4, binop(BinOp::And,
+                        binop(BinOp::Le, lit(48), var(2)),
+                        binop(BinOp::Le, var(2), lit(57)),
+                    )),
+                    // is_alnum = is_alpha | is_digit  (1 level, safe)
+                    assign(3, binop(BinOp::Or, var(3), var(4))),
+                    Stmt::If(var(3), vec![
+                        assign(0, binop(BinOp::Or,
+                            binop(BinOp::Shl, var(0), lit(8)),
+                            var(2),
+                        )),
+                        call_stmt("advance", vec![]),
+                    ], vec![
+                        assign(1, lit(0)),
+                    ]),
+                ]),
+                // Keyword check: compare packed name against stored constants
+                Stmt::If(
+                    binop(BinOp::Eq, var(0), deref(lit(WS_KW_INT))),
+                    vec![
+                        deref_assign(lit(WS_TOK_TYPE), lit(TOK_INT_KW)),
+                    ],
+                    vec![Stmt::If(
+                        binop(BinOp::Eq, var(0), deref(lit(WS_KW_RETURN))),
+                        vec![
+                            deref_assign(lit(WS_TOK_TYPE), lit(TOK_RETURN)),
+                        ],
+                        vec![
+                            deref_assign(lit(WS_TOK_TYPE), lit(TOK_IDENT)),
+                            deref_assign(lit(WS_TOK_VALUE), var(0)),
+                        ],
+                    )],
+                ),
+                Stmt::Return(lit(0)),
+            ],
+        };
+
+        // ─── next_token() ──────────────────────────────────
+        // Lexer dispatch: skip whitespace, classify first char.
+        // Locals: ch(0), is_d(1), is_a(2)
+        let fn_next_token = Function {
+            name: "next_token".into(),
+            params: vec![],
+            ret_type: Type::Int,
+            locals: vec![
+                (0, Type::Int), (1, Type::Int), (2, Type::Int),
+            ],
+            body: vec![
+                call_stmt("skip_ws", vec![]),
+                Stmt::VarDecl(0, Type::Int, Some(call("peek_char", vec![]))),
+                // EOF
+                Stmt::If(binop(BinOp::Eq, var(0), lit(0)), vec![
+                    deref_assign(lit(WS_TOK_TYPE), lit(TOK_EOF)),
+                    Stmt::Return(lit(0)),
+                ], vec![
+                // Digit → scan_number
+                Stmt::VarDecl(1, Type::Int, Some(binop(BinOp::And,
+                    binop(BinOp::Le, lit(48), var(0)),
+                    binop(BinOp::Le, var(0), lit(57)),
+                ))),
+                Stmt::If(var(1), vec![
+                    call_stmt("scan_number", vec![]),
+                    Stmt::Return(lit(0)),
+                ], vec![
+                // Alpha → scan_ident
+                Stmt::VarDecl(2, Type::Int, Some(binop(BinOp::And,
+                    binop(BinOp::Le, lit(97), var(0)),
+                    binop(BinOp::Le, var(0), lit(122)),
+                ))),
+                Stmt::If(var(2), vec![
+                    call_stmt("scan_ident", vec![]),
+                    Stmt::Return(lit(0)),
+                ], vec![
+                // Single-character tokens
+                Stmt::If(binop(BinOp::Eq, var(0), lit(43)), vec![   // '+'
+                    Stmt::Return(call("set_char_token", vec![lit(TOK_PLUS)])),
+                ], vec![
+                Stmt::If(binop(BinOp::Eq, var(0), lit(45)), vec![   // '-'
+                    Stmt::Return(call("set_char_token", vec![lit(TOK_MINUS)])),
+                ], vec![
+                Stmt::If(binop(BinOp::Eq, var(0), lit(42)), vec![   // '*'
+                    Stmt::Return(call("set_char_token", vec![lit(TOK_STAR)])),
+                ], vec![
+                Stmt::If(binop(BinOp::Eq, var(0), lit(40)), vec![   // '('
+                    Stmt::Return(call("set_char_token", vec![lit(TOK_LPAREN)])),
+                ], vec![
+                Stmt::If(binop(BinOp::Eq, var(0), lit(41)), vec![   // ')'
+                    Stmt::Return(call("set_char_token", vec![lit(TOK_RPAREN)])),
+                ], vec![
+                Stmt::If(binop(BinOp::Eq, var(0), lit(61)), vec![   // '='
+                    Stmt::Return(call("set_char_token", vec![lit(TOK_EQ)])),
+                ], vec![
+                Stmt::If(binop(BinOp::Eq, var(0), lit(59)), vec![   // ';'
+                    Stmt::Return(call("set_char_token", vec![lit(TOK_SEMI)])),
+                ], vec![
+                    // Unknown character → error + force EOF
+                    deref_assign(lit(WS_ERROR), lit(1)),
+                    deref_assign(lit(WS_TOK_TYPE), lit(TOK_EOF)),
+                ]),
+                ]),
+                ]),
+                ]),
+                ]),
+                ]),
+                ]),
+                ]),
+                ]),
+                ]),
+            ],
+        };
+
+        // ─── parse_primary() → int ─────────────────────────
+        // primary → NUMBER | IDENT | '(' expr ')'
+        // Locals: tok(0), val(1), name_v(2)
+        let fn_parse_primary = Function {
+            name: "parse_primary".into(),
+            params: vec![],
+            ret_type: Type::Int,
+            locals: vec![
+                (0, Type::Int), (1, Type::Int), (2, Type::Int),
+            ],
+            body: vec![
+                Stmt::VarDecl(0, Type::Int, Some(deref(lit(WS_TOK_TYPE)))),
+                Stmt::VarDecl(1, Type::Int, Some(lit(0))),
+                Stmt::VarDecl(2, Type::Int, Some(lit(0))),
+                Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_NUMBER)), vec![
+                    assign(1, deref(lit(WS_TOK_VALUE))),
+                    call_stmt("next_token", vec![]),
+                    Stmt::Return(var(1)),
+                ], vec![Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_IDENT)), vec![
+                    assign(2, deref(lit(WS_TOK_VALUE))),
+                    call_stmt("next_token", vec![]),
+                    Stmt::Return(call("lookup_symbol", vec![var(2)])),
+                ], vec![Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_LPAREN)), vec![
+                    call_stmt("next_token", vec![]),
+                    assign(1, call("parse_expr", vec![])),
+                    Stmt::If(
+                        binop(BinOp::Ne, deref(lit(WS_TOK_TYPE)), lit(TOK_RPAREN)),
+                        vec![deref_assign(lit(WS_ERROR), lit(1))],
+                        vec![call_stmt("next_token", vec![])],
+                    ),
+                    Stmt::Return(var(1)),
+                ], vec![
+                    deref_assign(lit(WS_ERROR), lit(1)),
+                    Stmt::Return(lit(0)),
+                ])])]),
+            ],
+        };
+
+        // ─── parse_multiplicative() → int ───────────────────
+        // multiplicative → primary { '*' primary }
+        // Locals: left(0), running(1), tok(2), right(3)
+        let fn_parse_mult = Function {
+            name: "parse_multiplicative".into(),
+            params: vec![],
+            ret_type: Type::Int,
+            locals: vec![
+                (0, Type::Int), (1, Type::Int),
+                (2, Type::Int), (3, Type::Int),
+            ],
+            body: vec![
+                Stmt::VarDecl(0, Type::Int, Some(
+                    call("parse_primary", vec![]))),
+                Stmt::VarDecl(1, Type::Int, Some(lit(1))),
+                Stmt::VarDecl(2, Type::Int, Some(lit(0))),
+                Stmt::VarDecl(3, Type::Int, Some(lit(0))),
+                Stmt::While(var(1), vec![
+                    assign(2, deref(lit(WS_TOK_TYPE))),
+                    Stmt::If(
+                        binop(BinOp::Eq, var(2), lit(TOK_STAR)),
+                        vec![
+                            call_stmt("next_token", vec![]),
+                            assign(3, call("parse_primary", vec![])),
+                            assign(0, binop(BinOp::Mul, var(0), var(3))),
+                        ],
+                        vec![assign(1, lit(0))],
+                    ),
+                ]),
+                Stmt::Return(var(0)),
+            ],
+        };
+
+        // ─── parse_additive() → int ────────────────────────
+        // additive → multiplicative { ('+'|'-') multiplicative }
+        // Locals: left(0), running(1), tok(2), right(3)
+        let fn_parse_add = Function {
+            name: "parse_additive".into(),
+            params: vec![],
+            ret_type: Type::Int,
+            locals: vec![
+                (0, Type::Int), (1, Type::Int),
+                (2, Type::Int), (3, Type::Int),
+            ],
+            body: vec![
+                Stmt::VarDecl(0, Type::Int, Some(
+                    call("parse_multiplicative", vec![]))),
+                Stmt::VarDecl(1, Type::Int, Some(lit(1))),
+                Stmt::VarDecl(2, Type::Int, Some(lit(0))),
+                Stmt::VarDecl(3, Type::Int, Some(lit(0))),
+                Stmt::While(var(1), vec![
+                    assign(2, deref(lit(WS_TOK_TYPE))),
+                    Stmt::If(
+                        binop(BinOp::Eq, var(2), lit(TOK_PLUS)),
+                        vec![
+                            call_stmt("next_token", vec![]),
+                            assign(3, call("parse_multiplicative", vec![])),
+                            assign(0, binop(BinOp::Add, var(0), var(3))),
+                        ],
+                        vec![Stmt::If(
+                            binop(BinOp::Eq, var(2), lit(TOK_MINUS)),
+                            vec![
+                                call_stmt("next_token", vec![]),
+                                assign(3, call("parse_multiplicative", vec![])),
+                                assign(0, binop(BinOp::Sub, var(0), var(3))),
+                            ],
+                            vec![assign(1, lit(0))],
+                        )],
+                    ),
+                ]),
+                Stmt::Return(var(0)),
+            ],
+        };
+
+        // ─── parse_expr() → int ────────────────────────────
+        let fn_parse_expr = Function {
+            name: "parse_expr".into(),
+            params: vec![],
+            ret_type: Type::Int,
+            locals: vec![],
+            body: vec![
+                Stmt::Return(call("parse_additive", vec![])),
+            ],
+        };
+
+        // ─── add_symbol(name, value) ────────────────────────
+        // Add name→value to the fixed symbol table.
+        // Rejects duplicates by setting error.
+        // Params: name(0), value(1)
+        // Locals: count(2), i(3), addr(4), entry_name(5)
+        let fn_add_symbol = Function {
+            name: "add_symbol".into(),
+            params: vec![(0, Type::Int), (1, Type::Int)],
+            ret_type: Type::Int,
+            locals: vec![
+                (2, Type::Int), (3, Type::Int),
+                (4, Type::Int), (5, Type::Int),
+            ],
+            body: vec![
+                Stmt::VarDecl(2, Type::Int, Some(deref(lit(WS_SYM_COUNT)))),
+                Stmt::VarDecl(3, Type::Int, Some(lit(0))),
+                Stmt::VarDecl(4, Type::Int, Some(lit(0))),
+                Stmt::VarDecl(5, Type::Int, Some(lit(0))),
+                // Duplicate check: scan existing entries
+                Stmt::While(binop(BinOp::Lt, var(3), var(2)), vec![
+                    assign(4, binop(BinOp::Add, lit(WS_SYM_TABLE),
+                        binop(BinOp::Mul, var(3), lit(16)))),
+                    assign(5, deref(var(4))),
+                    Stmt::If(
+                        binop(BinOp::Eq, var(5), var(0)),
+                        vec![
+                            deref_assign(lit(WS_ERROR), lit(1)),
+                            Stmt::Return(lit(0)),
+                        ],
+                        vec![],
+                    ),
+                    assign(3, binop(BinOp::Add, var(3), lit(1))),
+                ]),
+                // Add new entry at count * 16
+                assign(4, binop(BinOp::Add, lit(WS_SYM_TABLE),
+                    binop(BinOp::Mul, var(2), lit(16)))),
+                deref_assign(var(4), var(0)),
+                deref_assign(
+                    binop(BinOp::Add, var(4), lit(8)),
+                    var(1)),
+                deref_assign(lit(WS_SYM_COUNT),
+                    binop(BinOp::Add, var(2), lit(1))),
+                Stmt::Return(lit(0)),
+            ],
+        };
+
+        // ─── lookup_symbol(name) → value ────────────────────
+        // Look up name in the symbol table. Sets error if not found.
+        // Params: name(0)
+        // Locals: count(1), i(2), addr(3), entry_name(4)
+        let fn_lookup_symbol = Function {
+            name: "lookup_symbol".into(),
+            params: vec![(0, Type::Int)],
+            ret_type: Type::Int,
+            locals: vec![
+                (1, Type::Int), (2, Type::Int),
+                (3, Type::Int), (4, Type::Int),
+            ],
+            body: vec![
+                Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_SYM_COUNT)))),
+                Stmt::VarDecl(2, Type::Int, Some(lit(0))),
+                Stmt::VarDecl(3, Type::Int, Some(lit(0))),
+                Stmt::VarDecl(4, Type::Int, Some(lit(0))),
+                Stmt::While(binop(BinOp::Lt, var(2), var(1)), vec![
+                    assign(3, binop(BinOp::Add, lit(WS_SYM_TABLE),
+                        binop(BinOp::Mul, var(2), lit(16)))),
+                    assign(4, deref(var(3))),
+                    Stmt::If(
+                        binop(BinOp::Eq, var(4), var(0)),
+                        vec![Stmt::Return(deref(
+                            binop(BinOp::Add, var(3), lit(8))
+                        ))],
+                        vec![],
+                    ),
+                    assign(2, binop(BinOp::Add, var(2), lit(1))),
+                ]),
+                deref_assign(lit(WS_ERROR), lit(1)),
+                Stmt::Return(lit(0)),
+            ],
+        };
+
+        // ─── main() ────────────────────────────────────────
+        // Locals:
+        //   0: src_base, 1: src_len, 2: text_base,
+        //   3: kw_int, 4: kw_ret (temporaries for keyword building),
+        //   5: name, 6: decl_val (var-decl parsing),
+        //   7: value (return expr),
+        //   8: error_flag,
+        //   9: movi_r1, 10: movi_r0, 11: trap_insn, 12: nop_insn,
+        //   13: pair0, 14: pair1, 15: child
+        let fn_main = Function {
+            name: "main".into(),
+            params: vec![],
+            ret_type: Type::Int,
+            locals: vec![
+                (0, Type::Int), (1, Type::Int), (2, Type::Int),
+                (3, Type::Int), (4, Type::Int), (5, Type::Int),
+                (6, Type::Int), (7, Type::Int), (8, Type::Int),
+                (9, Type::Int), (10, Type::Int), (11, Type::Int),
+                (12, Type::Int), (13, Type::Int), (14, Type::Int),
+                (15, Type::Int),
+            ],
+            body: vec![
+                // ─── Source setup ─────────────────────────
+                Stmt::VarDecl(0, Type::Int, Some(lit(0x4000))),
+                Stmt::VarDecl(1, Type::Int, Some(deref(var(0)))),
+                Stmt::VarDecl(2, Type::Int, Some(
+                    binop(BinOp::Add, var(0), lit(8)))),
+
+                // Source metadata guard: reject src_len > 0xFF8
+                Stmt::If(
+                    binop(BinOp::Lt, lit(0xFF8), var(1)),
+                    vec![Stmt::Expr(syscall(SYS_EXIT as u8, vec![lit(-1)]))],
+                    vec![],
+                ),
+
+                // ─── Initialize workspace ────────────────
+                deref_assign(lit(WS_POS), lit(0)),
+                deref_assign(lit(WS_SRC_LEN), var(1)),
+                deref_assign(lit(WS_TEXT_BASE), var(2)),
+                deref_assign(lit(WS_ERROR), lit(0)),
+                deref_assign(lit(WS_SYM_COUNT), lit(0)),
+
+                // ─── Build packed keyword constants ──────
+                // "int": pack 'i'(0x69), 'n'(0x6E), 't'(0x74)
+                Stmt::VarDecl(3, Type::Int, Some(lit(0x69))),
+                assign(3, binop(BinOp::Or,
+                    binop(BinOp::Shl, var(3), lit(8)),
+                    lit(0x6E))),
+                assign(3, binop(BinOp::Or,
+                    binop(BinOp::Shl, var(3), lit(8)),
+                    lit(0x74))),
+                deref_assign(lit(WS_KW_INT), var(3)),
+
+                // "return": pack 'r','e','t','u','r','n'
+                Stmt::VarDecl(4, Type::Int, Some(lit(0x72))),
+                assign(4, binop(BinOp::Or,
+                    binop(BinOp::Shl, var(4), lit(8)),
+                    lit(0x65))),
+                assign(4, binop(BinOp::Or,
+                    binop(BinOp::Shl, var(4), lit(8)),
+                    lit(0x74))),
+                assign(4, binop(BinOp::Or,
+                    binop(BinOp::Shl, var(4), lit(8)),
+                    lit(0x75))),
+                assign(4, binop(BinOp::Or,
+                    binop(BinOp::Shl, var(4), lit(8)),
+                    lit(0x72))),
+                assign(4, binop(BinOp::Or,
+                    binop(BinOp::Shl, var(4), lit(8)),
+                    lit(0x6E))),
+                deref_assign(lit(WS_KW_RETURN), var(4)),
+
+                // ─── Prime the lexer ─────────────────────
+                call_stmt("next_token", vec![]),
+
+                // ─── Parse variable declarations ─────────
+                // while tok_type == INT_KW: parse "int IDENT = expr;"
+                Stmt::VarDecl(5, Type::Int, Some(lit(0))),
+                Stmt::VarDecl(6, Type::Int, Some(lit(0))),
+                Stmt::While(
+                    binop(BinOp::Eq,
+                        deref(lit(WS_TOK_TYPE)),
+                        lit(TOK_INT_KW)),
+                    vec![
+                        call_stmt("next_token", vec![]),     // consume 'int'
+                        // Expect identifier
+                        Stmt::If(
+                            binop(BinOp::Ne,
+                                deref(lit(WS_TOK_TYPE)),
+                                lit(TOK_IDENT)),
+                            vec![deref_assign(lit(WS_ERROR), lit(1))],
+                            vec![],
+                        ),
+                        assign(5, deref(lit(WS_TOK_VALUE))),
+                        call_stmt("next_token", vec![]),     // consume ident
+                        // Expect '='
+                        Stmt::If(
+                            binop(BinOp::Ne,
+                                deref(lit(WS_TOK_TYPE)),
+                                lit(TOK_EQ)),
+                            vec![deref_assign(lit(WS_ERROR), lit(1))],
+                            vec![],
+                        ),
+                        call_stmt("next_token", vec![]),     // consume '='
+                        // Parse initializer expression
+                        assign(6, call("parse_expr", vec![])),
+                        // Expect ';'
+                        Stmt::If(
+                            binop(BinOp::Ne,
+                                deref(lit(WS_TOK_TYPE)),
+                                lit(TOK_SEMI)),
+                            vec![deref_assign(lit(WS_ERROR), lit(1))],
+                            vec![],
+                        ),
+                        call_stmt("next_token", vec![]),     // consume ';'
+                        // Add to symbol table
+                        call_stmt("add_symbol", vec![var(5), var(6)]),
+                    ],
+                ),
+
+                // ─── Parse return statement ──────────────
+                Stmt::If(
+                    binop(BinOp::Ne,
+                        deref(lit(WS_TOK_TYPE)),
+                        lit(TOK_RETURN)),
+                    vec![deref_assign(lit(WS_ERROR), lit(1))],
+                    vec![],
+                ),
+                call_stmt("next_token", vec![]),             // consume 'return'
+                Stmt::VarDecl(7, Type::Int, Some(
+                    call("parse_expr", vec![]))),
+
+                // Expect ';'
+                Stmt::If(
+                    binop(BinOp::Ne,
+                        deref(lit(WS_TOK_TYPE)),
+                        lit(TOK_SEMI)),
+                    vec![deref_assign(lit(WS_ERROR), lit(1))],
+                    vec![],
+                ),
+                call_stmt("next_token", vec![]),             // consume ';'
+
+                // ─── Check EOF ───────────────────────────
+                Stmt::If(
+                    binop(BinOp::Ne,
+                        deref(lit(WS_TOK_TYPE)),
+                        lit(TOK_EOF)),
+                    vec![deref_assign(lit(WS_ERROR), lit(1))],
+                    vec![],
+                ),
+
+                // ─── Check error flag ────────────────────
+                Stmt::VarDecl(8, Type::Int, Some(
+                    deref(lit(WS_ERROR)))),
+                Stmt::If(var(8),
+                    vec![Stmt::Expr(syscall(SYS_EXIT as u8, vec![lit(-1)]))],
+                    vec![],
+                ),
+
+                // ─── Check value range ───────────────────
+                Stmt::If(
+                    binop(BinOp::Lt, lit(131071), var(7)),
+                    vec![Stmt::Expr(syscall(SYS_EXIT as u8, vec![lit(-1)]))],
+                    vec![],
+                ),
+
+                // ─── Code emission ───────────────────────
+                // Same 4-instruction child program as 6B.0/6B.1:
+                //   MOVI R1, value
+                //   MOVI R0, 0
+                //   TRAP #0
+                //   NOP
+                Stmt::VarDecl(9, Type::Int, Some(
+                    binop(BinOp::Or,
+                        binop(BinOp::Or,
+                            binop(BinOp::Shl, lit(22), lit(26)),
+                            binop(BinOp::Shl, lit(1), lit(22)),
+                        ),
+                        var(7),
+                    )
+                )),
+                Stmt::VarDecl(10, Type::Int, Some(
+                    binop(BinOp::Shl, lit(22), lit(26)))),
+                Stmt::VarDecl(11, Type::Int, Some(
+                    binop(BinOp::Shl, lit(57), lit(26)))),
+                Stmt::VarDecl(12, Type::Int, Some(
+                    binop(BinOp::Shl, lit(63), lit(26)))),
+                Stmt::VarDecl(13, Type::Int, Some(
+                    binop(BinOp::Or, var(9),
+                        binop(BinOp::Shl, var(10), lit(32))))),
+                Stmt::VarDecl(14, Type::Int, Some(
+                    binop(BinOp::Or, var(11),
+                        binop(BinOp::Shl, var(12), lit(32))))),
+
+                deref_assign(lit(0x5000), var(13)),
+                deref_assign(
+                    binop(BinOp::Add, lit(0x5000), lit(8)),
+                    var(14)),
+
+                // ─── Seal → Exec ─────────────────────────
+                Stmt::Expr(syscall(SYS_SEAL as u8, vec![lit(0x5000)])),
+                Stmt::VarDecl(15, Type::Int, Some(
+                    syscall(SYS_EXEC as u8, vec![lit(0x5000), lit(16)]))),
+                Stmt::Expr(syscall(SYS_EXIT as u8, vec![var(15)])),
+            ],
+        };
+
+        Program {
+            functions: vec![
+                fn_main, fn_peek_char, fn_advance, fn_skip_ws,
+                fn_set_char_token, fn_scan_number, fn_scan_ident,
+                fn_next_token,
+                fn_parse_primary, fn_parse_mult, fn_parse_add,
+                fn_parse_expr,
+                fn_add_symbol, fn_lookup_symbol,
+            ],
+        }
+    }
+
+    /// Run a 6B.2 test case: guest tokenizer + parser → expected result.
+    fn run_6b2_test(source_text: &[u8], expected_exit: u64, expect_child: bool) {
+        let mut fabric = Fabric::new(0x400000);
+
+        let text   = fabric.alloc_object("compiler_text",  0x4000, ObjectKind::Memory);
+        let source = fabric.alloc_object("source_data",    0x1000, ObjectKind::Memory);
+        let output = fabric.alloc_object("output_buf",     0x1000, ObjectKind::Memory);
+        let work   = fabric.alloc_object("workspace",      0x1000, ObjectKind::Memory);
+        let stack  = fabric.alloc_object("compiler_stack", 0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text,   0x000000);
+        fabric.place_object(source, 0x010000);
+        fabric.place_object(output, 0x020000);
+        fabric.place_object(work,   0x030000);
+        fabric.place_object(stack,  0x040000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, source, 0, 0x1000, Permissions::READ);
+        fabric.grant(dom, output, 0, 0x1000, Permissions::RWS);
+        fabric.grant(dom, work,   0, 0x1000, Permissions::RW);
+        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+
+        let src_len = source_text.len() as u64;
+        fabric.write_physical(0x010000, &src_len.to_le_bytes());
+        fabric.write_physical(0x010008, source_text);
+
+        install_trap_handler(&mut fabric, 0x000000);
+
+        let compiler_prog = build_6b2_compiler();
+        let asm = cc::compile(&compiler_prog);
+        eprintln!("--- 6B.2 listing ---\n{}", asm.listing());
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x04000, 0x1000, source);
+        core.address_map.add(0x05000, 0x1000, output);
+        core.address_map.add(0x06000, 0x1000, work);
+        core.address_map.add(0x07000, 0x4000, stack);
+        core.r[SP as usize] = 0x07000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x050000;
+        kernel.next_agent = 10;
+        kernel.spawn(core);
+        kernel.run(100000, 100000);
+
+        assert!(kernel.processes[0].exited,
+            "compiler process should have exited");
+        assert_eq!(kernel.processes[0].exit_code, expected_exit,
+            "source {:?}: expected exit {}, got {}",
+            std::str::from_utf8(source_text).unwrap_or("<invalid>"),
+            expected_exit, kernel.processes[0].exit_code);
+
+        if expect_child {
+            assert!(kernel.processes.len() >= 2,
+                "expected child process");
+            assert!(kernel.processes[1].exited);
+            assert_eq!(kernel.processes[1].exit_code, expected_exit);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 6B.2 test corpus
+    // ═══════════════════════════════════════════════════════════════
+
+    // ─── Regression: expression-only programs still work ────────
+
+    #[test]
+    fn b2_return_42() {
+        run_6b2_test(b"return 42;", 42, true);
+        eprintln!("6B.2: \"return 42;\" → 42 ✓");
+    }
+
+    #[test]
+    fn b2_return_arithmetic() {
+        run_6b2_test(b"return 2 + 3 * 4;", 14, true);
+        eprintln!("6B.2: \"return 2 + 3 * 4;\" → 14 ✓");
+    }
+
+    #[test]
+    fn b2_return_parens() {
+        run_6b2_test(b"return (2 + 3) * 4;", 20, true);
+        eprintln!("6B.2: \"return (2 + 3) * 4;\" → 20 ✓");
+    }
+
+    #[test]
+    fn b2_left_assoc() {
+        run_6b2_test(b"return 10 - 3 - 2;", 5, true);
+        eprintln!("6B.2: \"return 10 - 3 - 2;\" → 5 ✓");
+    }
+
+    // ─── Basic variable declarations ────────────────────────────
+
+    #[test]
+    fn b2_single_var() {
+        run_6b2_test(b"int x = 42; return x;", 42, true);
+        eprintln!("6B.2: \"int x = 42; return x;\" → 42 ✓");
+    }
+
+    #[test]
+    fn b2_two_vars_addition() {
+        run_6b2_test(b"int x = 40; int y = 2; return x + y;", 42, true);
+        eprintln!("6B.2: \"int x = 40; int y = 2; return x + y;\" → 42 ✓");
+    }
+
+    #[test]
+    fn b2_var_with_expr_init() {
+        run_6b2_test(b"int x = 2 + 3; return x * 4;", 20, true);
+        eprintln!("6B.2: \"int x = 2 + 3; return x * 4;\" → 20 ✓");
+    }
+
+    #[test]
+    fn b2_var_plus_literal() {
+        run_6b2_test(b"int x = 40; return x + 2;", 42, true);
+        eprintln!("6B.2: \"int x = 40; return x + 2;\" → 42 ✓");
+    }
+
+    #[test]
+    fn b2_precedence_with_vars() {
+        run_6b2_test(b"int x = 2; int y = 3; return x + y * 4;", 14, true);
+        eprintln!("6B.2: \"int x = 2; int y = 3; return x + y * 4;\" → 14 ✓");
+    }
+
+    #[test]
+    fn b2_parens_with_vars() {
+        run_6b2_test(b"int x = 2; int y = 3; return (x + y) * 4;", 20, true);
+        eprintln!("6B.2: \"int x = 2; int y = 3; return (x + y) * 4;\" → 20 ✓");
+    }
+
+    // ─── Lexical identity: maximal munch ────────────────────────
+
+    #[test]
+    fn b2_return42_is_ident() {
+        // "return42" is scanned as one identifier, not RETURN + NUMBER.
+        // It's not a keyword, so the parser sees IDENT where it expects
+        // RETURN, setting error.
+        run_6b2_test(b"return42;", u64::MAX, false);
+        eprintln!("6B.2: \"return42;\" → error (maximal munch: one IDENT) ✓");
+    }
+
+    #[test]
+    fn b2_int0_is_ident() {
+        // "int0" is an identifier, not the keyword "int" followed by "0".
+        run_6b2_test(b"int0 x = 1; return x;", u64::MAX, false);
+        eprintln!("6B.2: \"int0 x = 1;\" → error (int0 is IDENT) ✓");
+    }
+
+    // ─── Symbol table: common prefixes ──────────────────────────
+
+    #[test]
+    fn b2_common_prefix() {
+        run_6b2_test(b"int x = 1; int xy = 2; return x + xy;", 3, true);
+        eprintln!("6B.2: \"int x = 1; int xy = 2; return x + xy;\" → 3 ✓");
+    }
+
+    // ─── Symbol table errors ────────────────────────────────────
+
+    #[test]
+    fn b2_duplicate_declaration() {
+        run_6b2_test(b"int x = 1; int x = 2; return x;", u64::MAX, false);
+        eprintln!("6B.2: duplicate declaration → error ✓");
+    }
+
+    #[test]
+    fn b2_use_before_declaration() {
+        run_6b2_test(b"return x;", u64::MAX, false);
+        eprintln!("6B.2: use before declaration → error ✓");
+    }
+
+    #[test]
+    fn b2_unknown_identifier() {
+        run_6b2_test(b"int x = 1; return z;", u64::MAX, false);
+        eprintln!("6B.2: unknown identifier → error ✓");
+    }
+
+    // ─── Syntax errors ──────────────────────────────────────────
+
+    #[test]
+    fn b2_missing_return() {
+        run_6b2_test(b"int x = 42;", u64::MAX, false);
+        eprintln!("6B.2: missing return → error ✓");
+    }
+
+    #[test]
+    fn b2_missing_initializer() {
+        run_6b2_test(b"int x; return x;", u64::MAX, false);
+        eprintln!("6B.2: \"int x;\" (no initializer) → error ✓");
+    }
+
+    #[test]
+    fn b2_missing_semicolon() {
+        run_6b2_test(b"int x = 42 return x;", u64::MAX, false);
+        eprintln!("6B.2: missing semicolon → error ✓");
+    }
+
+    // ─── Overflow guard preserved ───────────────────────────────
+
+    #[test]
+    fn b2_literal_overflow() {
+        run_6b2_test(b"return 131072;", u64::MAX, false);
+        eprintln!("6B.2: \"return 131072;\" → error (overflow) ✓");
+    }
+
+    #[test]
+    fn b2_literal_max_accepted() {
+        run_6b2_test(b"return 131071;", 131071, true);
+        eprintln!("6B.2: \"return 131071;\" → 131071 (MOVI max) ✓");
+    }
+
+    #[test]
+    fn b2_expr_overflow() {
+        run_6b2_test(b"int x = 131070; return x + 2;", u64::MAX, false);
+        eprintln!("6B.2: expr overflow → error ✓");
+    }
+
+    // ─── Multiline source ───────────────────────────────────────
+
+    #[test]
+    fn b2_multiline() {
+        run_6b2_test(b"int x = 40;\nint y = 2;\nreturn x + y;", 42, true);
+        eprintln!("6B.2: multiline source → 42 ✓");
+    }
 }
