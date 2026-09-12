@@ -82,9 +82,11 @@ pub(crate) fn enc_s(opcode: i64) -> Expr {
 // ═══════════════════════════════════════════════════════════
 //  Virtual memory layout — all addresses derived from TEXT_SIZE
 // ═══════════════════════════════════════════════════════════
-// The compiler text object grew past 0x4000 in 6B.5.0b (full
-// expression ladder).  All downstream addresses shift together.
-pub(crate) const TEXT_SIZE: i64     = 0x5000;
+// TEXT_SIZE = align_up(compiled_bytes, 0x1000).
+// The test `text_size_is_derived` enforces this invariant.
+// When the compiler grows past the current page boundary,
+// that test fails with the exact value to set here.
+pub(crate) const TEXT_SIZE: i64     = 0x6000;
 
 // 6B.4+ layout (text at 0, source/output/workspace contiguous):
 //   0x00000 : compiler text    (TEXT_SIZE)
@@ -158,6 +160,7 @@ pub(crate) const TOK_SHR: i64   = 23;   // >>
 pub(crate) const TOK_PIPE: i64  = 24;   // |
 pub(crate) const TOK_AMP: i64   = 25;   // &
 pub(crate) const TOK_BANG: i64  = 26;   // ! (only valid before =)
+pub(crate) const TOK_SYSCALL: i64 = 27; // syscall keyword
 
 
 // ─── ISA encoding constants ──────────────────────
@@ -178,6 +181,7 @@ pub(crate) const OP_LD: i64   = 32;   // 0x20
 pub(crate) const OP_ST: i64   = 33;   // 0x21
 pub(crate) const OP_BCC: i64  = 48;   // 0x30
 pub(crate) const OP_CALL: i64 = 50;   // 0x32
+pub(crate) const OP_TRAP: i64 = 57;   // 0x39
 pub(crate) const OP_RET: i64  = 56;   // 0x38
 pub(crate) const OP_HALT: i64 = 62;   // 0x3E
 pub(crate) const OP_NOP: i64  = 63;   // 0x3F
@@ -682,6 +686,10 @@ pub(crate) fn guest_classify_kw() -> Function {
             Stmt::If(binop(BinOp::Eq, var(1), lit(6)), vec![
                 kw_byte_chain(0, &[114, 101, 116, 117, 114, 110],
                     Stmt::Return(lit(TOK_RETURN))),
+            ], vec![]),
+            Stmt::If(binop(BinOp::Eq, var(1), lit(7)), vec![
+                kw_byte_chain(0, &[115, 121, 115, 99, 97, 108, 108],
+                    Stmt::Return(lit(TOK_SYSCALL))),
             ], vec![]),
             Stmt::Return(lit(TOK_IDENT)),
         ],
@@ -1495,6 +1503,88 @@ pub fn build_6b4_compiler() -> Program {
                         vec![deref_assign(lit(WS_ERROR), lit(1))],
                         vec![call_stmt("next_token", vec![])],
                     ),
+                    Stmt::Return(lit(0)),
+                ], vec![]),
+            // ─── syscall(n, a, b, c) ─────────────────
+            // Reserved builtin: evaluates 4 args, stages R0-R3,
+            // emits TRAP 0, moves R0→R4.
+            Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_SYSCALL)),
+                vec![
+                    call_stmt("next_token", vec![]),
+                    Stmt::If(
+                        binop(BinOp::Ne, deref(lit(WS_TOK_TYPE)),
+                            lit(TOK_LPAREN)),
+                        vec![deref_assign(lit(WS_ERROR), lit(1))],
+                        vec![],
+                    ),
+                    call_stmt("next_token", vec![]),
+                    // Evaluate all 4 args, push each to stack
+                    call_stmt("compile_expr", vec![]),
+                    call_stmt("emit", vec![
+                        enc_i(OP_SUBI, GEN_SP, GEN_SP, lit(8))]),
+                    call_stmt("emit", vec![
+                        enc_i(OP_ST, GEN_R4, GEN_SP, lit(0))]),
+                    Stmt::If(
+                        binop(BinOp::Ne, deref(lit(WS_TOK_TYPE)),
+                            lit(TOK_COMMA)),
+                        vec![deref_assign(lit(WS_ERROR), lit(1))],
+                        vec![],
+                    ),
+                    call_stmt("next_token", vec![]),
+                    call_stmt("compile_expr", vec![]),
+                    call_stmt("emit", vec![
+                        enc_i(OP_SUBI, GEN_SP, GEN_SP, lit(8))]),
+                    call_stmt("emit", vec![
+                        enc_i(OP_ST, GEN_R4, GEN_SP, lit(0))]),
+                    Stmt::If(
+                        binop(BinOp::Ne, deref(lit(WS_TOK_TYPE)),
+                            lit(TOK_COMMA)),
+                        vec![deref_assign(lit(WS_ERROR), lit(1))],
+                        vec![],
+                    ),
+                    call_stmt("next_token", vec![]),
+                    call_stmt("compile_expr", vec![]),
+                    call_stmt("emit", vec![
+                        enc_i(OP_SUBI, GEN_SP, GEN_SP, lit(8))]),
+                    call_stmt("emit", vec![
+                        enc_i(OP_ST, GEN_R4, GEN_SP, lit(0))]),
+                    Stmt::If(
+                        binop(BinOp::Ne, deref(lit(WS_TOK_TYPE)),
+                            lit(TOK_COMMA)),
+                        vec![deref_assign(lit(WS_ERROR), lit(1))],
+                        vec![],
+                    ),
+                    call_stmt("next_token", vec![]),
+                    call_stmt("compile_expr", vec![]),
+                    call_stmt("emit", vec![
+                        enc_i(OP_SUBI, GEN_SP, GEN_SP, lit(8))]),
+                    call_stmt("emit", vec![
+                        enc_i(OP_ST, GEN_R4, GEN_SP, lit(0))]),
+                    Stmt::If(
+                        binop(BinOp::Ne, deref(lit(WS_TOK_TYPE)),
+                            lit(TOK_RPAREN)),
+                        vec![deref_assign(lit(WS_ERROR), lit(1))],
+                        vec![],
+                    ),
+                    call_stmt("next_token", vec![]),
+                    // Pop 4 args into R0-R3:
+                    //   stack: [arg3(SP+0), arg2(SP+8),
+                    //           arg1(SP+16), n(SP+24)]
+                    call_stmt("emit", vec![
+                        enc_i(OP_LD, GEN_R0, GEN_SP, lit(24))]),
+                    call_stmt("emit", vec![
+                        enc_i(OP_LD, 1, GEN_SP, lit(16))]),
+                    call_stmt("emit", vec![
+                        enc_i(OP_LD, 2, GEN_SP, lit(8))]),
+                    call_stmt("emit", vec![
+                        enc_i(OP_LD, 3, GEN_SP, lit(0))]),
+                    call_stmt("emit", vec![
+                        enc_i(OP_ADDI, GEN_SP, GEN_SP, lit(32))]),
+                    // TRAP 0 → kernel handles syscall
+                    call_stmt("emit", vec![enc_s(OP_TRAP)]),
+                    // Result: R0 → R4
+                    call_stmt("emit", vec![
+                        enc_r(OP_MOV, GEN_R4, GEN_R0, 0)]),
                     Stmt::Return(lit(0)),
                 ], vec![]),
             deref_assign(lit(WS_ERROR), lit(1)),
