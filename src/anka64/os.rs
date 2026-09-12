@@ -50,6 +50,37 @@ struct Message {
 }
 
 // ───────────────────────────────────────────────────────────────────
+// HALT classification — one authoritative rule (Rule 28)
+//
+// Three machine events collapse into StepResult::Halted, but they
+// have completely different process-level meanings.  This function
+// is the single point of truth consumed by both the scheduler
+// (run_process) and synchronous SYS_EXEC (run_to_completion).
+// ───────────────────────────────────────────────────────────────────
+
+#[derive(Debug, PartialEq, Eq)]
+enum HaltDisposition {
+    /// User-mode HALT: _start's HALT after main returns.
+    /// Implicit SYS_EXIT with exit_code = R0.
+    UserExit(u64),
+    /// Supervisor HALT at the trap gate: TRAP → handler → HALT.
+    /// R0 = syscall number.
+    Syscall,
+    /// Supervisor HALT not at the trap gate: kernel halt/panic.
+    SupervisorFault,
+}
+
+fn classify_halt(core: &Anka64Core) -> HaltDisposition {
+    if core.privilege == Privilege::Supervisor && core.pc == core.trap_vector {
+        HaltDisposition::Syscall
+    } else if core.privilege == Privilege::Supervisor {
+        HaltDisposition::SupervisorFault
+    } else {
+        HaltDisposition::UserExit(core.r[R0 as usize])
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────
 // Kernel
 // ───────────────────────────────────────────────────────────────────
 
@@ -118,25 +149,21 @@ impl Kernel {
             match result {
                 super::core::StepResult::Continue => {}
                 super::core::StepResult::Halted => {
-                    let core = &self.processes[idx].core;
-                    if core.privilege == Privilege::Supervisor
-                        && core.pc == core.trap_vector
-                    {
-                        // Supervisor HALT at the trap gate: TRAP → handler
-                        // → HALT.  R0 = syscall number.
-                        self.handle_syscall(idx);
-                    } else if core.privilege == Privilege::Supervisor {
-                        // Supervisor HALT elsewhere: kernel halt/panic.
-                        eprintln!("Process {} supervisor halt at {:#x} (not trap gate {:#x})",
-                            self.processes[idx].pid, core.pc, core.trap_vector);
-                        self.processes[idx].exited = true;
-                        self.processes[idx].exit_code = 0xDEAD;
-                    } else {
-                        // User HALT: _start's HALT after main returns.
-                        // Implicit SYS_EXIT with exit_code = R0.
-                        let proc = &mut self.processes[idx];
-                        proc.exit_code = proc.core.r[R0 as usize];
-                        proc.exited = true;
+                    match classify_halt(&self.processes[idx].core) {
+                        HaltDisposition::Syscall => {
+                            self.handle_syscall(idx);
+                        }
+                        HaltDisposition::SupervisorFault => {
+                            let core = &self.processes[idx].core;
+                            eprintln!("Process {} supervisor halt at {:#x} (not trap gate {:#x})",
+                                self.processes[idx].pid, core.pc, core.trap_vector);
+                            self.processes[idx].exited = true;
+                            self.processes[idx].exit_code = 0xDEAD;
+                        }
+                        HaltDisposition::UserExit(code) => {
+                            self.processes[idx].exit_code = code;
+                            self.processes[idx].exited = true;
+                        }
                     }
                     return;
                 }
@@ -373,19 +400,19 @@ impl Kernel {
             match result {
                 super::core::StepResult::Continue => {}
                 super::core::StepResult::Halted => {
-                    let core = &self.processes[idx].core;
-                    if core.privilege == Privilege::Supervisor
-                        && core.pc == core.trap_vector
-                    {
-                        self.handle_syscall(idx);
-                    } else if core.privilege == Privilege::Supervisor {
-                        self.processes[idx].exited = true;
-                        self.processes[idx].exit_code = 0xDEAD;
-                        return;
-                    } else {
-                        let proc = &mut self.processes[idx];
-                        proc.exit_code = proc.core.r[R0 as usize];
-                        proc.exited = true;
+                    match classify_halt(&self.processes[idx].core) {
+                        HaltDisposition::Syscall => {
+                            self.handle_syscall(idx);
+                        }
+                        HaltDisposition::SupervisorFault => {
+                            self.processes[idx].exited = true;
+                            self.processes[idx].exit_code = 0xDEAD;
+                            return;
+                        }
+                        HaltDisposition::UserExit(code) => {
+                            self.processes[idx].exit_code = code;
+                            self.processes[idx].exited = true;
+                        }
                     }
                 }
                 super::core::StepResult::Fault(f) => {
@@ -3686,5 +3713,42 @@ mod tests {
         assert_eq!(kernel.processes[0].exit_code, 0xDEAD,
             "illegal instruction must produce fault exit (0xDEAD), not user HALT");
         eprintln!("halt: illegal opcode → IllegalInstruction fault → exit 0xDEAD ✓");
+    }
+
+    /// Supervisor HALT at PC ≠ trap_vector → 0xDEAD.
+    ///
+    /// Places a core in Supervisor mode at a HALT instruction that is
+    /// NOT at the trap gate.  The kernel must treat this as a
+    /// supervisor fault, not a syscall.
+    #[test]
+    fn halt_supervisor_not_at_gate() {
+        let mut fabric = Fabric::new(0x400000);
+        let text = fabric.alloc_object("text", 0x4000, ObjectKind::Memory);
+        fabric.place_object(text, 0x0000);
+
+        let dom = fabric.create_domain();
+
+        // Write HALT at word 0 (physical 0x0000).
+        let mut asm = Asm64::new();
+        asm.halt();
+        fabric.write_physical(0x0000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x0000, 0x4000, text);
+        core.trap_vector = 0x3FF0;
+        // Force supervisor mode — as if TRAP had elevated privilege
+        // but we jumped somewhere other than the trap gate.
+        core.privilege = Privilege::Supervisor;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.run(100, 100);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, 0xDEAD,
+            "supervisor HALT not at trap gate must produce 0xDEAD");
+        eprintln!("halt: supervisor HALT at PC=0x0000 (not gate 0x3FF0) → 0xDEAD ✓");
+        eprintln!("     classify_halt → SupervisorFault");
     }
 }
