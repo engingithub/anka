@@ -6008,43 +6008,52 @@ mod tests {
                                 lit(TOK_LPAREN)),
                             vec![
                                 // Function call: IDENT ( args )
-                                call_stmt("next_token", vec![]),   // consume (
+                                // 6B.4.2a: SP-push staging — each arg
+                                // evaluated fully before the next begins.
+                                call_stmt("next_token", vec![]),
                                 Stmt::VarDecl(2, Type::Int, Some(lit(0))),
-                                // Parse arguments: expr [, expr]*
+                                // Parse and push arguments to stack
                                 Stmt::If(
                                     binop(BinOp::Ne,
                                         deref(lit(WS_TOK_TYPE)),
                                         lit(TOK_RPAREN)),
                                     vec![
-                                        // At least one argument
                                         call_stmt("compile_expr", vec![]),
-                                        // Result in R4 → MOV R0, R4
+                                        // push R4
                                         call_stmt("emit", vec![
-                                            enc_r(OP_MOV, GEN_R0, GEN_R4, 0)]),
+                                            enc_i(OP_SUBI, GEN_SP, GEN_SP,
+                                                lit(8))]),
+                                        call_stmt("emit", vec![
+                                            enc_i(OP_ST, GEN_R4, GEN_SP,
+                                                lit(0))]),
                                         assign(2, lit(1)),
-                                        // More arguments?
                                         Stmt::While(
                                             binop(BinOp::Eq,
                                                 deref(lit(WS_TOK_TYPE)),
                                                 lit(TOK_COMMA)),
                                             vec![
                                                 Stmt::If(
-                                                    binop(BinOp::Le, lit(4), var(2)),
+                                                    binop(BinOp::Le,
+                                                        lit(4), var(2)),
                                                     vec![
-                                                        deref_assign(lit(WS_ERROR), lit(1)),
+                                                        deref_assign(
+                                                            lit(WS_ERROR),
+                                                            lit(1)),
                                                         Stmt::Return(lit(0)),
                                                     ],
                                                     vec![],
                                                 ),
-                                                call_stmt("next_token", vec![]),
-                                                call_stmt("compile_expr", vec![]),
-                                                // R4 → Rn (n = argc, runtime value)
+                                                call_stmt("next_token",
+                                                    vec![]),
+                                                call_stmt("compile_expr",
+                                                    vec![]),
+                                                // push R4
                                                 call_stmt("emit", vec![
-                                                    binop(BinOp::Or,
-                                                        binop(BinOp::Or,
-                                                            binop(BinOp::Shl, lit(OP_MOV), lit(26)),
-                                                            binop(BinOp::Shl, var(2), lit(22))),
-                                                        binop(BinOp::Shl, lit(GEN_R4), lit(18)))]),
+                                                    enc_i(OP_SUBI, GEN_SP,
+                                                        GEN_SP, lit(8))]),
+                                                call_stmt("emit", vec![
+                                                    enc_i(OP_ST, GEN_R4,
+                                                        GEN_SP, lit(0))]),
                                                 assign(2, binop(BinOp::Add,
                                                     var(2), lit(1))),
                                             ],
@@ -6060,7 +6069,48 @@ mod tests {
                                     vec![deref_assign(lit(WS_ERROR), lit(1))],
                                     vec![],
                                 ),
-                                call_stmt("next_token", vec![]),   // consume )
+                                call_stmt("next_token", vec![]),
+                                // Load staged args: arg[i] at
+                                // [SP, (argc-1-i)*8]
+                                Stmt::If(binop(BinOp::Lt, lit(0), var(2)),
+                                    vec![call_stmt("emit", vec![
+                                        enc_i(OP_LD, GEN_R0, GEN_SP,
+                                            binop(BinOp::Mul,
+                                                binop(BinOp::Sub,
+                                                    var(2), lit(1)),
+                                                lit(8)))])],
+                                    vec![]),
+                                Stmt::If(binop(BinOp::Lt, lit(1), var(2)),
+                                    vec![call_stmt("emit", vec![
+                                        enc_i(OP_LD, 1, GEN_SP,
+                                            binop(BinOp::Mul,
+                                                binop(BinOp::Sub,
+                                                    var(2), lit(2)),
+                                                lit(8)))])],
+                                    vec![]),
+                                Stmt::If(binop(BinOp::Lt, lit(2), var(2)),
+                                    vec![call_stmt("emit", vec![
+                                        enc_i(OP_LD, 2, GEN_SP,
+                                            binop(BinOp::Mul,
+                                                binop(BinOp::Sub,
+                                                    var(2), lit(3)),
+                                                lit(8)))])],
+                                    vec![]),
+                                Stmt::If(binop(BinOp::Lt, lit(3), var(2)),
+                                    vec![call_stmt("emit", vec![
+                                        enc_i(OP_LD, 3, GEN_SP,
+                                            binop(BinOp::Mul,
+                                                binop(BinOp::Sub,
+                                                    var(2), lit(4)),
+                                                lit(8)))])],
+                                    vec![]),
+                                // Pop all staged args
+                                Stmt::If(binop(BinOp::Lt, lit(0), var(2)),
+                                    vec![call_stmt("emit", vec![
+                                        enc_i(OP_ADDI, GEN_SP, GEN_SP,
+                                            binop(BinOp::Mul,
+                                                var(2), lit(8)))])],
+                                    vec![]),
                                 // Record fixup with argc
                                 assign(0, deref(lit(WS_OUT_POS))),
                                 call_stmt("emit", vec![
@@ -7093,5 +7143,81 @@ mod tests {
             b"int main() { return unknown(42); }",
             u64::MAX, false);
         eprintln!("6B.4.1: unknown function → error ✓");
+    }
+
+    // ─── 6B.4.2a: argument staging ─────────────────────
+
+    #[test]
+    fn b42_nested_call_arg0() {
+        // add(id(40), 2) — call in first argument
+        run_6b4_test(
+            b"int id(int x) { return x; } int add(int a, int b) { return a + b; } int main() { return add(id(40), 2); }",
+            42, true);
+        eprintln!("6B.4.2a: add(id(40), 2) → 42 ✓");
+    }
+
+    #[test]
+    fn b42_nested_call_arg1() {
+        // add(40, id(2)) — call in second argument
+        run_6b4_test(
+            b"int id(int x) { return x; } int add(int a, int b) { return a + b; } int main() { return add(40, id(2)); }",
+            42, true);
+        eprintln!("6B.4.2a: add(40, id(2)) → 42 ✓");
+    }
+
+    #[test]
+    fn b42_nested_call_both() {
+        // add(id(40), id(2)) — calls in both arguments
+        run_6b4_test(
+            b"int id(int x) { return x; } int add(int a, int b) { return a + b; } int main() { return add(id(40), id(2)); }",
+            42, true);
+        eprintln!("6B.4.2a: add(id(40), id(2)) → 42 ✓");
+    }
+
+    #[test]
+    fn b42_zero_arg_calls_as_args() {
+        // add(g(), h()) — zero-arg calls as arguments
+        run_6b4_test(
+            b"int g() { return 40; } int h() { return 2; } int add(int a, int b) { return a + b; } int main() { return add(g(), h()); }",
+            42, true);
+        eprintln!("6B.4.2a: add(g(), h()) → 42 ✓");
+    }
+
+    // ─── 6B.4.2b: expression preservation across CALL ──
+
+    #[test]
+    fn b42_expr_plus_call() {
+        // 40 + id(2) — left operand must survive CALL
+        run_6b4_test(
+            b"int id(int x) { return x; } int main() { return 40 + id(2); }",
+            42, true);
+        eprintln!("6B.4.2b: 40 + id(2) → 42 ✓");
+    }
+
+    #[test]
+    fn b42_call_plus_literal() {
+        // id(40) + 2 — call result combined with literal
+        run_6b4_test(
+            b"int id(int x) { return x; } int main() { return id(40) + 2; }",
+            42, true);
+        eprintln!("6B.4.2b: id(40) + 2 → 42 ✓");
+    }
+
+    #[test]
+    fn b42_call_minus_call() {
+        // id(50) - id(8) — both sides are calls
+        run_6b4_test(
+            b"int id(int x) { return x; } int main() { return id(50) - id(8); }",
+            42, true);
+        eprintln!("6B.4.2b: id(50) - id(8) → 42 ✓");
+    }
+
+    #[test]
+    fn b42_call_times_literal() {
+        // id(6) * 7 — call in multiply left
+        run_6b4_test(
+            b"int id(int x) { return x; } int main() { return id(6) * 7; }",
+            42, true);
+        eprintln!("6B.4.2b: id(6) * 7 → 42 ✓");
     }
 }
