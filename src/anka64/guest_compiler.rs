@@ -83,20 +83,19 @@ pub(crate) fn enc_s(opcode: i64) -> Expr {
 //  Virtual memory layout — all addresses derived from TEXT_SIZE
 // ═══════════════════════════════════════════════════════════
 // TEXT_SIZE = align_up(compiled_bytes, 0x1000).
+// TEXT_SIZE: page-aligned upper bound on the code region.
+// Must accommodate the HOST compiler (CC_A, ~21KB).
+// CC_B (the canonical binary, ~57KB) runs at a separate base
+// address so it doesn't overlap with data regions at TEXT_SIZE.
 // The test `text_size_is_derived` enforces this invariant.
-// When the compiler grows past the current page boundary,
-// that test fails with the exact value to set here.
 pub(crate) const TEXT_SIZE: i64     = 0x6000;
 
 // 6B.4+ layout (text at 0, source/output/workspace contiguous):
-//   0x00000 : compiler text    (TEXT_SIZE)
-//   TEXT_SIZE : source data    (0x1000)
-//   TEXT_SIZE+0x00000 : source   (0x4000)  — 16KB canonical source text
-//   TEXT_SIZE+0x04000 : output   (0x10000) — 64KB compiled child binary
-//   TEXT_SIZE+0x00000 : source   (0x4000)  — 16KB canonical source text
-//   TEXT_SIZE+0x04000 : output   (0x10000) — 64KB compiled child binary
-//   TEXT_SIZE+0x14000 : workspace (0x6000)  — 24KB, includes fixup table
-//   TEXT_SIZE+0x1A000 : stack    (0x4000)
+//   0x00000             : compiler text  (TEXT_SIZE = 64KB)
+//   TEXT_SIZE+0x00000   : source         (0x4000 = 16KB)
+//   TEXT_SIZE+0x04000   : output         (0x10000 = 64KB)
+//   TEXT_SIZE+0x14000   : workspace      (0x6000 = 24KB)
+//   TEXT_SIZE+0x1A000   : stack          (0x4000 = 16KB)
 pub(crate) const LAYOUT_SRC: i64   = TEXT_SIZE;
 pub(crate) const SOURCE_SIZE: i64  = 0x4000;
 pub(crate) const LAYOUT_OUT: i64   = TEXT_SIZE + 0x4000;
