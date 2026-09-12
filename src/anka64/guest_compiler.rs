@@ -91,13 +91,15 @@ pub(crate) const TEXT_SIZE: i64     = 0x6000;
 // 6B.4+ layout (text at 0, source/output/workspace contiguous):
 //   0x00000 : compiler text    (TEXT_SIZE)
 //   TEXT_SIZE : source data    (0x1000)
-//   TEXT_SIZE+0x1000 : output  (0x1000)
-//   TEXT_SIZE+0x2000 : workspace (0x1000)
-//   TEXT_SIZE+0x3000 : stack   (0x4000)
+//   TEXT_SIZE+0x1000 : output  (0x4000) — 16KB for canonical source
+//   TEXT_SIZE+0x5000 : workspace (0x2000) — grown for fixup table
+//   TEXT_SIZE+0x7000 : stack   (0x4000)
 pub(crate) const LAYOUT_SRC: i64   = TEXT_SIZE;
 pub(crate) const LAYOUT_OUT: i64   = TEXT_SIZE + 0x1000;
-pub(crate) const LAYOUT_WS: i64    = TEXT_SIZE + 0x2000;
-pub(crate) const LAYOUT_STACK: i64 = TEXT_SIZE + 0x3000;
+pub(crate) const OUTPUT_SIZE: i64  = 0x4000;
+pub(crate) const LAYOUT_WS: i64    = TEXT_SIZE + 0x5000;
+pub(crate) const WS_SIZE: i64      = 0x2000;
+pub(crate) const LAYOUT_STACK: i64 = TEXT_SIZE + 0x7000;
 
 // ═══════════════════════════════════════════════════════════
 //  Shared workspace layout — addresses within workspace object
@@ -123,12 +125,12 @@ pub(crate) const WS_OUT_POS: i64        = LAYOUT_WS + 0x048;
 pub(crate) const WS_EXPR_SP: i64        = LAYOUT_WS + 0x050;
 pub(crate) const WS_FUNC_COUNT: i64     = LAYOUT_WS + 0x058;
 pub(crate) const WS_FIX_COUNT: i64      = LAYOUT_WS + 0x060;
-// Symbol table: 32 entries × 24 bytes
+// Symbol table: 32 entries × 24 bytes = 0x300
 pub(crate) const WS_SYM_TABLE: i64      = LAYOUT_WS + 0x068;
-// Function table: 16 entries × 32 bytes
+// Function table: 32 entries × 32 bytes = 0x400
 pub(crate) const WS_FUNC_TABLE: i64     = LAYOUT_WS + 0x368;
-// Fixup table: 32 entries × 32 bytes
-pub(crate) const WS_FIX_TABLE: i64      = LAYOUT_WS + 0x568;
+// Fixup table: 128 entries × 32 bytes = 0x1000
+pub(crate) const WS_FIX_TABLE: i64      = LAYOUT_WS + 0x768;
 // ─── Token types (same as 6B.3) ──────────────────
 
 // ─── Token types ──────────────────────────────────
@@ -984,7 +986,7 @@ pub fn build_6b4_compiler() -> Program {
         body: vec![
             Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_OUT_POS)))),
             Stmt::If(
-                binop(BinOp::Lt, lit(0xFF8), var(1)),
+                binop(BinOp::Lt, lit(OUTPUT_SIZE - 8), var(1)),
                 vec![
                     deref_assign(lit(WS_ERROR), lit(1)),
                     Stmt::Return(lit(0)),
@@ -1209,7 +1211,7 @@ pub fn build_6b4_compiler() -> Program {
         body: vec![
             Stmt::VarDecl(4, Type::Int, Some(deref(lit(WS_FIX_COUNT)))),
             Stmt::If(
-                binop(BinOp::Le, lit(32), var(4)),
+                binop(BinOp::Le, lit(128), var(4)),
                 vec![
                     deref_assign(lit(WS_ERROR), lit(1)),
                     Stmt::Return(lit(0)),
@@ -1342,10 +1344,109 @@ pub fn build_6b4_compiler() -> Program {
         ],
     };
 
+    // ─── compile_call(ns, nl) ──────────────────────
+    // Shared call-expression compiler used by both
+    // compile_primary (ident(...)) and compile_stmt (ident(...);).
+    // At entry, current token is '('.
+    // Params: ns(0)=name_start, nl(1)=name_len
+    // Locals: argc(2), code_pos(3)
+    let fn_compile_call = Function {
+        name: "compile_call".into(),
+        params: vec![(0, Type::Int), (1, Type::Int)],
+        ret_type: Type::Int,
+        locals: vec![(2, Type::Int), (3, Type::Int)],
+        body: vec![
+            call_stmt("next_token", vec![]),
+            Stmt::VarDecl(2, Type::Int, Some(lit(0))),
+            Stmt::If(
+                binop(BinOp::Ne,
+                    deref(lit(WS_TOK_TYPE)), lit(TOK_RPAREN)),
+                vec![
+                    call_stmt("compile_expr", vec![]),
+                    call_stmt("emit", vec![
+                        enc_i(OP_SUBI, GEN_SP, GEN_SP, lit(8))]),
+                    call_stmt("emit", vec![
+                        enc_i(OP_ST, GEN_R4, GEN_SP, lit(0))]),
+                    assign(2, lit(1)),
+                    Stmt::While(
+                        binop(BinOp::Eq,
+                            deref(lit(WS_TOK_TYPE)), lit(TOK_COMMA)),
+                        vec![
+                            Stmt::If(
+                                binop(BinOp::Le, lit(4), var(2)),
+                                vec![
+                                    deref_assign(lit(WS_ERROR), lit(1)),
+                                    Stmt::Return(lit(0)),
+                                ],
+                                vec![],
+                            ),
+                            call_stmt("next_token", vec![]),
+                            call_stmt("compile_expr", vec![]),
+                            call_stmt("emit", vec![
+                                enc_i(OP_SUBI, GEN_SP, GEN_SP, lit(8))]),
+                            call_stmt("emit", vec![
+                                enc_i(OP_ST, GEN_R4, GEN_SP, lit(0))]),
+                            assign(2, binop(BinOp::Add, var(2), lit(1))),
+                        ],
+                    ),
+                ],
+                vec![],
+            ),
+            Stmt::If(
+                binop(BinOp::Ne,
+                    deref(lit(WS_TOK_TYPE)), lit(TOK_RPAREN)),
+                vec![deref_assign(lit(WS_ERROR), lit(1))],
+                vec![],
+            ),
+            call_stmt("next_token", vec![]),
+            Stmt::If(binop(BinOp::Lt, lit(0), var(2)),
+                vec![call_stmt("emit", vec![
+                    enc_i(OP_LD, GEN_R0, GEN_SP,
+                        binop(BinOp::Mul,
+                            binop(BinOp::Sub, var(2), lit(1)),
+                            lit(8)))])],
+                vec![]),
+            Stmt::If(binop(BinOp::Lt, lit(1), var(2)),
+                vec![call_stmt("emit", vec![
+                    enc_i(OP_LD, 1, GEN_SP,
+                        binop(BinOp::Mul,
+                            binop(BinOp::Sub, var(2), lit(2)),
+                            lit(8)))])],
+                vec![]),
+            Stmt::If(binop(BinOp::Lt, lit(2), var(2)),
+                vec![call_stmt("emit", vec![
+                    enc_i(OP_LD, 2, GEN_SP,
+                        binop(BinOp::Mul,
+                            binop(BinOp::Sub, var(2), lit(3)),
+                            lit(8)))])],
+                vec![]),
+            Stmt::If(binop(BinOp::Lt, lit(3), var(2)),
+                vec![call_stmt("emit", vec![
+                    enc_i(OP_LD, 3, GEN_SP,
+                        binop(BinOp::Mul,
+                            binop(BinOp::Sub, var(2), lit(4)),
+                            lit(8)))])],
+                vec![]),
+            Stmt::If(binop(BinOp::Lt, lit(0), var(2)),
+                vec![call_stmt("emit", vec![
+                    enc_i(OP_ADDI, GEN_SP, GEN_SP,
+                        binop(BinOp::Mul, var(2), lit(8)))])],
+                vec![]),
+            assign(3, deref(lit(WS_OUT_POS))),
+            call_stmt("emit", vec![
+                binop(BinOp::Shl, lit(OP_CALL), lit(26))]),
+            call_stmt("add_fixup", vec![
+                var(3), var(0), var(1), var(2)]),
+            call_stmt("emit", vec![
+                enc_r(OP_MOV, GEN_R4, GEN_R0, 0)]),
+            Stmt::Return(lit(0)),
+        ],
+    };
+
     // ─── compile_primary() ─────────────────────────
     // Source-slice version: saves name_start/name_len
     // before consuming more tokens.
-    // Locals: tok(0), ns(1), nl(2), argc(3)
+    // Locals: tok(0), ns(1), nl(2)
     let fn_compile_primary = Function {
         name: "compile_primary".into(),
         params: vec![],
@@ -1377,110 +1478,8 @@ pub fn build_6b4_compiler() -> Program {
                         binop(BinOp::Eq, deref(lit(WS_TOK_TYPE)),
                             lit(TOK_LPAREN)),
                         vec![
-                            // Function call: IDENT ( args )
-                            call_stmt("next_token", vec![]),
-                            Stmt::VarDecl(3, Type::Int, Some(lit(0))),
-                            Stmt::If(
-                                binop(BinOp::Ne,
-                                    deref(lit(WS_TOK_TYPE)),
-                                    lit(TOK_RPAREN)),
-                                vec![
-                                    call_stmt("compile_expr", vec![]),
-                                    call_stmt("emit", vec![
-                                        enc_i(OP_SUBI, GEN_SP, GEN_SP,
-                                            lit(8))]),
-                                    call_stmt("emit", vec![
-                                        enc_i(OP_ST, GEN_R4, GEN_SP,
-                                            lit(0))]),
-                                    assign(3, lit(1)),
-                                    Stmt::While(
-                                        binop(BinOp::Eq,
-                                            deref(lit(WS_TOK_TYPE)),
-                                            lit(TOK_COMMA)),
-                                        vec![
-                                            Stmt::If(
-                                                binop(BinOp::Le,
-                                                    lit(4), var(3)),
-                                                vec![
-                                                    deref_assign(
-                                                        lit(WS_ERROR),
-                                                        lit(1)),
-                                                    Stmt::Return(lit(0)),
-                                                ],
-                                                vec![],
-                                            ),
-                                            call_stmt("next_token",
-                                                vec![]),
-                                            call_stmt("compile_expr",
-                                                vec![]),
-                                            call_stmt("emit", vec![
-                                                enc_i(OP_SUBI, GEN_SP,
-                                                    GEN_SP, lit(8))]),
-                                            call_stmt("emit", vec![
-                                                enc_i(OP_ST, GEN_R4,
-                                                    GEN_SP, lit(0))]),
-                                            assign(3, binop(BinOp::Add,
-                                                var(3), lit(1))),
-                                        ],
-                                    ),
-                                ],
-                                vec![],
-                            ),
-                            Stmt::If(
-                                binop(BinOp::Ne,
-                                    deref(lit(WS_TOK_TYPE)),
-                                    lit(TOK_RPAREN)),
-                                vec![deref_assign(lit(WS_ERROR), lit(1))],
-                                vec![],
-                            ),
-                            call_stmt("next_token", vec![]),
-                            Stmt::If(binop(BinOp::Lt, lit(0), var(3)),
-                                vec![call_stmt("emit", vec![
-                                    enc_i(OP_LD, GEN_R0, GEN_SP,
-                                        binop(BinOp::Mul,
-                                            binop(BinOp::Sub,
-                                                var(3), lit(1)),
-                                            lit(8)))])],
-                                vec![]),
-                            Stmt::If(binop(BinOp::Lt, lit(1), var(3)),
-                                vec![call_stmt("emit", vec![
-                                    enc_i(OP_LD, 1, GEN_SP,
-                                        binop(BinOp::Mul,
-                                            binop(BinOp::Sub,
-                                                var(3), lit(2)),
-                                            lit(8)))])],
-                                vec![]),
-                            Stmt::If(binop(BinOp::Lt, lit(2), var(3)),
-                                vec![call_stmt("emit", vec![
-                                    enc_i(OP_LD, 2, GEN_SP,
-                                        binop(BinOp::Mul,
-                                            binop(BinOp::Sub,
-                                                var(3), lit(3)),
-                                            lit(8)))])],
-                                vec![]),
-                            Stmt::If(binop(BinOp::Lt, lit(3), var(3)),
-                                vec![call_stmt("emit", vec![
-                                    enc_i(OP_LD, 3, GEN_SP,
-                                        binop(BinOp::Mul,
-                                            binop(BinOp::Sub,
-                                                var(3), lit(4)),
-                                            lit(8)))])],
-                                vec![]),
-                            Stmt::If(binop(BinOp::Lt, lit(0), var(3)),
-                                vec![call_stmt("emit", vec![
-                                    enc_i(OP_ADDI, GEN_SP, GEN_SP,
-                                        binop(BinOp::Mul,
-                                            var(3), lit(8)))])],
-                                vec![]),
-                            // Record fixup with name_start, name_len, argc
-                            assign(0, deref(lit(WS_OUT_POS))),
-                            call_stmt("emit", vec![
-                                binop(BinOp::Shl,
-                                    lit(OP_CALL), lit(26))]),
-                            call_stmt("add_fixup", vec![
-                                var(0), var(1), var(2), var(3)]),
-                            call_stmt("emit", vec![
-                                enc_r(OP_MOV, GEN_R4, GEN_R0, 0)]),
+                            call_stmt("compile_call",
+                                vec![var(1), var(2)]),
                         ],
                         vec![
                             // Variable reference: LD R4, [FP, offset]
@@ -2098,31 +2097,54 @@ pub fn build_6b4_compiler() -> Program {
                     s
                 }, vec![]),
 
-            // ─── IDENT = expr; (assignment) ────────────
+            // ─── IDENT ( args ); or IDENT = expr; ─────
             Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_IDENT)),
                 vec![
                     assign(1, deref(lit(WS_TOK_NAME_START))),
                     assign(3, deref(lit(WS_TOK_NAME_LEN))),
                     call_stmt("next_token", vec![]),
                     Stmt::If(
-                        binop(BinOp::Ne,
-                            deref(lit(WS_TOK_TYPE)), lit(TOK_EQ)),
-                        vec![deref_assign(lit(WS_ERROR), lit(1))],
-                        vec![],
+                        binop(BinOp::Eq,
+                            deref(lit(WS_TOK_TYPE)), lit(TOK_LPAREN)),
+                        // Function call as statement
+                        vec![
+                            call_stmt("compile_call",
+                                vec![var(1), var(3)]),
+                            Stmt::If(
+                                binop(BinOp::Ne,
+                                    deref(lit(WS_TOK_TYPE)),
+                                    lit(TOK_SEMI)),
+                                vec![deref_assign(lit(WS_ERROR), lit(1))],
+                                vec![],
+                            ),
+                            call_stmt("next_token", vec![]),
+                            Stmt::Return(lit(0)),
+                        ],
+                        // Assignment
+                        vec![
+                            Stmt::If(
+                                binop(BinOp::Ne,
+                                    deref(lit(WS_TOK_TYPE)), lit(TOK_EQ)),
+                                vec![deref_assign(lit(WS_ERROR), lit(1))],
+                                vec![],
+                            ),
+                            call_stmt("next_token", vec![]),
+                            call_stmt("compile_expr", vec![]),
+                            Stmt::If(
+                                binop(BinOp::Ne,
+                                    deref(lit(WS_TOK_TYPE)),
+                                    lit(TOK_SEMI)),
+                                vec![deref_assign(lit(WS_ERROR), lit(1))],
+                                vec![],
+                            ),
+                            call_stmt("next_token", vec![]),
+                            assign(2, call("lookup_symbol",
+                                vec![var(1), var(3)])),
+                            call_stmt("emit", vec![
+                                enc_i(OP_ST, GEN_R4, GEN_FP, var(2))]),
+                            Stmt::Return(lit(0)),
+                        ],
                     ),
-                    call_stmt("next_token", vec![]),
-                    call_stmt("compile_expr", vec![]),
-                    Stmt::If(
-                        binop(BinOp::Ne,
-                            deref(lit(WS_TOK_TYPE)), lit(TOK_SEMI)),
-                        vec![deref_assign(lit(WS_ERROR), lit(1))],
-                        vec![],
-                    ),
-                    call_stmt("next_token", vec![]),
-                    assign(2, call("lookup_symbol", vec![var(1), var(3)])),
-                    call_stmt("emit", vec![
-                        enc_i(OP_ST, GEN_R4, GEN_FP, var(2))]),
-                    Stmt::Return(lit(0)),
                 ], vec![]),
 
             deref_assign(lit(WS_ERROR), lit(1)),
@@ -2428,7 +2450,7 @@ pub fn build_6b4_compiler() -> Program {
     let mut functions = vec![fn_main];
     functions.extend(guest_lexer());
     functions.extend(vec![
-        fn_compile_primary, fn_compile_unary,
+        fn_compile_call, fn_compile_primary, fn_compile_unary,
         fn_compile_mult, fn_compile_add, fn_compile_shift,
         fn_compile_bit_and, fn_compile_bit_or,
         fn_compile_relational, fn_compile_equality,
