@@ -91,15 +91,17 @@ pub(crate) const TEXT_SIZE: i64     = 0x6000;
 // 6B.4+ layout (text at 0, source/output/workspace contiguous):
 //   0x00000 : compiler text    (TEXT_SIZE)
 //   TEXT_SIZE : source data    (0x1000)
-//   TEXT_SIZE+0x1000 : output  (0x4000) — 16KB for canonical source
-//   TEXT_SIZE+0x5000 : workspace (0x2000) — grown for fixup table
-//   TEXT_SIZE+0x7000 : stack   (0x4000)
+//   TEXT_SIZE+0x00000 : source   (0x4000)  — 16KB canonical source text
+//   TEXT_SIZE+0x04000 : output   (0x10000) — 64KB compiled child binary
+//   TEXT_SIZE+0x14000 : workspace (0x4000)  — 16KB, includes fixup table
+//   TEXT_SIZE+0x18000 : stack    (0x4000)
 pub(crate) const LAYOUT_SRC: i64   = TEXT_SIZE;
-pub(crate) const LAYOUT_OUT: i64   = TEXT_SIZE + 0x1000;
-pub(crate) const OUTPUT_SIZE: i64  = 0x4000;
-pub(crate) const LAYOUT_WS: i64    = TEXT_SIZE + 0x5000;
-pub(crate) const WS_SIZE: i64      = 0x2000;
-pub(crate) const LAYOUT_STACK: i64 = TEXT_SIZE + 0x7000;
+pub(crate) const SOURCE_SIZE: i64  = 0x4000;
+pub(crate) const LAYOUT_OUT: i64   = TEXT_SIZE + 0x4000;
+pub(crate) const OUTPUT_SIZE: i64  = 0x10000;
+pub(crate) const LAYOUT_WS: i64    = TEXT_SIZE + 0x14000;
+pub(crate) const WS_SIZE: i64      = 0x4000;
+pub(crate) const LAYOUT_STACK: i64 = TEXT_SIZE + 0x18000;
 
 // ═══════════════════════════════════════════════════════════
 //  Shared workspace layout — addresses within workspace object
@@ -127,10 +129,10 @@ pub(crate) const WS_FUNC_COUNT: i64     = LAYOUT_WS + 0x058;
 pub(crate) const WS_FIX_COUNT: i64      = LAYOUT_WS + 0x060;
 // Symbol table: 32 entries × 24 bytes = 0x300
 pub(crate) const WS_SYM_TABLE: i64      = LAYOUT_WS + 0x068;
-// Function table: 32 entries × 32 bytes = 0x400
+// Function table: 64 entries × 32 bytes = 0x800
 pub(crate) const WS_FUNC_TABLE: i64     = LAYOUT_WS + 0x368;
 // Fixup table: 128 entries × 32 bytes = 0x1000
-pub(crate) const WS_FIX_TABLE: i64      = LAYOUT_WS + 0x768;
+pub(crate) const WS_FIX_TABLE: i64      = LAYOUT_WS + 0xB68;
 // ─── Token types (same as 6B.3) ──────────────────
 
 // ─── Token types ──────────────────────────────────
@@ -1110,7 +1112,7 @@ pub fn build_6b4_compiler() -> Program {
         body: vec![
             Stmt::VarDecl(3, Type::Int, Some(deref(lit(WS_FUNC_COUNT)))),
             Stmt::If(
-                binop(BinOp::Le, lit(16), var(3)),
+                binop(BinOp::Le, lit(64), var(3)),
                 vec![
                     deref_assign(lit(WS_ERROR), lit(1)),
                     Stmt::Return(lit(0)),
@@ -1211,7 +1213,7 @@ pub fn build_6b4_compiler() -> Program {
         body: vec![
             Stmt::VarDecl(4, Type::Int, Some(deref(lit(WS_FIX_COUNT)))),
             Stmt::If(
-                binop(BinOp::Le, lit(128), var(4)),
+                binop(BinOp::Le, lit(256), var(4)),
                 vec![
                     deref_assign(lit(WS_ERROR), lit(1)),
                     Stmt::Return(lit(0)),
@@ -2388,7 +2390,7 @@ pub fn build_6b4_compiler() -> Program {
                 binop(BinOp::Add, var(0), lit(8)))),
 
             Stmt::If(
-                binop(BinOp::Lt, lit(0xFF8), var(1)),
+                binop(BinOp::Lt, lit(SOURCE_SIZE - 8), var(1)),
                 vec![Stmt::Return(lit(-1))],
                 vec![],
             ),

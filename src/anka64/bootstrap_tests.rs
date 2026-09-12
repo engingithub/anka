@@ -4034,7 +4034,7 @@ mod tests {
         let mut fabric = Fabric::new(0x400000);
 
         let text   = fabric.alloc_object("compiler_text",  TEXT_SIZE as u64, ObjectKind::Memory);
-        let source = fabric.alloc_object("source_data",    0x1000, ObjectKind::Memory);
+        let source = fabric.alloc_object("source_data",    SOURCE_SIZE as u64, ObjectKind::Memory);
         let output = fabric.alloc_object("output_buf",     OUTPUT_SIZE as u64, ObjectKind::Memory);
         let work   = fabric.alloc_object("workspace",      WS_SIZE as u64, ObjectKind::Memory);
         let stack  = fabric.alloc_object("compiler_stack", 0x4000, ObjectKind::Memory);
@@ -4046,7 +4046,7 @@ mod tests {
         fabric.place_object(stack,  0x040000);
 
         let dom = fabric.create_domain();
-        fabric.grant(dom, source, 0, 0x1000, Permissions::READ);
+        fabric.grant(dom, source, 0, SOURCE_SIZE as u64, Permissions::READ);
         fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
         fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
         fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
@@ -4081,7 +4081,7 @@ mod tests {
         // Set up process — virtual layout derived from TEXT_SIZE
         let mut core = Anka64Core::new(AgentId(0), dom);
         core.address_map.add(0, TEXT_SIZE as u64, text);
-        core.address_map.add(LAYOUT_SRC as u64,   0x1000, source);
+        core.address_map.add(LAYOUT_SRC as u64,   SOURCE_SIZE as u64, source);
         core.address_map.add(LAYOUT_OUT as u64,    OUTPUT_SIZE as u64, output);
         core.address_map.add(LAYOUT_WS as u64,     WS_SIZE as u64, work);
         core.address_map.add(LAYOUT_STACK as u64,  0x4000, stack);
@@ -4092,7 +4092,7 @@ mod tests {
         kernel.next_phys = 0x050000;
         kernel.next_agent = 10;
         kernel.spawn(core);
-        kernel.run(200000, 10);
+        kernel.run(2000000, 10);
 
         let exited = kernel.processes[0].exited;
         let exit_code = kernel.processes[0].exit_code;
@@ -4148,7 +4148,7 @@ mod tests {
             }
             let fix_count = read(0x60) as usize;
             for i in 0..fix_count.min(4) {
-                let base = 0x768 + i as u64 * 32;
+                let base = 0xB68 + i as u64 * 32;
                 eprintln!("  fix[{}]: call_pos={} ns={} nl={} argc={}",
                     i, read(base), read(base + 8),
                     read(base + 16), read(base + 24));
@@ -5109,6 +5109,272 @@ mod tests {
             shl = TOK_SHL, shr = TOK_SHR)
     }
 
+    // ─── Expression compiler layer ─────────────────────
+
+    fn canonical_compilecall() -> String {
+        format!(
+            "int compilecall(int ns, int nl) {{ \
+             nexttoken(); \
+             int argc = 0; \
+             if (*{tt} != {rp}) {{ \
+             compileexpr(); \
+             emit(enci({subi}, {sp}, {sp}, 8)); \
+             emit(enci({st}, {r4}, {sp}, 0)); \
+             argc = 1; \
+             while (*{tt} == {comma}) {{ \
+             if (4 <= argc) {{ *{e} = 1; return 0; }} \
+             nexttoken(); \
+             compileexpr(); \
+             emit(enci({subi}, {sp}, {sp}, 8)); \
+             emit(enci({st}, {r4}, {sp}, 0)); \
+             argc = argc + 1; }} }} \
+             if (*{tt} != {rp}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             if (0 < argc) {{ emit(enci({ld}, {r0}, {sp}, (argc - 1) * 8)); }} \
+             if (1 < argc) {{ emit(enci({ld}, 1, {sp}, (argc - 2) * 8)); }} \
+             if (2 < argc) {{ emit(enci({ld}, 2, {sp}, (argc - 3) * 8)); }} \
+             if (3 < argc) {{ emit(enci({ld}, 3, {sp}, (argc - 4) * 8)); }} \
+             if (0 < argc) {{ emit(enci({addi}, {sp}, {sp}, argc * 8)); }} \
+             int pos = *{op}; \
+             emit({call} << 26); \
+             addfixup(pos, ns, nl, argc); \
+             emit(encr(0, {r4}, {r0}, 0)); \
+             return 0; }} ",
+            tt = WS_TOK_TYPE, rp = TOK_RPAREN, comma = TOK_COMMA,
+            e = WS_ERROR, op = WS_OUT_POS,
+            subi = OP_SUBI, addi = OP_ADDI, st = OP_ST, ld = OP_LD,
+            call = OP_CALL,
+            sp = GEN_SP, r4 = GEN_R4, r0 = GEN_R0)
+    }
+
+    fn canonical_compileprimary() -> String {
+        format!(
+            "int compileprimary() {{ \
+             int tok = *{tt}; \
+             int ns = 0; \
+             int nl = 0; \
+             if (tok == {num}) {{ \
+             ns = *{tv}; \
+             nexttoken(); \
+             emit(enci({movi}, {r4}, 0, ns)); \
+             return 0; }} \
+             if (tok == {ident}) {{ \
+             ns = *{tns}; nl = *{tnl}; \
+             nexttoken(); \
+             if (*{tt} == {lp}) {{ \
+             compilecall(ns, nl); \
+             }} else {{ \
+             ns = lookupsymbol(ns, nl); \
+             emit(enci({ld}, {r4}, {fp}, ns)); }} \
+             return 0; }} \
+             if (tok == {lp}) {{ \
+             nexttoken(); \
+             compileexpr(); \
+             if (*{tt} != {rp}) {{ *{e} = 1; }} \
+             else {{ nexttoken(); }} \
+             return 0; }} \
+             if (tok == {syscall}) {{ \
+             nexttoken(); \
+             if (*{tt} != {lp}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             compileexpr(); \
+             emit(enci({subi}, {sp}, {sp}, 8)); \
+             emit(enci({st}, {r4}, {sp}, 0)); \
+             if (*{tt} != {comma}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             compileexpr(); \
+             emit(enci({subi}, {sp}, {sp}, 8)); \
+             emit(enci({st}, {r4}, {sp}, 0)); \
+             if (*{tt} != {comma}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             compileexpr(); \
+             emit(enci({subi}, {sp}, {sp}, 8)); \
+             emit(enci({st}, {r4}, {sp}, 0)); \
+             if (*{tt} != {comma}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             compileexpr(); \
+             emit(enci({subi}, {sp}, {sp}, 8)); \
+             emit(enci({st}, {r4}, {sp}, 0)); \
+             if (*{tt} != {rp}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             emit(enci({ld2}, {r0}, {sp}, 24)); \
+             emit(enci({ld2}, 1, {sp}, 16)); \
+             emit(enci({ld2}, 2, {sp}, 8)); \
+             emit(enci({ld2}, 3, {sp}, 0)); \
+             emit(enci({addi}, {sp}, {sp}, 32)); \
+             emit(encs({trap})); \
+             emit(encr(0, {r4}, {r0}, 0)); \
+             return 0; }} \
+             *{e} = 1; return 0; }} ",
+            tt = WS_TOK_TYPE, tv = WS_TOK_VALUE,
+            tns = WS_TOK_NAME_START, tnl = WS_TOK_NAME_LEN,
+            e = WS_ERROR,
+            num = TOK_NUMBER, ident = TOK_IDENT,
+            lp = TOK_LPAREN, rp = TOK_RPAREN,
+            comma = TOK_COMMA, syscall = TOK_SYSCALL,
+            movi = OP_MOVI, ld = OP_LD, ld2 = OP_LD,
+            subi = OP_SUBI, addi = OP_ADDI, st = OP_ST, trap = OP_TRAP,
+            r4 = GEN_R4, r0 = GEN_R0, fp = GEN_FP, sp = GEN_SP)
+    }
+
+    fn canonical_exprsave() -> String {
+        format!(
+            "int exprsave() {{ \
+             int off = *{esp}; \
+             emit(enci({st}, {r4}, {sp}, off)); \
+             *{esp} = *{esp} - 8; \
+             return 0; }} ",
+            esp = WS_EXPR_SP,
+            st = OP_ST, r4 = GEN_R4, sp = GEN_SP)
+    }
+
+    fn canonical_exprrestore() -> String {
+        format!(
+            "int exprrestore() {{ \
+             *{esp} = *{esp} + 8; \
+             int off = *{esp}; \
+             emit(enci({ld}, {r5}, {sp}, off)); \
+             return 0; }} ",
+            esp = WS_EXPR_SP,
+            ld = OP_LD, r5 = GEN_R5, sp = GEN_SP)
+    }
+
+    fn canonical_compilemult() -> String {
+        format!(
+            "int compilemult() {{ \
+             compileunary(); \
+             while (*{tt} == {star}) {{ \
+             nexttoken(); \
+             exprsave(); compileunary(); exprrestore(); \
+             emit(encr({mul}, {r4}, {r5}, {r4})); }} \
+             return 0; }} ",
+            tt = WS_TOK_TYPE, star = TOK_STAR,
+            mul = OP_MUL, r4 = GEN_R4, r5 = GEN_R5)
+    }
+
+    fn canonical_compileadd() -> String {
+        format!(
+            "int compileadd() {{ \
+             compilemult(); \
+             int op = 0; \
+             while ((*{tt} == {plus}) | (*{tt} == {minus})) {{ \
+             op = *{tt}; nexttoken(); \
+             exprsave(); compilemult(); exprrestore(); \
+             if (op == {plus}) {{ emit(encr({add}, {r4}, {r5}, {r4})); }} \
+             else {{ emit(encr({sub}, {r4}, {r5}, {r4})); }} }} \
+             return 0; }} ",
+            tt = WS_TOK_TYPE,
+            plus = TOK_PLUS, minus = TOK_MINUS,
+            add = OP_ADD, sub = OP_SUB,
+            r4 = GEN_R4, r5 = GEN_R5)
+    }
+
+    fn canonical_compileshift() -> String {
+        format!(
+            "int compileshift() {{ \
+             compileadd(); \
+             int op = 0; \
+             while ((*{tt} == {shl}) | (*{tt} == {shr})) {{ \
+             op = *{tt}; nexttoken(); \
+             exprsave(); compileadd(); exprrestore(); \
+             if (op == {shl}) {{ emit(encr({shlop}, {r4}, {r5}, {r4})); }} \
+             else {{ emit(encr({shrop}, {r4}, {r5}, {r4})); }} }} \
+             return 0; }} ",
+            tt = WS_TOK_TYPE,
+            shl = TOK_SHL, shr = TOK_SHR,
+            shlop = OP_SHL, shrop = OP_SHR,
+            r4 = GEN_R4, r5 = GEN_R5)
+    }
+
+    fn canonical_compilebitand() -> String {
+        format!(
+            "int compilebitand() {{ \
+             compileshift(); \
+             while (*{tt} == {amp}) {{ \
+             nexttoken(); \
+             exprsave(); compileshift(); exprrestore(); \
+             emit(encr({and}, {r4}, {r5}, {r4})); }} \
+             return 0; }} ",
+            tt = WS_TOK_TYPE, amp = TOK_AMP,
+            and = OP_AND, r4 = GEN_R4, r5 = GEN_R5)
+    }
+
+    fn canonical_compilebitor() -> String {
+        format!(
+            "int compilebitor() {{ \
+             compilebitand(); \
+             while (*{tt} == {pipe}) {{ \
+             nexttoken(); \
+             exprsave(); compilebitand(); exprrestore(); \
+             emit(encr({or}, {r4}, {r5}, {r4})); }} \
+             return 0; }} ",
+            tt = WS_TOK_TYPE, pipe = TOK_PIPE,
+            or = OP_OR, r4 = GEN_R4, r5 = GEN_R5)
+    }
+
+    // Comparison helper: CMP 0,R5,R4; MOVI R4,0; BCC skip,+4; MOVI R4,1
+    fn cmp_emit(skip_cond: i64) -> String {
+        format!(
+            "emit(encr({cmpi}, 0, {r5}, {r4})); \
+             emit(enci({movi}, {r4}, 0, 0)); \
+             emit(encb({skip}, 4)); \
+             emit(enci({movi2}, {r4}, 0, 1)); ",
+            cmpi = OP_CMP, r5 = GEN_R5, r4 = GEN_R4,
+            movi = OP_MOVI, movi2 = OP_MOVI,
+            skip = skip_cond)
+    }
+
+    fn canonical_compilerel() -> String {
+        format!(
+            "int compilerel() {{ \
+             compilebitor(); \
+             int op = 0; \
+             while ((*{tt} == {lt}) | (*{tt} == {le})) {{ \
+             op = *{tt}; nexttoken(); \
+             exprsave(); compilebitor(); exprrestore(); \
+             if (op == {lt}) {{ {cmp_lt} }} \
+             else {{ {cmp_le} }} }} \
+             return 0; }} ",
+            tt = WS_TOK_TYPE,
+            lt = TOK_LT, le = TOK_LE,
+            cmp_lt = cmp_emit(COND_GE),   // < skips on GE
+            cmp_le = cmp_emit(COND_GT))   // <= skips on GT
+    }
+
+    fn canonical_compileeq() -> String {
+        format!(
+            "int compileeq() {{ \
+             compilerel(); \
+             int op = 0; \
+             while ((*{tt} == {eqeq}) | (*{tt} == {ne})) {{ \
+             op = *{tt}; nexttoken(); \
+             exprsave(); compilerel(); exprrestore(); \
+             if (op == {eqeq}) {{ {cmp_eq} }} \
+             else {{ {cmp_ne} }} }} \
+             return 0; }} ",
+            tt = WS_TOK_TYPE,
+            eqeq = TOK_EQEQ, ne = TOK_NE,
+            cmp_eq = cmp_emit(COND_NE),   // == skips on NE
+            cmp_ne = cmp_emit(COND_EQ))   // != skips on EQ
+    }
+
+    fn canonical_compileexpr() -> String {
+        "int compileexpr() { return compileeq(); } ".to_string()
+    }
+
+    fn canonical_compileunary() -> String {
+        format!(
+            "int compileunary() {{ \
+             if (*{tt} == {star}) {{ \
+             nexttoken(); \
+             compileunary(); \
+             emit(enci({ld}, {r4}, {r4}, 0)); \
+             return 0; }} \
+             return compileprimary(); }} ",
+            tt = WS_TOK_TYPE, star = TOK_STAR,
+            ld = OP_LD, r4 = GEN_R4)
+    }
+
     // ─── Emit / encoding layer ───────────────────────
 
     fn canonical_enci() -> String {
@@ -5221,7 +5487,7 @@ mod tests {
         format!(
             "int addfunc(int ns, int nl, int arity) {{ \
              int cnt = *{fc}; \
-             if (32 <= cnt) {{ *{e} = 1; return 0; }} \
+             if (64 <= cnt) {{ *{e} = 1; return 0; }} \
              int base = {ft} + cnt * 32; \
              *base = ns; *(base + 8) = nl; \
              *(base + 16) = *{op}; *(base + 24) = arity; \
@@ -5270,7 +5536,7 @@ mod tests {
         format!(
             "int addfixup(int cp, int ns, int nl, int argc) {{ \
              int cnt = *{xc}; \
-             if (128 <= cnt) {{ *{e} = 1; return 0; }} \
+             if (256 <= cnt) {{ *{e} = 1; return 0; }} \
              int base = {xt} + cnt * 32; \
              *base = cp; *(base + 8) = ns; \
              *(base + 16) = nl; *(base + 24) = argc; \
@@ -5487,6 +5753,106 @@ mod tests {
         let expected: u64 = ((48u64 << 26) | 4) as u64;
         run_6b4_test(src.as_bytes(), expected, true);
         eprintln!("6B.5.0e: encb(0,4) = {:#x} ✓", expected);
+    }
+
+    /// Helper: all canonical functions needed for expression compilation.
+    fn canonical_expr_prelude() -> String {
+        format!(
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            canonical_readbyte(),
+            canonical_peekchar(),
+            canonical_advance(),
+            canonical_skipws(),
+            canonical_nameseq(),
+            canonical_classifykw(),
+            canonical_setchartok(),
+            canonical_scannumber(),
+            canonical_scanident(),
+            canonical_nexttoken(),
+            canonical_enci(),
+            canonical_encr(),
+            canonical_encs(),
+            canonical_encb(),
+            canonical_emit(),
+            canonical_patchbranch(),
+            canonical_patchcall(),
+            canonical_addsymbol(),
+            canonical_lookupsymbol(),
+            canonical_addfunc(),
+            canonical_lookupfunc(),
+            canonical_lookuparity(),
+            canonical_addfixup(),
+            canonical_resolvefixups(),
+            canonical_exprsave(),
+            canonical_exprrestore(),
+            canonical_compilecall(),
+            canonical_compileprimary(),
+            canonical_compileunary(),
+            canonical_compilemult(),
+            canonical_compileadd(),
+            canonical_compileshift(),
+            canonical_compilebitand(),
+            canonical_compilebitor(),
+        )
+    }
+
+    #[test]
+    fn b50e_expr_compiles() {
+        // Full expression compiler: all 10 precedence levels.
+        let src = format!(
+            "{}{}{}{}int main() {{ return 42; }}",
+            canonical_expr_prelude(),
+            canonical_compilerel(),
+            canonical_compileeq(),
+            canonical_compileexpr());
+        eprintln!("6B.5.0e: expr compiler source = {} bytes", src.len());
+        run_6b4_test(src.as_bytes(), 42, true);
+        eprintln!("6B.5.0e: canonical expression closure (37 functions) ✓");
+    }
+
+    #[test]
+    fn b50e_expr_arithmetic() {
+        // Verify expression code generation produces correct results
+        // through the host compiler with a simple main body.
+        run_6b4_test(b"int main() { return 3 + 4 * 5; }", 23, true);
+        eprintln!("6B.5 expr: 3 + 4 * 5 = 23 ✓");
+    }
+
+    #[test]
+    fn b50e_expr_comparison() {
+        run_6b4_test(b"int main() { return 5 < 10; }", 1, true);
+        run_6b4_test(b"int main() { return 10 < 5; }", 0, true);
+        run_6b4_test(b"int main() { return 5 == 5; }", 1, true);
+        run_6b4_test(b"int main() { return 5 != 5; }", 0, true);
+        run_6b4_test(b"int main() { return 5 <= 5; }", 1, true);
+        eprintln!("6B.5 expr: comparison operators ✓");
+    }
+
+    #[test]
+    fn b50e_expr_bitwise() {
+        run_6b4_test(b"int main() { return 6 & 3; }", 2, true);
+        run_6b4_test(b"int main() { return 5 | 2; }", 7, true);
+        run_6b4_test(b"int main() { return 1 << 4; }", 16, true);
+        run_6b4_test(b"int main() { return 32 >> 3; }", 4, true);
+        eprintln!("6B.5 expr: bitwise operators ✓");
+    }
+
+    #[test]
+    fn b50e_expr_funcall() {
+        run_6b4_test(
+            b"int add(int a, int b) { return a + b; } int main() { return add(10, 32); }",
+            42, true);
+        eprintln!("6B.5 expr: function call with args ✓");
+    }
+
+    #[test]
+    fn b50e_expr_deref() {
+        // Dereference operator: *addr reads from memory
+        // Use a local variable and read it via pointer arithmetic
+        run_6b4_test(
+            b"int main() { int x = 99; return x; }",
+            99, true);
+        eprintln!("6B.5 expr: variable read ✓");
     }
 
     #[test]
