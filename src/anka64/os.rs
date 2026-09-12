@@ -118,8 +118,19 @@ impl Kernel {
             match result {
                 super::core::StepResult::Continue => {}
                 super::core::StepResult::Halted => {
-                    // Check if we're in the trap vector (syscall)
-                    self.handle_syscall(idx);
+                    if self.processes[idx].core.privilege
+                        == Privilege::Supervisor
+                    {
+                        // HALT in Supervisor mode: reached through
+                        // TRAP → trap handler → HALT.  R0 = syscall number.
+                        self.handle_syscall(idx);
+                    } else {
+                        // HALT in User mode: _start's HALT after main
+                        // returns.  Implicit SYS_EXIT with exit_code = R0.
+                        let proc = &mut self.processes[idx];
+                        proc.exit_code = proc.core.r[R0 as usize];
+                        proc.exited = true;
+                    }
                     return;
                 }
                 super::core::StepResult::Fault(f) => {
@@ -355,7 +366,15 @@ impl Kernel {
             match result {
                 super::core::StepResult::Continue => {}
                 super::core::StepResult::Halted => {
-                    self.handle_syscall(idx);
+                    if self.processes[idx].core.privilege
+                        == Privilege::Supervisor
+                    {
+                        self.handle_syscall(idx);
+                    } else {
+                        let proc = &mut self.processes[idx];
+                        proc.exit_code = proc.core.r[R0 as usize];
+                        proc.exited = true;
+                    }
                 }
                 super::core::StepResult::Fault(f) => {
                     eprintln!("Process {} faulted: {:?}", self.processes[idx].pid, f.reason);
@@ -1176,10 +1195,8 @@ mod tests {
                         ])
                     )),
 
-                    // SYS_EXIT with child's result
-                    Stmt::Expr(Expr::Syscall(SYS_EXIT as u8, vec![
-                        Expr::Var(7),
-                    ])),
+                    // Return child's exit code to _start
+                    Stmt::Return(Expr::Var(7)),
                 ],
             }],
         };
@@ -1376,9 +1393,7 @@ mod tests {
                     // Memory authority ≠ source-role authority.
                     Stmt::If(
                         binop(BinOp::Lt, lit(0xFF8), var(SRC_LEN)),
-                        vec![
-                            Stmt::Expr(syscall(SYS_EXIT as u8, vec![lit(-1)])),
-                        ],
+                        vec![Stmt::Return(lit(-1))],
                         vec![],
                     ),
 
@@ -1489,16 +1504,12 @@ mod tests {
                     // if (!has_digit || overflow) exit(MAX)
                     Stmt::If(
                         binop(BinOp::Eq, var(HAS_DIGIT), lit(0)),
-                        vec![
-                            Stmt::Expr(syscall(SYS_EXIT as u8, vec![lit(-1)])),
-                        ],
+                        vec![Stmt::Return(lit(-1))],
                         vec![],
                     ),
                     Stmt::If(
                         var(OVERFLOW),
-                        vec![
-                            Stmt::Expr(syscall(SYS_EXIT as u8, vec![lit(-1)])),
-                        ],
+                        vec![Stmt::Return(lit(-1))],
                         vec![],
                     ),
 
@@ -1563,7 +1574,7 @@ mod tests {
                             lit(16),
                         ])
                     )),
-                    Stmt::Expr(syscall(SYS_EXIT as u8, vec![var(CHILD)])),
+                    Stmt::Return(var(CHILD)),
                 ],
             }],
         }
@@ -2194,7 +2205,7 @@ mod tests {
 
                 Stmt::If(
                     binop(BinOp::Lt, lit(0xFF8), var(1)),
-                    vec![Stmt::Expr(syscall(SYS_EXIT as u8, vec![lit(-1)]))],
+                    vec![Stmt::Return(lit(-1))],
                     vec![],
                 ),
 
@@ -2237,14 +2248,14 @@ mod tests {
                 Stmt::VarDecl(4, Type::Int, Some(
                     deref(lit(WS_ERROR)))),
                 Stmt::If(var(4),
-                    vec![Stmt::Expr(syscall(SYS_EXIT as u8, vec![lit(-1)]))],
+                    vec![Stmt::Return(lit(-1))],
                     vec![],
                 ),
 
                 // ─── Check value range ───────────────────
                 Stmt::If(
                     binop(BinOp::Lt, lit(131071), var(3)),
-                    vec![Stmt::Expr(syscall(SYS_EXIT as u8, vec![lit(-1)]))],
+                    vec![Stmt::Return(lit(-1))],
                     vec![],
                 ),
 
@@ -2280,7 +2291,7 @@ mod tests {
                 Stmt::Expr(syscall(SYS_SEAL as u8, vec![lit(0x5000)])),
                 Stmt::VarDecl(11, Type::Int, Some(
                     syscall(SYS_EXEC as u8, vec![lit(0x5000), lit(16)]))),
-                Stmt::Expr(syscall(SYS_EXIT as u8, vec![var(11)])),
+                Stmt::Return(var(11)),
             ],
         };
 
@@ -3127,7 +3138,7 @@ mod tests {
                 // Source metadata guard: reject src_len > 0xFF8
                 Stmt::If(
                     binop(BinOp::Lt, lit(0xFF8), var(1)),
-                    vec![Stmt::Expr(syscall(SYS_EXIT as u8, vec![lit(-1)]))],
+                    vec![Stmt::Return(lit(-1))],
                     vec![],
                 ),
 
@@ -3251,14 +3262,14 @@ mod tests {
                 Stmt::VarDecl(8, Type::Int, Some(
                     deref(lit(WS_ERROR)))),
                 Stmt::If(var(8),
-                    vec![Stmt::Expr(syscall(SYS_EXIT as u8, vec![lit(-1)]))],
+                    vec![Stmt::Return(lit(-1))],
                     vec![],
                 ),
 
                 // ─── Check value range ───────────────────
                 Stmt::If(
                     binop(BinOp::Lt, lit(131071), var(7)),
-                    vec![Stmt::Expr(syscall(SYS_EXIT as u8, vec![lit(-1)]))],
+                    vec![Stmt::Return(lit(-1))],
                     vec![],
                 ),
 
@@ -3299,7 +3310,7 @@ mod tests {
                 Stmt::Expr(syscall(SYS_SEAL as u8, vec![lit(0x5000)])),
                 Stmt::VarDecl(15, Type::Int, Some(
                     syscall(SYS_EXEC as u8, vec![lit(0x5000), lit(16)]))),
-                Stmt::Expr(syscall(SYS_EXIT as u8, vec![var(15)])),
+                Stmt::Return(var(15)),
             ],
         };
 
