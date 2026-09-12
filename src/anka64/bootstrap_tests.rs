@@ -4031,6 +4031,13 @@ mod tests {
 
     /// Run a 6B.4 test case: guest compiler with functions → expected result.
     fn run_6b4_test(source_text: &[u8], expected_exit: u64, expect_child: bool) {
+        let kernel = run_6b4_harness(source_text, expected_exit, expect_child);
+        // Discard kernel — caller doesn't need it.
+        drop(kernel);
+    }
+
+    /// Run the 6B.4 harness and return the Kernel for output inspection.
+    fn run_6b4_harness(source_text: &[u8], expected_exit: u64, expect_child: bool) -> Kernel {
         let mut fabric = Fabric::new(0x400000);
 
         let text   = fabric.alloc_object("compiler_text",  TEXT_SIZE as u64, ObjectKind::Memory);
@@ -4178,6 +4185,7 @@ mod tests {
             assert!(kernel.processes[1].exited);
             assert_eq!(kernel.processes[1].exit_code, expected_exit);
         }
+        kernel
     }
 
     // ═══════════════════════════════════════════════════════
@@ -4919,6 +4927,50 @@ mod tests {
             b"int main() { return syscall(0, syscall(1, 55, 0, 0) + 33, 0, 0); }",
             33, true);
         eprintln!("6B.5.0d: nested syscall ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════
+    //  7.3 — Buffer-based SYS_WRITE through guest compiler
+    // ═══════════════════════════════════════════════════════
+    //
+    // The demanding client for 7.3:
+    //   int main() { int s = "İzmir"; syscall(1, s + 8, *s, 0); return 0; }
+    //
+    // Observable result: six UTF-8 bytes C4 B0 7A 6D 69 72.
+
+    #[test]
+    fn p73_write_hello() {
+        // "hello" → 5 ASCII bytes: 68 65 6C 6C 6F
+        // Uses return-expression form: compile_stmt handles return,
+        // compile_expr handles syscall().  SYS_WRITE returns 0 on success.
+        let kernel = run_6b4_harness(
+            b"int main() { int s = \"hello\"; return syscall(1, s + 8, *s, 0); }",
+            0, true);
+        assert_eq!(&kernel.byte_output, b"hello",
+            "byte_output should be ASCII \"hello\"");
+        eprintln!("7.3: write_hello → {:?} ✓", &kernel.byte_output);
+    }
+
+    #[test]
+    fn p73_write_empty() {
+        // "" → length 0 → SYS_WRITE(addr, 0, 0) → no output, success
+        let kernel = run_6b4_harness(
+            b"int main() { int s = \"\"; return syscall(1, s + 8, *s, 0); }",
+            0, true);
+        assert!(kernel.byte_output.is_empty(),
+            "empty string should produce no output");
+        eprintln!("7.3: write_empty → {:?} ✓", &kernel.byte_output);
+    }
+
+    #[test]
+    fn p73_write_izmir() {
+        // "İzmir" → 6 UTF-8 bytes: C4 B0 7A 6D 69 72
+        let kernel = run_6b4_harness(
+            b"int main() { int s = \"\xC4\xB0zmir\"; return syscall(1, s + 8, *s, 0); }",
+            0, true);
+        assert_eq!(&kernel.byte_output, b"\xC4\xB0zmir",
+            "byte_output should be UTF-8 İzmir");
+        eprintln!("7.3: write_izmir → {:02X?} ✓", &kernel.byte_output);
     }
 
     // ═══════════════════════════════════════════════════════
@@ -6821,6 +6873,12 @@ mod tests {
     /// CC_B compiles the test source, seals output, executes the child.
     /// The child's exit code propagates through CC_B → returned here.
     fn run_ccb_test(ccb: &[u8], test_source: &[u8], expected_exit: u64) {
+        let kernel = run_ccb_harness(ccb, test_source, expected_exit);
+        drop(kernel);
+    }
+
+    /// CC_B harness returning the Kernel for byte_output inspection.
+    fn run_ccb_harness(ccb: &[u8], test_source: &[u8], expected_exit: u64) -> Kernel {
         let ccb_size = ((ccb.len() + 0xFFF) & !0xFFF) as u64;
         let mut fabric = Fabric::new(0x800000);
 
@@ -6905,6 +6963,7 @@ mod tests {
             "CC_B compiled {:?}: expected exit {}, got {}",
             std::str::from_utf8(test_source).unwrap_or("<invalid>"),
             expected_exit, exit_code);
+        kernel
     }
 
     /// Run CC_B (the canonical compiler) on source text and extract
@@ -7197,6 +7256,23 @@ mod tests {
             br#"int foo() { return *"abc"; } int main() { return *"world"; }"#,
             5);
         eprintln!("7.2g: CC_B + two literals ✓");
+    }
+
+    // ─── 7.3g: CC_B + İzmir through buffer write ────────────────
+    // CC_B runs at base > 0x8000. Compile the İzmir demanding client
+    // through the guest-compiled compiler; SYS_WRITE produces 6 bytes.
+
+    #[test]
+    fn p73g_ccb_write_izmir() {
+        let ccb = build_ccb();
+        assert!(ccb.len() > 0x8000,
+            "CC_B should exceed 0x8000 for this test to be meaningful");
+
+        let src = "int main() { int s = \"İzmir\"; return syscall(1, s + 8, *s, 0); }";
+        let kernel = run_ccb_harness(&ccb, src.as_bytes(), 0);
+        assert_eq!(&kernel.byte_output, b"\xC4\xB0zmir",
+            "CC_B + İzmir → expected 6 UTF-8 bytes");
+        eprintln!("7.3g: CC_B + İzmir → {:02X?} ✓", &kernel.byte_output);
     }
 
     // ─── 7.2h: Bootstrap fixed-point regression ────────────────

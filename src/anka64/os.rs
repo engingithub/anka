@@ -19,7 +19,7 @@ use super::state::*;
 // ───────────────────────────────────────────────────────────────────
 
 pub const SYS_EXIT: u64 = 0;
-pub const SYS_WRITE: u64 = 1;  // write(value) — log output
+pub const SYS_WRITE: u64 = 1;  // write(addr, len, 0) — buffer output
 pub const SYS_YIELD: u64 = 2;  // yield to other process
 pub const SYS_SEND: u64 = 3;   // send(dest_pid, value)
 pub const SYS_RECV: u64 = 4;   // recv() → value
@@ -84,10 +84,16 @@ fn classify_halt(core: &Anka64Core) -> HaltDisposition {
 // Kernel
 // ───────────────────────────────────────────────────────────────────
 
+/// Resource bound for SYS_WRITE: maximum bytes per call.
+/// Prevents a malicious guest from forcing unbounded host allocation.
+const MAX_WRITE: u64 = 0x10000; // 64 KiB
+
 pub struct Kernel {
     pub fabric: Fabric,
     pub processes: Vec<Process>,
-    pub output: Vec<(u64, u64)>,  // (pid, value) log
+    /// Byte output buffer.  SYS_WRITE appends here on success.
+    /// Output-atomic: a failed SYS_WRITE leaves this unchanged.
+    pub byte_output: Vec<u8>,
     mailboxes: Vec<Vec<Message>>,
     current: usize,
     /// Next available physical address for dynamic allocation.
@@ -101,7 +107,7 @@ impl Kernel {
         Self {
             fabric,
             processes: Vec::new(),
-            output: Vec::new(),
+            byte_output: Vec::new(),
             mailboxes: Vec::new(),
             current: 0,
             next_phys: 0x100000,
@@ -190,11 +196,7 @@ impl Kernel {
                 proc.exited = true;
             }
             SYS_WRITE => {
-                let value = proc.core.r[R1 as usize];
-                self.output.push((proc.pid, value));
-                // Return 0 (success)
-                proc.core.r[R0 as usize] = 0;
-                self.resume_from_trap(idx);
+                self.handle_buffer_write(idx);
             }
             SYS_YIELD => {
                 proc.core.r[R0 as usize] = 0;
@@ -243,6 +245,162 @@ impl Kernel {
     /// Authority check: the calling domain must possess a valid SEAL
     /// capability covering the entire object.  WRITE authority alone
     /// is not sufficient — writing a buffer and authorizing it to
+    /// SYS_WRITE: buffer-only output (7.3).
+    ///
+    ///   R1 = source virtual address
+    ///   R2 = byte length
+    ///   R3 = 0 (reserved — nonzero rejected)
+    ///
+    /// Authorization is range-atomic; observation is sequential;
+    /// output commit is atomic.
+    ///
+    /// Output-atomic, not snapshot-atomic: another agent could modify
+    /// a writable buffer between byte reads, so a successful write may
+    /// contain bytes observed at different instants.  The guarantee is:
+    /// either all reads succeed and one output buffer is committed, or
+    /// no output is committed.
+    ///
+    /// Anti-stitching: one address-map entry must cover the entire
+    /// virtual buffer, and one READ capability must authorize the
+    /// entire object-level range.  SYS_WRITE cannot manufacture wider
+    /// authority by combining multiple capabilities.
+    fn handle_buffer_write(&mut self, idx: usize) {
+        let addr = self.processes[idx].core.r[R1 as usize];
+        let len  = self.processes[idx].core.r[R2 as usize];
+        let r3   = self.processes[idx].core.r[R3 as usize];
+
+        // R3 reserved — reject nonzero now to prevent accidental ABI growth.
+        if r3 != 0 {
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return;
+        }
+
+        // len == 0: success, write nothing, addr not resolved.
+        if len == 0 {
+            self.processes[idx].core.r[R0 as usize] = 0;
+            self.resume_from_trap(idx);
+            return;
+        }
+
+        // Resource bound: reject before allocating.
+        if len > MAX_WRITE {
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return;
+        }
+
+        // Overflow preflight: addr + (len - 1) must not wrap.
+        let addr_end = match addr.checked_add(len - 1) {
+            Some(v) => v,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+
+        // ── Single-mapping preflight ──────────────────────────
+        // Resolve both endpoints.  One address-map entry must cover
+        // the entire virtual buffer.  This relies on the structural
+        // invariant that address-map entries are non-overlapping
+        // linear mappings: equal endpoint objects with contiguous
+        // offsets imply every interior address maps to the same
+        // object at the expected offset.
+        let (obj_start, off_start) = match self.processes[idx].core.address_map.resolve(addr) {
+            Some(r) => r,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+        let (obj_end, off_end) = match self.processes[idx].core.address_map.resolve(addr_end) {
+            Some(r) => r,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+
+        // Same object
+        if obj_start != obj_end {
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return;
+        }
+
+        // Contiguous offsets (checked arithmetic on object offsets)
+        let expected_off_end = match off_start.checked_add(len - 1) {
+            Some(v) => v,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+        if off_end != expected_off_end {
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return;
+        }
+
+        // ── Single-capability preflight ───────────────────────
+        // One READ capability must authorize the entire range.
+        let domain = self.processes[idx].core.domain;
+        if self.fabric.find_authorizing_cap(
+            domain, obj_start, off_start, len, Permissions::READ
+        ).is_none() {
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return;
+        }
+
+        // ── Per-byte fabric reads (revocation-sensitive) ──────
+        // Each byte goes through the full fabric transaction path
+        // (resolve → authorize → translate → read).  Revocation
+        // between preflight and here can cause individual reads to
+        // fail — in which case no output is committed.
+        let mut buf = Vec::with_capacity(len as usize);
+        for i in 0..len {
+            let va = addr + i; // safe: overflow preflight passed
+            let (obj, off) = match self.processes[idx].core.address_map.resolve(va) {
+                Some(r) => r,
+                None => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return;
+                }
+            };
+            let req = MemoryRequest {
+                context: AccessContext {
+                    agent: self.processes[idx].core.agent,
+                    domain: self.processes[idx].core.domain,
+                    privilege: self.processes[idx].core.privilege,
+                },
+                object: obj,
+                offset: off,
+                width: Width::Byte,
+                kind: AccessKind::Read,
+            };
+            match self.fabric.execute_read(req) {
+                Ok(bytes) => buf.push(bytes[0]),
+                Err(_) => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return;
+                }
+            }
+        }
+
+        // ── Commit staged output ──────────────────────────────
+        // All bytes succeeded.  Append once.
+        self.byte_output.extend_from_slice(&buf);
+        self.processes[idx].core.r[R0 as usize] = 0;
+        self.resume_from_trap(idx);
+    }
+
     /// become executable code are different powers:
     ///   WRITE authority ≠ authority to create executable code.
     ///
@@ -596,33 +754,41 @@ mod tests {
 
     #[test]
     fn p14_c_program_with_syscall() {
+        // Buffer-based SYS_WRITE (7.3): write 8-byte LE values
+        // to the data object, then SYS_WRITE(addr, 8, 0).
+        // Data object is at virtual 0x10000 with RW permission.
         let mut fabric = Fabric::new(0x400000);
         let (core, _dom, _text, _data, _stack) =
             create_process(&mut fabric, CPU0, "proc0", 0x000000, 0x010000, 0x020000);
         install_trap_handler(&mut fabric, 0x000000, 0x4000);
 
-        // Build program — must be written before sealing text object
-        //   syscall_write(42): R0=SYS_WRITE, R1=42, TRAP #0
-        //   syscall_exit(0):   R0=SYS_EXIT,  R1=0,  TRAP #0
-        // Build the program manually via Asm64
-        // since the compiler doesn't have syscall intrinsics yet.
         let mut asm = Asm64::new();
-        // _start: call main
-        asm.call(2);                // word 0 → jump to word 2
-        asm.halt();                 // word 1
+        asm.call(2);                // _start: call main
+        asm.halt();
 
         // main:
-        // syscall_write(42)
-        asm.movi(R0, SYS_WRITE as i32);  // R0 = 1 (SYS_WRITE)
-        asm.movi(R1, 42);                 // R1 = 42
-        asm.trap(0);                       // TRAP → kernel intercepts
-
-        // syscall_write(99)
+        // Store 42 as u64 LE to data[0] (virtual 0x10000)
+        asm.movi(R4, 42);
+        asm.movi(R5, 0x10000_u32 as i32);
+        asm.st(R4, R5, 0);
+        // SYS_WRITE(0x10000, 8, 0)
         asm.movi(R0, SYS_WRITE as i32);
-        asm.movi(R1, 99);
+        asm.mov(R1, R5);           // addr = 0x10000
+        asm.movi(R2, 8);           // len = 8
+        asm.movi(R3, 0);           // reserved
         asm.trap(0);
 
-        // syscall_exit(0)
+        // Store 99 as u64 LE to data[0]
+        asm.movi(R4, 99);
+        asm.st(R4, R5, 0);
+        // SYS_WRITE(0x10000, 8, 0)
+        asm.movi(R0, SYS_WRITE as i32);
+        asm.mov(R1, R5);
+        asm.movi(R2, 8);
+        asm.movi(R3, 0);
+        asm.trap(0);
+
+        // SYS_EXIT(0)
         asm.movi(R0, SYS_EXIT as i32);
         asm.movi(R1, 0);
         asm.trap(0);
@@ -636,11 +802,11 @@ mod tests {
 
         assert!(kernel.processes[0].exited, "process should have exited");
         assert_eq!(kernel.processes[0].exit_code, 0, "exit code should be 0");
-        assert_eq!(kernel.output.len(), 2, "should have 2 write outputs");
-        assert_eq!(kernel.output[0], (0, 42), "first write should be 42");
-        assert_eq!(kernel.output[1], (0, 99), "second write should be 99");
-        eprintln!("P14: syscall_write(42), syscall_write(99), syscall_exit(0) ✓");
-        eprintln!("     output: {:?}", kernel.output);
+        assert_eq!(kernel.byte_output.len(), 16, "should have 16 bytes (two 8-byte writes)");
+        assert_eq!(&kernel.byte_output[0..8], &42u64.to_le_bytes());
+        assert_eq!(&kernel.byte_output[8..16], &99u64.to_le_bytes());
+        eprintln!("P14: SYS_WRITE(42 as u64 LE), SYS_WRITE(99 as u64 LE) ✓");
+        eprintln!("     byte_output: {:?}", &kernel.byte_output);
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -652,6 +818,8 @@ mod tests {
 
     #[test]
     fn p15_two_processes_ipc() {
+        // Buffer-based SYS_WRITE (7.3): B receives 42 via IPC,
+        // stores it to its data object, and writes 8 bytes out.
         let mut fabric = Fabric::new(0x800000);
 
         // Process A at physical 0x000000..
@@ -666,7 +834,7 @@ mod tests {
                 0x100000, 0x110000, 0x120000);
         install_trap_handler(&mut fabric, 0x100000, 0x4000);
 
-        // Process A code: send(pid=1, value=42), exit(0)
+        // Process A: send(pid=1, value=42), exit(0)
         let mut asm_a = Asm64::new();
         asm_a.movi(R0, SYS_SEND as i32);
         asm_a.movi(R1, 1);    // dest pid
@@ -677,34 +845,24 @@ mod tests {
         asm_a.trap(0);
         fabric.write_physical(0x000000, &asm_a.to_bytes());
 
-        // Process B code: v = recv(), write(v), exit(v)
-        let mut asm_b = Asm64::new();
-        asm_b.movi(R0, SYS_RECV as i32);
-        asm_b.trap(0);
-        // R0 now has received value
-        asm_b.mov(R1, R0);     // save value
-        asm_b.movi(R0, SYS_WRITE as i32);
-        asm_b.trap(0);          // write(v)
-        asm_b.mov(R1, R0);     // Hmm, R0 was clobbered by write return
-        // Let's fix: save received value first
-        asm_b.movi(R0, SYS_EXIT as i32);
-        // We need the received value for exit code. Let's restructure.
-        asm_b.trap(0);
-        fabric.write_physical(0x100000, &asm_b.to_bytes());
-
-        // Actually, let me rewrite B more carefully:
+        // Process B: recv() → store to data → SYS_WRITE → exit
+        // Data object is at virtual 0x10000 with RW.
         let mut asm_b = Asm64::new();
         asm_b.movi(R0, SYS_RECV as i32);
         asm_b.trap(0);
         // R0 = received value (42)
-        asm_b.mov(R4, R0);     // save in R4
+        asm_b.mov(R4, R0);         // save in R4
+        asm_b.movi(R5, 0x10000_u32 as i32);
+        asm_b.st(R4, R5, 0);       // data[0] = 42 (u64 LE)
 
         asm_b.movi(R0, SYS_WRITE as i32);
-        asm_b.mov(R1, R4);     // write(42)
+        asm_b.mov(R1, R5);         // addr = 0x10000
+        asm_b.movi(R2, 8);         // len = 8
+        asm_b.movi(R3, 0);         // reserved
         asm_b.trap(0);
 
         asm_b.movi(R0, SYS_EXIT as i32);
-        asm_b.mov(R1, R4);     // exit(42)
+        asm_b.mov(R1, R4);         // exit(42)
         asm_b.trap(0);
         fabric.write_physical(0x100000, &asm_b.to_bytes());
 
@@ -723,12 +881,11 @@ mod tests {
         assert!(kernel.processes[1].exited, "B should have exited");
         assert_eq!(kernel.processes[0].exit_code, 0, "A exit code = 0");
         assert_eq!(kernel.processes[1].exit_code, 42, "B exit code = 42");
-        assert_eq!(kernel.output.len(), 1);
-        assert_eq!(kernel.output[0], (1, 42), "B wrote 42");
+        assert_eq!(kernel.byte_output.len(), 8, "B wrote 8 bytes");
+        assert_eq!(&kernel.byte_output[..], &42u64.to_le_bytes());
 
-        eprintln!("P15: A→send(42)→B, B→recv()=42→write(42)→exit(42) ✓");
-        eprintln!("     Process A domain ≠ Process B domain");
-        eprintln!("     Both domains protected by the fabric");
+        eprintln!("P15: A→send(42)→B, B→recv()=42→store+write(8 bytes)→exit(42) ✓");
+        eprintln!("     byte_output: {:?}", &kernel.byte_output);
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -1185,6 +1342,126 @@ mod tests {
             "supervisor HALT not at trap gate must produce 0xDEAD");
         eprintln!("halt: supervisor HALT at PC=0x0000 (not gate 0x3FF0) → 0xDEAD ✓");
         eprintln!("     classify_halt → SupervisorFault");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 7.3h: Hostile SYS_WRITE tests
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p73h_write_wraparound() {
+        // addr near u64::MAX, len > 1: addr + (len - 1) wraps.
+        // checked_add must catch it; SYS_WRITE returns u64::MAX.
+        let mut fabric = Fabric::new(0x400000);
+        let (mut core, _dom, _text, _data, _stack) =
+            create_process(&mut fabric, CPU0, "hostile",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+
+        // Code: set R0=SYS_WRITE, R1=u64::MAX-1, R2=4, R3=0; TRAP; exit R0
+        let mut asm = Asm64::new();
+        // We cannot load u64::MAX-1 via MOVI (18-bit signed).
+        // Instead, pre-load R1 in the core and use NOP in the asm.
+        asm.movi(R0, SYS_WRITE as i32);
+        // R1 is pre-set below
+        asm.movi(R2, 4);
+        asm.movi(R3, 0);
+        asm.trap(0);
+        asm.mov(R1, R0);   // R1 = SYS_WRITE return value
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, _text, _dom);
+
+        // Pre-set R1 = u64::MAX - 1
+        core.r[R1 as usize] = u64::MAX - 1;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.run(1000, 100);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "wraparound must fail with u64::MAX");
+        assert!(kernel.byte_output.is_empty(),
+            "no bytes should be committed on wraparound");
+        eprintln!("7.3h: wraparound → u64::MAX, no output ✓");
+    }
+
+    #[test]
+    fn p73h_write_range_preflight_oob() {
+        // Buffer starts inside a valid data object but len extends
+        // past the object boundary.  The preflight rejects before
+        // any bytes are read.
+        //
+        // Data object: virtual 0x10000, size 0x4000.
+        // We write a marker byte at data[0] and request a write
+        // of 0x4001 bytes starting at 0x10000 — one byte past end.
+        let mut fabric = Fabric::new(0x400000);
+        let (core, _dom, _text, _data, _stack) =
+            create_process(&mut fabric, CPU0, "hostile",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+
+        // Write a marker to data[0] so we can prove it was never read.
+        fabric.write_physical(0x010000, &[0xAB]);
+
+        let mut asm = Asm64::new();
+        // Store marker at data[0] (already there from write_physical)
+        asm.movi(R0, SYS_WRITE as i32);
+        asm.movi(R1, 0x10000_u32 as i32); // addr = data base
+        asm.movi(R2, 0x4001);              // len = 0x4001 = 1 past end
+        asm.movi(R3, 0);
+        asm.trap(0);
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, _text, _dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.run(1000, 100);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "OOB range must fail with u64::MAX");
+        assert!(kernel.byte_output.is_empty(),
+            "no bytes committed when range extends past object");
+        eprintln!("7.3h: range_preflight_oob → u64::MAX, no output ✓");
+    }
+
+    #[test]
+    fn p73h_write_r3_nonzero_rejected() {
+        // R3 != 0 must be rejected immediately.
+        let mut fabric = Fabric::new(0x400000);
+        let (core, _dom, _text, _data, _stack) =
+            create_process(&mut fabric, CPU0, "hostile",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+
+        let mut asm = Asm64::new();
+        asm.movi(R0, SYS_WRITE as i32);
+        asm.movi(R1, 0x10000_u32 as i32); // valid addr
+        asm.movi(R2, 1);                   // valid len
+        asm.movi(R3, 1);                   // NONZERO → reject
+        asm.trap(0);
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, _text, _dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.run(1000, 100);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "nonzero R3 must be rejected");
+        assert!(kernel.byte_output.is_empty(),
+            "no bytes committed when R3 != 0");
+        eprintln!("7.3h: R3 nonzero → u64::MAX, no output ✓");
     }
 
 }
