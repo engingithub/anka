@@ -4064,11 +4064,17 @@ mod tests {
         let asm = cc::compile(&compiler_prog);
         let code_bytes = asm.to_bytes();
         let code_len = code_bytes.len();
-        eprintln!("6B.4 guest compiler: {} bytes ({} insns, {:#x})",
-            code_len, code_len / 4, code_len);
-        assert!(code_len <= TEXT_SIZE as usize,
-            "compiled guest compiler is {} bytes, exceeds {:#x} text object",
-            code_len, TEXT_SIZE);
+        let text_sz = TEXT_SIZE as usize;
+        eprintln!("6B.4 guest compiler: {} bytes ({} insns, {:#x}) \
+                    [{:.0}% of {:#x}, {} bytes free]",
+            code_len, code_len / 4, code_len,
+            100.0 * code_len as f64 / text_sz as f64, text_sz,
+            text_sz - code_len);
+        assert!(code_len <= text_sz,
+            "compiled guest compiler is {} bytes, exceeds {:#x} text object. \
+             Update TEXT_SIZE to {:#x}.",
+            code_len, TEXT_SIZE,
+            ((code_len + 0xFFF) & !0xFFF));
         fabric.write_physical(0x000000, &code_bytes);
         seal_code_object(&mut fabric, text, dom);
 
@@ -4167,6 +4173,28 @@ mod tests {
             assert!(kernel.processes[1].exited);
             assert_eq!(kernel.processes[1].exit_code, expected_exit);
         }
+    }
+
+    // ═══════════════════════════════════════════════════════
+    //  TEXT_SIZE derivation invariant
+    // ═══════════════════════════════════════════════════════
+
+    #[test]
+    fn text_size_is_derived() {
+        // TEXT_SIZE must equal align_up(compiled_bytes, 0x1000).
+        // Code size is TEXT_SIZE-independent (only immediate values
+        // change, not instruction count), so this is a stable invariant.
+        let compiler_prog = build_6b4_compiler();
+        let asm = cc::compile(&compiler_prog);
+        let code_len = asm.to_bytes().len() as i64;
+        let derived = (code_len + 0xFFF) & !0xFFF;
+        assert_eq!(TEXT_SIZE, derived,
+            "TEXT_SIZE is {:#x} but should be {:#x} \
+             (align_up({}, 0x1000)). Update the constant \
+             in guest_compiler.rs.",
+            TEXT_SIZE, derived, code_len);
+        eprintln!("TEXT_SIZE={:#x} ← align_up({}, 0x1000) ✓",
+            TEXT_SIZE, code_len);
     }
 
     // ─── 6B.4.0 tests ───────────────────────────────────────
@@ -4819,6 +4847,73 @@ mod tests {
             b"int main() { int w = (3 << 26) | (4 << 22) | 42; return w & 63; }",
             42, true);  // extract low 6 bits (immediate)
         eprintln!("6B.5.0b: encode/decode field extraction ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════
+    //  6B.5.0d — syscall(n, a, b, c)
+    // ═══════════════════════════════════════════════════════
+
+    #[test]
+    fn b50d_syscall_exit() {
+        // syscall(0, 42, 0, 0) → SYS_EXIT(42)
+        // Child exits immediately with code 42.
+        run_6b4_test(
+            b"int main() { return syscall(0, 42, 0, 0); }",
+            42, true);
+        eprintln!("6B.5.0d: syscall(0, 42, 0, 0) → exit(42) ✓");
+    }
+
+    #[test]
+    fn b50d_syscall_in_expression() {
+        // syscall result used in an expression.
+        // syscall(1, 99, 0, 0) is SYS_WRITE(99) which returns 0.
+        // 0 + 7 = 7
+        run_6b4_test(
+            b"int main() { return syscall(1, 99, 0, 0) + 7; }",
+            7, true);
+        eprintln!("6B.5.0d: syscall in expression ✓");
+    }
+
+    #[test]
+    fn b50d_syscall_args_with_expressions() {
+        // Arguments are full expressions.
+        // syscall(0, 20 + 22, 0, 0) → SYS_EXIT(42)
+        run_6b4_test(
+            b"int main() { return syscall(0, 20 + 22, 0, 0); }",
+            42, true);
+        eprintln!("6B.5.0d: syscall args with expressions ✓");
+    }
+
+    #[test]
+    fn b50d_syscall_args_with_function_call() {
+        // One argument is a function call result.
+        // f() returns 42, syscall(0, f(), 0, 0) → SYS_EXIT(42)
+        run_6b4_test(
+            b"int f() { return 42; } int main() { return syscall(0, f(), 0, 0); }",
+            42, true);
+        eprintln!("6B.5.0d: syscall arg from function call ✓");
+    }
+
+    #[test]
+    fn b50d_syscall_write_then_return() {
+        // Multiple syscalls: write a value, then return normally.
+        // syscall(1, 77, 0, 0) writes 77, returns 0.
+        // Then main returns 10.
+        run_6b4_test(
+            b"int main() { int x = syscall(1, 77, 0, 0); return x + 10; }",
+            10, true);
+        eprintln!("6B.5.0d: syscall write then return ✓");
+    }
+
+    #[test]
+    fn b50d_syscall_nested() {
+        // Nested: syscall result feeds another syscall.
+        // syscall(1, 55, 0, 0) writes 55, returns 0.
+        // syscall(0, 0 + 33, 0, 0) → SYS_EXIT(33)
+        run_6b4_test(
+            b"int main() { return syscall(0, syscall(1, 55, 0, 0) + 33, 0, 0); }",
+            33, true);
+        eprintln!("6B.5.0d: nested syscall ✓");
     }
 
 }
