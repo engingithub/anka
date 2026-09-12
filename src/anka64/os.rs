@@ -88,6 +88,17 @@ fn classify_halt(core: &Anka64Core) -> HaltDisposition {
 /// Prevents a malicious guest from forcing unbounded host allocation.
 const MAX_WRITE: u64 = 0x10000; // 64 KiB
 
+/// Executable image geometry — already validated by caller.
+/// Used by the shared process-creation primitive (prepare_process).
+struct ProcessImageDesc {
+    code_obj: ObjectId,
+    code_offset: u64,
+    code_size: u64,
+    lit_start: u64,      // image-relative; 0 if no literals
+    image_size: u64,     // total image = obj_size - code_offset
+    entry: u64,          // image-relative entry point
+}
+
 pub struct Kernel {
     pub fabric: Fabric,
     pub processes: Vec<Process>,
@@ -113,6 +124,70 @@ impl Kernel {
             next_phys: 0x100000,
             next_agent: 100,
         }
+    }
+
+    // ─── Shared process-image creation primitive ────────────────
+    //
+    // Used by both SYS_EXEC and Kernel::boot().  The caller is
+    // responsible for creating the domain and granting executable
+    // image authority (RX for code, R for literals).  This method
+    // creates stack, trap handler, address map, and core.
+    //
+    // The difference between SYS_EXEC and boot() is the source of
+    // authority: SYS_EXEC derives it from a caller's domain;
+    // boot() establishes it from trusted boot state.  Everything
+    // after authority establishment is the same mechanism.
+
+    /// Create process infrastructure for a domain that already has
+    /// executable image authority.  Returns the spawned PID.
+    ///
+    /// On failure, rolls back: destroys domain and any resources
+    /// created during preparation.  No reachable domain, capability,
+    /// mapping, or runnable process survives a failed preparation.
+    fn prepare_process(&mut self, dom: DomainId, desc: &ProcessImageDesc) -> u64 {
+        // --- Stack ---
+        let stack_size: u64 = 0x4000;
+        let stack_obj = self.fabric.alloc_object("process_stack", stack_size, ObjectKind::Memory);
+        let stack_phys = self.next_phys;
+        self.next_phys += stack_size;
+        self.fabric.place_object(stack_obj, stack_phys);
+        self.fabric.grant(dom, stack_obj, 0, stack_size, Permissions::RW);
+
+        // --- Trap handler: alloc → initialize → seal → grant RX ---
+        // W⊕X: no exceptional executable-object creation path.
+        let trap_size: u64 = 0x1000;
+        let trap_obj = self.fabric.alloc_object("process_trap", trap_size, ObjectKind::Memory);
+        let trap_phys = self.next_phys;
+        self.next_phys += trap_size;
+        self.fabric.place_object(trap_obj, trap_phys);
+
+        let mut handler = Asm64::new();
+        handler.halt();
+        self.fabric.initialize_object(trap_obj, 0, &handler.to_bytes());
+        self.fabric.seal_object(trap_obj);
+        self.fabric.grant(dom, trap_obj, 0, trap_size, Permissions::RX);
+
+        // --- Core ---
+        let agent = AgentId(self.next_agent);
+        self.next_agent += 1;
+
+        let mut core = Anka64Core::new(agent, dom);
+        // Map code at virtual 0 → object at code_offset
+        core.address_map.add_at(0, desc.code_size, desc.code_obj, desc.code_offset);
+        core.pc = desc.entry;
+        // Map literal segment at its natural image-relative offset
+        if desc.lit_start != 0 {
+            let lit_length = desc.image_size - desc.lit_start;
+            core.address_map.add_at(
+                desc.lit_start, lit_length, desc.code_obj,
+                desc.code_offset + desc.lit_start);
+        }
+        core.address_map.add(0x10000, stack_size, stack_obj);
+        core.address_map.add(0x20000, trap_size, trap_obj);
+        core.r[SP as usize] = 0x10000 + stack_size;
+        core.trap_vector = 0x20000;
+
+        self.spawn(core)
     }
 
     pub fn spawn(&mut self, core: Anka64Core) -> u64 {
@@ -557,18 +632,17 @@ impl Kernel {
         // Transactional: all checks passed before any domain/object creation.
         let child_dom = self.fabric.create_domain();
 
-        // Check 5a: derive child's RX from code parent (I7).
+        // Derive child's RX from code parent (I7).
         if self.fabric.derive(
             child_dom, &code_parent, code_offset, code_size, Permissions::RX,
         ).is_none() {
-            // Rollback: destroy empty domain
             self.fabric.destroy_domain(child_dom);
             self.processes[idx].core.r[R0 as usize] = u64::MAX;
             self.resume_from_trap(idx);
             return;
         }
 
-        // Check 5b: if literals, derive child's R from literal parent.
+        // If literals, derive child's R from literal parent.
         // Rule 29: data is not authority to transfer control.
         if has_literals {
             let lit_offset = code_offset + lit_start;
@@ -584,50 +658,16 @@ impl Kernel {
             }
         }
 
-        // --- Child stack ---
-        let stack_size: u64 = 0x4000;
-        let stack_obj = self.fabric.alloc_object("child_stack", stack_size, ObjectKind::Memory);
-        let stack_phys = self.next_phys;
-        self.next_phys += stack_size;
-        self.fabric.place_object(stack_obj, stack_phys);
-        self.fabric.grant(child_dom, stack_obj, 0, stack_size, Permissions::RW);
-
-        // --- Child trap handler: alloc → initialize → seal → grant RX ---
-        // W⊕X: no exceptional executable-object creation path.
-        let trap_size: u64 = 0x1000;
-        let trap_obj = self.fabric.alloc_object("child_trap", trap_size, ObjectKind::Memory);
-        let trap_phys = self.next_phys;
-        self.next_phys += trap_size;
-        self.fabric.place_object(trap_obj, trap_phys);
-
-        let mut handler = Asm64::new();
-        handler.halt();
-        self.fabric.initialize_object(trap_obj, 0, &handler.to_bytes());
-        self.fabric.seal_object(trap_obj);
-        self.fabric.grant(child_dom, trap_obj, 0, trap_size, Permissions::RX);
-
-        // --- Child core ---
-        let child_agent = AgentId(self.next_agent);
-        self.next_agent += 1;
-
-        let mut child = Anka64Core::new(child_agent, child_dom);
-        // Map code at virtual 0 → object offset code_offset
-        child.address_map.add_at(0x00000, code_size, code_obj, code_offset);
-        // Map literal segment at its natural offset within the image.
-        // The child sees the same offsets that MOVI loaded.
-        // Virtual lit_start → object offset code_offset + lit_start.
-        if has_literals {
-            let lit_length = image_size - lit_start;
-            child.address_map.add_at(lit_start, lit_length, code_obj,
-                code_offset + lit_start);
-        }
-        child.address_map.add(0x10000, stack_size, stack_obj);
-        child.address_map.add(0x20000, trap_size, trap_obj);
-        child.r[SP as usize] = 0x10000 + stack_size;
-        child.trap_vector = 0x20000;
-
-        // --- Spawn and run synchronously ---
-        let child_pid = self.spawn(child);
+        // --- Create child process using shared primitive ---
+        let desc = ProcessImageDesc {
+            code_obj,
+            code_offset,
+            code_size,
+            lit_start,
+            image_size,
+            entry: 0,
+        };
+        let child_pid = self.prepare_process(child_dom, &desc);
         let child_idx = child_pid as usize;
         self.run_to_completion(child_idx, 100_000);
 
