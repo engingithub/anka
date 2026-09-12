@@ -6594,6 +6594,48 @@ mod tests {
         eprintln!("7.2: two literals compiled (world at 0x{:X}) ✓", expected_np);
     }
 
+    // ─── Phase 7.2 — Semantic dereference tests ────────────
+    // The child process receives R-only authority on the literal
+    // segment [lit_start, OUTPUT_SIZE).  Dereferencing a string
+    // literal reads the byte_len header: *"hello" → 5.
+    // Rule 29: the child has READ but not EXECUTE on literals.
+
+    #[test]
+    fn p72_deref_hello() {
+        // *"hello" → dereference the literal pointer, reads byte_len = 5.
+        // The literal header is at output offset 0xFFF0, and its first
+        // 8 bytes contain the u64 byte_len = 5.
+        let src = br#"int main() { return *"hello"; }"#;
+        run_6b4_test(src, 5, true);
+        eprintln!("7.2: *\"hello\" = 5 (byte_len via R-only literal segment) ✓");
+    }
+
+    #[test]
+    fn p72_deref_izmir() {
+        // *"İzmir" → 6 (UTF-8 byte count, not codepoint count).
+        let src = "int main() { return *\"İzmir\"; }";
+        run_6b4_test(src.as_bytes(), 6, true);
+        eprintln!("7.2: *\"İzmir\" = 6 (byte_len, Bytes ≠ Text) ✓");
+    }
+
+    #[test]
+    fn p72_deref_empty() {
+        // *"" → 0 (empty string has byte_len = 0).
+        let src = br#"int main() { return *""; }"#;
+        run_6b4_test(src, 0, true);
+        eprintln!("7.2: *\"\" = 0 (empty literal dereference) ✓");
+    }
+
+    #[test]
+    fn p72_deref_two_literals() {
+        // Two literals, dereference the second.
+        // "hello" compiled first (foo), "world" compiled second (main).
+        // *"world" → 5.
+        let src = br#"int foo() { return *"hello"; } int main() { return *"world"; }"#;
+        run_6b4_test(src, 5, true);
+        eprintln!("7.2: *\"world\" = 5 (second literal deref) ✓");
+    }
+
     #[test]
     fn b50e_expr_funcall() {
         run_6b4_test(
@@ -7117,6 +7159,74 @@ mod tests {
         run_compiler_corpus(&ccc, "CC_C");
         eprintln!("6B.5.1: bootstrap closure complete — \
             CC_A → CC_B → CC_C, CC_B == CC_C, corpus ✓");
+    }
+
+    // ─── 7.2g: Adversarial regression ─────────────────────────
+    // CC_B is ~59KB (>0x8000).  When CC_B compiles a program with
+    // a string literal, the output image has code in the lower region
+    // and the literal in the upper region.  This test verifies:
+    //   1. CC_B code_end > 0x8000 (the old fixed boundary)
+    //   2. The child can dereference the literal (READ authority)
+    //   3. The literal offset and byte_len are correct
+
+    #[test]
+    fn p72g_adversarial_large_code_with_literal() {
+        let ccb = build_ccb();
+        eprintln!("7.2g: CC_B = {} bytes ({:#x})", ccb.len(), ccb.len());
+
+        // Assert: CC_B code exceeds old 0x8000 boundary
+        assert!(ccb.len() > 0x8000,
+            "CC_B should exceed 0x8000 ({:#x}); \
+             adversarial test is only meaningful if code overlaps \
+             the old fixed literal boundary",
+            ccb.len());
+        eprintln!("7.2g: CC_B > 0x8000 ✓ (old boundary would have overlapped)");
+
+        // CC_B compiles `return *"hello"` → child dereferences literal
+        // *"hello" reads byte_len = 5 from the literal header.
+        run_ccb_test(&ccb, br#"int main() { return *"hello"; }"#, 5);
+        eprintln!("7.2g: CC_B + *\"hello\" = 5 ✓ (child reads literal via R cap)");
+
+        // CC_B compiles `return *"İzmir"` → byte_len = 6 (UTF-8)
+        let src = "int main() { return *\"İzmir\"; }";
+        run_ccb_test(&ccb, src.as_bytes(), 6);
+        eprintln!("7.2g: CC_B + *\"İzmir\" = 6 ✓ (UTF-8 literal, Bytes ≠ Text)");
+
+        // CC_B compiles a program with two literals
+        run_ccb_test(&ccb,
+            br#"int foo() { return *"abc"; } int main() { return *"world"; }"#,
+            5);
+        eprintln!("7.2g: CC_B + two literals ✓");
+    }
+
+    // ─── 7.2h: Bootstrap fixed-point regression ────────────────
+    // After the allocator redesign, CC_B must still equal CC_C.
+    // This is a stronger check than b51_bootstrap_closure because it
+    // explicitly names the 7.2 allocator change as the potential
+    // regression source.
+
+    #[test]
+    fn p72h_bootstrap_fixed_point_survives_allocator() {
+        let ccb = build_ccb();
+        eprintln!("7.2h: CC_B = {} bytes", ccb.len());
+
+        let canon_src = canonical_compiler_source();
+        let (ccc, ccc_funcs, ccc_error) =
+            compile_with_ccb(&ccb, canon_src.as_bytes());
+
+        assert_eq!(ccc_error, 0,
+            "CC_B failed to compile canonical source after 7.2 allocator change");
+        assert_eq!(ccc_funcs, 45, "CC_C should have 45 functions");
+        assert!(!ccc.is_empty(), "CC_C is empty");
+        eprintln!("7.2h: CC_C = {} bytes ({} functions)", ccc.len(), ccc_funcs);
+
+        assert_eq!(ccb, ccc,
+            "7.2h FIXED POINT VIOLATION: \
+             CC_B ({} bytes) ≠ CC_C ({} bytes) \
+             after two-ended allocator change",
+            ccb.len(), ccc.len());
+        eprintln!("7.2h: CC_B == CC_C after two-ended allocator ✓");
+        eprintln!("     The bootstrap fixed point survives the allocator redesign.");
     }
 
 }
