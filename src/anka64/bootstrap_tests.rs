@@ -5109,6 +5109,204 @@ mod tests {
             shl = TOK_SHL, shr = TOK_SHR)
     }
 
+    // ─── Emit / encoding layer ───────────────────────
+
+    fn canonical_enci() -> String {
+        "int enci(int op, int rd, int rs, int imm) { \
+         return (op << 26) | (rd << 22) | (rs << 18) | ((imm << 46) >> 46); } ".to_string()
+    }
+
+    fn canonical_encr() -> String {
+        "int encr(int op, int rd, int rs, int rs2) { \
+         return (op << 26) | (rd << 22) | (rs << 18) | (rs2 << 14); } ".to_string()
+    }
+
+    fn canonical_encs() -> String {
+        "int encs(int op) { return op << 26; } ".to_string()
+    }
+
+    fn canonical_encb() -> String {
+        format!(
+            "int encb(int cond, int disp) {{ \
+             return ({bcc} << 26) | (cond << 22) | ((disp << 42) >> 42); }} ",
+            bcc = OP_BCC)
+    }
+
+    fn canonical_emit() -> String {
+        format!(
+            "int emit(int word) {{ \
+             int pos = *{op}; \
+             if ({limit} < pos) {{ *{e} = 1; return 0; }} \
+             int padded = word | (({nop} << 26) << 32); \
+             *({out} + pos) = padded; \
+             *{op} = pos + 8; \
+             return 0; }} ",
+            op = WS_OUT_POS,
+            limit = OUTPUT_SIZE - 8,
+            e = WS_ERROR,
+            nop = OP_NOP,
+            out = LAYOUT_OUT)
+    }
+
+    fn canonical_patchbranch() -> String {
+        format!(
+            "int patchbranch(int pos, int cond, int target) {{ \
+             int disp = (target - pos) >> 2; \
+             int word = ({bcc} << 26) | (cond << 22) | ((disp << 42) >> 42); \
+             int padded = word | (({nop} << 26) << 32); \
+             *({out} + pos) = padded; \
+             return 0; }} ",
+            bcc = OP_BCC,
+            nop = OP_NOP,
+            out = LAYOUT_OUT)
+    }
+
+    fn canonical_patchcall() -> String {
+        format!(
+            "int patchcall(int pos, int addr) {{ \
+             int disp = (addr >> 2) - (pos >> 2); \
+             int word = ({call} << 26) | ((disp << 42) >> 42); \
+             int padded = word | (({nop} << 26) << 32); \
+             *({out} + pos) = padded; \
+             return 0; }} ",
+            call = OP_CALL,
+            nop = OP_NOP,
+            out = LAYOUT_OUT)
+    }
+
+    // ─── Table helpers ────────────────────────────────
+
+    fn canonical_addsymbol() -> String {
+        format!(
+            "int addsymbol(int ns, int nl) {{ \
+             int cnt = *{sc}; \
+             if (32 <= cnt) {{ *{e} = 1; return 0; }} \
+             int i = 0; \
+             int base = 0; \
+             int sns = 0; \
+             int snl = 0; \
+             while (i < cnt) {{ \
+             base = {st} + i * 24; \
+             sns = *base; snl = *(base + 8); \
+             if (nameseq(ns, nl, sns, snl) == 1) {{ *{e} = 1; return 0; }} \
+             i = i + 1; }} \
+             int off = (0 - (cnt + 1)) * 8; \
+             base = {st} + cnt * 24; \
+             *base = ns; *(base + 8) = nl; *(base + 16) = off; \
+             *{sc} = cnt + 1; \
+             return off; }} ",
+            sc = WS_SYM_COUNT,
+            e = WS_ERROR,
+            st = WS_SYM_TABLE)
+    }
+
+    fn canonical_lookupsymbol() -> String {
+        format!(
+            "int lookupsymbol(int ns, int nl) {{ \
+             int cnt = *{sc}; \
+             int i = 0; \
+             int base = 0; \
+             while (i < cnt) {{ \
+             base = {st} + i * 24; \
+             if (nameseq(ns, nl, *base, *(base + 8)) == 1) {{ \
+             return *(base + 16); }} \
+             i = i + 1; }} \
+             *{e} = 1; return 0; }} ",
+            sc = WS_SYM_COUNT,
+            e = WS_ERROR,
+            st = WS_SYM_TABLE)
+    }
+
+    fn canonical_addfunc() -> String {
+        format!(
+            "int addfunc(int ns, int nl, int arity) {{ \
+             int cnt = *{fc}; \
+             if (32 <= cnt) {{ *{e} = 1; return 0; }} \
+             int base = {ft} + cnt * 32; \
+             *base = ns; *(base + 8) = nl; \
+             *(base + 16) = *{op}; *(base + 24) = arity; \
+             *{fc} = cnt + 1; return 0; }} ",
+            fc = WS_FUNC_COUNT,
+            e = WS_ERROR,
+            ft = WS_FUNC_TABLE,
+            op = WS_OUT_POS)
+    }
+
+    fn canonical_lookupfunc() -> String {
+        format!(
+            "int lookupfunc(int ns, int nl) {{ \
+             int cnt = *{fc}; \
+             int i = 0; \
+             int base = 0; \
+             while (i < cnt) {{ \
+             base = {ft} + i * 32; \
+             if (nameseq(ns, nl, *base, *(base + 8)) == 1) {{ \
+             return *(base + 16); }} \
+             i = i + 1; }} \
+             *{e} = 1; return 0; }} ",
+            fc = WS_FUNC_COUNT,
+            e = WS_ERROR,
+            ft = WS_FUNC_TABLE)
+    }
+
+    fn canonical_lookuparity() -> String {
+        format!(
+            "int lookuparity(int ns, int nl) {{ \
+             int cnt = *{fc}; \
+             int i = 0; \
+             int base = 0; \
+             while (i < cnt) {{ \
+             base = {ft} + i * 32; \
+             if (nameseq(ns, nl, *base, *(base + 8)) == 1) {{ \
+             return *(base + 24); }} \
+             i = i + 1; }} \
+             *{e} = 1; return 0; }} ",
+            fc = WS_FUNC_COUNT,
+            e = WS_ERROR,
+            ft = WS_FUNC_TABLE)
+    }
+
+    fn canonical_addfixup() -> String {
+        format!(
+            "int addfixup(int cp, int ns, int nl, int argc) {{ \
+             int cnt = *{xc}; \
+             if (128 <= cnt) {{ *{e} = 1; return 0; }} \
+             int base = {xt} + cnt * 32; \
+             *base = cp; *(base + 8) = ns; \
+             *(base + 16) = nl; *(base + 24) = argc; \
+             *{xc} = cnt + 1; return 0; }} ",
+            xc = WS_FIX_COUNT,
+            e = WS_ERROR,
+            xt = WS_FIX_TABLE)
+    }
+
+    fn canonical_resolvefixups() -> String {
+        format!(
+            "int resolvefixups() {{ \
+             int cnt = *{xc}; \
+             int i = 0; \
+             int base = 0; \
+             int cp = 0; \
+             int ns = 0; \
+             int nl = 0; \
+             int argc = 0; \
+             int addr = 0; \
+             int arity = 0; \
+             while (i < cnt) {{ \
+             base = {xt} + i * 32; \
+             cp = *base; ns = *(base + 8); \
+             nl = *(base + 16); argc = *(base + 24); \
+             addr = lookupfunc(ns, nl); \
+             arity = lookuparity(ns, nl); \
+             if (argc != arity) {{ *{e} = 1; }} \
+             patchcall(cp, addr); \
+             i = i + 1; }} \
+             return 0; }} ",
+            xc = WS_FIX_COUNT,
+            e = WS_ERROR,
+            xt = WS_FIX_TABLE)
+    }
+
     #[test]
     fn b50e_readbyte_compiles() {
         let src = format!(
@@ -5224,6 +5422,141 @@ mod tests {
         eprintln!("6B.5.0e: lexer+tokenizer source = {} bytes", src.len());
         run_6b4_test(src.as_bytes(), 42, true);
         eprintln!("6B.5.0e: complete tokenizer (10 functions) compiles ✓");
+    }
+
+    // ─── Emit/encoding layer tests ──────────────────
+
+    #[test]
+    fn b50e_encoding_compiles() {
+        // All four encoding helpers + emit.
+        let src = format!(
+            "{}{}{}{}{}int main() {{ return 42; }}",
+            canonical_enci(),
+            canonical_encr(),
+            canonical_encs(),
+            canonical_encb(),
+            canonical_emit());
+        run_6b4_test(src.as_bytes(), 42, true);
+        eprintln!("6B.5.0e: enci/encr/encs/encb/emit compile ✓");
+    }
+
+    #[test]
+    fn b50e_enci_value() {
+        // Verify enc_i produces the correct instruction word.
+        // MOVI R4, 42: opcode=8 rd=4 rs=0 imm=42
+        // Expected: (8 << 26) | (4 << 22) | 42
+        let src = format!(
+            "{}int main() {{ return enci(8, 4, 0, 42); }}",
+            canonical_enci());
+        let expected: u64 = ((8u64 << 26) | (4 << 22) | 42) as u64;
+        run_6b4_test(src.as_bytes(), expected, true);
+        eprintln!("6B.5.0e: enci(8,4,0,42) = {:#x} ✓", expected);
+    }
+
+    #[test]
+    fn b50e_encr_value() {
+        // MOV R4, R0: opcode=0 rd=4 rs=0 rs2=0 (fn3=0)
+        // Expected: (0 << 26) | (4 << 22)
+        let src = format!(
+            "{}int main() {{ return encr(0, 4, 0, 0); }}",
+            canonical_encr());
+        let expected: u64 = (4u64 << 22) as u64;
+        run_6b4_test(src.as_bytes(), expected, true);
+        eprintln!("6B.5.0e: encr(0,4,0,0) = {:#x} ✓", expected);
+    }
+
+    #[test]
+    fn b50e_encs_value() {
+        // HALT: opcode=62
+        // Expected: 62 << 26
+        let src = format!(
+            "{}int main() {{ return encs(62); }}",
+            canonical_encs());
+        let expected: u64 = (62u64 << 26) as u64;
+        run_6b4_test(src.as_bytes(), expected, true);
+        eprintln!("6B.5.0e: encs(62) = {:#x} ✓", expected);
+    }
+
+    #[test]
+    fn b50e_encb_value() {
+        // BCC EQ, +4: opcode=48 cond=0 disp=4
+        // Expected: (48 << 26) | 4
+        let src = format!(
+            "{}int main() {{ return encb(0, 4); }}",
+            canonical_encb());
+        let expected: u64 = ((48u64 << 26) | 4) as u64;
+        run_6b4_test(src.as_bytes(), expected, true);
+        eprintln!("6B.5.0e: encb(0,4) = {:#x} ✓", expected);
+    }
+
+    #[test]
+    fn b50e_patch_compiles() {
+        // patch_branch and patch_call compile.
+        let src = format!(
+            "{}{}{}{}{}{}{}int main() {{ return 42; }}",
+            canonical_enci(),
+            canonical_encr(),
+            canonical_encs(),
+            canonical_encb(),
+            canonical_emit(),
+            canonical_patchbranch(),
+            canonical_patchcall());
+        run_6b4_test(src.as_bytes(), 42, true);
+        eprintln!("6B.5.0e: patchbranch/patchcall compile ✓");
+    }
+
+    #[test]
+    fn b50e_tables_compile() {
+        // All table helpers. Depends on readbyte + nameseq (for name comparison)
+        // and patchcall (for resolve_fixups).
+        let src = format!(
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}\
+             int main() {{ return 42; }}",
+            canonical_readbyte(),
+            canonical_nameseq(),
+            canonical_enci(),
+            canonical_encr(),
+            canonical_encs(),
+            canonical_encb(),
+            canonical_emit(),
+            canonical_patchcall(),
+            canonical_addsymbol(),
+            canonical_lookupsymbol(),
+            canonical_addfunc(),
+            canonical_lookupfunc(),
+            canonical_lookuparity(),
+            canonical_addfixup(),
+            );
+        eprintln!("6B.5.0e: table helpers source = {} bytes", src.len());
+        run_6b4_test(src.as_bytes(), 42, true);
+        eprintln!("6B.5.0e: table helpers (14 functions) compile ✓");
+    }
+
+    #[test]
+    fn b50e_resolvefixups_compiles() {
+        // resolve_fixups depends on lookupfunc, lookuparity, patchcall.
+        let src = format!(
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}\
+             int main() {{ return 42; }}",
+            canonical_readbyte(),
+            canonical_nameseq(),
+            canonical_enci(),
+            canonical_encr(),
+            canonical_encs(),
+            canonical_encb(),
+            canonical_emit(),
+            canonical_patchcall(),
+            canonical_addsymbol(),
+            canonical_lookupsymbol(),
+            canonical_addfunc(),
+            canonical_lookupfunc(),
+            canonical_lookuparity(),
+            canonical_addfixup(),
+            canonical_resolvefixups(),
+            );
+        eprintln!("6B.5.0e: resolve_fixups source = {} bytes", src.len());
+        run_6b4_test(src.as_bytes(), 42, true);
+        eprintln!("6B.5.0e: resolve_fixups (15 functions) compiles ✓");
     }
 
 }
