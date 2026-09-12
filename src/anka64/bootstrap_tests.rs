@@ -6654,71 +6654,89 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════
-    //  6B.5.1 — Bootstrap closure: CC_B(source_CC) → CC_C
+    //  Self-hosted compiler reproducibility invariant
+    //
+    //  This is the permanent stage-2/stage-3 test.  It verifies:
+    //
+    //    Stage 1:  CC_A(source_CC) → CC_B     (host compiles canonical source)
+    //    Stage 2:  CC_B(source_CC) → CC_C     (child compiles canonical source)
+    //    Assert:   CC_B == CC_C               (binary fixed point)
+    //    Assert:   CC_C passes regression corpus (semantic correctness)
+    //
+    //  If this test fails, either the canonical source or the host
+    //  compiler has a semantic divergence.  The fixed-point property
+    //  is a hard assertion, not advisory.
+    //
+    //  The compiler binary is position-independent for code:
+    //  all CALL and BCC use PC-relative displacements.  Data addresses
+    //  (LAYOUT_SRC, LAYOUT_OUT, LAYOUT_WS) are absolute and loaded
+    //  via MOVI, so they must be within the 18-bit signed immediate
+    //  range (≤ 131071).  The code itself can load at any aligned
+    //  virtual base — the test uses CCB_CODE_BASE = 0x30000.
     // ═══════════════════════════════════════════════════════════
+
+    /// Semantic regression corpus: exercises every language feature.
+    /// Both CC_B and CC_C must produce identical behavior for each program.
+    fn run_compiler_corpus(compiler: &[u8], label: &str) {
+        run_ccb_test(compiler, b"int main() { return 42; }", 42);
+        run_ccb_test(compiler, b"int main() { return 3 + 4 * 5; }", 23);
+        run_ccb_test(compiler, b"int main() { return 100 - 58; }", 42);
+        run_ccb_test(compiler, b"int main() { return (2 + 3) * (4 + 1); }", 25);
+        run_ccb_test(compiler,
+            b"int main() { int x = 40; int y = 2; return x + y; }", 42);
+        run_ccb_test(compiler,
+            b"int main() { int a = 10; int b = 3; int c = a * b + 12; return c; }", 42);
+        run_ccb_test(compiler,
+            b"int main() { int x = 5; if (x < 10) { return 42; } else { return 0; } }", 42);
+        run_ccb_test(compiler,
+            b"int main() { int x = 15; if (x < 10) { return 0; } else { return 42; } }", 42);
+        run_ccb_test(compiler,
+            b"int main() { int i = 0; int s = 0; while (i < 10) { s = s + i; i = i + 1; } return s; }", 45);
+        run_ccb_test(compiler,
+            b"int add(int a, int b) { return a + b; } int main() { return add(20, 22); }", 42);
+        run_ccb_test(compiler,
+            b"int double(int x) { return x + x; } int main() { return double(21); }", 42);
+        run_ccb_test(compiler,
+            b"int sum(int n) { if (n == 0) { return 0; } else { return n + sum(n - 1); } } \
+              int main() { return sum(5); }", 15);
+        run_ccb_test(compiler,
+            b"int main() { int p = 65536; *p = 42; return *p; }", 42);
+        run_ccb_test(compiler, b"int main() { return 6 & 3; }", 2);
+        run_ccb_test(compiler, b"int main() { return 5 | 2; }", 7);
+        run_ccb_test(compiler, b"int main() { return 1 << 4; }", 16);
+        run_ccb_test(compiler, b"int main() { return 32 >> 3; }", 4);
+        run_ccb_test(compiler, b"int main() { return 5 < 10; }", 1);
+        run_ccb_test(compiler, b"int main() { return 10 < 5; }", 0);
+        run_ccb_test(compiler, b"int main() { return 5 == 5; }", 1);
+        run_ccb_test(compiler, b"int main() { return 5 != 5; }", 0);
+        run_ccb_test(compiler, b"int main() { return 5 <= 5; }", 1);
+        eprintln!("{}: 22-program corpus ✓", label);
+    }
 
     #[test]
     fn b51_bootstrap_closure() {
-        // Step 1: CC_A(source_CC) → CC_B
+        // ── Stage 1: CC_A(source_CC) → CC_B ──
         let ccb = build_ccb();
-        eprintln!("CC_B = {} bytes", ccb.len());
+        eprintln!("stage 1: CC_A → CC_B = {} bytes (42 functions)", ccb.len());
 
-        // Step 2: CC_B(source_CC) → CC_C
+        // ── Stage 2: CC_B(source_CC) → CC_C ──
         let canon_src = canonical_compiler_source();
         let (ccc, ccc_funcs, ccc_error) = compile_with_ccb(&ccb, canon_src.as_bytes());
-        eprintln!("CC_C: {} bytes, {} functions, error={}",
-            ccc.len(), ccc_funcs, ccc_error);
         assert_eq!(ccc_error, 0, "CC_B failed to compile canonical source");
         assert_eq!(ccc_funcs, 42, "CC_C has wrong function count");
-        assert!(ccc.len() > 0, "CC_C is empty");
-        eprintln!("6B.5.1: CC_B(source_CC) → CC_C ({} bytes) ✓", ccc.len());
+        assert!(!ccc.is_empty(), "CC_C is empty");
+        eprintln!("stage 2: CC_B → CC_C = {} bytes (42 functions)", ccc.len());
 
-        // Step 3: CC_C compiles the corpus
-        run_ccb_test(&ccc, b"int main() { return 42; }", 42);
-        eprintln!("  CC_C: return 42 ✓");
-        run_ccb_test(&ccc, b"int main() { return 3 + 4 * 5; }", 23);
-        eprintln!("  CC_C: arithmetic ✓");
-        run_ccb_test(&ccc,
-            b"int main() { int x = 40; int y = 2; return x + y; }", 42);
-        eprintln!("  CC_C: variables ✓");
-        run_ccb_test(&ccc,
-            b"int main() { int x = 5; if (x < 10) { return 42; } else { return 0; } }", 42);
-        eprintln!("  CC_C: if/else ✓");
-        run_ccb_test(&ccc,
-            b"int main() { int i = 0; int s = 0; while (i < 10) { s = s + i; i = i + 1; } return s; }", 45);
-        eprintln!("  CC_C: while ✓");
-        run_ccb_test(&ccc,
-            b"int add(int a, int b) { return a + b; } int main() { return add(20, 22); }", 42);
-        eprintln!("  CC_C: function calls ✓");
-        run_ccb_test(&ccc,
-            b"int sum(int n) { if (n == 0) { return 0; } else { return n + sum(n - 1); } } \
-              int main() { return sum(5); }", 15);
-        eprintln!("  CC_C: recursion ✓");
-        eprintln!("6B.5.1: CC_C passes full corpus ✓");
+        // ── Fixed-point assertion: CC_B == CC_C ──
+        assert_eq!(ccb, ccc,
+            "FIXED POINT VIOLATION: CC_B ({} bytes) ≠ CC_C ({} bytes)",
+            ccb.len(), ccc.len());
+        eprintln!("stage 2: CC_B == CC_C (binary fixed point) ✓");
 
-        // Step 4: Fixed-point check — CC_B == CC_C?
-        if ccb == ccc {
-            eprintln!("6B.5.1: FIXED POINT — CC_B == CC_C (binary identical) ✓✓✓");
-        } else {
-            eprintln!("6B.5.1: CC_B ({} bytes) ≠ CC_C ({} bytes) — not yet a fixed point",
-                ccb.len(), ccc.len());
-            // Compare byte-by-byte for diagnostic
-            let min_len = ccb.len().min(ccc.len());
-            let mut first_diff = None;
-            for i in 0..min_len {
-                if ccb[i] != ccc[i] {
-                    first_diff = Some(i);
-                    break;
-                }
-            }
-            if let Some(off) = first_diff {
-                eprintln!("  first difference at byte {:#x}: CC_B={:#04x} CC_C={:#04x}",
-                    off, ccb[off], ccc[off]);
-            } else if ccb.len() != ccc.len() {
-                eprintln!("  same prefix ({} bytes), CC_B is {} bytes longer",
-                    min_len, ccb.len() as i64 - ccc.len() as i64);
-            }
-        }
+        // ── Semantic verification: CC_C passes the corpus ──
+        run_compiler_corpus(&ccc, "CC_C");
+        eprintln!("6B.5.1: bootstrap closure complete — \
+            CC_A → CC_B → CC_C, CC_B == CC_C, corpus ✓");
     }
 
 }

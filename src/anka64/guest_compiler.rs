@@ -83,19 +83,27 @@ pub(crate) fn enc_s(opcode: i64) -> Expr {
 //  Virtual memory layout — all addresses derived from TEXT_SIZE
 // ═══════════════════════════════════════════════════════════
 // TEXT_SIZE = align_up(compiled_bytes, 0x1000).
-// TEXT_SIZE: page-aligned upper bound on the code region.
-// Must accommodate the HOST compiler (CC_A, ~21KB).
-// CC_B (the canonical binary, ~57KB) runs at a separate base
-// address so it doesn't overlap with data regions at TEXT_SIZE.
-// The test `text_size_is_derived` enforces this invariant.
+// TEXT_SIZE: page-aligned upper bound on the HOST compiler (CC_A, ~21KB).
+// The test `text_size_is_derived` enforces TEXT_SIZE = align_up(CC_A, 0x1000).
+//
+// The canonical compiler binary (CC_B, ~57KB) runs at a SEPARATE virtual
+// base address (CCB_CODE_BASE = 0x30000) so its code does not overlap with
+// data regions.  All CALL and BCC instructions use PC-relative displacements,
+// so function calls work regardless of the code base address.  Data regions
+// use absolute addresses (LAYOUT_SRC, LAYOUT_OUT, LAYOUT_WS) loaded via MOVI.
+// These must fit in the 18-bit signed immediate: max address ≤ 131071.
 pub(crate) const TEXT_SIZE: i64     = 0x6000;
 
-// 6B.4+ layout (text at 0, source/output/workspace contiguous):
-//   0x00000             : compiler text  (TEXT_SIZE = 64KB)
-//   TEXT_SIZE+0x00000   : source         (0x4000 = 16KB)
-//   TEXT_SIZE+0x04000   : output         (0x10000 = 64KB)
-//   TEXT_SIZE+0x14000   : workspace      (0x6000 = 24KB)
-//   TEXT_SIZE+0x1A000   : stack          (0x4000 = 16KB)
+// Data layout (contiguous after TEXT_SIZE):
+//   0x00000 ..TEXT_SIZE  : compiler text  (TEXT_SIZE = 24KB, host only)
+//   TEXT_SIZE+0x00000    : source         (0x4000 = 16KB)
+//   TEXT_SIZE+0x04000    : output         (0x10000 = 64KB)
+//   TEXT_SIZE+0x14000    : workspace      (0x6000 = 24KB)
+//   TEXT_SIZE+0x1A000    : stack          (0x4000 = 16KB)
+// Stack/source/output addresses are NOT loaded via MOVI — they are set
+// by the host harness or derived from workspace slots.  Only workspace
+// addresses (up to WS_FIX_TABLE end ≈ 0x1FB68 = 129,896) must fit in
+// the 18-bit signed immediate range.
 pub(crate) const LAYOUT_SRC: i64   = TEXT_SIZE;
 pub(crate) const SOURCE_SIZE: i64  = 0x4000;
 pub(crate) const LAYOUT_OUT: i64   = TEXT_SIZE + 0x4000;
