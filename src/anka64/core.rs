@@ -178,8 +178,19 @@ impl Anka64Core {
         let insn = decode(word);
 
         if insn.is_illegal() {
-            self.halted = true;
-            return StepResult::Halted;
+            return StepResult::Fault(FaultRecord {
+                agent: self.agent,
+                domain: self.domain,
+                privilege: self.privilege,
+                transaction: TransactionId(0),
+                object: ObjectId(0),
+                generation: None,
+                offset: self.pc,
+                width: Width::Word,
+                kind: AccessKind::Fetch,
+                pc: Some(self.pc),
+                reason: FaultReason::IllegalInstruction,
+            });
         }
 
         // 3. Execute (semantic dispatch)
@@ -1179,5 +1190,40 @@ mod tests {
 
         eprintln!("P24: failed RET preserved R (depth=1), second RET succeeded ✓");
         eprintln!("     fault atomicity: faulting RET ⟹ R' = R");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // P25: Illegal instruction → IllegalInstruction fault (not Halted)
+    //
+    // Encodes a word with no semantic mapping.  Before the
+    // disambiguation, this produced StepResult::Halted — now it
+    // must produce StepResult::Fault(IllegalInstruction).
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p25_illegal_instruction_faults() {
+        let (mut fabric, _text, _data, _dom, mut core) = setup();
+
+        // word 0: illegal encoding (opcode 0x00 has no desc-table entry).
+        // NOTE: 0xFFFFFFFF maps to opcode 0x3F = NOP, not illegal.
+        let code = [
+            0x00000001u32,  // opcode 0 → is_illegal()
+        ];
+        let mut bytes = Vec::new();
+        for w in &code { bytes.extend_from_slice(&w.to_le_bytes()); }
+        fabric.write_physical(0x0000, &bytes);
+        seal_text(&mut fabric, _text, _dom);
+
+        let result = core.step(&mut fabric);
+        match &result {
+            StepResult::Fault(fault) => {
+                assert_eq!(fault.reason, FaultReason::IllegalInstruction);
+                assert_eq!(fault.pc, Some(0x0000));
+                eprintln!("P25: illegal opcode → IllegalInstruction fault ✓");
+                eprintln!("     (was StepResult::Halted before disambiguation)");
+            }
+            _ => panic!("expected IllegalInstruction fault, got {:?}", result),
+        }
+        assert!(!core.halted, "illegal instruction must not set halted flag");
     }
 }

@@ -368,6 +368,13 @@ pub enum FaultReason {
     ///
     /// Rule 29: "An executable address is not control-flow authority."
     ControlFlowViolation,
+    /// Decoded opcode has no semantic mapping in the description table.
+    ///
+    /// Distinct from Halted: an illegal instruction is an architectural
+    /// fault, not a deliberate stop.  Without this distinction, an
+    /// unknown opcode with R0 == 42 in user mode would be silently
+    /// reported as "normal exit 42" instead of a fault.
+    IllegalInstruction,
 }
 
 impl fmt::Display for FaultReason {
@@ -380,6 +387,7 @@ impl fmt::Display for FaultReason {
             Self::TranslationFault => write!(f, "TranslationFault"),
             Self::AlignmentFault => write!(f, "AlignmentFault"),
             Self::ControlFlowViolation => write!(f, "ControlFlowViolation"),
+            Self::IllegalInstruction => write!(f, "IllegalInstruction"),
         }
     }
 }
