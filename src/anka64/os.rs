@@ -99,6 +99,104 @@ struct ProcessImageDesc {
     entry: u64,          // image-relative entry point
 }
 
+// ───────────────────────────────────────────────────────────────────
+// Boot contract types
+//
+// The boot contract separates authority from placement (Rule 1):
+//   BootImage  — identifies the sealed executable object
+//   BootGrant  — additional authority beyond the image
+//   BootMap    — virtual address placement
+//
+// BootImage implicitly creates:
+//   - RX grant covering [code_offset .. code_offset + code_size)
+//   - R  grant covering [code_offset + lit_start .. code_offset + image_end) if lit_start > 0
+//   - address map entry: virtual 0 → code
+//   - address map entry: virtual lit_start → literals (if present)
+//
+// Invariant: BootGrant ranges may NOT overlap the BootImage backing
+// range [code_offset .. code_offset + image_size).  This preserves
+// Rule 28 (one semantic fact, one definition) and Rule 29 (data
+// that names code is not authority to transfer control to it).
+//
+// Invariant: BootMap virtual ranges may NOT overlap each other or
+// the implicit BootImage/stack/trap mappings.
+// ───────────────────────────────────────────────────────────────────
+
+/// The sealed executable image that init will execute.
+#[derive(Debug, Clone)]
+pub struct BootImage {
+    /// Object containing the executable image (must be Sealed).
+    pub obj: ObjectId,
+    /// Byte offset within the object where code begins.
+    pub code_offset: u64,
+    /// Size of the code segment in bytes.
+    pub code_size: u64,
+    /// Image-relative entry point (must be < code_size).
+    pub entry: u64,
+    /// Image-relative start of the literal segment.
+    /// 0 means no literals.  Must satisfy: code_size <= lit_start < image_size.
+    pub lit_start: u64,
+}
+
+/// Additional authority granted to init beyond the executable image.
+/// The (obj, offset, size) range must NOT overlap the BootImage
+/// backing range within the same object.
+#[derive(Debug, Clone)]
+pub struct BootGrant {
+    pub obj: ObjectId,
+    pub offset: u64,
+    pub size: u64,
+    pub perms: Permissions,
+}
+
+/// Additional virtual address mapping for init.
+/// The virtual range [vaddr .. vaddr + size) must NOT overlap any
+/// other BootMap entry or the implicit code/literal/stack/trap maps.
+#[derive(Debug, Clone)]
+pub struct BootMap {
+    pub vaddr: u64,
+    pub size: u64,
+    pub obj: ObjectId,
+    pub obj_offset: u64,
+}
+
+/// Complete boot descriptor.
+#[derive(Debug, Clone)]
+pub struct BootInfo {
+    pub image: BootImage,
+    pub grants: Vec<BootGrant>,
+    pub maps: Vec<BootMap>,
+}
+
+/// Boot error — reason a boot descriptor was rejected.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BootError {
+    /// The kernel has already been successfully booted.
+    AlreadyBooted,
+    /// The image object does not exist.
+    ImageNotFound,
+    /// The image object is not Sealed.
+    ImageNotSealed,
+    /// entry >= code_size.
+    InvalidEntry,
+    /// code_size is zero.
+    ZeroCode,
+    /// lit_start is non-zero but < code_size or >= image_size.
+    InvalidLiterals,
+    /// A BootGrant range overlaps the BootImage backing range.
+    GrantOverlapsImage,
+    /// Two BootMap virtual ranges overlap each other or an implicit mapping.
+    OverlappingMaps,
+    /// A BootGrant references an object that doesn't exist.
+    GrantObjectNotFound,
+    /// A BootMap references an object that doesn't exist.
+    MapObjectNotFound,
+    /// A BootGrant range exceeds the object size.
+    GrantOutOfBounds,
+    /// A BootMap range exceeds the object size.
+    MapOutOfBounds,
+}
+
 pub struct Kernel {
     pub fabric: Fabric,
     pub processes: Vec<Process>,
@@ -111,6 +209,8 @@ pub struct Kernel {
     pub next_phys: u64,
     /// Next available agent ID for child processes.
     pub next_agent: u64,
+    /// One-success-only boot flag.  Set to true after a successful boot.
+    booted: bool,
 }
 
 impl Kernel {
@@ -123,6 +223,7 @@ impl Kernel {
             current: 0,
             next_phys: 0x100000,
             next_agent: 100,
+            booted: false,
         }
     }
 
