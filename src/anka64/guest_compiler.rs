@@ -95,21 +95,23 @@ pub(crate) const WS_KW_IF: i64      = 0x6040;
 pub(crate) const WS_KW_ELSE: i64    = 0x6048;
 pub(crate) const WS_KW_WHILE: i64   = 0x6050;
 
-// Phase-specific workspace slots (6B.4)
-pub(crate) const WS_SYM_COUNT: i64  = 0x6058;
-pub(crate) const WS_OUT_POS: i64    = 0x6060;
-pub(crate) const WS_EXPR_SP: i64    = 0x6068;
-pub(crate) const WS_FUNC_COUNT: i64 = 0x6070;
-pub(crate) const WS_FIX_COUNT: i64  = 0x6078;
-pub(crate) const WS_KW_MAIN: i64    = 0x6080;
-// Symbol table: 32 entries × 16 bytes at 0x6088..0x6288
-pub(crate) const WS_SYM_TABLE: i64  = 0x6088;
-// Function table: 16 entries × 24 bytes at 0x6288..0x6408
-//   (name: i64, address: i64, arity: i64)
-pub(crate) const WS_FUNC_TABLE: i64 = 0x6288;
-// Fixup table: 32 entries × 24 bytes at 0x6408..0x6708
-//   (call_pos: i64, func_name: i64, argc: i64)
-pub(crate) const WS_FIX_TABLE: i64  = 0x6408;
+// Phase-specific workspace slots (6B.5: source-slice names)
+pub(crate) const WS_TOK_NAME_START: i64 = 0x6030;
+pub(crate) const WS_TOK_NAME_LEN: i64   = 0x6038;
+pub(crate) const WS_SYM_COUNT: i64  = 0x6040;
+pub(crate) const WS_OUT_POS: i64    = 0x6048;
+pub(crate) const WS_EXPR_SP: i64    = 0x6050;
+pub(crate) const WS_FUNC_COUNT: i64 = 0x6058;
+pub(crate) const WS_FIX_COUNT: i64  = 0x6060;
+// Symbol table: 32 entries × 24 bytes at 0x6068..0x6368
+//   (name_start: i64, name_len: i64, offset: i64)
+pub(crate) const WS_SYM_TABLE: i64  = 0x6068;
+// Function table: 16 entries × 32 bytes at 0x6368..0x6568
+//   (name_start: i64, name_len: i64, address: i64, arity: i64)
+pub(crate) const WS_FUNC_TABLE: i64 = 0x6368;
+// Fixup table: 32 entries × 32 bytes at 0x6568..0x6968
+//   (call_pos: i64, name_start: i64, name_len: i64, argc: i64)
+pub(crate) const WS_FIX_TABLE: i64  = 0x6568;
 // ─── Token types (same as 6B.3) ──────────────────
 
 // ─── Token types ──────────────────────────────────
@@ -503,8 +505,30 @@ pub(crate) fn seal_code_object(fabric: &mut Fabric, obj: ObjectId, dom: DomainId
 //  Prologue:  SUBI SP,SP,16; ST LR,[SP,8]; ST FP,[SP,0]; MOV FP,SP
 //  Epilogue:  MOV SP,FP; LD FP,[SP,0]; LD LR,[SP,8]; ADDI SP,SP,16; RET
 
+/// Build a nested If chain that checks source bytes against a known keyword.
+///
+/// Produces: if (read_byte(start+0)==b0) { if (read_byte(start+1)==b1) { ... result } }
+fn kw_byte_chain(start_var: VarId, bytes: &[i64], result: Stmt) -> Stmt {
+    bytes.iter().enumerate().rfold(
+        result,
+        |inner, (i, &byte)| {
+            Stmt::If(
+                binop(BinOp::Eq,
+                    call("read_byte", vec![
+                        binop(BinOp::Add, var(start_var), lit(i as i64))]),
+                    lit(byte)),
+                vec![inner],
+                vec![],
+            )
+        }
+    )
+}
+
 pub fn build_6b4_compiler() -> Program {
-    // ─── Shared lexer ────────────────────────────────
+    // ─── Shared lexer functions (unchanged) ──────────
+    // peek_char, advance, skip_ws, set_char_token, scan_number
+    // use the shared builders; scan_ident and next_token are
+    // replaced with source-slice versions below.
     let tok4 = TokMap {
         eof: TOK_EOF, number: TOK_NUMBER, ident: TOK_IDENT,
         plus: TOK_PLUS, minus: TOK_MINUS, star: TOK_STAR,
@@ -514,7 +538,231 @@ pub fn build_6b4_compiler() -> Program {
         if_kw: TOK_IF, else_kw: TOK_ELSE, while_kw: TOK_WHILE,
         lbrace: TOK_LBRACE, rbrace: TOK_RBRACE, lt: TOK_LT,
     };
-    let lexer_fns = guest_lexer(&tok4);
+
+    // ─── read_byte(pos) → byte value ───────────────
+    // Same logic as peek_char but pos is a parameter.
+    let fn_read_byte = Function {
+        name: "read_byte".into(),
+        params: vec![(0, Type::Int)],
+        ret_type: Type::Int,
+        locals: vec![(1, Type::Int)],
+        body: vec![
+            Stmt::VarDecl(1, Type::Int, Some(
+                deref(binop(BinOp::Add,
+                    deref(lit(WS_TEXT_BASE)),
+                    var(0))))),
+            Stmt::Return(binop(BinOp::Shr,
+                binop(BinOp::Shl, var(1), lit(56)), lit(56))),
+        ],
+    };
+
+    // ─── names_equal(sa, la, sb, lb) → 0 or 1 ─────
+    // Byte-by-byte comparison of two source slices.
+    // Call results are saved to locals to avoid scratch register
+    // conflicts (CALL clobbers R4-R6).
+    let fn_names_equal = Function {
+        name: "names_equal".into(),
+        params: vec![(0, Type::Int), (1, Type::Int),
+                     (2, Type::Int), (3, Type::Int)],
+        ret_type: Type::Int,
+        locals: vec![(4, Type::Int), (5, Type::Int), (6, Type::Int)],
+        body: vec![
+            Stmt::If(
+                binop(BinOp::Ne, var(1), var(3)),
+                vec![Stmt::Return(lit(0))],
+                vec![],
+            ),
+            Stmt::VarDecl(4, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(5, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(6, Type::Int, Some(lit(0))),
+            Stmt::While(binop(BinOp::Lt, var(4), var(1)), vec![
+                assign(5, call("read_byte", vec![
+                    binop(BinOp::Add, var(0), var(4))])),
+                assign(6, call("read_byte", vec![
+                    binop(BinOp::Add, var(2), var(4))])),
+                Stmt::If(
+                    binop(BinOp::Ne, var(5), var(6)),
+                    vec![Stmt::Return(lit(0))],
+                    vec![],
+                ),
+                assign(4, binop(BinOp::Add, var(4), lit(1))),
+            ]),
+            Stmt::Return(lit(1)),
+        ],
+    };
+
+    // ─── classify_kw(start, len) → token type ──────
+    // Length-first dispatch + byte-by-byte comparison.
+    // Params: (0: start, 1: len).
+    let fn_classify_kw = Function {
+        name: "classify_kw".into(),
+        params: vec![(0, Type::Int), (1, Type::Int)],
+        ret_type: Type::Int,
+        locals: vec![],
+        body: vec![
+            // len 2: "if" (105, 102)
+            Stmt::If(binop(BinOp::Eq, var(1), lit(2)), vec![
+                kw_byte_chain(0, &[105, 102],
+                    Stmt::Return(lit(TOK_IF))),
+            ], vec![]),
+            // len 3: "int" (105, 110, 116)
+            Stmt::If(binop(BinOp::Eq, var(1), lit(3)), vec![
+                kw_byte_chain(0, &[105, 110, 116],
+                    Stmt::Return(lit(TOK_INT_KW))),
+            ], vec![]),
+            // len 4: "else" (101, 108, 115, 101)
+            Stmt::If(binop(BinOp::Eq, var(1), lit(4)), vec![
+                kw_byte_chain(0, &[101, 108, 115, 101],
+                    Stmt::Return(lit(TOK_ELSE))),
+            ], vec![]),
+            // len 5: "while" (119, 104, 105, 108, 101)
+            Stmt::If(binop(BinOp::Eq, var(1), lit(5)), vec![
+                kw_byte_chain(0, &[119, 104, 105, 108, 101],
+                    Stmt::Return(lit(TOK_WHILE))),
+            ], vec![]),
+            // len 6: "return" (114, 101, 116, 117, 114, 110)
+            Stmt::If(binop(BinOp::Eq, var(1), lit(6)), vec![
+                kw_byte_chain(0, &[114, 101, 116, 117, 114, 110],
+                    Stmt::Return(lit(TOK_RETURN))),
+            ], vec![]),
+            Stmt::Return(lit(TOK_IDENT)),
+        ],
+    };
+
+    // ─── find_main() → address ─────────────────────
+    // Scans function table for a 4-byte name spelling "main".
+    // Params: none. Locals: count(0), i(1), base(2), ns(3), nl(4).
+    let fn_find_main = Function {
+        name: "find_main".into(),
+        params: vec![],
+        ret_type: Type::Int,
+        locals: vec![
+            (0, Type::Int), (1, Type::Int), (2, Type::Int),
+            (3, Type::Int), (4, Type::Int),
+        ],
+        body: vec![
+            Stmt::VarDecl(0, Type::Int, Some(deref(lit(WS_FUNC_COUNT)))),
+            Stmt::VarDecl(1, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(2, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(3, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(4, Type::Int, Some(lit(0))),
+            Stmt::While(binop(BinOp::Lt, var(1), var(0)), vec![
+                assign(2, binop(BinOp::Add, lit(WS_FUNC_TABLE),
+                    binop(BinOp::Mul, var(1), lit(32)))),
+                assign(3, deref(var(2))),
+                assign(4, deref(binop(BinOp::Add, var(2), lit(8)))),
+                Stmt::If(binop(BinOp::Eq, var(4), lit(4)), vec![
+                    // "main" = 109, 97, 105, 110
+                    kw_byte_chain(3, &[109, 97, 105, 110],
+                        Stmt::Return(deref(
+                            binop(BinOp::Add, var(2), lit(16))))),
+                ], vec![]),
+                assign(1, binop(BinOp::Add, var(1), lit(1))),
+            ]),
+            deref_assign(lit(WS_ERROR), lit(1)),
+            Stmt::Return(lit(0)),
+        ],
+    };
+
+    // ─── scan_ident() — source-slice version ───────
+    // Records (start, len) in WS_TOK_NAME_START/LEN,
+    // calls classify_kw for keyword classification.
+    // Vars: ch(0), start(1), len(2).
+    let fn_scan_ident = Function {
+        name: "scan_ident".into(),
+        params: vec![],
+        ret_type: Type::Int,
+        locals: vec![(0, Type::Int), (1, Type::Int), (2, Type::Int)],
+        body: vec![
+            Stmt::VarDecl(0, Type::Int, Some(call("peek_char", vec![]))),
+            Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_POS)))),
+            Stmt::VarDecl(2, Type::Int, Some(lit(0))),
+            // Letter loop: 97 ≤ ch ≤ 122
+            Stmt::While(
+                in_range(var(0), 97, 122),
+                vec![
+                    assign(2, binop(BinOp::Add, var(2), lit(1))),
+                    call_stmt("advance", vec![]),
+                    assign(0, call("peek_char", vec![])),
+                ],
+            ),
+            // Digit suffix loop: 48 ≤ ch ≤ 57
+            Stmt::While(
+                in_range(var(0), 48, 57),
+                vec![
+                    assign(2, binop(BinOp::Add, var(2), lit(1))),
+                    call_stmt("advance", vec![]),
+                    assign(0, call("peek_char", vec![])),
+                ],
+            ),
+            deref_assign(lit(WS_TOK_NAME_START), var(1)),
+            deref_assign(lit(WS_TOK_NAME_LEN), var(2)),
+            deref_assign(lit(WS_TOK_TYPE),
+                call("classify_kw", vec![var(1), var(2)])),
+            Stmt::Return(lit(0)),
+        ],
+    };
+
+    // ─── next_token() — direct TOK_* constants ─────
+    // Position-based EOF. Uses source-slice scan_ident.
+    let fn_next_token = Function {
+        name: "next_token".into(),
+        params: vec![],
+        ret_type: Type::Int,
+        locals: vec![(0, Type::Int)],
+        body: vec![
+            call_stmt("skip_ws", vec![]),
+            Stmt::If(
+                binop(BinOp::Le, deref(lit(WS_SRC_LEN)), deref(lit(WS_POS))),
+                vec![
+                    deref_assign(lit(WS_TOK_TYPE), lit(TOK_EOF)),
+                    Stmt::Return(lit(0)),
+                ], vec![]),
+            Stmt::VarDecl(0, Type::Int, Some(call("peek_char", vec![]))),
+            Stmt::If(binop(BinOp::Eq, var(0), lit(43)),
+                vec![Stmt::Return(call("set_char_token",
+                    vec![lit(TOK_PLUS), lit(43)]))], vec![]),
+            Stmt::If(binop(BinOp::Eq, var(0), lit(45)),
+                vec![Stmt::Return(call("set_char_token",
+                    vec![lit(TOK_MINUS), lit(45)]))], vec![]),
+            Stmt::If(binop(BinOp::Eq, var(0), lit(42)),
+                vec![Stmt::Return(call("set_char_token",
+                    vec![lit(TOK_STAR), lit(42)]))], vec![]),
+            Stmt::If(binop(BinOp::Eq, var(0), lit(61)),
+                vec![Stmt::Return(call("set_char_token",
+                    vec![lit(TOK_EQ), lit(61)]))], vec![]),
+            Stmt::If(binop(BinOp::Eq, var(0), lit(59)),
+                vec![Stmt::Return(call("set_char_token",
+                    vec![lit(TOK_SEMI), lit(59)]))], vec![]),
+            Stmt::If(binop(BinOp::Eq, var(0), lit(44)),
+                vec![Stmt::Return(call("set_char_token",
+                    vec![lit(TOK_COMMA), lit(44)]))], vec![]),
+            Stmt::If(binop(BinOp::Eq, var(0), lit(40)),
+                vec![Stmt::Return(call("set_char_token",
+                    vec![lit(TOK_LPAREN), lit(40)]))], vec![]),
+            Stmt::If(binop(BinOp::Eq, var(0), lit(41)),
+                vec![Stmt::Return(call("set_char_token",
+                    vec![lit(TOK_RPAREN), lit(41)]))], vec![]),
+            Stmt::If(binop(BinOp::Eq, var(0), lit(123)),
+                vec![Stmt::Return(call("set_char_token",
+                    vec![lit(TOK_LBRACE), lit(123)]))], vec![]),
+            Stmt::If(binop(BinOp::Eq, var(0), lit(125)),
+                vec![Stmt::Return(call("set_char_token",
+                    vec![lit(TOK_RBRACE), lit(125)]))], vec![]),
+            Stmt::If(binop(BinOp::Eq, var(0), lit(60)),
+                vec![Stmt::Return(call("set_char_token",
+                    vec![lit(TOK_LT), lit(60)]))], vec![]),
+            Stmt::If(in_range(var(0), 97, 122),
+                vec![Stmt::Return(call("scan_ident", vec![]))],
+                vec![]),
+            Stmt::If(in_range(var(0), 48, 57),
+                vec![Stmt::Return(call("scan_number", vec![]))],
+                vec![]),
+            deref_assign(lit(WS_ERROR), lit(1)),
+            deref_assign(lit(WS_TOK_TYPE), lit(TOK_EOF)),
+            Stmt::Return(lit(0)),
+        ],
+    };
 
     // ─── emit(word) ────────────────────────────────
     let fn_emit = Function {
@@ -546,191 +794,110 @@ pub fn build_6b4_compiler() -> Program {
         ],
     };
 
-    // ─── add_symbol(name) → offset ─────────────────
-    // FP-relative offsets: first var at [FP,-8], second at [FP,-16].
+    // ─── add_symbol(ns, nl) → offset ───────────────
+    // Stride 24: (name_start, name_len, offset).
+    // Duplicate detection via names_equal.
     let fn_add_symbol = Function {
         name: "add_symbol".into(),
-        params: vec![(0, Type::Int)],
+        params: vec![(0, Type::Int), (1, Type::Int)],
         ret_type: Type::Int,
         locals: vec![
-            (1, Type::Int), (2, Type::Int),
-            (3, Type::Int), (4, Type::Int), (5, Type::Int),
+            (2, Type::Int), (3, Type::Int), (4, Type::Int),
+            (5, Type::Int), (6, Type::Int), (7, Type::Int),
         ],
         body: vec![
-            Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_SYM_COUNT)))),
-            Stmt::VarDecl(2, Type::Int, Some(lit(0))),
-            Stmt::VarDecl(3, Type::Int, Some(lit(0))),
-            Stmt::VarDecl(4, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(2, Type::Int, Some(deref(lit(WS_SYM_COUNT)))),
             Stmt::If(
-                binop(BinOp::Le, lit(32), var(1)),
+                binop(BinOp::Le, lit(32), var(2)),
                 vec![
                     deref_assign(lit(WS_ERROR), lit(1)),
                     Stmt::Return(lit(0)),
                 ],
                 vec![],
             ),
-            Stmt::While(binop(BinOp::Lt, var(2), var(1)), vec![
-                assign(3, binop(BinOp::Add, lit(WS_SYM_TABLE),
-                    binop(BinOp::Mul, var(2), lit(16)))),
-                assign(4, deref(var(3))),
+            Stmt::VarDecl(3, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(4, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(5, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(6, Type::Int, Some(lit(0))),
+            Stmt::While(binop(BinOp::Lt, var(3), var(2)), vec![
+                assign(4, binop(BinOp::Add, lit(WS_SYM_TABLE),
+                    binop(BinOp::Mul, var(3), lit(24)))),
+                assign(5, deref(var(4))),
+                assign(6, deref(binop(BinOp::Add, var(4), lit(8)))),
                 Stmt::If(
-                    binop(BinOp::Eq, var(4), var(0)),
+                    call("names_equal", vec![
+                        var(0), var(1), var(5), var(6)]),
                     vec![
                         deref_assign(lit(WS_ERROR), lit(1)),
                         Stmt::Return(lit(0)),
                     ],
                     vec![],
                 ),
-                assign(2, binop(BinOp::Add, var(2), lit(1))),
+                assign(3, binop(BinOp::Add, var(3), lit(1))),
             ]),
-            Stmt::VarDecl(5, Type::Int, Some(
+            Stmt::VarDecl(7, Type::Int, Some(
                 binop(BinOp::Sub, lit(0),
                     binop(BinOp::Mul,
-                        binop(BinOp::Add, var(1), lit(1)),
+                        binop(BinOp::Add, var(2), lit(1)),
                         lit(8))))),
-            assign(3, binop(BinOp::Add, lit(WS_SYM_TABLE),
-                binop(BinOp::Mul, var(1), lit(16)))),
-            deref_assign(var(3), var(0)),
+            assign(4, binop(BinOp::Add, lit(WS_SYM_TABLE),
+                binop(BinOp::Mul, var(2), lit(24)))),
+            deref_assign(var(4), var(0)),
             deref_assign(
-                binop(BinOp::Add, var(3), lit(8)),
-                var(5)),
+                binop(BinOp::Add, var(4), lit(8)),
+                var(1)),
+            deref_assign(
+                binop(BinOp::Add, var(4), lit(16)),
+                var(7)),
             deref_assign(lit(WS_SYM_COUNT),
-                binop(BinOp::Add, var(1), lit(1))),
-            Stmt::Return(var(5)),
+                binop(BinOp::Add, var(2), lit(1))),
+            Stmt::Return(var(7)),
         ],
     };
 
-    // ─── lookup_symbol(name) → offset ──────────────
+    // ─── lookup_symbol(ns, nl) → offset ────────────
+    // Stride 24, uses names_equal.
     let fn_lookup_symbol = Function {
         name: "lookup_symbol".into(),
-        params: vec![(0, Type::Int)],
-        ret_type: Type::Int,
-        locals: vec![
-            (1, Type::Int), (2, Type::Int),
-            (3, Type::Int), (4, Type::Int),
-        ],
-        body: vec![
-            Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_SYM_COUNT)))),
-            Stmt::VarDecl(2, Type::Int, Some(lit(0))),
-            Stmt::VarDecl(3, Type::Int, Some(lit(0))),
-            Stmt::VarDecl(4, Type::Int, Some(lit(0))),
-            Stmt::While(binop(BinOp::Lt, var(2), var(1)), vec![
-                assign(3, binop(BinOp::Add, lit(WS_SYM_TABLE),
-                    binop(BinOp::Mul, var(2), lit(16)))),
-                assign(4, deref(var(3))),
-                Stmt::If(
-                    binop(BinOp::Eq, var(4), var(0)),
-                    vec![Stmt::Return(deref(
-                        binop(BinOp::Add, var(3), lit(8))))],
-                    vec![],
-                ),
-                assign(2, binop(BinOp::Add, var(2), lit(1))),
-            ]),
-            deref_assign(lit(WS_ERROR), lit(1)),
-            Stmt::Return(lit(0)),
-        ],
-    };
-
-    // ─── add_func(name) ────────────────────────────
-    // Record function name + current out_pos as its address.
-    // add_func(name, arity) — stride 24: (name, address, arity)
-    let fn_add_func = Function {
-        name: "add_func".into(),
         params: vec![(0, Type::Int), (1, Type::Int)],
         ret_type: Type::Int,
-        locals: vec![(2, Type::Int), (3, Type::Int)],
-        body: vec![
-            Stmt::VarDecl(2, Type::Int, Some(deref(lit(WS_FUNC_COUNT)))),
-            Stmt::If(
-                binop(BinOp::Le, lit(16), var(2)),
-                vec![
-                    deref_assign(lit(WS_ERROR), lit(1)),
-                    Stmt::Return(lit(0)),
-                ],
-                vec![],
-            ),
-            Stmt::VarDecl(3, Type::Int, Some(
-                binop(BinOp::Add, lit(WS_FUNC_TABLE),
-                    binop(BinOp::Mul, var(2), lit(24))))),
-            deref_assign(var(3), var(0)),
-            deref_assign(
-                binop(BinOp::Add, var(3), lit(8)),
-                deref(lit(WS_OUT_POS))),
-            deref_assign(
-                binop(BinOp::Add, var(3), lit(16)),
-                var(1)),
-            deref_assign(lit(WS_FUNC_COUNT),
-                binop(BinOp::Add, var(2), lit(1))),
-            Stmt::Return(lit(0)),
-        ],
-    };
-
-    // lookup_func(name) → byte address — stride 24
-    let fn_lookup_func = Function {
-        name: "lookup_func".into(),
-        params: vec![(0, Type::Int)],
-        ret_type: Type::Int,
         locals: vec![
-            (1, Type::Int), (2, Type::Int), (3, Type::Int),
+            (2, Type::Int), (3, Type::Int), (4, Type::Int),
         ],
         body: vec![
-            Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_FUNC_COUNT)))),
-            Stmt::VarDecl(2, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(2, Type::Int, Some(deref(lit(WS_SYM_COUNT)))),
             Stmt::VarDecl(3, Type::Int, Some(lit(0))),
-            Stmt::While(binop(BinOp::Lt, var(2), var(1)), vec![
-                assign(3, binop(BinOp::Add, lit(WS_FUNC_TABLE),
-                    binop(BinOp::Mul, var(2), lit(24)))),
+            Stmt::VarDecl(4, Type::Int, Some(lit(0))),
+            Stmt::While(binop(BinOp::Lt, var(3), var(2)), vec![
+                assign(4, binop(BinOp::Add, lit(WS_SYM_TABLE),
+                    binop(BinOp::Mul, var(3), lit(24)))),
                 Stmt::If(
-                    binop(BinOp::Eq, deref(var(3)), var(0)),
+                    call("names_equal", vec![
+                        var(0), var(1),
+                        deref(var(4)),
+                        deref(binop(BinOp::Add, var(4), lit(8)))]),
                     vec![Stmt::Return(deref(
-                        binop(BinOp::Add, var(3), lit(8))))],
+                        binop(BinOp::Add, var(4), lit(16))))],
                     vec![],
                 ),
-                assign(2, binop(BinOp::Add, var(2), lit(1))),
+                assign(3, binop(BinOp::Add, var(3), lit(1))),
             ]),
             deref_assign(lit(WS_ERROR), lit(1)),
             Stmt::Return(lit(0)),
         ],
     };
 
-    // lookup_arity(name) → arity — stride 24
-    let fn_lookup_arity = Function {
-        name: "lookup_arity".into(),
-        params: vec![(0, Type::Int)],
-        ret_type: Type::Int,
-        locals: vec![
-            (1, Type::Int), (2, Type::Int), (3, Type::Int),
-        ],
-        body: vec![
-            Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_FUNC_COUNT)))),
-            Stmt::VarDecl(2, Type::Int, Some(lit(0))),
-            Stmt::VarDecl(3, Type::Int, Some(lit(0))),
-            Stmt::While(binop(BinOp::Lt, var(2), var(1)), vec![
-                assign(3, binop(BinOp::Add, lit(WS_FUNC_TABLE),
-                    binop(BinOp::Mul, var(2), lit(24)))),
-                Stmt::If(
-                    binop(BinOp::Eq, deref(var(3)), var(0)),
-                    vec![Stmt::Return(deref(
-                        binop(BinOp::Add, var(3), lit(16))))],
-                    vec![],
-                ),
-                assign(2, binop(BinOp::Add, var(2), lit(1))),
-            ]),
-            deref_assign(lit(WS_ERROR), lit(1)),
-            Stmt::Return(lit(0)),
-        ],
-    };
-
-    // add_fixup(call_pos, func_name, argc) — stride 24
-    let fn_add_fixup = Function {
-        name: "add_fixup".into(),
+    // ─── add_func(ns, nl, arity) ───────────────────
+    // Stride 32: (name_start, name_len, address, arity).
+    let fn_add_func = Function {
+        name: "add_func".into(),
         params: vec![(0, Type::Int), (1, Type::Int), (2, Type::Int)],
         ret_type: Type::Int,
         locals: vec![(3, Type::Int), (4, Type::Int)],
         body: vec![
-            Stmt::VarDecl(3, Type::Int, Some(deref(lit(WS_FIX_COUNT)))),
+            Stmt::VarDecl(3, Type::Int, Some(deref(lit(WS_FUNC_COUNT)))),
             Stmt::If(
-                binop(BinOp::Le, lit(32), var(3)),
+                binop(BinOp::Le, lit(16), var(3)),
                 vec![
                     deref_assign(lit(WS_ERROR), lit(1)),
                     Stmt::Return(lit(0)),
@@ -738,25 +905,126 @@ pub fn build_6b4_compiler() -> Program {
                 vec![],
             ),
             Stmt::VarDecl(4, Type::Int, Some(
-                binop(BinOp::Add, lit(WS_FIX_TABLE),
-                    binop(BinOp::Mul, var(3), lit(24))))),
+                binop(BinOp::Add, lit(WS_FUNC_TABLE),
+                    binop(BinOp::Mul, var(3), lit(32))))),
             deref_assign(var(4), var(0)),
             deref_assign(
                 binop(BinOp::Add, var(4), lit(8)),
                 var(1)),
             deref_assign(
                 binop(BinOp::Add, var(4), lit(16)),
+                deref(lit(WS_OUT_POS))),
+            deref_assign(
+                binop(BinOp::Add, var(4), lit(24)),
                 var(2)),
-            deref_assign(lit(WS_FIX_COUNT),
+            deref_assign(lit(WS_FUNC_COUNT),
                 binop(BinOp::Add, var(3), lit(1))),
             Stmt::Return(lit(0)),
         ],
     };
 
+    // ─── lookup_func(ns, nl) → address ─────────────
+    // Stride 32, uses names_equal.
+    let fn_lookup_func = Function {
+        name: "lookup_func".into(),
+        params: vec![(0, Type::Int), (1, Type::Int)],
+        ret_type: Type::Int,
+        locals: vec![
+            (2, Type::Int), (3, Type::Int), (4, Type::Int),
+        ],
+        body: vec![
+            Stmt::VarDecl(2, Type::Int, Some(deref(lit(WS_FUNC_COUNT)))),
+            Stmt::VarDecl(3, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(4, Type::Int, Some(lit(0))),
+            Stmt::While(binop(BinOp::Lt, var(3), var(2)), vec![
+                assign(4, binop(BinOp::Add, lit(WS_FUNC_TABLE),
+                    binop(BinOp::Mul, var(3), lit(32)))),
+                Stmt::If(
+                    call("names_equal", vec![
+                        var(0), var(1),
+                        deref(var(4)),
+                        deref(binop(BinOp::Add, var(4), lit(8)))]),
+                    vec![Stmt::Return(deref(
+                        binop(BinOp::Add, var(4), lit(16))))],
+                    vec![],
+                ),
+                assign(3, binop(BinOp::Add, var(3), lit(1))),
+            ]),
+            deref_assign(lit(WS_ERROR), lit(1)),
+            Stmt::Return(lit(0)),
+        ],
+    };
+
+    // ─── lookup_arity(ns, nl) → arity ──────────────
+    // Stride 32, uses names_equal.
+    let fn_lookup_arity = Function {
+        name: "lookup_arity".into(),
+        params: vec![(0, Type::Int), (1, Type::Int)],
+        ret_type: Type::Int,
+        locals: vec![
+            (2, Type::Int), (3, Type::Int), (4, Type::Int),
+        ],
+        body: vec![
+            Stmt::VarDecl(2, Type::Int, Some(deref(lit(WS_FUNC_COUNT)))),
+            Stmt::VarDecl(3, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(4, Type::Int, Some(lit(0))),
+            Stmt::While(binop(BinOp::Lt, var(3), var(2)), vec![
+                assign(4, binop(BinOp::Add, lit(WS_FUNC_TABLE),
+                    binop(BinOp::Mul, var(3), lit(32)))),
+                Stmt::If(
+                    call("names_equal", vec![
+                        var(0), var(1),
+                        deref(var(4)),
+                        deref(binop(BinOp::Add, var(4), lit(8)))]),
+                    vec![Stmt::Return(deref(
+                        binop(BinOp::Add, var(4), lit(24))))],
+                    vec![],
+                ),
+                assign(3, binop(BinOp::Add, var(3), lit(1))),
+            ]),
+            deref_assign(lit(WS_ERROR), lit(1)),
+            Stmt::Return(lit(0)),
+        ],
+    };
+
+    // ─── add_fixup(cp, ns, nl, argc) ───────────────
+    // Stride 32: (call_pos, name_start, name_len, argc).
+    let fn_add_fixup = Function {
+        name: "add_fixup".into(),
+        params: vec![(0, Type::Int), (1, Type::Int),
+                     (2, Type::Int), (3, Type::Int)],
+        ret_type: Type::Int,
+        locals: vec![(4, Type::Int), (5, Type::Int)],
+        body: vec![
+            Stmt::VarDecl(4, Type::Int, Some(deref(lit(WS_FIX_COUNT)))),
+            Stmt::If(
+                binop(BinOp::Le, lit(32), var(4)),
+                vec![
+                    deref_assign(lit(WS_ERROR), lit(1)),
+                    Stmt::Return(lit(0)),
+                ],
+                vec![],
+            ),
+            Stmt::VarDecl(5, Type::Int, Some(
+                binop(BinOp::Add, lit(WS_FIX_TABLE),
+                    binop(BinOp::Mul, var(4), lit(32))))),
+            deref_assign(var(5), var(0)),
+            deref_assign(
+                binop(BinOp::Add, var(5), lit(8)),
+                var(1)),
+            deref_assign(
+                binop(BinOp::Add, var(5), lit(16)),
+                var(2)),
+            deref_assign(
+                binop(BinOp::Add, var(5), lit(24)),
+                var(3)),
+            deref_assign(lit(WS_FIX_COUNT),
+                binop(BinOp::Add, var(4), lit(1))),
+            Stmt::Return(lit(0)),
+        ],
+    };
+
     // ─── patch_call(call_pos, func_addr) ───────────
-    // Writes CALL instruction at call_pos with displacement
-    // to func_addr.  disp = func_addr/4 - call_pos/4 (both
-    // are small positive multiples of 8, so logical shift OK).
     let fn_patch_call = Function {
         name: "patch_call".into(),
         params: vec![(0, Type::Int), (1, Type::Int)],
@@ -765,19 +1033,16 @@ pub fn build_6b4_compiler() -> Program {
             (2, Type::Int), (3, Type::Int), (4, Type::Int),
         ],
         body: vec![
-            // disp = (func_addr / 4) - (call_pos / 4)
             Stmt::VarDecl(2, Type::Int, Some(
                 binop(BinOp::Sub,
                     binop(BinOp::Shr, var(1), lit(2)),
                     binop(BinOp::Shr, var(0), lit(2))))),
-            // word = (OP_CALL << 26) | (disp & 0x3FFFFF)
             Stmt::VarDecl(3, Type::Int, Some(
                 binop(BinOp::Or,
                     binop(BinOp::Shl, lit(OP_CALL), lit(26)),
                     binop(BinOp::Shr,
                         binop(BinOp::Shl, var(2), lit(42)),
                         lit(42))))),
-            // padded = word | (NOP << 32)
             Stmt::VarDecl(4, Type::Int, Some(
                 binop(BinOp::Or, var(3),
                     binop(BinOp::Shl,
@@ -790,8 +1055,9 @@ pub fn build_6b4_compiler() -> Program {
         ],
     };
 
-    // resolve_fixups() — stride 24, with arity checking.
-    // For each fixup: look up function, check arity matches argc, patch CALL.
+    // ─── resolve_fixups() ──────────────────────────
+    // Stride 32: (call_pos, name_start, name_len, argc).
+    // Reads ns/nl, passes both to lookup_func/lookup_arity.
     let fn_resolve_fixups = Function {
         name: "resolve_fixups".into(),
         params: vec![],
@@ -799,7 +1065,7 @@ pub fn build_6b4_compiler() -> Program {
         locals: vec![
             (0, Type::Int), (1, Type::Int), (2, Type::Int),
             (3, Type::Int), (4, Type::Int), (5, Type::Int),
-            (6, Type::Int), (7, Type::Int),
+            (6, Type::Int), (7, Type::Int), (8, Type::Int),
         ],
         body: vec![
             Stmt::VarDecl(0, Type::Int, Some(deref(lit(WS_FIX_COUNT)))),
@@ -810,26 +1076,22 @@ pub fn build_6b4_compiler() -> Program {
             Stmt::VarDecl(5, Type::Int, Some(lit(0))),
             Stmt::VarDecl(6, Type::Int, Some(lit(0))),
             Stmt::VarDecl(7, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(8, Type::Int, Some(lit(0))),
             Stmt::While(binop(BinOp::Lt, var(1), var(0)), vec![
-                // addr of fixup entry (stride 24)
                 assign(2, binop(BinOp::Add, lit(WS_FIX_TABLE),
-                    binop(BinOp::Mul, var(1), lit(24)))),
-                assign(3, deref(var(2))),                     // call_pos
-                assign(4, deref(binop(BinOp::Add, var(2), lit(8)))),  // func_name
-                assign(5, deref(binop(BinOp::Add, var(2), lit(16)))), // argc
-                // Look up function → func_addr
-                assign(6, call("lookup_func", vec![var(4)])),
-                // Find arity from function table: scan for matching name
-                // lookup_func already validates existence; find arity
-                // by scanning func table (stride 24)
-                assign(7, call("lookup_arity", vec![var(4)])),
-                // Check argc == arity
+                    binop(BinOp::Mul, var(1), lit(32)))),
+                assign(3, deref(var(2))),                            // call_pos
+                assign(4, deref(binop(BinOp::Add, var(2), lit(8)))), // ns
+                assign(5, deref(binop(BinOp::Add, var(2), lit(16)))),// nl
+                assign(6, deref(binop(BinOp::Add, var(2), lit(24)))),// argc
+                assign(7, call("lookup_func", vec![var(4), var(5)])),
+                assign(8, call("lookup_arity", vec![var(4), var(5)])),
                 Stmt::If(
-                    binop(BinOp::Ne, var(5), var(7)),
+                    binop(BinOp::Ne, var(6), var(8)),
                     vec![deref_assign(lit(WS_ERROR), lit(1))],
                     vec![],
                 ),
-                call_stmt("patch_call", vec![var(3), var(6)]),
+                call_stmt("patch_call", vec![var(3), var(7)]),
                 assign(1, binop(BinOp::Add, var(1), lit(1))),
             ]),
             Stmt::Return(lit(0)),
@@ -869,56 +1131,57 @@ pub fn build_6b4_compiler() -> Program {
         ],
     };
 
-    // compile_primary:
-    //   NUMBER → MOVI R4, val
-    //   IDENT ( args ) → evaluate args into R0-R3, CALL, MOV R4, R0
-    //   IDENT → LD R4, [FP, offset]
-    //   ( expr ) → recursive
-    // Locals: tok(0), val(1), argc(2)
+    // ─── compile_primary() ─────────────────────────
+    // Source-slice version: saves name_start/name_len
+    // before consuming more tokens.
+    // Locals: tok(0), ns(1), nl(2), argc(3)
     let fn_compile_primary = Function {
         name: "compile_primary".into(),
         params: vec![],
         ret_type: Type::Int,
-        locals: vec![(0, Type::Int), (1, Type::Int), (2, Type::Int)],
+        locals: vec![
+            (0, Type::Int), (1, Type::Int),
+            (2, Type::Int), (3, Type::Int),
+        ],
         body: vec![
             Stmt::VarDecl(0, Type::Int, Some(deref(lit(WS_TOK_TYPE)))),
-            Stmt::VarDecl(1, Type::Int, Some(deref(lit(WS_TOK_VALUE)))),
+            Stmt::VarDecl(1, Type::Int, Some(lit(0))),
+            Stmt::VarDecl(2, Type::Int, Some(lit(0))),
             // NUMBER
             Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_NUMBER)),
                 vec![
+                    assign(1, deref(lit(WS_TOK_VALUE))),
                     call_stmt("next_token", vec![]),
                     call_stmt("emit", vec![
                         enc_i(OP_MOVI, GEN_R4, 0, var(1))]),
                     Stmt::Return(lit(0)),
                 ], vec![]),
-            // IDENT — check if followed by '(' (function call)
+            // IDENT — save name_start and name_len immediately
             Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_IDENT)),
                 vec![
+                    assign(1, deref(lit(WS_TOK_NAME_START))),
+                    assign(2, deref(lit(WS_TOK_NAME_LEN))),
                     call_stmt("next_token", vec![]),
                     Stmt::If(
                         binop(BinOp::Eq, deref(lit(WS_TOK_TYPE)),
                             lit(TOK_LPAREN)),
                         vec![
                             // Function call: IDENT ( args )
-                            // 6B.4.2a: SP-push staging — each arg
-                            // evaluated fully before the next begins.
                             call_stmt("next_token", vec![]),
-                            Stmt::VarDecl(2, Type::Int, Some(lit(0))),
-                            // Parse and push arguments to stack
+                            Stmt::VarDecl(3, Type::Int, Some(lit(0))),
                             Stmt::If(
                                 binop(BinOp::Ne,
                                     deref(lit(WS_TOK_TYPE)),
                                     lit(TOK_RPAREN)),
                                 vec![
                                     call_stmt("compile_expr", vec![]),
-                                    // push R4
                                     call_stmt("emit", vec![
                                         enc_i(OP_SUBI, GEN_SP, GEN_SP,
                                             lit(8))]),
                                     call_stmt("emit", vec![
                                         enc_i(OP_ST, GEN_R4, GEN_SP,
                                             lit(0))]),
-                                    assign(2, lit(1)),
+                                    assign(3, lit(1)),
                                     Stmt::While(
                                         binop(BinOp::Eq,
                                             deref(lit(WS_TOK_TYPE)),
@@ -926,7 +1189,7 @@ pub fn build_6b4_compiler() -> Program {
                                         vec![
                                             Stmt::If(
                                                 binop(BinOp::Le,
-                                                    lit(4), var(2)),
+                                                    lit(4), var(3)),
                                                 vec![
                                                     deref_assign(
                                                         lit(WS_ERROR),
@@ -939,21 +1202,19 @@ pub fn build_6b4_compiler() -> Program {
                                                 vec![]),
                                             call_stmt("compile_expr",
                                                 vec![]),
-                                            // push R4
                                             call_stmt("emit", vec![
                                                 enc_i(OP_SUBI, GEN_SP,
                                                     GEN_SP, lit(8))]),
                                             call_stmt("emit", vec![
                                                 enc_i(OP_ST, GEN_R4,
                                                     GEN_SP, lit(0))]),
-                                            assign(2, binop(BinOp::Add,
-                                                var(2), lit(1))),
+                                            assign(3, binop(BinOp::Add,
+                                                var(3), lit(1))),
                                         ],
                                     ),
                                 ],
                                 vec![],
                             ),
-                            // Expect: )
                             Stmt::If(
                                 binop(BinOp::Ne,
                                     deref(lit(WS_TOK_TYPE)),
@@ -962,62 +1223,58 @@ pub fn build_6b4_compiler() -> Program {
                                 vec![],
                             ),
                             call_stmt("next_token", vec![]),
-                            // Load staged args: arg[i] at
-                            // [SP, (argc-1-i)*8]
-                            Stmt::If(binop(BinOp::Lt, lit(0), var(2)),
+                            Stmt::If(binop(BinOp::Lt, lit(0), var(3)),
                                 vec![call_stmt("emit", vec![
                                     enc_i(OP_LD, GEN_R0, GEN_SP,
                                         binop(BinOp::Mul,
                                             binop(BinOp::Sub,
-                                                var(2), lit(1)),
+                                                var(3), lit(1)),
                                             lit(8)))])],
                                 vec![]),
-                            Stmt::If(binop(BinOp::Lt, lit(1), var(2)),
+                            Stmt::If(binop(BinOp::Lt, lit(1), var(3)),
                                 vec![call_stmt("emit", vec![
                                     enc_i(OP_LD, 1, GEN_SP,
                                         binop(BinOp::Mul,
                                             binop(BinOp::Sub,
-                                                var(2), lit(2)),
+                                                var(3), lit(2)),
                                             lit(8)))])],
                                 vec![]),
-                            Stmt::If(binop(BinOp::Lt, lit(2), var(2)),
+                            Stmt::If(binop(BinOp::Lt, lit(2), var(3)),
                                 vec![call_stmt("emit", vec![
                                     enc_i(OP_LD, 2, GEN_SP,
                                         binop(BinOp::Mul,
                                             binop(BinOp::Sub,
-                                                var(2), lit(3)),
+                                                var(3), lit(3)),
                                             lit(8)))])],
                                 vec![]),
-                            Stmt::If(binop(BinOp::Lt, lit(3), var(2)),
+                            Stmt::If(binop(BinOp::Lt, lit(3), var(3)),
                                 vec![call_stmt("emit", vec![
                                     enc_i(OP_LD, 3, GEN_SP,
                                         binop(BinOp::Mul,
                                             binop(BinOp::Sub,
-                                                var(2), lit(4)),
+                                                var(3), lit(4)),
                                             lit(8)))])],
                                 vec![]),
-                            // Pop all staged args
-                            Stmt::If(binop(BinOp::Lt, lit(0), var(2)),
+                            Stmt::If(binop(BinOp::Lt, lit(0), var(3)),
                                 vec![call_stmt("emit", vec![
                                     enc_i(OP_ADDI, GEN_SP, GEN_SP,
                                         binop(BinOp::Mul,
-                                            var(2), lit(8)))])],
+                                            var(3), lit(8)))])],
                                 vec![]),
-                            // Record fixup with argc
+                            // Record fixup with name_start, name_len, argc
                             assign(0, deref(lit(WS_OUT_POS))),
                             call_stmt("emit", vec![
                                 binop(BinOp::Shl,
                                     lit(OP_CALL), lit(26))]),
                             call_stmt("add_fixup", vec![
-                                var(0), var(1), var(2)]),
-                            // Move return value to R4
+                                var(0), var(1), var(2), var(3)]),
                             call_stmt("emit", vec![
                                 enc_r(OP_MOV, GEN_R4, GEN_R0, 0)]),
                         ],
                         vec![
                             // Variable reference: LD R4, [FP, offset]
                             assign(0, call("lookup_symbol",
-                                vec![var(1)])),
+                                vec![var(1), var(2)])),
                             call_stmt("emit", vec![
                                 enc_i(OP_LD, GEN_R4, GEN_FP, var(0))]),
                         ],
@@ -1179,8 +1436,9 @@ pub fn build_6b4_compiler() -> Program {
     };
 
     // ─── compile_stmt() ────────────────────────────
-    // In 6B.4: return emits epilogue + RET (not HALT).
-    // Variables use FP-relative addressing.
+    // Source-slice version: saves name_start/name_len
+    // for var decl and assignment.
+    // Locals: tok(0), ns(1), nl(2) / temp, branch_pos(3), temp(4)
     let fn_compile_stmt = Function {
         name: "compile_stmt".into(),
         params: vec![],
@@ -1206,7 +1464,8 @@ pub fn build_6b4_compiler() -> Program {
                         vec![deref_assign(lit(WS_ERROR), lit(1))],
                         vec![],
                     ),
-                    assign(1, deref(lit(WS_TOK_VALUE))),
+                    assign(1, deref(lit(WS_TOK_NAME_START))),
+                    assign(3, deref(lit(WS_TOK_NAME_LEN))),
                     call_stmt("next_token", vec![]),
                     Stmt::If(
                         binop(BinOp::Ne,
@@ -1223,15 +1482,13 @@ pub fn build_6b4_compiler() -> Program {
                         vec![],
                     ),
                     call_stmt("next_token", vec![]),
-                    assign(2, call("add_symbol", vec![var(1)])),
-                    // ST R4, [FP, offset]  (FP-relative)
+                    assign(2, call("add_symbol", vec![var(1), var(3)])),
                     call_stmt("emit", vec![
                         enc_i(OP_ST, GEN_R4, GEN_FP, var(2))]),
                     Stmt::Return(lit(0)),
                 ], vec![]),
 
             // ─── return expr; → epilogue + RET ─────────
-            // Returns 1 (definitely returns).
             Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_RETURN)),
                 vec![
                     call_stmt("next_token", vec![]),
@@ -1258,8 +1515,6 @@ pub fn build_6b4_compiler() -> Program {
                 ], vec![]),
 
             // ─── if ( expr ) { stmts } [else { stmts }] ──
-            // Returns And(then_returns, else_returns) when
-            // else is present; 0 when else is absent.
             Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_IF)),
                 vec![
                     call_stmt("next_token", vec![]),
@@ -1352,7 +1607,6 @@ pub fn build_6b4_compiler() -> Program {
                     assign(4, deref(lit(WS_OUT_POS))),
                     call_stmt("emit", vec![
                         enc_b(COND_EQ, lit(0))]),
-                    // while-body { ... }
                     Stmt::If(
                         binop(BinOp::Ne,
                             deref(lit(WS_TOK_TYPE)), lit(TOK_LBRACE)),
@@ -1361,7 +1615,6 @@ pub fn build_6b4_compiler() -> Program {
                     ),
                     call_stmt("next_token", vec![]),
                     call_stmt("compile_block", vec![]),
-                    // BAL backward to loop_start
                     assign(1, binop(BinOp::Sub, lit(0),
                         binop(BinOp::Shr,
                             binop(BinOp::Sub,
@@ -1378,7 +1631,8 @@ pub fn build_6b4_compiler() -> Program {
             // ─── IDENT = expr; (assignment) ────────────
             Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_IDENT)),
                 vec![
-                    assign(1, deref(lit(WS_TOK_VALUE))),
+                    assign(1, deref(lit(WS_TOK_NAME_START))),
+                    assign(3, deref(lit(WS_TOK_NAME_LEN))),
                     call_stmt("next_token", vec![]),
                     Stmt::If(
                         binop(BinOp::Ne,
@@ -1395,8 +1649,7 @@ pub fn build_6b4_compiler() -> Program {
                         vec![],
                     ),
                     call_stmt("next_token", vec![]),
-                    assign(2, call("lookup_symbol", vec![var(1)])),
-                    // ST R4, [FP, offset]  (FP-relative)
+                    assign(2, call("lookup_symbol", vec![var(1), var(3)])),
                     call_stmt("emit", vec![
                         enc_i(OP_ST, GEN_R4, GEN_FP, var(2))]),
                     Stmt::Return(lit(0)),
@@ -1408,21 +1661,13 @@ pub fn build_6b4_compiler() -> Program {
     };
 
     // ─── compile_block() ───────────────────────────
-    // Parser liveness invariant: every block loop must
-    // enforce  tok ≠ RBRACE ∧ tok ≠ EOF ∧ error = 0.
-    // Callers check/consume '{'; this function compiles
-    // statements until '}' (consuming it) or terminates
-    // on EOF / error without making zero-progress loops.
     let fn_compile_block = Function {
         name: "compile_block".into(),
         params: vec![],
         ret_type: Type::Int,
         locals: vec![(0, Type::Int)],
         body: vec![
-            // block_returns: accumulated definitely-returns flag
             Stmt::VarDecl(0, Type::Int, Some(lit(0))),
-            // Left-leaning And: And(And(Ne,Ne),Eq) stays
-            // at scratch depth 3 (right-leaning would need 4).
             Stmt::While(
                 binop(BinOp::And,
                     binop(BinOp::And,
@@ -1454,12 +1699,10 @@ pub fn build_6b4_compiler() -> Program {
     };
 
     // ─── compile_func_def() ────────────────────────
-    // Parses: int IDENT ( ) { body }
-    // Records function, emits prologue, compiles body.
-    // compile_func_def:
-    //   int NAME ( [int IDENT [, int IDENT]*] ) { body }
-    // Locals: name(0), param_count(1), param_name(2), offset(3),
-    //         prologue_pos(4), frame_size(5)
+    // Source-slice version: saves name_start/name_len
+    // for function name and parameters.
+    // Locals: ns(0), param_count(1), pns(2)/temp, pnl(3)/temp,
+    //         prologue_pos(4), frame_size(5), fnl(6)
     let fn_compile_func_def = Function {
         name: "compile_func_def".into(),
         params: vec![],
@@ -1467,6 +1710,7 @@ pub fn build_6b4_compiler() -> Program {
         locals: vec![
             (0, Type::Int), (1, Type::Int), (2, Type::Int),
             (3, Type::Int), (4, Type::Int), (5, Type::Int),
+            (6, Type::Int),
         ],
         body: vec![
             // Expect: int
@@ -1485,7 +1729,9 @@ pub fn build_6b4_compiler() -> Program {
                 vec![],
             ),
             Stmt::VarDecl(0, Type::Int, Some(
-                deref(lit(WS_TOK_VALUE)))),
+                deref(lit(WS_TOK_NAME_START)))),
+            Stmt::VarDecl(6, Type::Int, Some(
+                deref(lit(WS_TOK_NAME_LEN)))),
             call_stmt("next_token", vec![]),
             // Expect: (
             Stmt::If(
@@ -1523,9 +1769,10 @@ pub fn build_6b4_compiler() -> Program {
                         vec![deref_assign(lit(WS_ERROR), lit(1))],
                         vec![],
                     ),
-                    assign(2, deref(lit(WS_TOK_VALUE))),
+                    assign(2, deref(lit(WS_TOK_NAME_START))),
+                    assign(3, deref(lit(WS_TOK_NAME_LEN))),
                     call_stmt("next_token", vec![]),
-                    assign(3, call("add_symbol", vec![var(2)])),
+                    call_stmt("add_symbol", vec![var(2), var(3)]),
                     assign(1, binop(BinOp::Add, var(1), lit(1))),
                     Stmt::If(
                         binop(BinOp::Eq,
@@ -1552,21 +1799,18 @@ pub fn build_6b4_compiler() -> Program {
             ),
             call_stmt("next_token", vec![]),
 
-            // Record function in table (name, arity)
-            call_stmt("add_func", vec![var(0), var(1)]),
+            // Record function in table (ns, nl, arity)
+            call_stmt("add_func", vec![var(0), var(6), var(1)]),
 
             // ─── Prologue placeholder (backpatched after body) ──
-            // Save prologue position for backpatch.
             Stmt::VarDecl(4, Type::Int, Some(
                 deref(lit(WS_OUT_POS)))),
-            // Emit 4 NOP placeholders (will be overwritten)
             call_stmt("emit", vec![enc_s(OP_NOP)]),
             call_stmt("emit", vec![enc_s(OP_NOP)]),
             call_stmt("emit", vec![enc_s(OP_NOP)]),
             call_stmt("emit", vec![enc_s(OP_NOP)]),
 
             // Spill parameters R0..Rn into their frame slots.
-            // Offsets from add_symbol: param 0 → [FP, -8], etc.
             Stmt::If(binop(BinOp::Lt, lit(0), var(1)), vec![
                 call_stmt("emit", vec![
                     enc_i(OP_ST, GEN_R0, GEN_FP, lit(-8))]),
@@ -1588,16 +1832,13 @@ pub fn build_6b4_compiler() -> Program {
             assign(0, call("compile_block", vec![])),
 
             // ─── Backpatch prologue with actual frame size ──
-            // frame_size = 16 + 8 * sym_count
             Stmt::VarDecl(5, Type::Int, Some(
                 binop(BinOp::Add, lit(16),
                     binop(BinOp::Mul,
                         deref(lit(WS_SYM_COUNT)), lit(8))))),
-            // NOP high-word constant in var(3)
             assign(3, binop(BinOp::Shl,
                 binop(BinOp::Shl, lit(OP_NOP), lit(26)),
                 lit(32))),
-            // Base output address in var(1)
             assign(1, binop(BinOp::Add, lit(0x5000), var(4))),
 
             // Instruction 0: SUBI SP, SP, frame_size
@@ -1627,7 +1868,6 @@ pub fn build_6b4_compiler() -> Program {
             deref_assign(var(1), var(2)),
 
             // ─── Return-path closure (6B.4.4) ──────────
-            // Reject functions that can fall through.
             Stmt::If(
                 binop(BinOp::Eq, var(0), lit(0)),
                 vec![deref_assign(lit(WS_ERROR), lit(1))],
@@ -1639,14 +1879,14 @@ pub fn build_6b4_compiler() -> Program {
     };
 
     // ─── main() ────────────────────────────────────
+    // No keyword pre-computation; uses find_main() after compilation.
     let fn_main = Function {
         name: "main".into(),
         params: vec![],
         ret_type: Type::Int,
         locals: vec![
             (0, Type::Int), (1, Type::Int), (2, Type::Int),
-            (3, Type::Int), (4, Type::Int), (5, Type::Int),
-            (6, Type::Int), (7, Type::Int), (8, Type::Int),
+            (3, Type::Int), (4, Type::Int),
         ],
         body: vec![
             // ─── Source setup ─────────────────────────
@@ -1672,83 +1912,18 @@ pub fn build_6b4_compiler() -> Program {
             deref_assign(lit(WS_FUNC_COUNT), lit(0)),
             deref_assign(lit(WS_FIX_COUNT), lit(0)),
 
-            // ─── Build packed keyword constants ──────
-            // "int"
-            Stmt::VarDecl(3, Type::Int, Some(lit(0x69))),
-            assign(3, binop(BinOp::Or,
-                binop(BinOp::Shl, var(3), lit(8)), lit(0x6E))),
-            assign(3, binop(BinOp::Or,
-                binop(BinOp::Shl, var(3), lit(8)), lit(0x74))),
-            deref_assign(lit(WS_KW_INT), var(3)),
-
-            // "return"
-            Stmt::VarDecl(4, Type::Int, Some(lit(0x72))),
-            assign(4, binop(BinOp::Or,
-                binop(BinOp::Shl, var(4), lit(8)), lit(0x65))),
-            assign(4, binop(BinOp::Or,
-                binop(BinOp::Shl, var(4), lit(8)), lit(0x74))),
-            assign(4, binop(BinOp::Or,
-                binop(BinOp::Shl, var(4), lit(8)), lit(0x75))),
-            assign(4, binop(BinOp::Or,
-                binop(BinOp::Shl, var(4), lit(8)), lit(0x72))),
-            assign(4, binop(BinOp::Or,
-                binop(BinOp::Shl, var(4), lit(8)), lit(0x6E))),
-            deref_assign(lit(WS_KW_RETURN), var(4)),
-
-            // "if"
-            Stmt::VarDecl(5, Type::Int, Some(lit(0x69))),
-            assign(5, binop(BinOp::Or,
-                binop(BinOp::Shl, var(5), lit(8)), lit(0x66))),
-            deref_assign(lit(WS_KW_IF), var(5)),
-
-            // "else"
-            Stmt::VarDecl(6, Type::Int, Some(lit(0x65))),
-            assign(6, binop(BinOp::Or,
-                binop(BinOp::Shl, var(6), lit(8)), lit(0x6C))),
-            assign(6, binop(BinOp::Or,
-                binop(BinOp::Shl, var(6), lit(8)), lit(0x73))),
-            assign(6, binop(BinOp::Or,
-                binop(BinOp::Shl, var(6), lit(8)), lit(0x65))),
-            deref_assign(lit(WS_KW_ELSE), var(6)),
-
-            // "while"
-            Stmt::VarDecl(7, Type::Int, Some(lit(0x77))),
-            assign(7, binop(BinOp::Or,
-                binop(BinOp::Shl, var(7), lit(8)), lit(0x68))),
-            assign(7, binop(BinOp::Or,
-                binop(BinOp::Shl, var(7), lit(8)), lit(0x69))),
-            assign(7, binop(BinOp::Or,
-                binop(BinOp::Shl, var(7), lit(8)), lit(0x6C))),
-            assign(7, binop(BinOp::Or,
-                binop(BinOp::Shl, var(7), lit(8)), lit(0x65))),
-            deref_assign(lit(WS_KW_WHILE), var(7)),
-
-            // "main"
-            Stmt::VarDecl(8, Type::Int, Some(lit(0x6D))),
-            assign(8, binop(BinOp::Or,
-                binop(BinOp::Shl, var(8), lit(8)), lit(0x61))),
-            assign(8, binop(BinOp::Or,
-                binop(BinOp::Shl, var(8), lit(8)), lit(0x69))),
-            assign(8, binop(BinOp::Or,
-                binop(BinOp::Shl, var(8), lit(8)), lit(0x6E))),
-            deref_assign(lit(WS_KW_MAIN), var(8)),
-
             // ─── Prime lexer ─────────────────────────
             call_stmt("next_token", vec![]),
 
             // ─── Emit _start stub ────────────────────
-            //   CALL main (placeholder — will be patched)
+            //   CALL main (placeholder — patched by find_main)
             //   HALT
             assign(3, deref(lit(WS_OUT_POS))),
             call_stmt("emit", vec![
                 binop(BinOp::Shl, lit(OP_CALL), lit(26))]),
             call_stmt("emit", vec![enc_s(OP_HALT)]),
-            call_stmt("add_fixup", vec![
-                var(3), deref(lit(WS_KW_MAIN))]),
 
             // ─── Compile function definitions ────────
-            // Guard: exit on EOF or error to prevent infinite
-            // loops when a syntax error leaves tok ≠ EOF.
             Stmt::While(
                 binop(BinOp::And,
                     binop(BinOp::Ne,
@@ -1760,6 +1935,10 @@ pub fn build_6b4_compiler() -> Program {
 
             // ─── Resolve call fixups ─────────────────
             call_stmt("resolve_fixups", vec![]),
+
+            // ─── Patch _start → main ─────────────────
+            assign(4, call("find_main", vec![])),
+            call_stmt("patch_call", vec![var(3), var(4)]),
 
             // ─── Check error flag ────────────────────
             Stmt::If(deref(lit(WS_ERROR)),
@@ -1777,7 +1956,19 @@ pub fn build_6b4_compiler() -> Program {
     };
 
     let mut functions = vec![fn_main];
-    functions.extend(lexer_fns);
+    functions.extend(vec![
+        guest_peek_char(),
+        guest_advance(),
+        guest_skip_ws(),
+        guest_set_char_token(),
+        guest_scan_number(&tok4),
+        fn_scan_ident,
+        fn_next_token,
+        fn_read_byte,
+        fn_names_equal,
+        fn_classify_kw,
+        fn_find_main,
+    ]);
     functions.extend(vec![
         fn_compile_primary, fn_compile_mult, fn_compile_add,
         fn_compile_cmp, fn_compile_expr,
