@@ -6340,6 +6340,7 @@ mod tests {
                     ], vec![]),
 
                 // ─── return expr; → epilogue + RET ─────────
+                // Returns 1 (definitely returns).
                 Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_RETURN)),
                     vec![
                         call_stmt("next_token", vec![]),
@@ -6351,11 +6352,8 @@ mod tests {
                             vec![],
                         ),
                         call_stmt("next_token", vec![]),
-                        // MOV R0, R4
                         call_stmt("emit", vec![
                             enc_r(OP_MOV, GEN_R0, GEN_R4, 0)]),
-                        // Epilogue: MOV SP,FP; LD FP,[SP,0];
-                        //           LD LR,[SP,8]; ADDI SP,SP,16; RET
                         call_stmt("emit", vec![
                             enc_r(OP_MOV, GEN_SP, GEN_FP, 0)]),
                         call_stmt("emit", vec![
@@ -6365,10 +6363,12 @@ mod tests {
                         call_stmt("emit", vec![
                             enc_i(OP_ADDI, GEN_SP, GEN_SP, lit(16))]),
                         call_stmt("emit", vec![enc_s(OP_RET)]),
-                        Stmt::Return(lit(0)),
+                        Stmt::Return(lit(1)),
                     ], vec![]),
 
                 // ─── if ( expr ) { stmts } [else { stmts }] ──
+                // Returns And(then_returns, else_returns) when
+                // else is present; 0 when else is absent.
                 Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_IF)),
                     vec![
                         call_stmt("next_token", vec![]),
@@ -6387,14 +6387,11 @@ mod tests {
                             vec![],
                         ),
                         call_stmt("next_token", vec![]),
-                        // CMPI R4, 0
                         call_stmt("emit", vec![
                             enc_i(OP_CMPI, 0, GEN_R4, lit(0))]),
-                        // BEQ placeholder (skip then-body)
                         assign(3, deref(lit(WS_OUT_POS))),
                         call_stmt("emit", vec![
                             enc_b(COND_EQ, lit(0))]),
-                        // then-body { ... }
                         Stmt::If(
                             binop(BinOp::Ne,
                                 deref(lit(WS_TOK_TYPE)), lit(TOK_LBRACE)),
@@ -6402,8 +6399,7 @@ mod tests {
                             vec![],
                         ),
                         call_stmt("next_token", vec![]),
-                        call_stmt("compile_block", vec![]),
-                        // Check for else
+                        assign(1, call("compile_block", vec![])),
                         Stmt::If(
                             binop(BinOp::Eq,
                                 deref(lit(WS_TOK_TYPE)), lit(TOK_ELSE)),
@@ -6415,7 +6411,6 @@ mod tests {
                                 call_stmt("patch_branch", vec![
                                     var(3), lit(COND_EQ),
                                     deref(lit(WS_OUT_POS))]),
-                                // else-body { ... }
                                 Stmt::If(
                                     binop(BinOp::Ne,
                                         deref(lit(WS_TOK_TYPE)),
@@ -6424,15 +6419,18 @@ mod tests {
                                     vec![],
                                 ),
                                 call_stmt("next_token", vec![]),
-                                call_stmt("compile_block", vec![]),
+                                assign(2, call("compile_block", vec![])),
                                 call_stmt("patch_branch", vec![
                                     var(4), lit(COND_AL),
                                     deref(lit(WS_OUT_POS))]),
+                                Stmt::Return(
+                                    binop(BinOp::And, var(1), var(2))),
                             ],
                             vec![
                                 call_stmt("patch_branch", vec![
                                     var(3), lit(COND_EQ),
                                     deref(lit(WS_OUT_POS))]),
+                                Stmt::Return(lit(0)),
                             ],
                         ),
                         Stmt::Return(lit(0)),
@@ -6528,8 +6526,10 @@ mod tests {
             name: "compile_block".into(),
             params: vec![],
             ret_type: Type::Int,
-            locals: vec![],
+            locals: vec![(0, Type::Int)],
             body: vec![
+                // block_returns: accumulated definitely-returns flag
+                Stmt::VarDecl(0, Type::Int, Some(lit(0))),
                 // Left-leaning And: And(And(Ne,Ne),Eq) stays
                 // at scratch depth 3 (right-leaning would need 4).
                 Stmt::While(
@@ -6541,26 +6541,24 @@ mod tests {
                                 deref(lit(WS_TOK_TYPE)), lit(TOK_EOF))),
                         binop(BinOp::Eq,
                             deref(lit(WS_ERROR)), lit(0))),
-                    vec![call_stmt("compile_stmt", vec![])],
+                    vec![assign(0, binop(BinOp::Or, var(0),
+                        call("compile_stmt", vec![])))],
                 ),
-                // After loop: if error already set, propagate
                 Stmt::If(deref(lit(WS_ERROR)),
-                    vec![Stmt::Return(lit(0))],
+                    vec![Stmt::Return(var(0))],
                     vec![],
                 ),
-                // If EOF without seeing '}' → missing brace
                 Stmt::If(
                     binop(BinOp::Eq,
                         deref(lit(WS_TOK_TYPE)), lit(TOK_EOF)),
                     vec![
                         deref_assign(lit(WS_ERROR), lit(1)),
-                        Stmt::Return(lit(0)),
+                        Stmt::Return(var(0)),
                     ],
                     vec![],
                 ),
-                // Consume '}'
                 call_stmt("next_token", vec![]),
-                Stmt::Return(lit(0)),
+                Stmt::Return(var(0)),
             ],
         };
 
@@ -6695,8 +6693,8 @@ mod tests {
                         enc_i(OP_ST, 3, GEN_FP, lit(-32))]),
                 ], vec![]),
 
-                // Compile body statements until }
-                call_stmt("compile_block", vec![]),
+                // Compile body; capture definitely-returns flag
+                assign(0, call("compile_block", vec![])),
 
                 // ─── Backpatch prologue with actual frame size ──
                 // frame_size = 16 + 8 * sym_count
@@ -6736,6 +6734,14 @@ mod tests {
                     binop(BinOp::Sub, var(5), lit(16)))),
                 assign(2, binop(BinOp::Or, var(2), var(3))),
                 deref_assign(var(1), var(2)),
+
+                // ─── Return-path closure (6B.4.4) ──────────
+                // Reject functions that can fall through.
+                Stmt::If(
+                    binop(BinOp::Eq, var(0), lit(0)),
+                    vec![deref_assign(lit(WS_ERROR), lit(1))],
+                    vec![],
+                ),
 
                 Stmt::Return(lit(0)),
             ],
@@ -7333,5 +7339,70 @@ mod tests {
             b"int fact(int n) { if (n < 2) { return 1; } return n * fact(n - 1); } int main() { return fact(3) + fact(4); }",
             30, true);
         eprintln!("6B.4.3c: fact(3)+fact(4) → 30 ✓");
+    }
+
+    // ─── 6B.4.4  Return-path closure ──────────────────
+
+    #[test]
+    fn b44_accept_simple_return() {
+        // Every function has an unconditional return.
+        run_6b4_test(
+            b"int f() { return 42; } int main() { return f(); }",
+            42, true);
+        eprintln!("6B.4.4: accept simple return ✓");
+    }
+
+    #[test]
+    fn b44_accept_if_else_both_return() {
+        // if/else where both branches return → definitely returns.
+        run_6b4_test(
+            b"int f(int x) { if (x) { return 1; } else { return 0; } } int main() { return f(1); }",
+            1, true);
+        eprintln!("6B.4.4: accept if/else both return ✓");
+    }
+
+    #[test]
+    fn b44_reject_if_no_else() {
+        // if without else — function can fall through.
+        run_6b4_test(
+            b"int f(int x) { if (x) { return 1; } } int main() { return f(1); }",
+            u64::MAX, false);
+        eprintln!("6B.4.4: reject if-without-else (no return after) ✓");
+    }
+
+    #[test]
+    fn b44_reject_while_only() {
+        // while body may return, but while itself is conservative → 0.
+        run_6b4_test(
+            b"int f() { while (1) { return 42; } } int main() { return f(); }",
+            u64::MAX, false);
+        eprintln!("6B.4.4: reject while-only (no return after) ✓");
+    }
+
+    #[test]
+    fn b44_accept_while_then_return() {
+        // while followed by unconditional return → block returns.
+        run_6b4_test(
+            b"int f() { int x = 0; while (x < 3) { x = x + 1; } return x; } int main() { return f(); }",
+            3, true);
+        eprintln!("6B.4.4: accept while + return ✓");
+    }
+
+    #[test]
+    fn b44_accept_nested_if_else() {
+        // Nested if/else, both inner and outer branches return.
+        run_6b4_test(
+            b"int f(int x) { if (x < 2) { if (x) { return 1; } else { return 0; } } else { return 2; } } int main() { return f(0); }",
+            0, true);
+        eprintln!("6B.4.4: accept nested if/else ✓");
+    }
+
+    #[test]
+    fn b44_reject_fall_through() {
+        // Function f has no return at all — pure fall-through.
+        run_6b4_test(
+            b"int f() { int x = 42; } int main() { return 42; }",
+            u64::MAX, false);
+        eprintln!("6B.4.4: reject fall-through ✓");
     }
 }
