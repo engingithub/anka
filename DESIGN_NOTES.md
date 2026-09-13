@@ -184,9 +184,14 @@ The host never constructs an Anka64Core.  The `p80_boot_return_42` test
 proves this: it boots and runs a process without touching Core, Process,
 AgentId, or DomainId.
 
-Old-style harnesses (`run_6b4_harness`, `run_ccb_harness`) remain for
-testing the compiler pipeline.  They will be retired in Phase 8.6 when
-the boot contract replaces all direct-construction test paths.
+Phase 8.5 retired all four compiler-integration harnesses
+(`run_6b4_harness`, `build_ccb`, `run_ccb_harness`, `compile_with_ccb`).
+Each now delegates to `run_supervised_compiler`, which boots ankad and
+uses SYS_SPAWN/SYS_WAIT to supervise the compiler as an ordinary process.
+The host still constructs executable artifacts (AST → code bytes); Anka
+constructs every compiler process.  The invariant is:
+
+  compiler/system integration tests ∩ host-side process construction = ∅
 
 ---
 
@@ -811,3 +816,35 @@ CC_B compiles, seals, and executes a child program — all without any
 kernel-side compiler awareness.  The ownership invariant from Phase 8.3
 was confirmed under delegation: CC_B's slot is reclaimed while the
 delegated objects survive.  458/458 tests pass; 29 instructions.
+
+**Phase 8.5 completion (2026-09-13):**
+
+Phase 8.5 retired all four compiler-integration harnesses that performed
+host-side process construction: `run_6b4_harness`, `build_ccb`,
+`run_ccb_harness`, and `compile_with_ccb`.  Each now delegates to
+`run_supervised_compiler`, which boots ankad and uses `SYS_SPAWN(R1–R8)`
+/ `SYS_WAIT` to execute every compiler invocation.  The closure invariant:
+
+  compiler/system integration tests ∩ host-side process construction = ∅
+
+Key design choices:
+
+- `SUPERVISOR_COMPILER_VADDR = 0x30000` — where ankad maps the compiler
+  in its own address space.  `SYS_SPAWN.R1` is always this constant.
+  Only `SpawnLayout.code_vaddr` varies (0 for CC_A, `CCB_CODE_BASE` for
+  CC_B), preserving the parent placement ≠ child placement distinction.
+- ankad preserves the `SYS_WAIT` result tag in R10 (non-ABI register),
+  then `SYS_EXIT(R1)` propagates the detail.  The host reads both,
+  distinguishing normal exits from faults without consuming `byte_output`.
+- Workspace pre-initialization (`WS_LIT_POS = OUTPUT_SIZE`) is always
+  performed: required for CC_A, harmless for self-initializing CC_B.
+
+The host still constructs executable artifacts (AST → code bytes), which
+is toolchain artifact construction, not process instantiation.  After 8.5,
+the compiler lineage is:
+
+  host constructs CC_A bytes → boot ankad → ankad spawns CC_A →
+  CC_A(canonical source) → CC_B → ankad spawns CC_B →
+  CC_B(canonical source) → CC_C → CC_B = CC_C
+
+No compiler incarnation is fabricated by the host.  458/458; 29 instructions.
