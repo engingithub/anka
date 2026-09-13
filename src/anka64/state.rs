@@ -549,6 +549,25 @@ pub struct FaultRecord {
 }
 
 // ───────────────────────────────────────────────────────────────────
+// Generation-qualified requester identity (Phase 9.1a)
+// ───────────────────────────────────────────────────────────────────
+
+/// Architecturally neutral requester identity token.
+///
+/// The block controller stores and returns this opaquely; the kernel
+/// interprets it (slot = process index, generation = incarnation).
+/// The block layer does not know what "process" means.
+///
+/// Formal basis: anka_block_device.kleis GEN-REQ-1 through GEN-REQ-3.
+/// Late completion cannot wake a recycled process because the
+/// generation in the completion record no longer matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequesterKey {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+// ───────────────────────────────────────────────────────────────────
 // Events (deterministic scheduler)
 // ───────────────────────────────────────────────────────────────────
 
