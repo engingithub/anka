@@ -7500,6 +7500,7 @@ mod tests {
             },
             grants: vec![],
             maps: vec![],
+            code_vaddr: 0,
             stack_vaddr: 0x10000,
             stack_size: 0x4000,
             trap_vaddr: 0x20000,
@@ -7519,6 +7520,103 @@ mod tests {
         assert_eq!(kernel.processes[0].exit_code, 42,
             "init should exit with 42");
         eprintln!("8.0: boot(return 42) succeeded — test never constructed a core ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Phase 8.1: Boot the real compiler
+    //
+    // The test builds CC_B, then boots it via kernel.boot() with
+    // a BootInfo that places the compiler's code, source, workspace,
+    // and output at the same virtual addresses the compiler expects.
+    // The host never constructs an Anka64Core.
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p81_boot_compiler() {
+        // Build CC_B using the existing bootstrap path
+        let ccb = build_ccb();
+        let ccb_size = ((ccb.len() + 0xFFF) & !0xFFF) as u64;
+
+        // Host creates the machine
+        let mut fabric = Fabric::new(0x800000);
+
+        // Code object: holds CC_B
+        let code_obj = fabric.alloc_object("ccb_code", ccb_size, ObjectKind::Memory);
+        fabric.place_object(code_obj, 0x100000);
+        fabric.initialize_object(code_obj, 0, &ccb);
+        fabric.seal_object(code_obj);
+
+        // Source object
+        let source_obj = fabric.alloc_object("source", SOURCE_SIZE as u64, ObjectKind::Memory);
+        fabric.place_object(source_obj, 0x200000);
+        let source_text = b"int main() { return 42; }";
+        fabric.write_physical(0x200000, &(source_text.len() as u64).to_le_bytes());
+        fabric.write_physical(0x200008, source_text);
+
+        // Output object
+        let output_obj = fabric.alloc_object("output", OUTPUT_SIZE as u64, ObjectKind::Memory);
+        fabric.place_object(output_obj, 0x210000);
+
+        // Workspace object
+        let work_obj = fabric.alloc_object("workspace", WS_SIZE as u64, ObjectKind::Memory);
+        fabric.place_object(work_obj, 0x220000);
+        // Initialize two-ended allocator: WS_LIT_POS = OUTPUT_SIZE
+        // (Phase 8.1c will move this inside the compiler; for now host does it)
+        fabric.write_physical(
+            0x220000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            &(OUTPUT_SIZE as u64).to_le_bytes());
+
+        // Boot descriptor: CC_B at 0x30000, data at canonical addresses
+        let info = BootInfo {
+            image: BootImage {
+                obj: code_obj,
+                code_offset: 0,
+                code_size: ccb.len() as u64,
+                entry: 0,
+                lit_start: 0,
+            },
+            grants: vec![
+                BootGrant { obj: source_obj, offset: 0, size: SOURCE_SIZE as u64, perms: Permissions::READ },
+                BootGrant { obj: output_obj, offset: 0, size: OUTPUT_SIZE as u64, perms: Permissions::RWS },
+                BootGrant { obj: work_obj,   offset: 0, size: WS_SIZE as u64,     perms: Permissions::RW },
+            ],
+            maps: vec![
+                BootMap { vaddr: LAYOUT_SRC as u64, size: SOURCE_SIZE as u64, obj: source_obj, obj_offset: 0 },
+                BootMap { vaddr: LAYOUT_WS as u64,  size: WS_SIZE as u64,     obj: work_obj,   obj_offset: 0 },
+                BootMap { vaddr: LAYOUT_OUT as u64,  size: OUTPUT_SIZE as u64, obj: output_obj, obj_offset: 0 },
+            ],
+            code_vaddr: CCB_CODE_BASE,
+            stack_vaddr: LAYOUT_STACK as u64,
+            stack_size: 0x4000,
+            trap_vaddr: LAYOUT_STACK as u64 + 0x4000, // after stack
+        };
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x300000;
+        let result = kernel.boot(&info);
+        assert_eq!(result, Ok(()), "boot(CC_B) should succeed");
+
+        // Host runs the kernel
+        kernel.run(4_000_000, 100);
+
+        assert!(kernel.processes[0].exited, "CC_B should have exited");
+
+        // Read workspace results
+        let read_ws = |off: u64| -> u64 {
+            let bytes = kernel.fabric.read_physical(0x220000 + off, 8);
+            u64::from_le_bytes(bytes.try_into().unwrap())
+        };
+        let ws_error = read_ws((WS_ERROR - LAYOUT_WS) as u64);
+        let ws_funcs = read_ws((WS_FUNC_COUNT - LAYOUT_WS) as u64);
+        let out_pos = read_ws((WS_OUT_POS - LAYOUT_WS) as u64);
+
+        assert_eq!(ws_error, 0, "CC_B should report no error");
+        assert!(ws_funcs > 0, "CC_B should compile at least one function");
+        assert!(out_pos > 0, "CC_B should produce output");
+
+        eprintln!("8.1b: boot(CC_B) compiled {} functions, {} output bytes ✓",
+            ws_funcs, out_pos);
+        eprintln!("      test never constructed an Anka64Core ✓");
     }
 
     // ─── 8.0e: Hostile boot descriptors ──────────────────────
@@ -7554,6 +7652,7 @@ mod tests {
             },
             grants: vec![],
             maps: vec![],
+            code_vaddr: 0,
             stack_vaddr: 0x10000,
             stack_size: 0x4000,
             trap_vaddr: 0x20000,

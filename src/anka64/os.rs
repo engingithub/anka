@@ -104,6 +104,7 @@ struct ProcessImageDesc {
 /// Process creation mechanism must not assume one universal virtual layout.
 /// The compiler's address space is not the tiny child's address space.
 struct ProcessLayout {
+    code_vaddr: u64,
     stack_vaddr: u64,
     stack_size: u64,
     trap_vaddr: u64,
@@ -111,6 +112,7 @@ struct ProcessLayout {
 
 /// Default layout used by SYS_EXEC children.
 const EXEC_DEFAULT_LAYOUT: ProcessLayout = ProcessLayout {
+    code_vaddr: 0,
     stack_vaddr: 0x10000,
     stack_size: 0x4000,
     trap_vaddr: 0x20000,
@@ -183,6 +185,8 @@ pub struct BootInfo {
     pub image: BootImage,
     pub grants: Vec<BootGrant>,
     pub maps: Vec<BootMap>,
+    /// Virtual address where init's code is mapped.
+    pub code_vaddr: u64,
     /// Virtual address for init's stack.
     pub stack_vaddr: u64,
     /// Size of init's stack in bytes.
@@ -298,14 +302,15 @@ impl Kernel {
         self.next_agent += 1;
 
         let mut core = Anka64Core::new(agent, dom);
-        // Map code at virtual 0 → object at code_offset
-        core.address_map.add_at(0, desc.code_size, desc.code_obj, desc.code_offset);
-        core.pc = desc.entry;
+        // Map code at code_vaddr → object at code_offset
+        core.address_map.add_at(
+            layout.code_vaddr, desc.code_size, desc.code_obj, desc.code_offset);
+        core.pc = layout.code_vaddr + desc.entry;
         // Map literal segment at its natural image-relative offset
         if desc.lit_start != 0 {
             let lit_length = desc.image_size - desc.lit_start;
             core.address_map.add_at(
-                desc.lit_start, lit_length, desc.code_obj,
+                layout.code_vaddr + desc.lit_start, lit_length, desc.code_obj,
                 desc.code_offset + desc.lit_start);
         }
         core.address_map.add(layout.stack_vaddr, layout.stack_size, stack_obj);
@@ -411,12 +416,13 @@ impl Kernel {
         let trap_size: u64 = 0x1000;
 
         let mut ranges: Vec<(u64, u64)> = Vec::new();
-        // Code: [0 .. code_size)
-        ranges.push((0, img.code_size));
-        // Literals: [lit_start .. lit_start + lit_length)
+        // Code: [code_vaddr .. code_vaddr + code_size)
+        ranges.push((info.code_vaddr, info.code_vaddr + img.code_size));
+        // Literals: [code_vaddr + lit_start .. code_vaddr + lit_start + lit_length)
         if img.lit_start != 0 {
             let lit_length = image_size - img.lit_start;
-            ranges.push((img.lit_start, img.lit_start + lit_length));
+            ranges.push((info.code_vaddr + img.lit_start,
+                         info.code_vaddr + img.lit_start + lit_length));
         }
         // Stack and trap from descriptor
         ranges.push((info.stack_vaddr, info.stack_vaddr + info.stack_size));
@@ -479,6 +485,7 @@ impl Kernel {
             entry: img.entry,
         };
         let boot_layout = ProcessLayout {
+            code_vaddr: info.code_vaddr,
             stack_vaddr: info.stack_vaddr,
             stack_size: info.stack_size,
             trap_vaddr: info.trap_vaddr,
