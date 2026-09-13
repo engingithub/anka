@@ -316,13 +316,27 @@ pub struct AccessContext {
 
 /// The canonical Anka64 memory request.
 ///
-/// Each request concerns exactly one object.
+/// Each request concerns exactly one object and an explicit byte span.
+///
+/// `length` is the Fabric-level authorization span in bytes.  CPU scalar
+/// paths derive it from `width.bytes()`.  DMA paths set it directly
+/// (e.g. `length: 512` for a block transfer).  This prevents an ISA
+/// representation detail from becoming an architectural limitation of
+/// the Fabric.
+///
+/// `width` remains for ISA context in fault records and CPU decode.
 #[derive(Debug, Clone, Copy)]
 pub struct MemoryRequest {
     pub context: AccessContext,
     pub object: ObjectId,
     pub offset: u64,
+    /// ISA-level transaction width (CPU context).  DMA paths may set
+    /// this to `Width::Byte` as a placeholder — the Fabric uses
+    /// `length`, not `width`, for authorization and commit.
     pub width: Width,
+    /// Byte span authorized and committed.  Must be nonzero.
+    /// CPU paths: `width.bytes()`.  DMA paths: e.g. 512.
+    pub length: u64,
     pub kind: AccessKind,
 }
 
@@ -389,6 +403,17 @@ pub enum FaultReason {
     /// unknown opcode with R0 == 42 in user mode would be silently
     /// reported as "normal exit 42" instead of a fault.
     IllegalInstruction,
+    /// Declared transaction span does not match provided data length.
+    ///
+    /// Protection boundary: length mismatch implies zero memory mutation.
+    /// DMA span commit is all-or-nothing — authorization, bounds,
+    /// generation revalidation, AND data-length validation all complete
+    /// before the first byte changes.
+    LengthMismatch,
+    /// Transaction span is zero bytes or overflows address arithmetic.
+    ///
+    /// `offset + length` or `physical + length` would wrap.
+    InvalidSpan,
 }
 
 impl fmt::Display for FaultReason {
@@ -402,6 +427,8 @@ impl fmt::Display for FaultReason {
             Self::AlignmentFault => write!(f, "AlignmentFault"),
             Self::ControlFlowViolation => write!(f, "ControlFlowViolation"),
             Self::IllegalInstruction => write!(f, "IllegalInstruction"),
+            Self::LengthMismatch => write!(f, "LengthMismatch"),
+            Self::InvalidSpan => write!(f, "InvalidSpan"),
         }
     }
 }
@@ -464,7 +491,12 @@ pub enum EventCause {
     Syscall,
     /// Asynchronous timer interrupt delivered at instruction boundary.
     TimerInterrupt,
-    // Future: DeviceInterrupt { source }, InterprocessorInterrupt,
+    /// Asynchronous device interrupt delivered at instruction boundary.
+    ///
+    /// Formal basis: anka_block_device.kleis IRQ-INDEP-1 through
+    /// IRQ-INDEP-3 prove P_timer and P_dev are independent.
+    DeviceInterrupt,
+    // Future: InterprocessorInterrupt,
     //         ProtectionFault, IllegalInstruction, ...
     // Synchronous exceptions vs asynchronous interrupts differ in
     // entry semantics but share the same return-integrity mechanism.
@@ -509,9 +541,30 @@ pub struct FaultRecord {
     pub generation: Option<Generation>,
     pub offset: u64,
     pub width: Width,
+    /// Byte span of the faulting transaction.
+    pub length: u64,
     pub kind: AccessKind,
     pub pc: Option<u64>,
     pub reason: FaultReason,
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Generation-qualified requester identity (Phase 9.1a)
+// ───────────────────────────────────────────────────────────────────
+
+/// Architecturally neutral requester identity token.
+///
+/// The block controller stores and returns this opaquely; the kernel
+/// interprets it (slot = process index, generation = incarnation).
+/// The block layer does not know what "process" means.
+///
+/// Formal basis: anka_block_device.kleis GEN-REQ-1 through GEN-REQ-3.
+/// Late completion cannot wake a recycled process because the
+/// generation in the completion record no longer matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequesterKey {
+    pub slot: u32,
+    pub generation: u32,
 }
 
 // ───────────────────────────────────────────────────────────────────

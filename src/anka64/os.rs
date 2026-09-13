@@ -9,6 +9,7 @@
 //!   R1–R3 = arguments
 //!   R0 = return value
 
+use super::block::BlockController;
 use super::core::Anka64Core;
 use super::fabric::Fabric;
 use super::isa::*;
@@ -27,6 +28,7 @@ pub const SYS_SEAL: u64 = 5;   // seal(addr) — RW→RX, W⊕X enforcement
 pub const SYS_EXEC: u64 = 6;   // exec(code_addr, code_size, lit_start) → child exit
 pub const SYS_SPAWN: u64 = 7;  // spawn(R1-R8: code, grants, maps, layout) → handle
 pub const SYS_WAIT: u64 = 8;   // wait(handle) → result
+pub const SYS_BLOCK_READ: u64 = 9; // block_read(block_num, buf_vaddr) → async
 
 // ───────────────────────────────────────────────────────────────────
 // Process descriptor
@@ -40,6 +42,11 @@ pub struct Process {
     pub exit_code: u64,
     /// If Some, this process is blocked waiting for a specific child incarnation.
     pub waiting_on: Option<WaitState>,
+    /// If Some, process is blocked on a SYS_BLOCK_READ with its
+    /// EventFrame still outstanding.  The completion path must
+    /// match both RequesterKey (process incarnation) and
+    /// RequestHandle (I/O operation) before performing event_return().
+    pub io_wait: Option<IoWait>,
     /// Exact incarnation of the parent (None for init).
     pub parent: Option<ProcessKey>,
     /// Generation counter for lifecycle authority.
@@ -207,6 +214,20 @@ struct WaitState {
     handle_slot: Option<usize>,
 }
 
+/// Suspended I/O wait — the process has an outstanding
+/// SYS_BLOCK_READ whose EventFrame remains on the frame stack.
+///
+/// Two independent identity protections:
+///   RequesterKey — which process incarnation?
+///   RequestHandle — which I/O operation?
+///
+/// The completion must match both before the kernel will perform
+/// event_return() and resume the caller at user PC.
+#[derive(Debug, Clone)]
+pub struct IoWait {
+    pub request: super::block::RequestHandle,
+}
+
 // ───────────────────────────────────────────────────────────────────
 // Message mailbox
 // ───────────────────────────────────────────────────────────────────
@@ -239,6 +260,9 @@ enum HaltDisposition {
     /// Supervisor HALT at the trap gate caused by a timer interrupt.
     /// EventFrame cause = TimerInterrupt.
     TimerInterrupt,
+    /// Supervisor HALT at the trap gate caused by a device interrupt.
+    /// EventFrame cause = DeviceInterrupt.
+    DeviceInterrupt,
     /// Supervisor HALT not at the trap gate: kernel halt/panic.
     SupervisorFault,
 }
@@ -246,10 +270,10 @@ enum HaltDisposition {
 fn classify_halt(core: &Anka64Core) -> HaltDisposition {
     use super::state::EventCause;
     if core.privilege == Privilege::Supervisor && core.pc == core.trap_vector {
-        // Peek at the top EventFrame to determine why we entered supervisor.
         match core.event_frames.last().map(|f| &f.cause) {
             Some(EventCause::Syscall) => HaltDisposition::Syscall,
             Some(EventCause::TimerInterrupt) => HaltDisposition::TimerInterrupt,
+            Some(EventCause::DeviceInterrupt) => HaltDisposition::DeviceInterrupt,
             None => HaltDisposition::SupervisorFault,
         }
     } else if core.privilege == Privilege::Supervisor {
@@ -501,6 +525,10 @@ pub struct Kernel {
     pub(crate) free_stack_extents: Vec<PhysicalExtent>,
     /// Recycled trap extents (exact-size match only).
     pub(crate) free_trap_extents: Vec<PhysicalExtent>,
+    /// Optional block device controller.
+    /// When present, tick_devices() advances it and routes
+    /// level-triggered device interrupts.
+    pub block_controller: Option<BlockController>,
 }
 
 impl Kernel {
@@ -518,6 +546,7 @@ impl Kernel {
             lifecycle_tables: Vec::new(),
             free_stack_extents: Vec::new(),
             free_trap_extents: Vec::new(),
+            block_controller: None,
         }
     }
 
@@ -728,6 +757,7 @@ impl Kernel {
                 core,
                 exit_code: 0,
                 waiting_on: None,
+                io_wait: None,
                 parent: None,
                 generation: reuse_gen,
                 result: None,
@@ -746,6 +776,7 @@ impl Kernel {
             core,
             exit_code: 0,
             waiting_on: None,
+            io_wait: None,
             parent: None,
             generation: 0,
             result: None,
@@ -852,6 +883,7 @@ impl Kernel {
         // --- Erase incarnation relations/state ---
         self.processes[slot].parent = None;
         self.processes[slot].waiting_on = None;
+        self.processes[slot].io_wait = None;
         self.processes[slot].result = None;
         self.processes[slot].exit_code = 0;
 
@@ -1128,8 +1160,10 @@ impl Kernel {
                 if self.processes[i].exited() {
                     continue;
                 }
-                // Skip processes blocked waiting on a child
-                if self.processes[i].waiting_on.is_some() {
+                // Skip processes blocked waiting on a child or I/O
+                if self.processes[i].waiting_on.is_some()
+                    || self.processes[i].io_wait.is_some()
+                {
                     continue;
                 }
                 self.current = i;
@@ -1202,15 +1236,14 @@ impl Kernel {
 
             // ── Pre-fetch delivery check ──────────────────────────
             // Handles case B: if event_return() or a previous cycle
-            // left pending_event + interrupts_enabled, deliver now
+            // left pending bits + interrupts_enabled, deliver now
             // before executing the next instruction.
+            //
+            // The arbiter inside deliver_pending() selects at most
+            // one source per boundary (ARB-11).
             if self.processes[idx].core.deliver_pending() {
-                // Delivery pushed an EventFrame, entered Supervisor,
-                // masked, and redirected to trap_vector.  The core
-                // is now halted-equivalent at trap_vector (HALT).
-                // Classify and handle exactly like a post-step halt.
                 self.processes[idx].core.halted = true;
-                self.handle_timer_interrupt(idx);
+                self.handle_async_interrupt(idx);
                 return;
             }
 
@@ -1218,39 +1251,24 @@ impl Kernel {
             let result = self.processes[idx].core.step(&mut self.fabric);
             match result {
                 super::core::StepResult::Continue => {
-                    // ── Committed: tick devices, may post event ────
-                    let timer_fired = if let Some(ref mut timer) = self.fabric.timer {
-                        timer.tick()
-                    } else {
-                        false
-                    };
-                    if timer_fired {
-                        self.processes[idx].core.pending_event =
-                            Some(super::state::EventCause::TimerInterrupt);
-                    }
+                    // ── Committed: tick devices, route assertions ──
+                    self.tick_devices(idx);
                     // Post-commit delivery (case A) is handled by
                     // the pre-fetch check at the top of the next
                     // iteration.  This keeps deliver_pending() in
                     // exactly one place.
                 }
                 super::core::StepResult::Halted => {
-                    // HALT does tick the timer (committed instruction).
-                    let timer_fired = if let Some(ref mut timer) = self.fabric.timer {
-                        timer.tick()
-                    } else {
-                        false
-                    };
-                    if timer_fired {
-                        self.processes[idx].core.pending_event =
-                            Some(super::state::EventCause::TimerInterrupt);
-                    }
+                    // HALT is a committed instruction: tick devices.
+                    self.tick_devices(idx);
 
                     match classify_halt(&self.processes[idx].core) {
                         HaltDisposition::Syscall => {
                             self.handle_syscall(idx);
                         }
-                        HaltDisposition::TimerInterrupt => {
-                            self.handle_timer_interrupt(idx);
+                        HaltDisposition::TimerInterrupt
+                        | HaltDisposition::DeviceInterrupt => {
+                            self.handle_async_interrupt(idx);
                         }
                         HaltDisposition::SupervisorFault => {
                             let core = &self.processes[idx].core;
@@ -1278,15 +1296,123 @@ impl Kernel {
         }
     }
 
-    /// Handle a timer interrupt: perform event_return() and yield
-    /// to the round-robin scheduler.
+    /// Tick all devices and route source assertions to the core.
     ///
-    /// The outer scheduling loop will choose the next runnable process.
-    /// When this process eventually runs again, the pre-fetch delivery
-    /// check handles any preserved pending event.
-    fn handle_timer_interrupt(&mut self, idx: usize) {
+    /// Called once per committed instruction boundary.  This is the
+    /// machine-level operation:
+    ///   I_n commits → tick_devices() → route assertions → I_{n+1}
+    ///
+    /// Timer source: edge-triggered — fires once at period expiry.
+    /// Block device: level-triggered — L_dev := (C > 0).
+    ///   As long as the completion queue is non-empty, the source
+    ///   remains asserted and posts P_dev every tick.  Consuming
+    ///   P_dev in deliver_pending() does not consume completions;
+    ///   if C > 0 persists, P_dev is re-posted on the next tick.
+    fn tick_devices(&mut self, idx: usize) {
+        // --- Timer source ---
+        let timer_fired = if let Some(ref mut timer) = self.fabric.timer {
+            timer.tick()
+        } else {
+            false
+        };
+        if timer_fired {
+            self.processes[idx].core.post_timer_interrupt();
+        }
+
+        // --- Block device source ---
+        // Tick the controller (advances latency, DMA transactions).
+        if let Some(ref mut ctrl) = self.block_controller {
+            ctrl.tick(&mut self.fabric);
+        }
+        // Level-triggered: L_dev := requires_attention() = (C > 0).
+        // Posting is idempotent (sets pending.device = true).
+        if self.block_controller.as_ref()
+            .map_or(false, |c| c.requires_attention())
+        {
+            self.processes[idx].core.post_device_interrupt();
+        }
+    }
+
+    /// Handle an asynchronous interrupt (timer or device).
+    ///
+    /// For timer interrupts: resume the interrupted process and yield
+    /// to the round-robin scheduler (scheduling preemption).
+    ///
+    /// For device interrupts: drain the block controller's completion
+    /// queue, wake any processes blocked on I/O whose RequesterKey
+    /// matches a completion, then resume the interrupted process.
+    ///
+    /// The generation-qualified RequesterKey prevents stale completions
+    /// from waking a recycled process slot.
+    fn handle_async_interrupt(&mut self, idx: usize) {
+        // Determine cause from the current event frame.
+        let is_device = self.processes[idx].core.event_frames.last()
+            .map(|f| f.cause == EventCause::DeviceInterrupt)
+            .unwrap_or(false);
+
+        if is_device {
+            self.drain_block_completions();
+        }
+
         self.resume_from_trap(idx);
-        // Returning from run_process yields to the round-robin.
+    }
+
+    /// Drain the block controller's completion queue and wake
+    /// processes whose identity matches a completed request.
+    ///
+    /// Two independent identity checks:
+    ///   RequesterKey (slot, generation) — which process incarnation?
+    ///   RequestHandle (slot, generation) — which I/O operation?
+    ///
+    /// Both must match the process's current `io_wait`.  If either
+    /// is stale, the completion is consumed with no observable effect.
+    ///
+    /// On match, the suspended SYS_BLOCK_READ is completed:
+    ///   1. R0 = completion status (0 = success, MAX = fault)
+    ///   2. event_return() pops the syscall EventFrame
+    ///   3. io_wait = None
+    ///   4. halted = false
+    ///
+    /// The process then becomes schedulable and resumes at user PC
+    /// (the instruction after the original TRAP).
+    fn drain_block_completions(&mut self) {
+        loop {
+            let completion = match self.block_controller.as_mut() {
+                Some(ctrl) if ctrl.completion_count() > 0 => {
+                    ctrl.consume_completion()
+                }
+                _ => break,
+            };
+            let completion = match completion {
+                Some(c) => c,
+                None => break,
+            };
+
+            let rk = &completion.requester;
+            let slot = rk.slot as usize;
+
+            // Validate: slot in range, generation matches, process
+            // is Running and actually waiting for this exact request.
+            let wake = slot < self.processes.len()
+                && self.processes[slot].generation == rk.generation
+                && self.processes[slot].state == ProcessState::Running
+                && self.processes[slot].io_wait.as_ref()
+                    .map(|w| w.request == completion.handle)
+                    .unwrap_or(false);
+
+            if wake {
+                let proc = &mut self.processes[slot];
+                proc.core.r[R0 as usize] = match completion.status {
+                    super::block::CompletionStatus::Success => 0,
+                    super::block::CompletionStatus::DmaFault(_) => u64::MAX,
+                };
+                let pc = proc.core.event_return()
+                    .expect("matched I/O completion requires outstanding syscall EventFrame");
+                proc.core.pc = pc;
+                proc.io_wait = None;
+                proc.core.halted = false;
+            }
+        }
     }
 
     fn handle_syscall(&mut self, idx: usize) {
@@ -1335,6 +1461,9 @@ impl Kernel {
             }
             SYS_WAIT => {
                 self.handle_wait(idx);
+            }
+            SYS_BLOCK_READ => {
+                self.handle_block_read(idx);
             }
             _ => {
                 eprintln!("Unknown syscall {} from pid {}",
@@ -1489,6 +1618,7 @@ impl Kernel {
                 object: obj,
                 offset: off,
                 width: Width::Byte,
+                length: Width::Byte.bytes(),
                 kind: AccessKind::Read,
             };
             match self.fabric.execute_read(req) {
@@ -2309,6 +2439,87 @@ impl Kernel {
             kind: WaitKind::Lifecycle,
             handle_slot: Some(slot),
         });
+    }
+
+    /// SYS_BLOCK_READ: asynchronous block read.
+    ///
+    /// ABI:
+    ///   R1 = block number
+    ///   R2 = buffer virtual address (must map a contiguous 512-byte
+    ///        region within a single address-map entry)
+    ///
+    /// On success: the process blocks with its syscall EventFrame
+    /// outstanding.  The block controller is given a request with
+    /// RequesterKey = (process_slot, process_generation).  When the
+    /// DMA completes, drain_block_completions() performs event_return()
+    /// and resumes the caller at user PC with R0 = 0.
+    ///
+    /// On failure (no block controller, invalid block, bad buffer,
+    /// delegation failure, already waiting): R0 = MAX and the
+    /// caller resumes immediately.
+    fn handle_block_read(&mut self, idx: usize) {
+        use super::block::{BlockRequest, SubmitResult};
+
+        let block_number = self.processes[idx].core.r[R1 as usize];
+        let buf_vaddr = self.processes[idx].core.r[R2 as usize];
+
+        // Fail fast: no block controller.
+        if self.block_controller.is_none() {
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return;
+        }
+
+        // Fail fast: already waiting on I/O.
+        if self.processes[idx].io_wait.is_some() {
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return;
+        }
+
+        let block_size = self.block_controller.as_ref().unwrap()
+            .storage_ref().block_size();
+
+        // Resolve the 512-byte destination buffer to (ObjectId, offset).
+        let (target_object, target_offset) = match self.processes[idx]
+            .core.address_map.resolve_range_single_entry(buf_vaddr, block_size)
+        {
+            Some(r) => r,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+
+        let rk = RequesterKey {
+            slot: idx as u32,
+            generation: self.processes[idx].generation,
+        };
+        let source_domain = self.processes[idx].core.domain;
+
+        let req = BlockRequest {
+            block_number,
+            requester: rk,
+            target_object,
+            target_offset,
+            source_domain,
+        };
+
+        let result = self.block_controller.as_mut().unwrap()
+            .submit(req, &mut self.fabric);
+
+        match result {
+            SubmitResult::Accepted(handle) => {
+                // Block the caller: leave EventFrame outstanding,
+                // keep halted = true, set io_wait.
+                self.processes[idx].io_wait = Some(IoWait { request: handle });
+            }
+            _ => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+            }
+        }
     }
 
     fn resume_from_trap(&mut self, idx: usize) {
@@ -4868,7 +5079,7 @@ mod tests {
     /// A 10-instruction NOP sled with timer period 5.  The timer
     /// fires after instruction 5 commits.  Before instruction 6
     /// fetches, deliver_pending() triggers, the process enters
-    /// supervisor at trap_vector, and handle_timer_interrupt() yields.
+    /// supervisor at trap_vector, and handle_async_interrupt() yields.
     ///
     /// On resume the process continues from instruction 6.
     #[test]
@@ -4961,8 +5172,8 @@ mod tests {
     ///
     /// Strategy: period 1 fires every instruction.  After the first
     /// delivery, the timer fires again during the HALT at trap_vector
-    /// (committed instruction → tick → post).  handle_timer_interrupt
-    /// does event_return, leaving pending_event = Some + enabled.
+    /// (committed instruction → tick → post).  handle_async_interrupt
+    /// does event_return, leaving P_timer + enabled.
     /// The pre-fetch check in run_process catches this and delivers
     /// again immediately.
     ///
@@ -5039,7 +5250,7 @@ mod tests {
     ///
     /// where A and B are iteration counts of two infinite loops,
     /// and the only cause of context switching is the FabricTimer
-    /// → pending_event → deliver_pending() → handle_timer_interrupt
+    /// → post_timer_interrupt → deliver_pending() → handle_async_interrupt
     /// → round-robin path.
     #[test]
     fn p90e_preemptive_multitasking() {
@@ -5110,5 +5321,836 @@ mod tests {
         eprintln!("      Both A > 0 ∧ B > 0 ✓");
         eprintln!("      Preemption source: architectural FabricTimer");
         eprintln!("      (not host-loop quantum bound)");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.1d — Interrupt source + kernel wiring
+    //
+    // Tests the composition:
+    //   tick_devices() → level-triggered L_dev → post_device_interrupt()
+    //   → deliver_pending() → handle_async_interrupt() → drain_block_completions()
+    //   → generation-qualified wake
+    //
+    // The block controller is attached to the kernel and ticked
+    // at each committed instruction boundary alongside the timer.
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Helper: set up a kernel with one process and a block device.
+    ///
+    /// The process runs a simple NOP sled then SYS_EXIT(code).
+    /// The block controller has `num_blocks` × 512 bytes, latency 1.
+    /// Returns (kernel, buffer ObjectId, buffer DomainId) so callers
+    /// can submit requests manually.
+    fn block_kernel_setup(
+        num_nops: usize,
+        exit_code: i32,
+        num_blocks: u64,
+    ) -> (Kernel, ObjectId, DomainId) {
+        use super::super::block::{BlockStorage, BlockController};
+
+        let mut asm = Asm64::new();
+        for _ in 0..num_nops { asm.nop(); }
+        asm.movi(R1, exit_code);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        let code = asm.to_bytes();
+
+        let mut fabric = Fabric::new(0x200000);
+        let (core, dom, text, _data, _stack) =
+            create_process(&mut fabric, AgentId(0), "blk_test",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        fabric.write_physical(0x000000, &code);
+        seal_code_object(&mut fabric, text, dom);
+
+        // DMA target buffer — a separate Memory object with WRITE authority.
+        let buf = fabric.alloc_object("dma_buf", 0x1000, ObjectKind::Memory);
+        fabric.place_object(buf, 0x080000);
+        fabric.grant(dom, buf, 0, 0x1000, Permissions::WRITE);
+
+        let storage = BlockStorage::new(num_blocks, 512);
+        let ctrl = BlockController::new(storage, 1, AgentId(50));
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.block_controller = Some(ctrl);
+
+        (kernel, buf, dom)
+    }
+
+    /// Level-triggered routing: tick_devices posts P_dev when C > 0.
+    ///
+    /// Manually submit a block request, tick until completed,
+    /// then verify the core's pending.device bit is set.
+    #[test]
+    fn p91d_level_triggered_routing() {
+        use super::super::block::{BlockRequest, SubmitResult};
+
+        let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
+
+        // Pre-populate block 0 with known data.
+        kernel.block_controller.as_mut().unwrap()
+            .storage_mut().write_block(0, &[0xAA; 512]);
+
+        let rk = RequesterKey { slot: 0, generation: 0 };
+        let req = BlockRequest {
+            block_number: 0,
+            requester: rk,
+            target_object: buf,
+            target_offset: 0,
+            source_domain: dom,
+        };
+
+        let result = kernel.block_controller.as_mut().unwrap()
+            .submit(req, &mut kernel.fabric);
+        assert!(matches!(result, SubmitResult::Accepted(_)));
+
+        // Tick the controller until the request completes (latency 1 + DMA).
+        for _ in 0..5 {
+            kernel.block_controller.as_mut().unwrap()
+                .tick(&mut kernel.fabric);
+        }
+        assert!(kernel.block_controller.as_ref().unwrap().requires_attention(),
+            "C > 0 after completion");
+
+        // Now call tick_devices() which should post P_dev.
+        kernel.tick_devices(0);
+        assert!(kernel.processes[0].core.pending.device,
+            "level-triggered: tick_devices must post P_dev when C > 0");
+        eprintln!("9.1d: level-triggered routing ✓");
+    }
+
+    /// Level re-assertion: after P_dev is consumed by delivery,
+    /// if C > 0 persists, tick_devices re-posts P_dev.
+    #[test]
+    fn p91d_level_reassertion() {
+        use super::super::block::{BlockRequest, SubmitResult};
+
+        let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
+
+        kernel.block_controller.as_mut().unwrap()
+            .storage_mut().write_block(0, &[0xBB; 512]);
+        kernel.block_controller.as_mut().unwrap()
+            .storage_mut().write_block(1, &[0xCC; 512]);
+
+        // Submit two requests — both slots occupied.
+        let rk = RequesterKey { slot: 0, generation: 0 };
+        for blk in 0..2u64 {
+            let req = BlockRequest {
+                block_number: blk,
+                requester: rk,
+                target_object: buf,
+                target_offset: blk * 512,
+                source_domain: dom,
+            };
+            let result = kernel.block_controller.as_mut().unwrap()
+                .submit(req, &mut kernel.fabric);
+            assert!(matches!(result, SubmitResult::Accepted(_)));
+        }
+
+        // Tick until both complete.
+        for _ in 0..10 {
+            kernel.block_controller.as_mut().unwrap()
+                .tick(&mut kernel.fabric);
+        }
+        assert_eq!(kernel.block_controller.as_ref().unwrap().completion_count(), 2);
+
+        // tick_devices posts P_dev.
+        kernel.tick_devices(0);
+        assert!(kernel.processes[0].core.pending.device);
+
+        // Simulate delivery consuming P_dev.
+        kernel.processes[0].core.pending.device = false;
+
+        // Consume one completion — C is now 1, still > 0.
+        kernel.block_controller.as_mut().unwrap().consume_completion();
+        assert_eq!(kernel.block_controller.as_ref().unwrap().completion_count(), 1);
+
+        // tick_devices must re-post because L_dev = (C > 0) is still true.
+        kernel.tick_devices(0);
+        assert!(kernel.processes[0].core.pending.device,
+            "level re-assertion: P_dev must be re-posted while C > 0");
+        eprintln!("9.1d: level re-assertion ✓");
+    }
+
+    /// Drain completions + wake: device interrupt handler wakes
+    /// a process blocked on I/O with proper EventFrame continuation.
+    ///
+    /// Manually submit a request with the process's RequesterKey,
+    /// push a synthetic syscall EventFrame, set io_wait, complete
+    /// the request, then invoke drain_block_completions() and verify
+    /// the process is unblocked with R0 = 0 and EventFrame consumed.
+    #[test]
+    fn p91d_drain_wake_success() {
+        use super::super::block::{BlockRequest, SubmitResult, RequestHandle};
+
+        let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
+
+        kernel.block_controller.as_mut().unwrap()
+            .storage_mut().write_block(0, &[0xDD; 512]);
+
+        let rk = RequesterKey {
+            slot: 0,
+            generation: kernel.processes[0].generation,
+        };
+        let req = BlockRequest {
+            block_number: 0,
+            requester: rk,
+            target_object: buf,
+            target_offset: 0,
+            source_domain: dom,
+        };
+
+        let result = kernel.block_controller.as_mut().unwrap()
+            .submit(req, &mut kernel.fabric);
+        let handle = match result {
+            SubmitResult::Accepted(h) => h,
+            _ => panic!("submit must succeed"),
+        };
+
+        // Simulate the suspended syscall state: push an EventFrame
+        // and set halted, as if SYS_BLOCK_READ had just executed.
+        let saved_pc = kernel.processes[0].core.pc;
+        kernel.processes[0].core.event_frames.push(EventFrame {
+            return_pc: saved_pc,
+            return_privilege: Privilege::User,
+            interrupts_were_enabled: true,
+            cause: EventCause::Syscall,
+        });
+        kernel.processes[0].core.halted = true;
+        kernel.processes[0].io_wait = Some(IoWait { request: handle });
+
+        // Tick until DMA completes.
+        for _ in 0..10 {
+            kernel.block_controller.as_mut().unwrap()
+                .tick(&mut kernel.fabric);
+        }
+        assert!(kernel.block_controller.as_ref().unwrap().requires_attention());
+
+        // Drain — should wake the process via event_return().
+        kernel.drain_block_completions();
+
+        assert!(kernel.processes[0].io_wait.is_none(),
+            "process must be unblocked after completion drain");
+        assert!(!kernel.processes[0].core.halted,
+            "halted must be cleared by drain");
+        assert_eq!(kernel.processes[0].core.r[R0 as usize], 0,
+            "R0 = 0 on successful completion");
+        assert_eq!(kernel.processes[0].core.pc, saved_pc,
+            "PC must be restored to saved return address");
+        assert!(kernel.processes[0].core.event_frames.is_empty(),
+            "EventFrame must be consumed by event_return()");
+
+        // Verify data arrived in guest buffer.
+        let buf_data = kernel.fabric.read_physical(0x080000, 512);
+        assert!(buf_data.iter().all(|&b| b == 0xDD),
+            "DMA must have written block data to guest buffer");
+        eprintln!("9.1d: drain + wake (success, event_return) ✓");
+    }
+
+    /// Generation-qualified wake: stale RequesterKey does not
+    /// wake a recycled process slot.
+    ///
+    /// Submit a request with generation 0, then recycle the process
+    /// slot (increment generation), complete the request, and verify
+    /// that drain_block_completions() does NOT unblock the recycled slot.
+    #[test]
+    fn p91d_stale_requester_no_wake() {
+        use super::super::block::{BlockRequest, SubmitResult, RequestHandle};
+
+        let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
+
+        kernel.block_controller.as_mut().unwrap()
+            .storage_mut().write_block(0, &[0xEE; 512]);
+
+        // Submit with generation 0 (the current incarnation).
+        let rk = RequesterKey {
+            slot: 0,
+            generation: kernel.processes[0].generation,
+        };
+        let req = BlockRequest {
+            block_number: 0,
+            requester: rk,
+            target_object: buf,
+            target_offset: 0,
+            source_domain: dom,
+        };
+
+        let result = kernel.block_controller.as_mut().unwrap()
+            .submit(req, &mut kernel.fabric);
+        let handle = match result {
+            SubmitResult::Accepted(h) => h,
+            _ => panic!("submit must succeed"),
+        };
+
+        // "Recycle" the process slot by bumping its generation.
+        kernel.processes[0].generation += 1;
+        // Set up io_wait with the old handle on the recycled slot.
+        kernel.processes[0].io_wait = Some(IoWait { request: handle });
+
+        // Tick until completion.
+        for _ in 0..10 {
+            kernel.block_controller.as_mut().unwrap()
+                .tick(&mut kernel.fabric);
+        }
+
+        // Drain — should NOT wake because generation doesn't match.
+        kernel.drain_block_completions();
+
+        assert!(kernel.processes[0].io_wait.is_some(),
+            "stale RequesterKey must not wake a recycled process slot");
+        eprintln!("9.1d: stale requester → no wake ✓");
+    }
+
+    /// Not-io_wait process: completion is consumed but no wake effect.
+    ///
+    /// A process that is not waiting on I/O should not have its
+    /// R0 clobbered or state modified.
+    #[test]
+    fn p91d_not_blocked_no_clobber() {
+        use super::super::block::{BlockRequest, SubmitResult};
+
+        let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
+
+        kernel.block_controller.as_mut().unwrap()
+            .storage_mut().write_block(0, &[0xFF; 512]);
+
+        let rk = RequesterKey {
+            slot: 0,
+            generation: kernel.processes[0].generation,
+        };
+        let req = BlockRequest {
+            block_number: 0,
+            requester: rk,
+            target_object: buf,
+            target_offset: 0,
+            source_domain: dom,
+        };
+
+        kernel.block_controller.as_mut().unwrap()
+            .submit(req, &mut kernel.fabric);
+
+        // Process is NOT io_wait.
+        assert!(kernel.processes[0].io_wait.is_none());
+        kernel.processes[0].core.r[R0 as usize] = 0xDEAD;
+
+        for _ in 0..10 {
+            kernel.block_controller.as_mut().unwrap()
+                .tick(&mut kernel.fabric);
+        }
+
+        kernel.drain_block_completions();
+
+        // R0 should be untouched — process was not waiting.
+        assert_eq!(kernel.processes[0].core.r[R0 as usize], 0xDEAD,
+            "non-waiting process must not have R0 clobbered");
+        assert!(kernel.processes[0].io_wait.is_none());
+        eprintln!("9.1d: not-waiting → no clobber ✓");
+    }
+
+    /// Timer + device simultaneously: both sources become pending
+    /// from the same tick boundary, and both are eventually served.
+    ///
+    /// Uses a NOP sled long enough for the timer to fire and the
+    /// block request to complete, then verifies both P_t and P_d
+    /// are posted on the same tick.
+    #[test]
+    fn p91d_timer_and_device_simultaneous() {
+        use super::super::block::{BlockRequest, BlockStorage, BlockController, SubmitResult};
+
+        let mut asm = Asm64::new();
+        for _ in 0..50 { asm.nop(); }
+        asm.movi(R1, 99);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        let code = asm.to_bytes();
+
+        let mut fabric = Fabric::new(0x200000);
+        // Timer period: large enough that we can control when it fires.
+        fabric.configure_timer(10);
+        let (core, dom, text, _data, _stack) =
+            create_process(&mut fabric, AgentId(0), "simul",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        fabric.write_physical(0x000000, &code);
+        seal_code_object(&mut fabric, text, dom);
+
+        let buf = fabric.alloc_object("dma_buf", 0x1000, ObjectKind::Memory);
+        fabric.place_object(buf, 0x080000);
+        fabric.grant(dom, buf, 0, 0x1000, Permissions::WRITE);
+
+        let mut storage = BlockStorage::new(4, 512);
+        storage.write_block(0, &[0x42; 512]);
+        let ctrl = BlockController::new(storage, 1, AgentId(50));
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.block_controller = Some(ctrl);
+
+        // Submit a block request.
+        let rk = RequesterKey { slot: 0, generation: 0 };
+        let req = BlockRequest {
+            block_number: 0,
+            requester: rk,
+            target_object: buf,
+            target_offset: 0,
+            source_domain: dom,
+        };
+        kernel.block_controller.as_mut().unwrap()
+            .submit(req, &mut kernel.fabric);
+
+        // Tick the block controller until completed.
+        for _ in 0..10 {
+            kernel.block_controller.as_mut().unwrap()
+                .tick(&mut kernel.fabric);
+        }
+        assert!(kernel.block_controller.as_ref().unwrap().requires_attention());
+
+        // Manually configure timer to fire on the next tick.
+        kernel.fabric.configure_timer(1);
+
+        // tick_devices should post BOTH P_t and P_d.
+        kernel.tick_devices(0);
+
+        assert!(kernel.processes[0].core.pending.timer,
+            "timer must be pending");
+        assert!(kernel.processes[0].core.pending.device,
+            "device must be pending");
+        eprintln!("9.1d: timer + device simultaneous pending ✓");
+    }
+
+    /// No block controller → tick_devices is harmless.
+    ///
+    /// Kernel without a block controller should not panic.
+    #[test]
+    fn p91d_no_controller_harmless() {
+        let mut asm = Asm64::new();
+        asm.movi(R1, 7);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        let code = asm.to_bytes();
+
+        let mut fabric = Fabric::new(0x100000);
+        let (core, dom, text) = timer_test_setup(&mut fabric, &code);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        assert!(kernel.block_controller.is_none());
+        kernel.spawn(core);
+        kernel.run(10000, 100);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, 7);
+        eprintln!("9.1d: no controller → harmless ✓");
+    }
+
+    /// Empty completion queue: drain_block_completions is harmless.
+    #[test]
+    fn p91d_drain_empty_harmless() {
+        let (mut kernel, _buf, _dom) = block_kernel_setup(10, 42, 4);
+        kernel.drain_block_completions();
+        assert!(kernel.processes[0].io_wait.is_none());
+        eprintln!("9.1d: drain empty → harmless ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.1e — Decisive guest-level async block I/O
+    //
+    // The centerpiece: a real SYS_BLOCK_READ syscall that retains
+    // the EventFrame while the process is I/O-blocked.  Completion
+    // performs event_return(), resuming the caller at user PC.
+    //
+    // This composes EventFrame architecture (9.0) with asynchronous
+    // I/O (9.1) into a single suspended-syscall continuation path.
+    // ═══════════════════════════════════════════════════════════════
+
+    /// **Decisive Phase 9.1 test**: guest async block READ.
+    ///
+    /// Process A issues SYS_BLOCK_READ and blocks.  Process B
+    /// runs an infinite counter.  The block controller completes
+    /// A's request via DMA.  A device interrupt fires during B's
+    /// execution.  The handler drains the completion, validates
+    /// both RequesterKey and RequestHandle identity, performs
+    /// event_return(), and resumes A at user PC.  A then reads
+    /// the DMA buffer and verifies the 512 bytes match.
+    ///
+    /// Proves the full composition:
+    ///   guest TRAP → validate buffer → narrow DMA delegation
+    ///   → block with EventFrame → other process executes
+    ///   → DMA commit → device interrupt → identity validation
+    ///   → event_return → guest verifies 512 bytes
+    #[test]
+    fn p91e_decisive_guest_async_read() {
+        use super::super::block::{BlockStorage, BlockController};
+
+        // Process A — guest verifies all 512 bytes (64 words) after DMA:
+        //
+        //   MOVI R1, 0               ; block_number = 0
+        //   MOVI R2, buf_vaddr       ; buffer virtual address
+        //   MOVI R0, SYS_BLOCK_READ
+        //   TRAP                     ; → blocks here
+        //   --- resumes here after completion ---
+        //   MOVI R5, 64              ; word counter (512 / 8)
+        //   MOVI R6, 1               ; expected word value
+        // loop:
+        //   LD   R3, R2, 0           ; load 8 bytes at [R2]
+        //   CMP  R3, R6              ; compare with expected (1)
+        //   BCC  Ne, +5              ; mismatch → error exit
+        //   ADDI R2, R2, 8           ; advance pointer
+        //   SUBI R5, R5, 1           ; decrement counter
+        //   MOVI R7, 0
+        //   CMP  R5, R7              ; counter == 0?
+        //   BCC  Ne, -6              ; loop back if counter > 0
+        //   MOVI R1, 200             ; all 64 words verified — success
+        //   MOVI R0, SYS_EXIT
+        //   TRAP
+        // error:
+        //   MOVI R1, 0xDEA           ; data mismatch
+        //   MOVI R0, SYS_EXIT
+        //   TRAP
+        let buf_vaddr = 0x04000_i32;  // fits signed imm18
+        let mut asm_a = Asm64::new();
+        asm_a.movi(R1, 0);                          // block_number = 0
+        asm_a.movi(R2, buf_vaddr);                   // buf_vaddr
+        asm_a.movi(R0, SYS_BLOCK_READ as i32);
+        asm_a.trap(0);
+        // After wake: R0 = 0 (success).  Verify all 512 bytes.
+        asm_a.movi(R5, 64);                          // 64 words = 512 bytes
+        asm_a.movi(R6, 1);                           // expected u64 value
+        // loop (word offset 6):
+        asm_a.ld(R3, R2, 0);                         // load 8 bytes at [R2]
+        asm_a.cmp(R3, R6);                           // compare with expected
+        asm_a.bcc(Cond::Ne, 5);                      // mismatch → error exit
+        asm_a.addi(R2, R2, 8);                       // advance pointer
+        asm_a.subi(R5, R5, 1);                       // decrement counter
+        asm_a.movi(R7, 0);
+        asm_a.cmp(R5, R7);                           // counter == 0?
+        asm_a.bcc(Cond::Ne, -6);                     // loop back
+        // success:
+        asm_a.movi(R1, 200);
+        asm_a.movi(R0, SYS_EXIT as i32);
+        asm_a.trap(0);
+        // error:
+        asm_a.movi(R1, 0xDEA);
+        asm_a.movi(R0, SYS_EXIT as i32);
+        asm_a.trap(0);
+        let code_a = asm_a.to_bytes();
+
+        // Process B: infinite counter loop.
+        let code_b = infinite_counter_program(0x10000);
+
+        let mut fabric = Fabric::new(0x800000);
+        fabric.configure_timer(5);
+
+        // Process A — text at 0x000000, data at 0x010000, stack at 0x020000
+        let (core_a, dom_a, text_a, _data_a, _stack_a) =
+            create_process(&mut fabric, AgentId(0), "procA",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        fabric.write_physical(0x000000, &code_a);
+        seal_code_object(&mut fabric, text_a, dom_a);
+
+        // DMA target buffer for process A — mapped at buf_vaddr.
+        let buf_obj = fabric.alloc_object("dma_buf_a", 0x1000, ObjectKind::Memory);
+        fabric.place_object(buf_obj, 0x040000);
+        fabric.grant(dom_a, buf_obj, 0, 0x1000, Permissions::RW);
+
+        // Process B — at separate physical addresses
+        let (core_b, dom_b, text_b, _data_b, _stack_b) =
+            create_process(&mut fabric, AgentId(1), "procB",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        fabric.write_physical(0x100000, &code_b);
+        seal_code_object(&mut fabric, text_b, dom_b);
+
+        // Block storage: block 0 filled with 64 copies of u64 = 1.
+        let mut storage = BlockStorage::new(4, 512);
+        let block_data: Vec<u8> = (0..64)
+            .flat_map(|_| 1u64.to_le_bytes())
+            .collect();
+        assert_eq!(block_data.len(), 512);
+        storage.write_block(0, &block_data);
+        let ctrl = BlockController::new(storage, 1, AgentId(50));
+
+        let mut kernel = Kernel::new(fabric);
+        let key_a = kernel.spawn(core_a);
+        kernel.spawn(core_b);
+        kernel.block_controller = Some(ctrl);
+
+        // Map the DMA buffer into process A's address space at buf_vaddr.
+        kernel.processes[key_a.slot].core.address_map
+            .add(buf_vaddr as u64, 0x1000, buf_obj);
+
+        // Run: A will issue SYS_BLOCK_READ and block.
+        // B runs in the background. The block controller completes.
+        // A device interrupt fires, drains, event_return wakes A.
+        // A reads the buffer, verifies data, exits with 200.
+        kernel.run(100_000, 500);
+
+        assert!(kernel.processes[key_a.slot].exited(),
+            "process A must complete after I/O wake + verification");
+        assert_eq!(kernel.processes[key_a.slot].exit_code, 200,
+            "A must exit with 200 (data verified), got {}",
+            kernel.processes[key_a.slot].exit_code);
+        assert!(!kernel.processes[1].exited(),
+            "process B (infinite loop) must still be running");
+
+        // Double-check: verify the physical DMA buffer contains expected data.
+        let phys_buf = kernel.fabric.read_physical(0x040000, 512);
+        assert_eq!(&phys_buf[..], &block_data[..],
+            "DMA buffer must contain the exact block data");
+
+        eprintln!("9.1e: DECISIVE GUEST ASYNC BLOCK READ");
+        eprintln!("      A: SYS_BLOCK_READ → blocked → woken → verified all 512 bytes → exit(200)");
+        eprintln!("      B: infinite counter (still running)");
+        eprintln!("      Block data: 64 × u64(1), guest-verified word-by-word");
+        eprintln!("      Composition: EventFrame + async I/O + DMA + device interrupt ✓");
+    }
+
+    /// SYS_BLOCK_READ with no block controller returns MAX immediately.
+    #[test]
+    fn p91e_block_read_no_controller() {
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0);
+        asm.movi(R2, 0x10000);
+        asm.movi(R0, SYS_BLOCK_READ as i32);
+        asm.trap(0);
+        // R0 should be MAX after failed syscall.
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        let code = asm.to_bytes();
+
+        let mut fabric = Fabric::new(0x100000);
+        let (core, dom, text) = timer_test_setup(&mut fabric, &code);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        assert!(kernel.block_controller.is_none());
+        kernel.spawn(core);
+        kernel.run(10000, 100);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "SYS_BLOCK_READ with no controller must return MAX");
+        eprintln!("9.1e: block_read no controller → MAX ✓");
+    }
+
+    /// SYS_BLOCK_READ with invalid buffer address returns MAX.
+    #[test]
+    fn p91e_block_read_bad_buffer() {
+        use super::super::block::{BlockStorage, BlockController};
+
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0);          // block 0
+        asm.movi(R2, 0x18000_i32); // representable AND unmapped
+        asm.movi(R0, SYS_BLOCK_READ as i32);
+        asm.trap(0);
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        let code = asm.to_bytes();
+
+        let mut fabric = Fabric::new(0x200000);
+        let (core, dom, text) = timer_test_setup(&mut fabric, &code);
+        seal_code_object(&mut fabric, text, dom);
+
+        let storage = BlockStorage::new(4, 512);
+        let ctrl = BlockController::new(storage, 1, AgentId(50));
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.block_controller = Some(ctrl);
+        kernel.run(10000, 100);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "SYS_BLOCK_READ with unmapped buffer must return MAX");
+        eprintln!("9.1e: block_read bad buffer → MAX ✓");
+    }
+
+    /// SYS_BLOCK_READ with invalid block number returns MAX.
+    #[test]
+    fn p91e_block_read_invalid_block() {
+        use super::super::block::{BlockStorage, BlockController};
+
+        // Read block 999 from a 4-block device.
+        let buf_vaddr = 0x04000_i32;  // fits signed imm18
+        let mut asm = Asm64::new();
+        asm.movi(R1, 999);
+        asm.movi(R2, buf_vaddr);
+        asm.movi(R0, SYS_BLOCK_READ as i32);
+        asm.trap(0);
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        let code = asm.to_bytes();
+
+        let mut fabric = Fabric::new(0x200000);
+        let (core, dom, text, _data, _stack) =
+            create_process(&mut fabric, AgentId(0), "inv_blk",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        fabric.write_physical(0x000000, &code);
+        seal_code_object(&mut fabric, text, dom);
+
+        let buf = fabric.alloc_object("buf", 0x1000, ObjectKind::Memory);
+        fabric.place_object(buf, 0x080000);
+        fabric.grant(dom, buf, 0, 0x1000, Permissions::RW);
+
+        let storage = BlockStorage::new(4, 512);
+        let ctrl = BlockController::new(storage, 1, AgentId(50));
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.block_controller = Some(ctrl);
+        kernel.processes[0].core.address_map.add(buf_vaddr as u64, 0x1000, buf);
+        kernel.run(10000, 100);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "SYS_BLOCK_READ with out-of-range block must return MAX");
+        eprintln!("9.1e: block_read invalid block → MAX ✓");
+    }
+
+    /// Stale RequestHandle: completion with a non-matching handle
+    /// does not wake the process.
+    ///
+    /// Submit two requests (different blocks), io_wait on the second
+    /// handle, complete both.  The first completion (different handle)
+    /// must not wake; the second (matching handle) must.
+    #[test]
+    fn p91e_stale_request_handle_no_wake() {
+        use super::super::block::{BlockRequest, SubmitResult, RequestHandle};
+
+        let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
+        kernel.block_controller.as_mut().unwrap()
+            .storage_mut().write_block(0, &[0xAA; 512]);
+        kernel.block_controller.as_mut().unwrap()
+            .storage_mut().write_block(1, &[0xBB; 512]);
+
+        let rk = RequesterKey {
+            slot: 0,
+            generation: kernel.processes[0].generation,
+        };
+
+        // Submit request for block 0 → gets handle from slot 0.
+        let req0 = BlockRequest {
+            block_number: 0,
+            requester: rk,
+            target_object: buf,
+            target_offset: 0,
+            source_domain: dom,
+        };
+        let handle0 = match kernel.block_controller.as_mut().unwrap()
+            .submit(req0, &mut kernel.fabric)
+        {
+            SubmitResult::Accepted(h) => h,
+            _ => panic!("submit 0 must succeed"),
+        };
+
+        // Submit request for block 1 → gets handle from slot 1.
+        let req1 = BlockRequest {
+            block_number: 1,
+            requester: rk,
+            target_object: buf,
+            target_offset: 512,
+            source_domain: dom,
+        };
+        let handle1 = match kernel.block_controller.as_mut().unwrap()
+            .submit(req1, &mut kernel.fabric)
+        {
+            SubmitResult::Accepted(h) => h,
+            _ => panic!("submit 1 must succeed"),
+        };
+
+        assert_ne!(handle0.slot, handle1.slot, "must use different slots");
+
+        // The process is waiting on handle1 (the second request).
+        let saved_pc = kernel.processes[0].core.pc;
+        kernel.processes[0].core.event_frames.push(EventFrame {
+            return_pc: saved_pc,
+            return_privilege: Privilege::User,
+            interrupts_were_enabled: true,
+            cause: EventCause::Syscall,
+        });
+        kernel.processes[0].core.halted = true;
+        kernel.processes[0].io_wait = Some(IoWait { request: handle1 });
+
+        // Tick until both complete.
+        for _ in 0..10 {
+            kernel.block_controller.as_mut().unwrap()
+                .tick(&mut kernel.fabric);
+        }
+        assert_eq!(kernel.block_controller.as_ref().unwrap().completion_count(), 2);
+
+        // Drain: the first completion (handle0) must NOT wake.
+        // The second completion (handle1) MUST wake.
+        kernel.drain_block_completions();
+
+        assert!(kernel.processes[0].io_wait.is_none(),
+            "process must be woken by matching handle1");
+        assert!(!kernel.processes[0].core.halted);
+        assert_eq!(kernel.processes[0].core.r[R0 as usize], 0);
+        eprintln!("9.1e: stale request handle → selective wake ✓");
+    }
+
+    /// Machine limitation documentation test: with a block controller
+    /// attached, if the only process is io_wait'd and no other
+    /// process runs, the device never ticks (no instructions commit).
+    ///
+    /// This test documents the known limitation rather than fixing it.
+    /// The current machine model requires at least one running process
+    /// to generate instruction boundaries for tick_devices().
+    #[test]
+    fn p91e_all_blocked_no_progress_documented() {
+        use super::super::block::{BlockRequest, BlockStorage, BlockController, SubmitResult};
+
+        let buf_vaddr = 0x04000_i32;  // fits signed imm18
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0);
+        asm.movi(R2, buf_vaddr);
+        asm.movi(R0, SYS_BLOCK_READ as i32);
+        asm.trap(0);
+        asm.movi(R1, 123);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        let code = asm.to_bytes();
+
+        let mut fabric = Fabric::new(0x200000);
+        let (core, dom, text, _data, _stack) =
+            create_process(&mut fabric, AgentId(0), "solo",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        fabric.write_physical(0x000000, &code);
+        seal_code_object(&mut fabric, text, dom);
+
+        let buf = fabric.alloc_object("buf", 0x1000, ObjectKind::Memory);
+        fabric.place_object(buf, 0x080000);
+        fabric.grant(dom, buf, 0, 0x1000, Permissions::RW);
+
+        let mut storage = BlockStorage::new(4, 512);
+        storage.write_block(0, &[0x42; 512]);
+        let ctrl = BlockController::new(storage, 1, AgentId(50));
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.block_controller = Some(ctrl);
+        kernel.processes[0].core.address_map.add(buf_vaddr as u64, 0x1000, buf);
+
+        // Run with very few rounds — the process will block on I/O
+        // and no one else runs, so no tick_devices() fires.
+        kernel.run(10000, 10);
+
+        // Process A issued SYS_BLOCK_READ and is now io_wait.
+        // It should NOT have exited because no device ticks occurred.
+        assert!(!kernel.processes[0].exited(),
+            "solo io_wait process must NOT complete — no tick source");
+        assert!(kernel.processes[0].io_wait.is_some(),
+            "process must still be waiting on I/O");
+
+        eprintln!("9.1e: all-blocked-no-progress limitation documented ✓");
+        eprintln!("      (machine requires at least one running process");
+        eprintln!("       to generate instruction boundaries for tick_devices)");
     }
 }

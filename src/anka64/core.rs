@@ -125,6 +125,51 @@ pub enum StepResult {
 }
 
 // ───────────────────────────────────────────────────────────────────
+// Multi-source pending interrupt state (Phase 9.1a)
+// ───────────────────────────────────────────────────────────────────
+
+/// Per-source pending interrupt bits.
+///
+/// Each asynchronous source has independent Boolean pending truth.
+/// Posting one source does not alter the other.  Both may be
+/// simultaneously true — the arbiter resolves ties.
+///
+/// Formal basis: anka_block_device.kleis IRQ-INDEP-1 through
+/// IRQ-INDEP-3.  Phase 9.0's `Option<EventCause>` could not
+/// represent `(P_timer=1, P_dev=1)`.
+#[derive(Debug, Clone)]
+pub struct PendingSet {
+    pub timer: bool,
+    pub device: bool,
+}
+
+impl PendingSet {
+    pub fn new() -> Self {
+        Self { timer: false, device: false }
+    }
+
+    /// True if any source is pending.
+    pub fn any_pending(&self) -> bool {
+        self.timer || self.device
+    }
+}
+
+/// Interrupt arbiter turn state.
+///
+/// When both `P_timer` and `P_dev` are true, the arbiter selects
+/// the source matching the current turn, then flips.  A lone
+/// pending source is always selected regardless of turn.
+///
+/// Formal basis: anka_block_device.kleis ARB-7/ARB-8 prove
+/// bounded service: both sources served within two eligible
+/// delivery opportunities from either initial turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptTurn {
+    Timer,
+    Device,
+}
+
+// ───────────────────────────────────────────────────────────────────
 // Core
 // ───────────────────────────────────────────────────────────────────
 
@@ -165,15 +210,24 @@ pub struct Anka64Core {
     /// M=1 means masked, interrupts_enabled=false).
     pub interrupts_enabled: bool,
 
-    /// Pending asynchronous event awaiting delivery (Phase 9.0b).
+    /// Per-source pending interrupt state (Phase 9.1a).
     ///
-    /// At most one event can be pending at a time (coalescing for
-    /// timer-class sources).  `deliver_pending()` is the only
-    /// consumer; event sources (timer, future devices) are producers.
+    /// Replaces `Option<EventCause>` from Phase 9.0.  Each source
+    /// has independent Boolean pending truth (coalescing per source).
     ///
-    /// Formal basis: place P in anka_interrupts.kleis.
-    /// CONS-1: P+Q=1.  COALESCE-2: P≤1 at reachable markings.
-    pub pending_event: Option<EventCause>,
+    /// Formal basis: anka_block_device.kleis IRQ-INDEP-1 through
+    /// IRQ-INDEP-3 prove P_timer and P_dev are independent.
+    pub pending: PendingSet,
+
+    /// Interrupt arbitration state (Phase 9.1a).
+    ///
+    /// When both sources are simultaneously pending, the arbiter
+    /// uses this turn bit to select which is served first.
+    /// Serving one source flips the turn to the other.
+    ///
+    /// Formal basis: anka_block_device.kleis ARB-7 and ARB-8
+    /// prove bounded service within two eligible opportunities.
+    pub interrupt_turn: InterruptTurn,
 
     /// Protected return-authority stack (6S.2 + 6S.2a).
     ///
@@ -203,7 +257,8 @@ impl Anka64Core {
             trap_vector: 0,
             event_frames: Vec::new(),
             interrupts_enabled: true,
-            pending_event: None,
+            pending: PendingSet::new(),
+            interrupt_turn: InterruptTurn::Timer,
             return_stack: Vec::new(),
         }
     }
@@ -224,48 +279,86 @@ impl Anka64Core {
         Some(frame.return_pc)
     }
 
-    /// Generic architectural interrupt-delivery gate (Phase 9.0b).
+    // ───────────── Posting (Phase 9.1a) ──────────────────────────
+
+    /// Post a timer interrupt.  Does not alter P_dev.
     ///
-    /// If a pending asynchronous event exists and interrupts are enabled,
-    /// consume the pending token, push a protected EventFrame, enter
-    /// Supervisor with interrupts masked, and redirect to trap_vector.
+    /// Formal basis: anka_block_device.kleis IRQ-INDEP-1.
+    pub fn post_timer_interrupt(&mut self) {
+        self.pending.timer = true;
+    }
+
+    /// Post a device interrupt.  Does not alter P_timer.
+    ///
+    /// Formal basis: anka_block_device.kleis IRQ-INDEP-2.
+    pub fn post_device_interrupt(&mut self) {
+        self.pending.device = true;
+    }
+
+    // ───────────── Delivery with arbitration (Phase 9.1a) ───────
+
+    /// Multi-source interrupt delivery gate.
+    ///
+    /// If any source is pending and interrupts are enabled:
+    ///   - Arbiter selects one source (turn-based if both pending).
+    ///   - Consumes only the chosen source's pending bit.
+    ///   - Preserves the other source's pending bit.
+    ///   - Pushes exactly one protected EventFrame.
+    ///   - Enters Supervisor, masks, redirects to trap_vector.
+    ///   - Flips the turn after serving a tied request.
     ///
     /// Returns true if delivery occurred, false otherwise.
     ///
-    /// This is the implementation of formal transition T_deliver:
-    ///   U + P → H + F + M  (with Q restored, P consumed).
-    ///
-    /// Called at instruction boundaries — after I_n commits, after
-    /// devices tick, before I_{n+1} fetches.  This method does NOT
-    /// decide when to call itself; callers (run_process, Phase 9.0d)
-    /// are responsible for machine sequencing.
-    ///
-    /// Formal properties witnessed:
-    ///   INT-2:  M=1 ⇒ no delivery (masked gate).
-    ///   INT-3:  delivery consumes exactly one P, restores Q.
-    ///   INT-6a: delivery requires committed boundary + P + ¬M.
-    ///   INT-9a: one delivered event creates exactly one H token.
+    /// Formal basis: anka_block_device.kleis
+    ///   ARB-1..ARB-11: turn-based arbitration with bounded service.
+    ///   IRQ-MASK-1: masked pending is not deliverable.
+    ///   IRQ-MASK-2: masking preserves latched pending truth.
     pub fn deliver_pending(&mut self) -> bool {
-        if let Some(cause) = self.pending_event.take() {
-            if self.interrupts_enabled {
-                self.event_frames.push(EventFrame {
-                    return_pc: self.pc,
-                    return_privilege: self.privilege,
-                    interrupts_were_enabled: self.interrupts_enabled,
-                    cause,
-                });
-                self.privilege = Privilege::Supervisor;
-                self.interrupts_enabled = false;
-                self.pc = self.trap_vector;
-                true
-            } else {
-                // INT-2: masked — put the event back, delivery blocked.
-                self.pending_event = Some(cause);
-                false
-            }
-        } else {
-            false
+        if !self.interrupts_enabled {
+            // IRQ-MASK-1/2: masked — preserve all pending bits, no delivery.
+            return false;
         }
+
+        // Select which source to deliver (if any).
+        let cause = match (self.pending.timer, self.pending.device) {
+            (false, false) => return false,
+            (true, false) => {
+                // ARB-9: lone timer, always selected.
+                self.pending.timer = false;
+                EventCause::TimerInterrupt
+            }
+            (false, true) => {
+                // ARB-10: lone device, always selected.
+                self.pending.device = false;
+                EventCause::DeviceInterrupt
+            }
+            (true, true) => {
+                // ARB-1..ARB-8: both pending, use turn.
+                match self.interrupt_turn {
+                    InterruptTurn::Timer => {
+                        self.pending.timer = false;
+                        self.interrupt_turn = InterruptTurn::Device;
+                        EventCause::TimerInterrupt
+                    }
+                    InterruptTurn::Device => {
+                        self.pending.device = false;
+                        self.interrupt_turn = InterruptTurn::Timer;
+                        EventCause::DeviceInterrupt
+                    }
+                }
+            }
+        };
+
+        self.event_frames.push(EventFrame {
+            return_pc: self.pc,
+            return_privilege: self.privilege,
+            interrupts_were_enabled: self.interrupts_enabled,
+            cause,
+        });
+        self.privilege = Privilege::Supervisor;
+        self.interrupts_enabled = false;
+        self.pc = self.trap_vector;
+        true
     }
 
     /// Execute one instruction cycle through the fabric.
@@ -289,6 +382,7 @@ impl Anka64Core {
                 generation: None,
                 offset: self.pc,
                 width: Width::Word,
+                length: Width::Word.bytes(),
                 kind: AccessKind::Fetch,
                 pc: Some(self.pc),
                 reason: FaultReason::AlignmentFault,
@@ -314,6 +408,7 @@ impl Anka64Core {
                 generation: None,
                 offset: self.pc,
                 width: Width::Word,
+                length: Width::Word.bytes(),
                 kind: AccessKind::Fetch,
                 pc: Some(self.pc),
                 reason: FaultReason::IllegalInstruction,
@@ -404,6 +499,7 @@ impl Anka64Core {
                             generation: None,
                             offset: self.pc,
                             width: Width::Word,
+                            length: Width::Word.bytes(),
                             kind: AccessKind::Fetch,
                             pc: Some(self.pc),
                             reason: FaultReason::ControlFlowViolation,
@@ -422,6 +518,7 @@ impl Anka64Core {
                             generation: None,
                             offset: self.pc,
                             width: Width::Word,
+                            length: Width::Word.bytes(),
                             kind: AccessKind::Fetch,
                             pc: Some(self.pc),
                             reason: FaultReason::ControlFlowViolation,
@@ -452,6 +549,7 @@ impl Anka64Core {
                             generation: None,
                             offset: lr_val,
                             width: Width::Word,
+                            length: Width::Word.bytes(),
                             kind: AccessKind::Fetch,
                             pc: Some(self.pc),
                             reason: FaultReason::ControlFlowViolation,
@@ -470,6 +568,7 @@ impl Anka64Core {
                         generation: Some(ret_auth.generation),
                         offset: lr_val,
                         width: Width::Word,
+                        length: Width::Word.bytes(),
                         kind: AccessKind::Fetch,
                         pc: Some(self.pc),
                         reason: FaultReason::ControlFlowViolation,
@@ -488,6 +587,7 @@ impl Anka64Core {
                             generation: Some(ret_auth.generation),
                             offset: lr_val,
                             width: Width::Word,
+                            length: Width::Word.bytes(),
                             kind: AccessKind::Fetch,
                             pc: Some(self.pc),
                             reason: FaultReason::ControlFlowViolation,
@@ -529,6 +629,7 @@ impl Anka64Core {
                             generation: None,
                             offset: self.pc,
                             width: Width::Word,
+                            length: Width::Word.bytes(),
                             kind: AccessKind::Fetch,
                             pc: Some(self.pc),
                             reason: FaultReason::ControlFlowViolation,
@@ -591,6 +692,7 @@ impl Anka64Core {
             object,
             offset,
             width,
+            length: width.bytes(),
             kind,
         }
     }
@@ -612,6 +714,7 @@ impl Anka64Core {
                 generation: None,
                 offset: addr,
                 width,
+                length: width.bytes(),
                 kind,
                 pc: Some(self.pc),
                 reason: FaultReason::TranslationFault,
@@ -637,6 +740,7 @@ impl Anka64Core {
                 generation: None,
                 offset: addr,
                 width,
+                length: width.bytes(),
                 kind: AccessKind::Write,
                 pc: Some(self.pc),
                 reason: FaultReason::TranslationFault,
@@ -662,6 +766,7 @@ impl Anka64Core {
                 generation: None,
                 offset: addr,
                 width,
+                length: width.bytes(),
                 kind: AccessKind::Atomic,
                 pc: Some(self.pc),
                 reason: FaultReason::TranslationFault,
@@ -1399,17 +1504,17 @@ mod tests {
         core.privilege = Privilege::User;
         core.interrupts_enabled = true;
 
-        // Post: P := 1  (formal T_post: M0 → M1)
-        core.pending_event = Some(EventCause::TimerInterrupt);
+        // Post: P_timer := 1
+        core.post_timer_interrupt();
 
-        // Deliver (formal T_deliver: M1 → M2)
+        // Deliver
         let delivered = core.deliver_pending();
 
-        assert!(delivered, "delivery must succeed when P=1, M=0");
+        assert!(delivered, "delivery must succeed when P_timer=1, M=0");
         assert_eq!(core.pc, 0x2000, "pc must be trap_vector");
         assert_eq!(core.privilege, Privilege::Supervisor);
         assert!(!core.interrupts_enabled, "interrupts must be masked (CONS-4: F=M)");
-        assert!(core.pending_event.is_none(), "P must be consumed (INT-3)");
+        assert!(!core.pending.timer, "P_timer must be consumed");
         assert_eq!(core.event_frames.len(), 1, "exactly one EventFrame (INT-9a)");
 
         let frame = &core.event_frames[0];
@@ -1432,7 +1537,7 @@ mod tests {
         core.privilege = Privilege::User;
         core.interrupts_enabled = true;
 
-        core.pending_event = Some(EventCause::TimerInterrupt);
+        core.post_timer_interrupt();
         assert!(core.deliver_pending());
 
         // Now in handler state: Supervisor, masked, at trap_vector.
@@ -1448,9 +1553,9 @@ mod tests {
         assert!(core.event_frames.is_empty(), "INT-4: frame consumed");
     }
 
-    /// INT-2: masked state blocks delivery; pending event preserved.
+    /// INT-2: masked state blocks delivery; pending bits preserved.
     ///
-    /// Formal: M=1 disables T_deliver.  P persists.
+    /// Formal: M=1 disables T_deliver.  P_timer persists.
     #[test]
     fn p90b_deliver_masked_preserves_pending() {
         let mut core = Anka64Core::new(CPU0, DomainId(0));
@@ -1458,16 +1563,16 @@ mod tests {
         core.trap_vector = 0x200;
         core.interrupts_enabled = false;  // masked
 
-        core.pending_event = Some(EventCause::TimerInterrupt);
+        core.post_timer_interrupt();
         let delivered = core.deliver_pending();
 
         assert!(!delivered, "INT-2: delivery must not fire when masked");
-        assert!(core.pending_event.is_some(), "pending event must survive");
+        assert!(core.pending.timer, "pending timer must survive");
         assert_eq!(core.pc, 0x100, "pc unchanged");
         assert!(core.event_frames.is_empty(), "no frame created");
     }
 
-    /// No delivery when pending_event is None.
+    /// No delivery when no source is pending.
     ///
     /// Formal: Q=1 (no pending) means T_deliver is disabled.
     #[test]
@@ -1476,7 +1581,7 @@ mod tests {
         core.pc = 0x100;
         core.trap_vector = 0x200;
         core.interrupts_enabled = true;
-        core.pending_event = None;
+        // No posting — both sources clear.
 
         let delivered = core.deliver_pending();
 
@@ -1498,23 +1603,21 @@ mod tests {
         core.trap_vector = 0x800;
         core.interrupts_enabled = true;
 
-        // First event: post + deliver (M0 → M1 → M2)
-        core.pending_event = Some(EventCause::TimerInterrupt);
+        // First event: post + deliver
+        core.post_timer_interrupt();
         assert!(core.deliver_pending());
         assert_eq!(core.pc, 0x800);
 
-        // Simulate handler completion + second event posted while
-        // masked (M2 → M2a via T_post, then M2a → M3a via T_handler).
-        // For the Petri model we only need pending + frame + masked.
-        core.pending_event = Some(EventCause::TimerInterrupt);
+        // Second event posted while masked.
+        core.post_timer_interrupt();
 
-        // T_eret with pending event (M3a → M1): pending preserved.
+        // T_eret with pending event: pending preserved.
         let return_pc = core.event_return();
         assert_eq!(return_pc, Some(0x400), "return to interrupted pc");
         assert!(core.interrupts_enabled, "unmasked after return");
-        assert!(core.pending_event.is_some(), "INT-10b: pending survives ERET");
+        assert!(core.pending.timer, "INT-10b: pending survives ERET");
 
-        // Now immediately deliverable again (M1 → M2)
+        // Now immediately deliverable again
         assert!(core.deliver_pending(), "re-delivery after ERET must succeed");
         assert_eq!(core.pc, 0x800, "back at trap_vector");
         assert!(!core.interrupts_enabled, "masked again");
@@ -1532,10 +1635,10 @@ mod tests {
         core.trap_vector = 0x200;
         core.interrupts_enabled = true;
 
-        core.pending_event = Some(EventCause::TimerInterrupt);
+        core.post_timer_interrupt();
         assert!(core.deliver_pending());
 
-        // After delivery: P=0, M=1.  Second deliver must be a no-op.
+        // After delivery: P_timer=0, M=1.  Second deliver must be a no-op.
         let second = core.deliver_pending();
         assert!(!second, "INT-9b: no double delivery");
         assert_eq!(core.event_frames.len(), 1, "still exactly one frame");
@@ -1543,24 +1646,30 @@ mod tests {
 
     /// Syscall cause uses the same frame-entry law as timer.
     ///
-    /// Formal: FRAME-UNIFIED-1.  Manually posting a Syscall cause
-    /// through deliver_pending() must produce the same structural
-    /// effect as TimerInterrupt — the generic gate is cause-agnostic.
+    /// Formal: FRAME-UNIFIED-1.  The generic gate is cause-agnostic.
+    /// Syscall delivery bypasses the pending/arbiter path (it is
+    /// synchronous via TRAP), but verifying frame structure is
+    /// identical remains important.
+    /// Device interrupt uses the same frame-entry law as timer.
+    ///
+    /// Formal: FRAME-UNIFIED-1 + IRQ-INDEP.  DeviceInterrupt
+    /// delivered through the same gate produces identical frame
+    /// structure; only the cause tag differs.
     #[test]
-    fn p90b_deliver_syscall_cause_unified() {
+    fn p90b_deliver_device_cause_unified() {
         let mut core = Anka64Core::new(CPU0, DomainId(0));
         core.pc = 0x300;
         core.trap_vector = 0x600;
         core.interrupts_enabled = true;
 
-        core.pending_event = Some(EventCause::Syscall);
+        core.post_device_interrupt();
         assert!(core.deliver_pending());
 
         assert_eq!(core.pc, 0x600);
         assert_eq!(core.privilege, Privilege::Supervisor);
         assert!(!core.interrupts_enabled);
         assert_eq!(core.event_frames.len(), 1);
-        assert_eq!(core.event_frames[0].cause, EventCause::Syscall);
+        assert_eq!(core.event_frames[0].cause, EventCause::DeviceInterrupt);
         assert_eq!(core.event_frames[0].return_pc, 0x300);
 
         // Return restores regardless of cause (FRAME-UNIFIED-3).
@@ -1571,18 +1680,18 @@ mod tests {
 
     /// INT-10a: pending event survives handler completion while masked.
     ///
-    /// With interrupts masked and a pending event, deliver_pending()
-    /// refuses, but the pending event remains intact for future
+    /// With interrupts masked and a pending timer, deliver_pending()
+    /// refuses, but the pending bit remains intact for future
     /// delivery when interrupts are re-enabled.
     #[test]
     fn p90b_pending_survives_masked_handler() {
         let mut core = Anka64Core::new(CPU0, DomainId(0));
         core.interrupts_enabled = false;
-        core.pending_event = Some(EventCause::TimerInterrupt);
+        core.post_timer_interrupt();
 
         // Masked: no delivery.
         assert!(!core.deliver_pending());
-        assert!(core.pending_event.is_some(), "INT-10a: pending preserved");
+        assert!(core.pending.timer, "INT-10a: pending preserved");
 
         // Re-enable and retry: delivery succeeds.
         core.interrupts_enabled = true;
@@ -1590,28 +1699,284 @@ mod tests {
         core.pc = 0x100;
         assert!(core.deliver_pending());
         assert_eq!(core.pc, 0x500);
-        assert!(core.pending_event.is_none());
+        assert!(!core.pending.timer);
     }
 
-    /// COALESCE: posting while already pending is idempotent (P+Q=1).
+    /// COALESCE: posting while already pending is idempotent (P≤1 per source).
     ///
-    /// This is a source-policy property: a second post while P=1
-    /// simply overwrites with the same value.  The Petri net enforces
-    /// this through the complement place Q (CONS-1, COALESCE-1).
+    /// This is a source-policy property: a second post while P_timer=1
+    /// simply writes true again.  Per-source Boolean truth enforces
+    /// coalescing structurally.
     #[test]
     fn p90b_coalesce_pending() {
         let mut core = Anka64Core::new(CPU0, DomainId(0));
-        core.pending_event = Some(EventCause::TimerInterrupt);
+        core.post_timer_interrupt();
 
-        // Simulate a second post (source-level coalescing).
-        core.pending_event = Some(EventCause::TimerInterrupt);
+        // Second post: idempotent.
+        core.post_timer_interrupt();
 
-        // Still exactly one pending event.
-        assert!(core.pending_event.is_some());
+        assert!(core.pending.timer);
+        assert!(!core.pending.device, "device unchanged");
         // After delivery, consumed once.
         core.interrupts_enabled = true;
         core.trap_vector = 0x100;
         assert!(core.deliver_pending());
-        assert!(core.pending_event.is_none());
+        assert!(!core.pending.timer);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.1a — Multi-source arbitration micro-tests
+    //
+    // Witnesses for anka_block_device.kleis ARB-1..ARB-11 and
+    // IRQ-INDEP-1..IRQ-INDEP-3.  Each test directly exercises the
+    // formal transition system rather than running guest code.
+    // ═══════════════════════════════════════════════════════════════
+
+    /// ARB-9: lone timer, always selected regardless of turn.
+    #[test]
+    fn p91a_lone_timer_ignores_turn() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.pc = 0x100;
+        core.trap_vector = 0x200;
+        core.interrupts_enabled = true;
+        core.interrupt_turn = InterruptTurn::Device;  // turn favors device
+
+        core.post_timer_interrupt();
+        assert!(core.deliver_pending());
+        assert_eq!(core.event_frames[0].cause, EventCause::TimerInterrupt);
+        assert!(!core.pending.timer);
+        assert!(!core.pending.device);
+    }
+
+    /// ARB-10: lone device, always selected regardless of turn.
+    #[test]
+    fn p91a_lone_device_ignores_turn() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.pc = 0x100;
+        core.trap_vector = 0x200;
+        core.interrupts_enabled = true;
+        core.interrupt_turn = InterruptTurn::Timer;  // turn favors timer
+
+        core.post_device_interrupt();
+        assert!(core.deliver_pending());
+        assert_eq!(core.event_frames[0].cause, EventCause::DeviceInterrupt);
+        assert!(!core.pending.timer);
+        assert!(!core.pending.device);
+    }
+
+    /// ARB-1..ARB-4: both pending, turn=Timer → deliver timer,
+    /// preserve device, flip turn.
+    #[test]
+    fn p91a_both_pending_turn_timer() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.pc = 0x100;
+        core.trap_vector = 0x200;
+        core.interrupts_enabled = true;
+        core.interrupt_turn = InterruptTurn::Timer;
+
+        core.post_timer_interrupt();
+        core.post_device_interrupt();
+        assert!(core.deliver_pending());
+
+        assert_eq!(core.event_frames[0].cause, EventCause::TimerInterrupt);
+        assert!(!core.pending.timer, "timer consumed");
+        assert!(core.pending.device, "device preserved");
+        assert_eq!(core.interrupt_turn, InterruptTurn::Device, "turn flipped");
+    }
+
+    /// ARB-5..ARB-8: both pending, turn=Device → deliver device,
+    /// preserve timer, flip turn.
+    #[test]
+    fn p91a_both_pending_turn_device() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.pc = 0x100;
+        core.trap_vector = 0x200;
+        core.interrupts_enabled = true;
+        core.interrupt_turn = InterruptTurn::Device;
+
+        core.post_timer_interrupt();
+        core.post_device_interrupt();
+        assert!(core.deliver_pending());
+
+        assert_eq!(core.event_frames[0].cause, EventCause::DeviceInterrupt);
+        assert!(core.pending.timer, "timer preserved");
+        assert!(!core.pending.device, "device consumed");
+        assert_eq!(core.interrupt_turn, InterruptTurn::Timer, "turn flipped");
+    }
+
+    /// Bounded-service witness: both continuously pending,
+    /// serve source A then source B within two deliveries.
+    ///
+    /// Formal: ARB-7/ARB-8 bounded-service theorem.
+    #[test]
+    fn p91a_bounded_service_two_deliveries() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.pc = 0x100;
+        core.trap_vector = 0x200;
+        core.interrupts_enabled = true;
+        core.interrupt_turn = InterruptTurn::Timer;
+
+        // Both pending
+        core.post_timer_interrupt();
+        core.post_device_interrupt();
+
+        // Delivery 1: timer (turn=Timer)
+        assert!(core.deliver_pending());
+        let cause1 = core.event_frames.last().unwrap().cause;
+        assert_eq!(cause1, EventCause::TimerInterrupt);
+        assert!(core.pending.device, "device still pending");
+
+        // Simulate handler + event_return
+        let _ = core.event_return();
+        // Re-post timer (continuously pending)
+        core.post_timer_interrupt();
+        assert!(core.pending.timer && core.pending.device);
+
+        // Delivery 2: device (turn=Device now)
+        assert!(core.deliver_pending());
+        let cause2 = core.event_frames.last().unwrap().cause;
+        assert_eq!(cause2, EventCause::DeviceInterrupt);
+
+        // Both served within two eligible deliveries.
+        assert_ne!(cause1, cause2, "bounded service: different sources");
+    }
+
+    /// First delivery leaves other pending; event_return + deliver
+    /// serves the survivor.
+    ///
+    /// This is the direct executable witness for P_t+P_d=2.
+    #[test]
+    fn p91a_dual_pending_sequential_delivery() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.pc = 0x1000;
+        core.trap_vector = 0x2000;
+        core.interrupts_enabled = true;
+        core.interrupt_turn = InterruptTurn::Timer;
+
+        core.post_timer_interrupt();
+        core.post_device_interrupt();
+
+        // Deliver first: timer
+        assert!(core.deliver_pending());
+        assert_eq!(core.event_frames[0].cause, EventCause::TimerInterrupt);
+        assert!(core.pending.device, "source B still pending");
+        assert!(!core.pending.timer, "source A consumed");
+
+        // event_return
+        let return_pc = core.event_return();
+        assert_eq!(return_pc, Some(0x1000));
+        assert!(core.interrupts_enabled);
+
+        // Deliver second: device (the survivor)
+        assert!(core.deliver_pending());
+        assert_eq!(core.event_frames[0].cause, EventCause::DeviceInterrupt);
+        assert!(!core.pending.device, "device consumed");
+        assert!(!core.pending.timer);
+        assert!(!core.pending.any_pending(), "pending set empty");
+    }
+
+    /// IRQ-MASK-1/2: masked simultaneous pending preserves both.
+    #[test]
+    fn p91a_masked_both_preserved() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.interrupts_enabled = false;
+
+        core.post_timer_interrupt();
+        core.post_device_interrupt();
+
+        assert!(!core.deliver_pending());
+        assert!(core.pending.timer, "timer preserved under mask");
+        assert!(core.pending.device, "device preserved under mask");
+    }
+
+    /// Repeated dual-pending opportunities alternate per formal turn.
+    #[test]
+    fn p91a_alternation_four_deliveries() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.pc = 0x100;
+        core.trap_vector = 0x200;
+        core.interrupts_enabled = true;
+        core.interrupt_turn = InterruptTurn::Timer;
+
+        let mut causes = Vec::new();
+        for _ in 0..4 {
+            core.post_timer_interrupt();
+            core.post_device_interrupt();
+            assert!(core.deliver_pending());
+            causes.push(core.event_frames.last().unwrap().cause);
+            let _ = core.event_return();
+        }
+        // Timer, Device, Timer, Device
+        assert_eq!(causes, vec![
+            EventCause::TimerInterrupt,
+            EventCause::DeviceInterrupt,
+            EventCause::TimerInterrupt,
+            EventCause::DeviceInterrupt,
+        ]);
+    }
+
+    /// IRQ-INDEP-1: posting timer does not alter P_dev.
+    #[test]
+    fn p91a_post_timer_independent() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.post_device_interrupt();
+
+        let dev_before = core.pending.device;
+        core.post_timer_interrupt();
+        assert_eq!(core.pending.device, dev_before, "P_dev unchanged");
+        assert!(core.pending.timer);
+    }
+
+    /// IRQ-INDEP-2: posting device does not alter P_timer.
+    #[test]
+    fn p91a_post_device_independent() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.post_timer_interrupt();
+
+        let timer_before = core.pending.timer;
+        core.post_device_interrupt();
+        assert_eq!(core.pending.timer, timer_before, "P_timer unchanged");
+        assert!(core.pending.device);
+    }
+
+    /// COALESCE per source: repeated posting remains Boolean.
+    #[test]
+    fn p91a_coalesce_device() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.post_device_interrupt();
+        core.post_device_interrupt();
+        core.post_device_interrupt();
+
+        assert!(core.pending.device);
+        assert!(!core.pending.timer, "timer untouched");
+
+        core.interrupts_enabled = true;
+        core.trap_vector = 0x100;
+        assert!(core.deliver_pending());
+        assert!(!core.pending.device, "consumed once");
+    }
+
+    /// Lone-source delivery never waits for its nominal turn.
+    ///
+    /// Even when turn=Device, a lone timer is served immediately.
+    /// Even when turn=Timer, a lone device is served immediately.
+    #[test]
+    fn p91a_lone_source_no_turn_wait() {
+        for turn in [InterruptTurn::Timer, InterruptTurn::Device] {
+            let mut core = Anka64Core::new(CPU0, DomainId(0));
+            core.pc = 0x100;
+            core.trap_vector = 0x200;
+            core.interrupts_enabled = true;
+            core.interrupt_turn = turn;
+
+            // Post only timer
+            core.post_timer_interrupt();
+            assert!(core.deliver_pending(), "lone timer served regardless of turn={:?}", turn);
+            let _ = core.event_return();
+
+            // Post only device
+            core.post_device_interrupt();
+            assert!(core.deliver_pending(), "lone device served regardless of turn={:?}", turn);
+        }
     }
 }

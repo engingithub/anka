@@ -1299,7 +1299,7 @@ Design questions, with current status.
 2. **Physical translation** — How should `(ObjectId, offset)` map to physical memory?  Is a TLB needed?  Can translation caching remain independent of authority?
 3. **Capability representation** — How are capabilities made unforgeable in hardware?  Tagged memory, capability registers, object handles plus protected metadata, or hybrid approaches?
 6. **Interrupt and exception model** — **Resolved in Phase 9.0.**  Event entry (TRAP, timer interrupt) pushes a protected `EventFrame` containing `return_pc`, `return_privilege`, `interrupts_were_enabled`, and `cause`.  A single `event_return()` primitive consumes the frame, used by both `ERET` (ISA instruction) and `resume_from_trap()` (host-mediated).  Asynchronous delivery: `deliver_pending()` fires at instruction boundaries when `pending_event.is_some() && interrupts_enabled`.  `FabricTimer` is a machine-global instruction-step timer on `Fabric`.  Generation ≠ routing ≠ pending ≠ delivery.  Formally verified: `anka_interrupts.kleis` (7-place Petri net, 6 reachable markings, 4 conservation invariants, 10 safety proofs, 2 falsifiability witnesses).
-7. **Device model** — How are device capabilities delegated?  How are command queues protected?  How are user-space drivers isolated?
+7. **Device model** — **Partially resolved in Phase 9.1.**  A block device demonstrates capability-mediated asynchronous I/O.  Device capabilities are delegated as narrow, request-local DMA domains derived at submission time from the submitter's authority.  Command slots are bounded (F + O\_wait + O\_dma + C = N\_slots) with generation-qualified handles.  Completion queues are the source of truth; interrupts are level-triggered notifications (L\_dev := C > 0).  User-space drivers are not yet implemented but the authority model (DMA-DELEGATION: request authority ⊆ explicitly delegated authority) is designed to support them.  Remaining open: user-space driver isolation, device register capabilities, multi-device routing.
 9. **Capability transfer through IPC** — How does the kernel prove that transferred authority was possessed by the sender?
 
 ### New (post-self-hosting)
@@ -1451,12 +1451,16 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions, 63,808 bytes |
 | Canonical source | ~17 KB |
-| Tests | 490 |
+| Tests | 557 |
 | Multicore | Implemented (SC + XCHG) |
-| DMA | Protected fabric agent |
+| DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
 | Protected CALL/RET | Implemented (return-stack authority) |
 | Table-driven ISA | Decoder, assembler, disassembler, Kleis generator |
+| Interrupt architecture | Multi-source pending (P\_timer, P\_device), bounded-service arbiter |
+| Block I/O | Async capability-mediated: 2-slot controller, completion queue, level-triggered |
+| SYS\_BLOCK\_READ | Suspended syscall continuation via EventFrame + IoWait |
+| I-format immediates | fits\_imm18() — assembler and compiler share single range predicate |
 | Host trust boundary | Still present (honest-host assumption) |
 | UTF-8 text literals | Implemented (RFC 3629 compile-time validation) |
 | SYS_WRITE | Buffer-based, capability-checked, output-atomic |
@@ -1561,7 +1565,19 @@ The decisive Phase 9.0 test: two infinite-loop processes, each incrementing a co
 
 The system-image compatibility gate also passed: all 10 Phase 8.6 system-image tests run unchanged on the new event architecture.  Same image + improved machine = same software behavior, confirming that machine state (EventFrame, pending_event, interrupts_enabled) is correctly separated from image state.
 
-Through self-hosting, capabilities, multicore, W⊕X, protected calls/returns, process lifecycle, formal Petri nets, reclamation, a genuine supervisor, an explicitly delegated initial-environment ABI, a compiler managed by Anka rather than merely running inside it, zero host-fabricated compiler processes, a declarative system image, and now architectural interrupts with preemptive multitasking, the ISA still has not demanded instruction 30.  Twenty-nine instructions.  490/490 tests.  The software keeps asking for better abstractions rather than instruction proliferation.
+Phase 9.1 introduced asynchronous capability-mediated block I/O — the second demanding client of the Chapter 9 event architecture.  The block device was chosen because it attacks every part of the architecture simultaneously: Fabric transactions must span 512 bytes (not just ISA widths), DMA authority must be delegated narrowly and revocable, completion and notification must be separated, multiple interrupt sources must coexist without starvation, and asynchronous identity must survive across the time gap between request submission and completion.
+
+The design was again formalized first (`anka_block_device.kleis`: 2-slot Petri net, 63 properties, 3 falsifiability witnesses).  Before formalization could even begin, the block-device client exposed a Fabric transaction-span bug — authorization was based on ISA width while commitment used payload length — forcing a Fabric hardening phase (9.1-pre) that introduced byte-span authority, an all-or-nothing precommit gate, and checked arithmetic throughout.
+
+The implementation layered five independent concerns: BlockStorage (bytes), BlockController (slot lifecycle and DMA orchestration), Fabric DMA (narrow delegation), multi-source interrupt architecture (independent pending bits with bounded-service arbitration), and kernel integration (level-triggered routing, generation-qualified waking, EventFrame-based syscall continuation).
+
+The decisive test runs a guest program that issues `SYS_BLOCK_READ`, blocks with its syscall EventFrame outstanding while another process executes, receives a device interrupt on DMA completion, undergoes double identity validation (RequesterKey + RequestHandle), resumes via `event_return()`, and verifies all 512 bytes of the DMA buffer word-by-word through its own address space.  Two independent observation paths — guest loads and host physical reads — agree on the result.
+
+A secondary discovery: the block-device test pushed guest buffer addresses beyond the MOVI signed 18-bit immediate range, exposing a silent aliasing bug in the assembler and compiler.  The fix established a shared `fits_imm18()` predicate as the single definition of representability, preventing any code-generation layer from silently manufacturing a different immediate than the programmer requested.
+
+One known limitation was explicitly recorded: the device clock advances only on committed instruction boundaries, so all-processes-blocked-on-I/O produces deadlock.  This is a named architectural pressure point, not a bug to be silently worked around.
+
+Through self-hosting, capabilities, multicore, W⊕X, protected calls/returns, process lifecycle, formal Petri nets, reclamation, a genuine supervisor, an explicitly delegated initial-environment ABI, a compiler managed by Anka rather than merely running inside it, zero host-fabricated compiler processes, a declarative system image, architectural interrupts with preemptive multitasking, and now asynchronous capability-mediated block I/O with suspended syscall continuations, the ISA still has not demanded instruction 30.  Twenty-nine instructions.  557/557 tests.  The software keeps asking for better abstractions rather than instruction proliferation.
 
 The project continues to evolve by the same rule that produced its strongest results:
 
