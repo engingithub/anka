@@ -36,6 +36,22 @@ pub struct Process {
     pub core: Anka64Core,
     pub exited: bool,
     pub exit_code: u64,
+    /// If Some(child_pid), this process is blocked waiting for child_pid to exit.
+    pub waiting_on: Option<u64>,
+    /// PID of the parent process (None for init).
+    pub parent: Option<u64>,
+}
+
+/// Process lifecycle result — distinguishes normal exit from fault.
+/// program returned 7 != program died with ExecuteDenied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessResult {
+    /// Process exited normally with exit code.
+    Exited(u64),
+    /// Process died due to a supervisor fault (HALT not at trap gate).
+    SupervisorFault,
+    /// Process died due to an architectural protection fault.
+    ProtectionFault,
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -54,8 +70,9 @@ struct Message {
 //
 // Three machine events collapse into StepResult::Halted, but they
 // have completely different process-level meanings.  This function
-// is the single point of truth consumed by both the scheduler
-// (run_process) and synchronous SYS_EXEC (run_to_completion).
+// is the single point of truth consumed by run_process().  SYS_EXEC
+// creates a runnable child and blocks the parent; the scheduler
+// drives both through the same run_process() path.
 // ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, PartialEq, Eq)]
@@ -328,6 +345,8 @@ impl Kernel {
             core,
             exited: false,
             exit_code: 0,
+            waiting_on: None,
+            parent: None,
         });
         self.mailboxes.push(Vec::new());
         pid
@@ -516,8 +535,36 @@ impl Kernel {
                 if self.processes[i].exited {
                     continue;
                 }
+                // Skip processes blocked waiting on a child
+                if self.processes[i].waiting_on.is_some() {
+                    continue;
+                }
                 self.current = i;
                 self.run_process(i, quantum);
+                // After running, check if any newly-exited process
+                // has a parent waiting on it
+                self.reap_exited();
+            }
+        }
+    }
+
+    /// Check for exited processes and resume any parent waiting on them.
+    fn reap_exited(&mut self) {
+        // Collect (child_pid, exit_code) for exited children
+        let mut completions: Vec<(u64, u64)> = Vec::new();
+        for p in &self.processes {
+            if p.exited {
+                completions.push((p.pid, p.exit_code));
+            }
+        }
+        // For each exited child, find any parent waiting on it
+        for (child_pid, child_exit) in completions {
+            for i in 0..self.processes.len() {
+                if self.processes[i].waiting_on == Some(child_pid) {
+                    self.processes[i].waiting_on = None;
+                    self.processes[i].core.r[R0 as usize] = child_exit;
+                    self.resume_from_trap(i);
+                }
             }
         }
     }
@@ -970,46 +1017,13 @@ impl Kernel {
             entry: 0,
         };
         let child_pid = self.prepare_process(child_dom, &desc, &EXEC_DEFAULT_LAYOUT);
-        let child_idx = child_pid as usize;
-        self.run_to_completion(child_idx, 100_000);
+        self.processes[child_pid as usize].parent = Some(self.processes[idx].pid);
 
-        // Return child's exit code to the parent
-        self.processes[idx].core.r[R0 as usize] = self.processes[child_idx].exit_code;
-        self.resume_from_trap(idx);
-    }
-
-    /// Run a process to completion (used by SYS_EXEC).
-    fn run_to_completion(&mut self, idx: usize, max_steps: usize) {
-        for _ in 0..max_steps {
-            if self.processes[idx].exited { return; }
-
-            let result = self.processes[idx].core.step(&mut self.fabric);
-            match result {
-                super::core::StepResult::Continue => {}
-                super::core::StepResult::Halted => {
-                    match classify_halt(&self.processes[idx].core) {
-                        HaltDisposition::Syscall => {
-                            self.handle_syscall(idx);
-                        }
-                        HaltDisposition::SupervisorFault => {
-                            self.processes[idx].exited = true;
-                            self.processes[idx].exit_code = 0xDEAD;
-                            return;
-                        }
-                        HaltDisposition::UserExit(code) => {
-                            self.processes[idx].exit_code = code;
-                            self.processes[idx].exited = true;
-                        }
-                    }
-                }
-                super::core::StepResult::Fault(f) => {
-                    eprintln!("Process {} faulted: {:?}", self.processes[idx].pid, f.reason);
-                    self.processes[idx].exited = true;
-                    self.processes[idx].exit_code = 0xDEAD;
-                    return;
-                }
-            }
-        }
+        // Block the parent until the child exits.
+        // The scheduler will resume the parent when it reaps the child.
+        self.processes[idx].waiting_on = Some(child_pid);
+        // Do NOT call resume_from_trap here — the parent stays suspended.
+        // When the child exits, complete_wait() will set R0 and resume.
     }
 
     fn resume_from_trap(&mut self, idx: usize) {
