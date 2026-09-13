@@ -333,7 +333,7 @@ impl BlockController {
                 let state = std::mem::replace(&mut self.slots[i], SlotState::Free);
                 if let SlotState::DmaReady { request, dma_domain } = state {
                     let block_data = self.storage.read_block(request.block_number)
-                        .unwrap_or_else(|| vec![0u8; self.storage.block_size() as usize]);
+                        .expect("accepted block request must name a valid block");
                     let dma_req = super::fabric::dma_request(
                         self.storage_agent,
                         dma_domain,
