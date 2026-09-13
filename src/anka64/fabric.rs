@@ -24,6 +24,56 @@ pub enum AuthResult {
 }
 
 // ───────────────────────────────────────────────────────────────────
+// Fabric timer — event source (Phase 9.0c)
+// ───────────────────────────────────────────────────────────────────
+
+/// Machine-global instruction-step timer.
+///
+/// Knows only how to advance its own state and report "I fired."
+/// Has no knowledge of cores, EventFrames, privilege, trap vectors,
+/// or scheduling.  Routing a firing to a core's pending_event is
+/// the caller's responsibility (Phase 9.0d).
+///
+/// Preserves the Chapter 9 decomposition:
+///   generation ≠ routing ≠ pending ≠ delivery.
+#[derive(Debug, Clone)]
+pub struct FabricTimer {
+    /// Ticks between firings.  Period 0 means permanently inert.
+    pub period: u64,
+    /// Remaining ticks until next firing.  Reloads from `period`.
+    pub counter: u64,
+    /// Master enable.  Disabled means no countdown and no firing.
+    pub enabled: bool,
+}
+
+impl FabricTimer {
+    pub fn new(period: u64) -> Self {
+        Self {
+            period,
+            counter: period,
+            enabled: true,
+        }
+    }
+
+    /// Advance by one instruction cycle.  Returns true if the timer fires.
+    ///
+    /// Firing reloads the counter for the next period.
+    /// Disabled or period-0 timers never fire and never count down.
+    pub fn tick(&mut self) -> bool {
+        if !self.enabled || self.period == 0 {
+            return false;
+        }
+        self.counter = self.counter.saturating_sub(1);
+        if self.counter == 0 {
+            self.counter = self.period;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────
 // Fabric
 // ───────────────────────────────────────────────────────────────────
 
@@ -38,6 +88,8 @@ pub struct Fabric {
     next_object_id: u64,
     next_domain_id: u64,
     next_tx_id: u64,
+    /// Machine-global timer (Phase 9.0c).  None = no timer configured.
+    pub timer: Option<FabricTimer>,
 }
 
 impl Fabric {
@@ -53,7 +105,16 @@ impl Fabric {
             next_object_id: 0,
             next_domain_id: 0,
             next_tx_id: 0,
+            timer: None,
         }
+    }
+
+    // ───────────────── Timer configuration ────────────────────────
+
+    /// Install a machine-global timer that fires every `period` ticks.
+    /// Period 0 creates an inert timer.
+    pub fn configure_timer(&mut self, period: u64) {
+        self.timer = Some(FabricTimer::new(period));
     }
 
     // ───────────────── Object management ─────────────────────────
@@ -1311,5 +1372,131 @@ mod tests {
 
             eprintln!("  ✓ {}: {:?}", case.name, f.transaction(idx).state);
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.0c — FabricTimer source-local tests
+    //
+    // These test the timer as an isolated event source.  No core,
+    // no EventFrame, no delivery — pure generation semantics.
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Period N fires exactly on the N-th tick, not before.
+    #[test]
+    fn p90c_timer_fires_on_period() {
+        let mut timer = FabricTimer::new(5);
+        for i in 1..5 {
+            assert!(!timer.tick(), "tick {} must not fire (period 5)", i);
+        }
+        assert!(timer.tick(), "tick 5 must fire");
+    }
+
+    /// After firing, counter reloads and fires again after another N.
+    #[test]
+    fn p90c_timer_reloads_after_fire() {
+        let mut timer = FabricTimer::new(3);
+        // First period
+        assert!(!timer.tick());
+        assert!(!timer.tick());
+        assert!(timer.tick(), "first fire at tick 3");
+        // Second period
+        assert!(!timer.tick());
+        assert!(!timer.tick());
+        assert!(timer.tick(), "second fire at tick 6");
+        // Third period
+        assert!(!timer.tick());
+        assert!(!timer.tick());
+        assert!(timer.tick(), "third fire at tick 9");
+    }
+
+    /// Period 1 fires every single tick.
+    #[test]
+    fn p90c_timer_period_one() {
+        let mut timer = FabricTimer::new(1);
+        for _ in 0..10 {
+            assert!(timer.tick(), "period 1 must fire every tick");
+        }
+    }
+
+    /// Disabled timer never fires and never counts down.
+    #[test]
+    fn p90c_timer_disabled() {
+        let mut timer = FabricTimer::new(2);
+        timer.enabled = false;
+        for _ in 0..20 {
+            assert!(!timer.tick(), "disabled timer must never fire");
+        }
+        assert_eq!(timer.counter, 2, "counter must not change while disabled");
+    }
+
+    /// Period 0 is permanently inert — never fires regardless of state.
+    #[test]
+    fn p90c_timer_period_zero() {
+        let mut timer = FabricTimer::new(0);
+        for _ in 0..20 {
+            assert!(!timer.tick(), "period 0 must never fire");
+        }
+    }
+
+    /// Timer generation does not modify any core state.
+    ///
+    /// This witnesses the critical boundary:
+    ///   timer generation alone cannot cause control transfer.
+    #[test]
+    fn p90c_timer_no_core_mutation() {
+        use super::super::core::Anka64Core;
+
+        let mut fabric = Fabric::new(0x1000);
+        fabric.configure_timer(3);
+
+        let core = Anka64Core::new(AgentId(0), DomainId(0));
+        let snapshot_pc = core.pc;
+        let snapshot_priv = core.privilege;
+        let snapshot_enabled = core.interrupts_enabled;
+        let snapshot_pending = core.pending_event.clone();
+        let snapshot_frames = core.event_frames.len();
+
+        // Tick the timer through multiple firings.
+        let timer = fabric.timer.as_mut().unwrap();
+        for _ in 0..9 {
+            timer.tick();
+        }
+
+        // Core is completely untouched.
+        assert_eq!(core.pc, snapshot_pc);
+        assert_eq!(core.privilege, snapshot_priv);
+        assert_eq!(core.interrupts_enabled, snapshot_enabled);
+        assert_eq!(core.pending_event.is_some(), snapshot_pending.is_some());
+        assert_eq!(core.event_frames.len(), snapshot_frames);
+    }
+
+    /// Fabric::configure_timer() installs the timer correctly.
+    #[test]
+    fn p90c_fabric_configure_timer() {
+        let mut fabric = Fabric::new(0x1000);
+        assert!(fabric.timer.is_none(), "no timer by default");
+
+        fabric.configure_timer(10);
+        let timer = fabric.timer.as_ref().unwrap();
+        assert_eq!(timer.period, 10);
+        assert_eq!(timer.counter, 10);
+        assert!(timer.enabled);
+    }
+
+    /// Disabling mid-countdown freezes the counter; re-enabling resumes.
+    #[test]
+    fn p90c_timer_disable_reenable() {
+        let mut timer = FabricTimer::new(5);
+        assert!(!timer.tick()); // counter: 4
+        assert!(!timer.tick()); // counter: 3
+        timer.enabled = false;
+        for _ in 0..10 {
+            assert!(!timer.tick());
+        }
+        assert_eq!(timer.counter, 3, "counter frozen while disabled");
+        timer.enabled = true;
+        assert!(!timer.tick()); // counter: 2
+        assert!(!timer.tick()); // counter: 1
+        assert!(timer.tick(),   "fires after re-enable completes remaining countdown");
     }
 }

@@ -937,3 +937,99 @@ The ankad supervisor program has a single authoritative source in
 and `build_compiler_system_image` (production image builder).
 
 468/468 tests; 29 instructions.  Phase 8 is complete.
+
+## DN-13: Unified EventFrame Architecture — Architectural Interrupts
+
+**Phase**: 9.0 (Chapter 9: Anka64 as an Independent Architecture)
+
+**Problem**: Anka64 had a host-side approximation of preemption: `run_process()`
+executed at most `quantum` instructions before returning to the scheduler.  This
+was adequate for cooperative scheduling (syscall → TRAP → HALT → kernel intervention)
+but was not an architectural mechanism.  The machine had no way to transfer control
+asynchronously between instruction boundaries.  The architecture document listed
+interrupts as an open question (research question 6).
+
+**Design**: Formal-first methodology.  A Kleis/Z3 Petri-net model
+(`theories/anka_interrupts.kleis`) was built and verified before any Rust code
+was written.  The formal model is the specification; the implementation follows it.
+
+**Formal model**: 7 places, 4 transitions, 6 reachable markings.
+
+Places:
+
+- U (user execution), P (pending event), Q (no pending — complement of P)
+- H (handler active), F (EventFrame exists), M (masked), R (return ready)
+
+Transitions:
+
+- T_post (event source fires), T_deliver (pending → handler entry)
+- T_handler (handler runs), T_eret (event return)
+
+Conservation invariants (proved structurally, transition-by-transition):
+
+- CONS-1: P + Q = 1 (coalescing: at most one pending event)
+- CONS-2: U + F = 1 (execution or frame, never both)
+- CONS-3: U + H + R = 1 (exactly one execution phase)
+- CONS-4: F = M (frame exists iff interrupts are masked)
+
+Safety proofs (10 properties + 2 falsifiability witnesses):
+
+- INT-1 through INT-10, including the critical INT-6 (delivery requires
+  committed instruction boundary, pending, unmasked, non-faulted).
+
+**Key architectural decisions**:
+
+1. **Unified EventFrame**.  A single protected `EventFrame` struct stores
+   `return_pc`, `return_privilege`, `interrupts_were_enabled`, and `cause`.
+   TRAP and interrupt delivery push frames; a single `event_return()` primitive
+   consumes them.  This replaces the old `saved_pc`/`saved_privilege` single-slot
+   mechanism.  The stack representation does not hard-code the current
+   no-nesting theorem (FRAME-BOUND: depth ≤ 1 in Phase 9.0).
+
+2. **Generic delivery gate**.  `deliver_pending()` is cause-agnostic: it fires
+   when `pending_event.is_some() && interrupts_enabled`, regardless of whether
+   the cause is a syscall, timer interrupt, or future device interrupt.  Coalescing
+   (P+Q=1) is a timer-source property, not a universal interrupt law.
+
+3. **Timer as Fabric device**.  `FabricTimer` lives on `Fabric`, not on
+   `Anka64Core`.  It knows only how to count instruction steps and report "I fired."
+   Routing a firing to a core's `pending_event` is the scheduler's responsibility.
+   This preserves:
+
+       generation ≠ routing ≠ pending ≠ delivery
+
+4. **Precise delivery at instruction boundaries**.  The machine sequence is:
+
+       I_n commits → devices tick → route/post → deliver_pending() → fetch I_{n+1}
+
+   Committed instructions tick the timer; faulted instructions do not.  Before any
+   fetch, if `P ∧ ¬M`, delivery gets first refusal.  This handles both post-commit
+   delivery and post-event_return delivery (the M3a → M1 → M2 re-fire path).
+
+5. **Masking and unmasking via EventFrame**.  Event entry sets
+   `interrupts_enabled = false`.  Event return restores the saved
+   `interrupts_were_enabled` from the frame — not unconditionally true.
+   This is architecturally exact (INT-8b).
+
+**Negative boundaries** (what SystemImage/EventFrame is NOT):
+
+- EventFrame is not in ordinary memory (not accessible through capabilities).
+- Timer generation alone cannot cause control transfer.
+- Coalescing is timer-specific, not universal.
+- The timer does not know about cores, privilege, or trap vectors.
+- The system image does not serialize event infrastructure
+  (EventFrame, pending_event, interrupts_enabled are runtime core state).
+
+**Decisive test**: Two infinite-loop processes, each incrementing a counter
+in data memory, preempted by the architectural timer (period 10, 200 scheduler
+rounds).  Both make progress (A = 666, B = 666).  The host-loop quantum is
+100,000 — never reached.  Preemption comes purely from the architectural
+timer → pending_event → deliver_pending() → handle_timer_interrupt → round-robin
+path.
+
+**Compatibility verification**: All 10 Phase 8.6 system-image tests pass
+unchanged on the new event architecture: same image bytes + improved machine
+implementation = same software behavior.  Machine state is correctly separated
+from image state.
+
+490/490 tests; 29 instructions.  Phase 9.0 is complete.

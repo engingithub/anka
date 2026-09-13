@@ -1298,7 +1298,7 @@ Design questions, with current status.
 1. **Concurrent authorization and revocation** — What happens if an object is revoked while a memory transaction is in flight?
 2. **Physical translation** — How should `(ObjectId, offset)` map to physical memory?  Is a TLB needed?  Can translation caching remain independent of authority?
 3. **Capability representation** — How are capabilities made unforgeable in hardware?  Tagged memory, capability registers, object handles plus protected metadata, or hybrid approaches?
-6. **Interrupt and exception model** — How are asynchronous events represented per core?  How are privilege changes made precise and restartable?
+6. **Interrupt and exception model** — **Resolved in Phase 9.0.**  Event entry (TRAP, timer interrupt) pushes a protected `EventFrame` containing `return_pc`, `return_privilege`, `interrupts_were_enabled`, and `cause`.  A single `event_return()` primitive consumes the frame, used by both `ERET` (ISA instruction) and `resume_from_trap()` (host-mediated).  Asynchronous delivery: `deliver_pending()` fires at instruction boundaries when `pending_event.is_some() && interrupts_enabled`.  `FabricTimer` is a machine-global instruction-step timer on `Fabric`.  Generation ≠ routing ≠ pending ≠ delivery.  Formally verified: `anka_interrupts.kleis` (7-place Petri net, 6 reachable markings, 4 conservation invariants, 10 safety proofs, 2 falsifiability witnesses).
 7. **Device model** — How are device capabilities delegated?  How are command queues protected?  How are user-space drivers isolated?
 9. **Capability transfer through IPC** — How does the kernel prove that transferred authority was possessed by the sender?
 
@@ -1451,7 +1451,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions, 63,808 bytes |
 | Canonical source | ~17 KB |
-| Tests | 468 |
+| Tests | 490 |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -1543,7 +1543,25 @@ The decisive Phase 8.6 test encodes one image, decodes it, and loads it into two
 
 `Permissions::from_bits_checked(u64)` is now the single authority for valid permission bits, replacing the previous `VALID_PERMS_MASK` constant.  The wide `u64` parameter prevents silent truncation when validating the SPAWN ABI's native register-width permission field.  The ankad supervisor program has a single authoritative source in `ankad.rs`, used by both the test helper and the production image builder.
 
-Through self-hosting, capabilities, multicore, W⊕X, protected calls/returns, process lifecycle, formal Petri nets, reclamation, a genuine supervisor, an explicitly delegated initial-environment ABI, a compiler managed by Anka rather than merely running inside it, zero host-fabricated compiler processes, and now a declarative system image, the ISA still has not demanded instruction 30.  Twenty-nine instructions.  468/468 tests.  The software keeps asking for better abstractions rather than instruction proliferation.
+Phase 9.0 introduced architectural interrupts and asynchronous event delivery — the first feature of Chapter 9 (Anka64 as an independent architecture).  The design was formalized first in a Kleis/Z3 Petri-net model (`anka_interrupts.kleis`: 7 places, 6 reachable markings, 4 conservation invariants, 10 safety proofs) before any Rust code was written.  The implementation followed the formal model without deviation.
+
+The interrupt architecture introduced three new architectural concepts without expanding the ISA:
+
+- **EventFrame** — protected event-entry record (return_pc, return_privilege, interrupts_were_enabled, cause).  TRAP and interrupt delivery push frames; a unified `event_return()` consumes them.  ERET on an empty stack faults (INT-5).
+- **deliver_pending()** — generic architectural gate: if `pending_event ∧ ¬masked`, push EventFrame, enter Supervisor, mask, redirect to trap_vector.  Cause-agnostic (FRAME-UNIFIED-1).
+- **FabricTimer** — machine-global instruction-step timer on Fabric.  Knows only how to count and say "I fired."  Generation ≠ routing ≠ pending ≠ delivery.
+
+The machine sequencing rule is:
+
+> Before any instruction fetch, if P ∧ ¬M, delivery gets first refusal.
+
+This handles both post-commit delivery (timer fires after instruction) and post-event_return delivery (pending event preserved through ERET).  Committed instructions tick the timer; faulted instructions do not (INT-6).
+
+The decisive Phase 9.0 test: two infinite-loop processes, each incrementing a counter in its own data memory, preempted by the architectural timer (period 10).  After 200 scheduler rounds, both counters are > 0 (A = 666, B = 666).  The only cause of context switching is the architectural timer path — the host-loop quantum is set to 100,000 (never reached).
+
+The system-image compatibility gate also passed: all 10 Phase 8.6 system-image tests run unchanged on the new event architecture.  Same image + improved machine = same software behavior, confirming that machine state (EventFrame, pending_event, interrupts_enabled) is correctly separated from image state.
+
+Through self-hosting, capabilities, multicore, W⊕X, protected calls/returns, process lifecycle, formal Petri nets, reclamation, a genuine supervisor, an explicitly delegated initial-environment ABI, a compiler managed by Anka rather than merely running inside it, zero host-fabricated compiler processes, a declarative system image, and now architectural interrupts with preemptive multitasking, the ISA still has not demanded instruction 30.  Twenty-nine instructions.  490/490 tests.  The software keeps asking for better abstractions rather than instruction proliferation.
 
 The project continues to evolve by the same rule that produced its strongest results:
 
