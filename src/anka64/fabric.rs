@@ -276,6 +276,11 @@ impl Fabric {
         self.domains.remove(&id);
     }
 
+    /// Number of currently live domains.
+    pub fn domain_count(&self) -> usize {
+        self.domains.len()
+    }
+
     /// Destroy an object: remove from objects table and placement map.
     /// Does NOT zero physical memory — caller must scrub separately.
     pub fn destroy_object(&mut self, id: ObjectId) {
@@ -362,6 +367,39 @@ impl Fabric {
         );
         self.domains.get_mut(&domain)?.capabilities.push(cap.clone());
         Some(cap)
+    }
+
+    /// Delegate a narrow DMA span from a source domain into a fresh
+    /// DMA domain.
+    ///
+    /// Proves that `source_domain` has authority over `(object, offset,
+    /// length)` with at least `perms`, then creates a new domain and
+    /// derives exactly that range into it.  Returns the new domain ID
+    /// on success.
+    ///
+    /// The DMA domain contains only the derived capability — no more.
+    /// This realizes the DMA-DELEGATION theorem:
+    ///   A_dma ⊆ A_explicitly_delegated.
+    ///
+    /// Formal basis: anka_block_device.kleis DMA-1..DMA-4.
+    pub fn delegate_dma_span(
+        &mut self,
+        source_domain: DomainId,
+        object: ObjectId,
+        offset: u64,
+        length: u64,
+        perms: Permissions,
+    ) -> Option<DomainId> {
+        let parent = self.find_authorizing_cap(
+            source_domain, object, offset, length, perms,
+        )?.clone();
+        let dma_domain = self.create_domain();
+        let result = self.derive(dma_domain, &parent, offset, length, perms);
+        if result.is_none() {
+            self.destroy_domain(dma_domain);
+            return None;
+        }
+        Some(dma_domain)
     }
 
     /// Write bytes into an Active object (bounds-checked, object-relative).

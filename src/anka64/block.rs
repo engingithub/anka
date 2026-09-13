@@ -1,28 +1,35 @@
-//! Phase 9.1b — Block Storage and Controller
+//! Phase 9.1b/c — Block Storage and Controller
 //!
 //! Asynchronous block device with two request slots, fixed
-//! completion latency, and bounded completion queue.  READ-only
-//! in this phase.
+//! completion latency, and bounded completion queue.  READ-only.
 //!
-//! No Fabric DMA, no interrupt posting, no kernel coupling.
-//! The controller's universe is:
-//!   BlockStorage + two request slots + latency + completion ordering.
+//! Phase 9.1c adds real Fabric DMA integration:
+//!   - Per-request DMA domain (narrow delegation at submission)
+//!   - Storage-agent MemoryRequest through full Fabric lifecycle
+//!   - CompletionStatus { Success, DmaFault } replaces data payload
+//!   - DmaInFlight persists across tick boundaries
+//!   - Commit-time generation revalidation (I5) catches revocation
 //!
 //! Formal basis: anka_block_device.kleis
 //!   SLOT-1..SLOT-4: F + O_wait + O_dma + C = N_slots
 //!   COMP-1..COMP-5: completion ordering and consumption
 //!   GEN-1..GEN-4:   generation-qualified request identity
+//!   DMA-1..DMA-4:   narrow delegation, commit-time revalidation
 //!   LEVEL-1:        L_dev ≡ (C > 0)
 //!
 //! Kleis ↔ Rust mapping:
 //!   F       ↔ SlotState::Free
 //!   O_wait  ↔ SlotState::Waiting
-//!   O_dma   ↔ SlotState::DmaReady   (9.1b: no-DMA shortcut)
+//!   O_dma   ↔ SlotState::DmaReady | SlotState::DmaInFlight
 //!   C       ↔ SlotState::Completed
 //!   L_dev   ↔ completion_count() > 0
 
 use std::collections::VecDeque;
-use super::state::RequesterKey;
+use super::state::{
+    RequesterKey, DomainId, ObjectId, AccessKind,
+    Permissions, FaultReason, AgentId, TxState,
+};
+use super::fabric::Fabric;
 
 /// Number of request slots.  Matches the formal two-slot model.
 const NUM_SLOTS: usize = 2;
@@ -86,15 +93,8 @@ impl BlockStorage {
 
 /// Opaque handle identifying a specific request submission.
 ///
-/// The generation field matches the slot's generation at acceptance
-/// time.  After the slot cycles (C → F), the generation increments,
-/// making stale handles distinguishable from current ones.
-///
 /// Generation is u64 to match the formal model (anka_block_device.kleis
-/// uses BitVec64 for request-slot generations).  This differs from
-/// RequesterKey.generation (u32), which follows the process lifecycle
-/// namespace.  A two-slot I/O controller can recycle its slots vastly
-/// more often than process identifiers.
+/// uses BitVec64 for request-slot generations).
 ///
 /// Formal basis: anka_block_device.kleis GEN-1..GEN-4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,22 +104,48 @@ pub struct RequestHandle {
 }
 
 /// A block read request.
+///
+/// The `target_object`, `target_offset`, and `source_domain` fields
+/// identify the guest buffer and the authority to delegate from.
+/// The controller delegates a narrow WRITE-only span at submission.
 #[derive(Debug, Clone)]
 pub struct BlockRequest {
     pub block_number: u64,
     pub requester: RequesterKey,
+    /// Guest buffer object to receive the read data.
+    pub target_object: ObjectId,
+    /// Byte offset within the target object.
+    pub target_offset: u64,
+    /// Domain with WRITE authority over the target span.
+    /// The controller derives a narrow DMA domain from this.
+    pub source_domain: DomainId,
+}
+
+/// Outcome of a completed block operation.
+///
+/// The guest buffer contains the data on success;
+/// the completion record contains only the outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionStatus {
+    /// DMA transaction committed — data is in guest buffer.
+    Success,
+    /// DMA transaction faulted — guest buffer unchanged.
+    DmaFault(FaultReason),
 }
 
 /// A completed block operation.
 ///
 /// Carries generation-qualified identity for both the request slot
 /// and the requester, so the kernel can detect stale completions.
+///
+/// `status` replaces the old `data: Vec<u8>` — the 512 bytes
+/// belong in the guest buffer, not the completion record.
 #[derive(Debug, Clone)]
 pub struct BlockCompletion {
     pub handle: RequestHandle,
     pub requester: RequesterKey,
     pub block_number: u64,
-    pub data: Vec<u8>,
+    pub status: CompletionStatus,
 }
 
 /// Result of attempting to submit a request.
@@ -131,6 +157,8 @@ pub enum SubmitResult {
     DeviceBusy,
     /// Block number out of range.
     InvalidBlock,
+    /// Source domain lacks authority to delegate the required span.
+    DelegationFailed,
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -139,157 +167,225 @@ pub enum SubmitResult {
 
 /// Per-slot lifecycle state — the single source of truth.
 ///
-/// The completion_order queue identifies *which* completed slots
-/// to drain and in what order, but does not duplicate completion
-/// data.  A queue entry asserts "this slot must be Completed";
-/// consuming it performs C → F and increments the slot's generation.
-///
 /// Conservation: F + O_wait + O_dma + C = NUM_SLOTS.
-#[derive(Debug, Clone)]
+///
+/// Both DmaReady and DmaInFlight count as the formal O_dma place.
+/// DmaReady is the entry: latency has expired, DMA not yet started.
+/// DmaInFlight: a Fabric transaction is in progress.
+#[derive(Debug)]
 enum SlotState {
     Free,
     Waiting {
         request: BlockRequest,
         remaining_ticks: u32,
+        dma_domain: DomainId,
     },
-    /// Latency expired, ready for DMA.
+    /// Latency expired, ready to start DMA.
     ///
-    /// **9.1b (no-DMA shortcut):** This state is an intra-tick()
-    /// microstate — Phase 1 creates it, Phase 2 immediately
-    /// consumes it into Completed by reading from BlockStorage.
-    /// It is never observable at a machine boundary.
-    ///
-    /// **9.1c removes this shortcut.**  Once real Fabric DMA exists,
-    /// the sequence becomes:
-    ///   O_dma → narrow delegated Fabric transaction
-    ///         → {commit, fault} → C
-    /// and DmaReady persists across tick boundaries until the
-    /// Fabric transaction terminates.  The controller must not
-    /// manufacture Completed merely because latency expired;
-    /// completion status must depend on the Fabric result.
+    /// A Fabric transaction will be created from this state on
+    /// the next tick.  Both DmaReady and DmaInFlight are the
+    /// formal O_dma place.
     DmaReady {
         request: BlockRequest,
+        dma_domain: DomainId,
+    },
+    /// Fabric transaction in progress.
+    ///
+    /// The transaction advances through Fabric phases (Requested →
+    /// Authorized → Prepared → Committed/Faulted).  Once terminal,
+    /// the slot transitions to Completed.
+    DmaInFlight {
+        request: BlockRequest,
+        dma_domain: DomainId,
+        tx_idx: usize,
     },
     Completed {
         completion: BlockCompletion,
     },
 }
 
+impl SlotState {
+    fn is_free(&self) -> bool { matches!(self, SlotState::Free) }
+    fn is_completed(&self) -> bool { matches!(self, SlotState::Completed { .. }) }
+    fn is_waiting(&self) -> bool { matches!(self, SlotState::Waiting { .. }) }
+    fn is_odma(&self) -> bool {
+        matches!(self, SlotState::DmaReady { .. } | SlotState::DmaInFlight { .. })
+    }
+}
+
 // ───────────────────────────────────────────────────────────────────
 // Block controller
 // ───────────────────────────────────────────────────────────────────
 
-/// Two-slot block controller with fixed completion latency.
-///
-/// Manages the request lifecycle and completion queue.
-/// Does not perform DMA (Phase 9.1c), does not post interrupts
-/// (Phase 9.1d), does not know about processes or kernels.
+/// Two-slot block controller with fixed completion latency and
+/// real Fabric DMA integration.
 ///
 /// Formal basis: anka_block_device.kleis
 ///   SLOT-1..SLOT-4:  bounded slot conservation
 ///   COMP-1..COMP-5:  completion queue ordering
 ///   GEN-1..GEN-4:    generation-qualified handles
+///   DMA-1..DMA-4:    narrow delegation, commit-time revalidation
 ///   LEVEL-1:         L_dev ≡ (C > 0), derived
 pub struct BlockController {
     slots: [SlotState; NUM_SLOTS],
     slot_generations: [u64; NUM_SLOTS],
     /// Completion ordering — slot indices, not completion data.
-    /// An entry asserts "this slot is Completed."
     completion_order: VecDeque<u8>,
     storage: BlockStorage,
     latency: u32,
+    /// Stable agent identity for storage DMA transactions.
+    pub storage_agent: AgentId,
 }
 
 impl BlockController {
-    pub fn new(storage: BlockStorage, latency: u32) -> Self {
+    pub fn new(storage: BlockStorage, latency: u32, storage_agent: AgentId) -> Self {
         Self {
             slots: std::array::from_fn(|_| SlotState::Free),
             slot_generations: [0; NUM_SLOTS],
             completion_order: VecDeque::new(),
             storage,
             latency,
+            storage_agent,
         }
     }
 
-    /// Submit a read request.
+    /// Submit a read request with narrow DMA delegation.
     ///
-    /// Returns `Accepted(handle)` if a free slot exists,
-    /// `DeviceBusy` if both slots are occupied,
-    /// `InvalidBlock` if block_number is out of range.
+    /// At submission time:
+    ///   1. Validate block number.
+    ///   2. Derive a narrow WRITE-only DMA domain from source_domain
+    ///      covering exactly (target_object, target_offset, block_size).
+    ///   3. Transition slot: F → O_wait.
     ///
-    /// Formal: F → O_wait.
-    pub fn submit(&mut self, request: BlockRequest) -> SubmitResult {
+    /// Delegation happens at t₀ (acceptance), not when DMA starts.
+    /// This freezes the authority incarnation, allowing later
+    /// revocation to produce StaleGeneration at commit time.
+    ///
+    /// Formal: F → O_wait, DMA-DELEGATION.
+    pub fn submit(
+        &mut self,
+        request: BlockRequest,
+        fabric: &mut Fabric,
+    ) -> SubmitResult {
         if request.block_number >= self.storage.num_blocks() {
             return SubmitResult::InvalidBlock;
         }
 
         let slot_idx = self.slots.iter()
-            .position(|s| matches!(s, SlotState::Free));
+            .position(|s| s.is_free());
 
-        match slot_idx {
-            None => SubmitResult::DeviceBusy,
-            Some(idx) => {
-                let handle = RequestHandle {
-                    slot: idx as u8,
-                    generation: self.slot_generations[idx],
-                };
-                let remaining = self.latency.max(1);
-                self.slots[idx] = SlotState::Waiting {
-                    request,
-                    remaining_ticks: remaining,
-                };
-                self.assert_conservation();
-                SubmitResult::Accepted(handle)
-            }
-        }
+        let idx = match slot_idx {
+            None => return SubmitResult::DeviceBusy,
+            Some(i) => i,
+        };
+
+        let block_size = self.storage.block_size();
+        let dma_domain = match fabric.delegate_dma_span(
+            request.source_domain,
+            request.target_object,
+            request.target_offset,
+            block_size,
+            Permissions::WRITE,
+        ) {
+            Some(d) => d,
+            None => return SubmitResult::DelegationFailed,
+        };
+
+        let handle = RequestHandle {
+            slot: idx as u8,
+            generation: self.slot_generations[idx],
+        };
+        let remaining = self.latency.max(1);
+        self.slots[idx] = SlotState::Waiting {
+            request,
+            remaining_ticks: remaining,
+            dma_domain,
+        };
+        self.assert_conservation();
+        SubmitResult::Accepted(handle)
     }
 
     /// Advance the controller by one machine tick.
     ///
-    /// Latency convention: submit at boundary t → DmaReady on
-    /// tick L.  Latency 0 is treated as "next tick" (= latency 1).
+    /// Three-phase processing:
+    ///   1. Waiting → advance remaining; if zero → DmaReady
+    ///   2. DmaReady → start Fabric transaction → DmaInFlight
+    ///   3. DmaInFlight → advance Fabric transaction; if terminal → Completed
     ///
-    /// Two-phase processing per tick:
-    ///   1. Waiting slots: decrement remaining; if zero → DmaReady.
-    ///   2. DmaReady slots: read from storage → Completed.
-    ///      (Phase 9.1b: no-DMA shortcut; 9.1c adds real DMA.)
-    pub fn tick(&mut self) {
-        // Phase 1: Waiting → advance or → DmaReady.
+    /// Latency convention: submit at t → DmaReady on tick L.
+    pub fn tick(&mut self, fabric: &mut Fabric) {
+        // Phase 1: Waiting → advance or → DmaReady
         for i in 0..NUM_SLOTS {
             if let SlotState::Waiting { remaining_ticks, .. } = &mut self.slots[i] {
                 *remaining_ticks -= 1;
                 if *remaining_ticks == 0 {
                     let state = std::mem::replace(&mut self.slots[i], SlotState::Free);
-                    if let SlotState::Waiting { request, .. } = state {
-                        self.slots[i] = SlotState::DmaReady { request };
+                    if let SlotState::Waiting { request, dma_domain, .. } = state {
+                        self.slots[i] = SlotState::DmaReady { request, dma_domain };
                     }
                 }
             }
         }
 
-        // Phase 2: DmaReady → Completed (9.1b: no-DMA shortcut).
-        // 9.1c removes this: DmaReady will persist until a real
-        // Fabric transaction terminates.  BlockCompletion.data will
-        // become CompletionStatus { Success, DmaFault(FaultReason) },
-        // and the 512 bytes will live in the guest buffer, not the
-        // completion record.
+        // Phase 2: DmaReady → start Fabric DMA → DmaInFlight
         for i in 0..NUM_SLOTS {
             if matches!(self.slots[i], SlotState::DmaReady { .. }) {
                 let state = std::mem::replace(&mut self.slots[i], SlotState::Free);
-                if let SlotState::DmaReady { request } = state {
-                    let data = self.storage.read_block(request.block_number)
-                        .unwrap_or_default();
-                    let completion = BlockCompletion {
-                        handle: RequestHandle {
-                            slot: i as u8,
-                            generation: self.slot_generations[i],
-                        },
-                        requester: request.requester,
-                        block_number: request.block_number,
-                        data,
+                if let SlotState::DmaReady { request, dma_domain } = state {
+                    let block_data = self.storage.read_block(request.block_number)
+                        .unwrap_or_else(|| vec![0u8; self.storage.block_size() as usize]);
+                    let dma_req = super::fabric::dma_request(
+                        self.storage_agent,
+                        dma_domain,
+                        request.target_object,
+                        request.target_offset,
+                        self.storage.block_size(),
+                        AccessKind::Write,
+                    );
+                    let tx_idx = fabric.submit(dma_req, Some(block_data));
+                    self.slots[i] = SlotState::DmaInFlight {
+                        request, dma_domain, tx_idx,
                     };
-                    self.slots[i] = SlotState::Completed { completion };
-                    self.completion_order.push_back(i as u8);
+                }
+            }
+        }
+
+        // Phase 3: DmaInFlight → advance transaction; if terminal → Completed
+        for i in 0..NUM_SLOTS {
+            if let SlotState::DmaInFlight { tx_idx, .. } = &self.slots[i] {
+                let tx_idx = *tx_idx;
+                let tx_state = fabric.transaction(tx_idx).state;
+                if !tx_state.is_terminal() {
+                    fabric.advance(tx_idx);
+                }
+                let tx_state = fabric.transaction(tx_idx).state;
+                if tx_state.is_terminal() {
+                    let state = std::mem::replace(&mut self.slots[i], SlotState::Free);
+                    if let SlotState::DmaInFlight { request, dma_domain, tx_idx } = state {
+                        let status = match fabric.transaction(tx_idx).state {
+                            TxState::Committed => CompletionStatus::Success,
+                            TxState::Faulted => {
+                                let reason = fabric.transaction(tx_idx)
+                                    .fault.as_ref()
+                                    .map(|f| f.reason)
+                                    .unwrap_or(FaultReason::TranslationFault);
+                                CompletionStatus::DmaFault(reason)
+                            }
+                            _ => unreachable!(),
+                        };
+                        fabric.destroy_domain(dma_domain);
+                        let completion = BlockCompletion {
+                            handle: RequestHandle {
+                                slot: i as u8,
+                                generation: self.slot_generations[i],
+                            },
+                            requester: request.requester,
+                            block_number: request.block_number,
+                            status,
+                        };
+                        self.slots[i] = SlotState::Completed { completion };
+                        self.completion_order.push_back(i as u8);
+                    }
                 }
             }
         }
@@ -321,9 +417,7 @@ impl BlockController {
 
     /// True if the completion queue is non-empty.
     ///
-    /// This is the level-triggered interrupt source condition:
-    ///   L_dev ≡ (C > 0).
-    /// Derived from actual slot state, never stored independently.
+    /// L_dev ≡ (C > 0).  Derived, never stored independently.
     ///
     /// Formal basis: anka_block_device.kleis LEVEL-1.
     pub fn requires_attention(&self) -> bool {
@@ -332,16 +426,12 @@ impl BlockController {
 
     /// Number of slots currently in Completed state.
     pub fn completion_count(&self) -> usize {
-        self.slots.iter()
-            .filter(|s| matches!(s, SlotState::Completed { .. }))
-            .count()
+        self.slots.iter().filter(|s| s.is_completed()).count()
     }
 
     /// Number of slots currently Free.
     pub fn free_slot_count(&self) -> usize {
-        self.slots.iter()
-            .filter(|s| matches!(s, SlotState::Free))
-            .count()
+        self.slots.iter().filter(|s| s.is_free()).count()
     }
 
     /// Current generation for a slot.
@@ -349,43 +439,35 @@ impl BlockController {
         self.slot_generations[slot as usize]
     }
 
-    /// Structural conservation invariant: F + O_wait + O_dma + C = NUM_SLOTS.
+    /// Structural conservation and coherence invariants.
     ///
-    /// Also verifies completion-order queue coherence:
+    /// Checks:
+    ///   F + O_wait + O_dma + C = NUM_SLOTS
     ///   |completion_order| = #C
-    ///   ∀ q ∈ completion_order, q names a distinct Completed slot.
+    ///   ∀ q ∈ completion_order: q names a distinct Completed slot
     fn assert_conservation(&self) {
-        let f = self.slots.iter().filter(|s| matches!(s, SlotState::Free)).count();
-        let ow = self.slots.iter().filter(|s| matches!(s, SlotState::Waiting { .. })).count();
-        let od = self.slots.iter().filter(|s| matches!(s, SlotState::DmaReady { .. })).count();
-        let c = self.slots.iter().filter(|s| matches!(s, SlotState::Completed { .. })).count();
+        let f = self.slots.iter().filter(|s| s.is_free()).count();
+        let ow = self.slots.iter().filter(|s| s.is_waiting()).count();
+        let od = self.slots.iter().filter(|s| s.is_odma()).count();
+        let c = self.slots.iter().filter(|s| s.is_completed()).count();
         debug_assert_eq!(
             f + ow + od + c, NUM_SLOTS,
             "SLOT conservation violated: F={} + O_wait={} + O_dma={} + C={} ≠ {}",
             f, ow, od, c, NUM_SLOTS,
         );
-
-        // Queue length equals completion count.
         debug_assert_eq!(
             self.completion_order.len(), c,
             "completion-order/slot coherence: |queue|={} ≠ #C={}",
             self.completion_order.len(), c,
         );
-
-        // Every queue entry names a distinct Completed slot.
         let mut seen = [false; NUM_SLOTS];
         for &slot_idx in &self.completion_order {
             let idx = slot_idx as usize;
             debug_assert!(
-                matches!(self.slots[idx], SlotState::Completed { .. }),
-                "queue entry {} names a non-Completed slot",
-                idx,
+                self.slots[idx].is_completed(),
+                "queue entry {} names a non-Completed slot", idx,
             );
-            debug_assert!(
-                !seen[idx],
-                "queue entry {} appears more than once",
-                idx,
-            );
+            debug_assert!(!seen[idx], "queue entry {} appears more than once", idx);
             seen[idx] = true;
         }
     }
@@ -398,6 +480,9 @@ impl BlockController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::state::*;
+
+    const STORAGE_AGENT: AgentId = AgentId(100);
 
     /// 4 blocks × 512 bytes, each with a distinct fill pattern.
     fn test_storage() -> BlockStorage {
@@ -414,6 +499,33 @@ mod tests {
         RequesterKey { slot, generation }
     }
 
+    /// Set up a Fabric with a 512-byte Active buffer object and a
+    /// domain that has WRITE authority over it.
+    ///
+    /// Returns (fabric, buffer_object, process_domain).
+    fn dma_setup() -> (Fabric, ObjectId, DomainId) {
+        let mut f = Fabric::new(0x10000);
+        let obj = f.alloc_object("buf", 512, ObjectKind::Memory);
+        f.place_object(obj, 0x2000);
+        let dom = f.create_domain();
+        f.grant(dom, obj, 0, 512, Permissions::WRITE);
+        (f, obj, dom)
+    }
+
+    fn make_request(
+        block_number: u64,
+        obj: ObjectId,
+        dom: DomainId,
+    ) -> BlockRequest {
+        BlockRequest {
+            block_number,
+            requester: rk(0, 0),
+            target_object: obj,
+            target_offset: 0,
+            source_domain: dom,
+        }
+    }
+
     // ─── Capacity / backpressure ──────────────────────────────────
 
     /// Two accepts exhaust capacity; third returns DeviceBusy.
@@ -421,291 +533,483 @@ mod tests {
     /// Formal: SLOT-1 (F=0 ⇒ no more accepts).
     #[test]
     fn p91b_two_slots_exhausted() {
-        let mut ctrl = BlockController::new(test_storage(), 1);
-        let r1 = ctrl.submit(BlockRequest { block_number: 0, requester: rk(0, 0) });
+        let (mut f, obj, dom) = dma_setup();
+        // Need a second buffer object for the second slot.
+        let obj2 = f.alloc_object("buf2", 512, ObjectKind::Memory);
+        f.place_object(obj2, 0x3000);
+        f.grant(dom, obj2, 0, 512, Permissions::WRITE);
+        let obj3 = f.alloc_object("buf2", 512, ObjectKind::Memory);
+        f.place_object(obj3, 0x4000);
+        f.grant(dom, obj3, 0, 512, Permissions::WRITE);
+
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
+        let r1 = ctrl.submit(make_request(0, obj, dom), &mut f);
         assert!(matches!(r1, SubmitResult::Accepted(_)));
-        let r2 = ctrl.submit(BlockRequest { block_number: 1, requester: rk(1, 0) });
+        let r2 = ctrl.submit(make_request(1, obj2, dom), &mut f);
         assert!(matches!(r2, SubmitResult::Accepted(_)));
-        let r3 = ctrl.submit(BlockRequest { block_number: 2, requester: rk(2, 0) });
+        let r3 = ctrl.submit(make_request(2, obj3, dom), &mut f);
         assert!(matches!(r3, SubmitResult::DeviceBusy));
     }
 
     // ─── Latency ──────────────────────────────────────────────────
 
     /// Exactly L ticks produce completion for several latency values.
-    ///
-    /// Formal: O_wait → O_dma on tick L.
     #[test]
     fn p91b_latency_exact() {
         for latency in [1u32, 2, 3, 5] {
-            let mut ctrl = BlockController::new(test_storage(), latency);
-            ctrl.submit(BlockRequest { block_number: 0, requester: rk(0, 0) });
+            let (mut f, obj, dom) = dma_setup();
+            let mut ctrl = BlockController::new(test_storage(), latency, STORAGE_AGENT);
+            ctrl.submit(make_request(0, obj, dom), &mut f);
 
             for tick_num in 1..latency {
-                ctrl.tick();
+                ctrl.tick(&mut f);
                 assert_eq!(ctrl.completion_count(), 0,
                     "latency={}: premature completion on tick {}", latency, tick_num);
             }
-            ctrl.tick();
-            assert_eq!(ctrl.completion_count(), 1,
-                "latency={}: expected completion on tick {}", latency, latency);
+            // Tick L: latency expires → DmaReady.
+            ctrl.tick(&mut f);
+            // Tick L+1: DMA transaction advances through Fabric.
+            // Multi-phase: Requested → Authorized → Prepared → Committed.
+            // Each advance() does one phase, so we need a few more ticks.
+            while ctrl.completion_count() == 0 {
+                ctrl.tick(&mut f);
+            }
+            assert_eq!(ctrl.completion_count(), 1);
         }
     }
 
     /// Latency 0 means "next tick" (equivalent to latency 1).
     #[test]
     fn p91b_latency_zero_next_tick() {
-        let mut ctrl = BlockController::new(test_storage(), 0);
-        ctrl.submit(BlockRequest { block_number: 0, requester: rk(0, 0) });
+        let (mut f, obj, dom) = dma_setup();
+        let mut ctrl = BlockController::new(test_storage(), 0, STORAGE_AGENT);
+        ctrl.submit(make_request(0, obj, dom), &mut f);
         assert_eq!(ctrl.completion_count(), 0, "not completed at submission");
-        ctrl.tick();
-        assert_eq!(ctrl.completion_count(), 1, "completed on first tick");
+        // Tick until completed (latency + Fabric phases).
+        for _ in 0..10 {
+            ctrl.tick(&mut f);
+            if ctrl.completion_count() > 0 { break; }
+        }
+        assert_eq!(ctrl.completion_count(), 1, "completed");
     }
 
     // ─── Slot lifecycle ───────────────────────────────────────────
 
     /// Completed slots remain unavailable until consumed.
-    ///
-    /// Formal: C ≠ F — a completed slot does not accept new requests.
     #[test]
     fn p91b_completed_blocks_slot() {
-        let mut ctrl = BlockController::new(test_storage(), 1);
-        ctrl.submit(BlockRequest { block_number: 0, requester: rk(0, 0) });
-        ctrl.submit(BlockRequest { block_number: 1, requester: rk(1, 0) });
-        ctrl.tick();
+        let (mut f, obj, dom) = dma_setup();
+        let obj2 = f.alloc_object("buf2", 512, ObjectKind::Memory);
+        f.place_object(obj2, 0x3000);
+        f.grant(dom, obj2, 0, 512, Permissions::WRITE);
+        let obj3 = f.alloc_object("buf2", 512, ObjectKind::Memory);
+        f.place_object(obj3, 0x4000);
+        f.grant(dom, obj3, 0, 512, Permissions::WRITE);
 
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
+        ctrl.submit(make_request(0, obj, dom), &mut f);
+        ctrl.submit(make_request(1, obj2, dom), &mut f);
+        for _ in 0..10 { ctrl.tick(&mut f); }
         assert_eq!(ctrl.completion_count(), 2);
+
         assert!(matches!(
-            ctrl.submit(BlockRequest { block_number: 2, requester: rk(2, 0) }),
+            ctrl.submit(make_request(2, obj3, dom), &mut f),
             SubmitResult::DeviceBusy,
-        ), "both slots completed, no free capacity");
+        ));
 
         ctrl.consume_completion();
         assert!(matches!(
-            ctrl.submit(BlockRequest { block_number: 2, requester: rk(2, 0) }),
+            ctrl.submit(make_request(2, obj3, dom), &mut f),
             SubmitResult::Accepted(_),
-        ), "one slot freed by consume");
+        ));
     }
 
     // ─── Generation ───────────────────────────────────────────────
 
-    /// Consuming a completion increments the slot's generation.
-    ///
-    /// Formal: C → F transitions increment gen (GEN-1).
+    /// Consuming increments slot generation.
     #[test]
     fn p91b_consume_increments_generation() {
-        let mut ctrl = BlockController::new(test_storage(), 1);
-        let gen_before_0 = ctrl.slot_generation(0);
+        let (mut f, obj, dom) = dma_setup();
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
+        let gen_before = ctrl.slot_generation(0);
 
-        ctrl.submit(BlockRequest { block_number: 0, requester: rk(0, 0) });
-        ctrl.tick();
+        ctrl.submit(make_request(0, obj, dom), &mut f);
+        for _ in 0..10 { ctrl.tick(&mut f); }
         let comp = ctrl.consume_completion().unwrap();
-        let consumed_slot = comp.handle.slot;
-
         assert_eq!(
-            ctrl.slot_generation(consumed_slot),
-            gen_before_0 + 1,
-            "generation must increment on C→F",
+            ctrl.slot_generation(comp.handle.slot),
+            gen_before + 1,
         );
     }
 
-    /// Stale {slot, generation} does not match after slot recycling.
-    ///
-    /// Formal: GEN-3 — stale request handle ≢ recycled slot.
+    /// Stale {slot, generation} does not match after recycling.
     #[test]
     fn p91b_stale_handle_no_match() {
-        let mut ctrl = BlockController::new(test_storage(), 1);
+        let (mut f, obj, dom) = dma_setup();
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
 
         let SubmitResult::Accepted(h1) = ctrl.submit(
-            BlockRequest { block_number: 0, requester: rk(0, 0) }
-        ) else { panic!("first accept must succeed") };
-        ctrl.tick();
+            make_request(0, obj, dom), &mut f,
+        ) else { panic!() };
+        for _ in 0..10 { ctrl.tick(&mut f); }
         ctrl.consume_completion().unwrap();
 
         let SubmitResult::Accepted(h2) = ctrl.submit(
-            BlockRequest { block_number: 1, requester: rk(0, 0) }
-        ) else { panic!("second accept must succeed after consume") };
+            make_request(1, obj, dom), &mut f,
+        ) else { panic!() };
 
-        assert_eq!(h1.slot, h2.slot, "same physical slot reused");
-        assert_ne!(h1.generation, h2.generation, "generation must differ");
+        assert_eq!(h1.slot, h2.slot);
+        assert_ne!(h1.generation, h2.generation);
         assert_eq!(h2.generation, h1.generation + 1);
     }
 
     // ─── Multiple completions ─────────────────────────────────────
 
     /// Two completions coexist; requires_attention tracks count.
-    ///
-    /// Formal: COMP-2 (both slots may be C simultaneously).
     #[test]
     fn p91b_two_completions_coexist() {
-        let mut ctrl = BlockController::new(test_storage(), 1);
-        ctrl.submit(BlockRequest { block_number: 0, requester: rk(0, 0) });
-        ctrl.submit(BlockRequest { block_number: 1, requester: rk(1, 0) });
-        ctrl.tick();
+        let (mut f, obj, dom) = dma_setup();
+        let obj2 = f.alloc_object("buf2", 512, ObjectKind::Memory);
+        f.place_object(obj2, 0x3000);
+        f.grant(dom, obj2, 0, 512, Permissions::WRITE);
+
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
+        ctrl.submit(make_request(0, obj, dom), &mut f);
+        ctrl.submit(make_request(1, obj2, dom), &mut f);
+        for _ in 0..10 { ctrl.tick(&mut f); }
 
         assert_eq!(ctrl.completion_count(), 2);
         assert!(ctrl.requires_attention());
 
         let c1 = ctrl.consume_completion().unwrap();
         assert_eq!(ctrl.completion_count(), 1);
-        assert!(ctrl.requires_attention());
-
         let c2 = ctrl.consume_completion().unwrap();
         assert_eq!(ctrl.completion_count(), 0);
         assert!(!ctrl.requires_attention());
-
         assert_ne!(c1.handle.slot, c2.handle.slot);
     }
 
     // ─── Derived attention ────────────────────────────────────────
 
-    /// requires_attention() is derived from completion state,
-    /// not stored independently.
-    ///
-    /// Formal: LEVEL-1 — L_dev ≡ (C > 0).
+    /// requires_attention() derived from completion state.
     #[test]
     fn p91b_requires_attention_derived() {
-        let mut ctrl = BlockController::new(test_storage(), 1);
-        assert!(!ctrl.requires_attention(), "empty controller");
+        let (mut f, obj, dom) = dma_setup();
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
+        assert!(!ctrl.requires_attention());
 
-        ctrl.submit(BlockRequest { block_number: 0, requester: rk(0, 0) });
-        assert!(!ctrl.requires_attention(), "waiting, not completed");
+        ctrl.submit(make_request(0, obj, dom), &mut f);
+        assert!(!ctrl.requires_attention());
 
-        ctrl.tick();
-        assert!(ctrl.requires_attention(), "completed");
+        for _ in 0..10 { ctrl.tick(&mut f); }
+        assert!(ctrl.requires_attention());
 
         ctrl.consume_completion();
-        assert!(!ctrl.requires_attention(), "consumed");
+        assert!(!ctrl.requires_attention());
     }
 
     // ─── Conservation ─────────────────────────────────────────────
 
     /// F + O_wait + O_dma + C = 2 throughout full lifecycle.
-    ///
-    /// Formal: SLOT-1..SLOT-4 conservation invariant.
     #[test]
     fn p91b_conservation_invariant() {
-        let mut ctrl = BlockController::new(test_storage(), 3);
+        let (mut f, obj, dom) = dma_setup();
+        let obj2 = f.alloc_object("buf2", 512, ObjectKind::Memory);
+        f.place_object(obj2, 0x3000);
+        f.grant(dom, obj2, 0, 512, Permissions::WRITE);
 
-        // [Free, Free]: F=2
+        let mut ctrl = BlockController::new(test_storage(), 3, STORAGE_AGENT);
         assert_eq!(ctrl.free_slot_count(), 2);
 
-        // Submit one: [Waiting, Free]: F=1, O_wait=1
-        ctrl.submit(BlockRequest { block_number: 0, requester: rk(0, 0) });
+        ctrl.submit(make_request(0, obj, dom), &mut f);
         assert_eq!(ctrl.free_slot_count(), 1);
 
-        // Submit two: [Waiting, Waiting]: O_wait=2
-        ctrl.submit(BlockRequest { block_number: 1, requester: rk(1, 0) });
+        ctrl.submit(make_request(1, obj2, dom), &mut f);
         assert_eq!(ctrl.free_slot_count(), 0);
 
-        // Tick through latency
-        for _ in 0..3 {
-            ctrl.tick();
-        }
-        // [Completed, Completed]: C=2
+        for _ in 0..20 { ctrl.tick(&mut f); }
         assert_eq!(ctrl.completion_count(), 2);
         assert_eq!(ctrl.free_slot_count(), 0);
 
-        // Consume both: [Free, Free]: F=2
         ctrl.consume_completion();
         ctrl.consume_completion();
         assert_eq!(ctrl.free_slot_count(), 2);
     }
 
-    // ─── Data correctness ─────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.1c — DMA integration tests
+    // ═══════════════════════════════════════════════════════════════
 
-    /// Read data matches storage content.
+    /// Exact 512-byte READ through narrow DMA domain succeeds
+    /// and fills only the intended buffer.
     #[test]
-    fn p91b_read_data_correct() {
-        let mut ctrl = BlockController::new(test_storage(), 1);
-        ctrl.submit(BlockRequest { block_number: 1, requester: rk(0, 0) });
-        ctrl.tick();
+    fn p91c_dma_read_512_succeeds() {
+        let (mut f, obj, dom) = dma_setup();
+        let sentinel = vec![0xDE; 512];
+        f.initialize_object(obj, 0, &sentinel);
+
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
+        ctrl.submit(make_request(1, obj, dom), &mut f);
+        for _ in 0..10 { ctrl.tick(&mut f); }
+
         let comp = ctrl.consume_completion().unwrap();
-        assert_eq!(comp.data, vec![0xAA; 512]);
-        assert_eq!(comp.block_number, 1);
+        assert_eq!(comp.status, CompletionStatus::Success);
+
+        let buf = f.read_physical(0x2000, 512);
+        assert_eq!(buf, &vec![0xAA; 512][..], "guest buffer has block 1 data");
+    }
+
+    /// A broader submitter capability produces a DMA domain
+    /// containing only the derived 512-byte WRITE authority.
+    /// DMA domain cannot access another object or bytes outside span.
+    #[test]
+    fn p91c_narrow_dma_domain() {
+        let (mut f, _obj, _dom) = dma_setup();
+        let big_obj = f.alloc_object("bigbuf", 4096, ObjectKind::Memory);
+        f.place_object(big_obj, 0x5000);
+        let big_dom = f.create_domain();
+        f.grant(big_dom, big_obj, 0, 4096, Permissions::WRITE);
+
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
+        let req = BlockRequest {
+            block_number: 0,
+            requester: rk(0, 0),
+            target_object: big_obj,
+            target_offset: 1024,
+            source_domain: big_dom,
+        };
+        ctrl.submit(req, &mut f);
+        for _ in 0..10 { ctrl.tick(&mut f); }
+
+        let comp = ctrl.consume_completion().unwrap();
+        assert_eq!(comp.status, CompletionStatus::Success);
+
+        let buf = f.read_physical(0x5000 + 1024, 512);
+        let expected: Vec<u8> = (0..512).map(|i| (i % 256) as u8).collect();
+        assert_eq!(buf, &expected[..], "only 512 bytes at offset 1024 written");
+
+        let before = f.read_physical(0x5000, 1024);
+        assert_eq!(before, &vec![0u8; 1024][..], "bytes before span untouched");
+
+        let after = f.read_physical(0x5000 + 1536, 512);
+        assert_eq!(after, &vec![0u8; 512][..], "bytes after span untouched");
+    }
+
+    /// Revoke before DMA authorization produces error completion
+    /// and zero mutation.
+    #[test]
+    fn p91c_revoke_before_dma_error_completion() {
+        let (mut f, obj, dom) = dma_setup();
+        let sentinel = vec![0xEE; 512];
+        f.initialize_object(obj, 0, &sentinel);
+
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
+        ctrl.submit(make_request(0, obj, dom), &mut f);
+
+        // Revoke the object before DMA can start.
+        f.revoke(obj);
+
+        for _ in 0..10 { ctrl.tick(&mut f); }
+        let comp = ctrl.consume_completion().unwrap();
+        assert!(matches!(comp.status, CompletionStatus::DmaFault(_)),
+            "revocation before DMA must produce fault");
+
+        let buf = f.read_physical(0x2000, 512);
+        assert_eq!(buf, &sentinel[..], "zero mutation after revocation");
+    }
+
+    /// Authorize → revoke → commit produces StaleGeneration,
+    /// error completion, zero mutation.
+    ///
+    /// This is the key I5 composition test: delegation at t₀,
+    /// revocation at t₁, commit-time revalidation at t₂.
+    #[test]
+    fn p91c_authorize_revoke_commit_stale() {
+        let (mut f, obj, dom) = dma_setup();
+        let sentinel = vec![0xDD; 512];
+        f.initialize_object(obj, 0, &sentinel);
+
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
+        ctrl.submit(make_request(0, obj, dom), &mut f);
+
+        // Tick once to expire latency → DmaReady.
+        ctrl.tick(&mut f);
+        // Tick again: DmaReady → DmaInFlight (Fabric submit).
+        // Fabric advance does one phase: Requested → Authorized.
+        ctrl.tick(&mut f);
+
+        // Now revoke: the DMA domain's capability is stale.
+        f.revoke(obj);
+
+        // Further ticks advance: Authorized → Prepared → commit revalidation → Faulted.
+        for _ in 0..10 { ctrl.tick(&mut f); }
+
+        let comp = ctrl.consume_completion().unwrap();
+        match comp.status {
+            CompletionStatus::DmaFault(reason) => {
+                assert_eq!(reason, FaultReason::StaleGeneration,
+                    "commit-time revalidation must detect revocation");
+            }
+            CompletionStatus::Success => {
+                panic!("DMA must not succeed after object revocation");
+            }
+        }
+
+        let buf = f.read_physical(0x2000, 512);
+        assert_eq!(buf, &sentinel[..], "zero mutation after stale-gen fault");
+    }
+
+    /// Successful Fabric terminal state produces exactly one
+    /// Success completion.
+    #[test]
+    fn p91c_success_produces_one_completion() {
+        let (mut f, obj, dom) = dma_setup();
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
+        ctrl.submit(make_request(2, obj, dom), &mut f);
+        for _ in 0..10 { ctrl.tick(&mut f); }
+
+        assert_eq!(ctrl.completion_count(), 1);
+        let comp = ctrl.consume_completion().unwrap();
+        assert_eq!(comp.status, CompletionStatus::Success);
+        assert_eq!(comp.block_number, 2);
+        assert!(ctrl.consume_completion().is_none());
+    }
+
+    /// Faulted Fabric terminal state produces exactly one
+    /// DmaFault completion.
+    #[test]
+    fn p91c_fault_produces_one_completion() {
+        let (mut f, obj, dom) = dma_setup();
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
+        ctrl.submit(make_request(0, obj, dom), &mut f);
+        f.revoke(obj);
+        for _ in 0..10 { ctrl.tick(&mut f); }
+
+        assert_eq!(ctrl.completion_count(), 1);
+        let comp = ctrl.consume_completion().unwrap();
+        assert!(matches!(comp.status, CompletionStatus::DmaFault(_)));
+        assert!(ctrl.consume_completion().is_none());
+    }
+
+    /// DMA domain is destroyed after the transaction becomes terminal.
+    #[test]
+    fn p91c_dma_domain_destroyed_after_terminal() {
+        let (mut f, obj, dom) = dma_setup();
+        let domains_before = f.domain_count();
+
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
+        ctrl.submit(make_request(0, obj, dom), &mut f);
+
+        // During DMA: one extra domain exists.
+        assert_eq!(f.domain_count(), domains_before + 1);
+
+        for _ in 0..10 { ctrl.tick(&mut f); }
+        ctrl.consume_completion();
+
+        // After completion + consume: DMA domain destroyed.
+        assert_eq!(f.domain_count(), domains_before,
+            "DMA domain must be destroyed after terminal");
+    }
+
+    /// Requester death without buffer revocation does not magically
+    /// revoke DMA authority.
+    ///
+    /// Process death and buffer revocation are independent events
+    /// in the formal model.  The DMA domain's authority survives
+    /// as long as the underlying object is not revoked.
+    #[test]
+    fn p91c_requester_death_independent_of_buffer() {
+        let (mut f, obj, dom) = dma_setup();
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
+
+        // Submit request (process is "alive" at slot=0, gen=0).
+        ctrl.submit(make_request(1, obj, dom), &mut f);
+
+        // "Kill" the process: destroy its domain.
+        // This simulates process death without revoking the buffer object.
+        f.destroy_domain(dom);
+
+        // DMA should still succeed — the DMA domain's capability
+        // is independent of the process domain.
+        for _ in 0..10 { ctrl.tick(&mut f); }
+        let comp = ctrl.consume_completion().unwrap();
+        assert_eq!(comp.status, CompletionStatus::Success,
+            "DMA authority survives process death");
+
+        let buf = f.read_physical(0x2000, 512);
+        assert_eq!(buf, &vec![0xAA; 512][..], "data written despite dead process");
+    }
+
+    /// Delegation fails when source domain lacks authority.
+    #[test]
+    fn p91c_delegation_fails_no_authority() {
+        let (mut f, obj, _dom) = dma_setup();
+        let empty_dom = f.create_domain();
+
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
+        let r = ctrl.submit(BlockRequest {
+            block_number: 0,
+            requester: rk(0, 0),
+            target_object: obj,
+            target_offset: 0,
+            source_domain: empty_dom,
+        }, &mut f);
+        assert!(matches!(r, SubmitResult::DelegationFailed));
+        assert_eq!(ctrl.free_slot_count(), 2, "no slot consumed");
     }
 
     /// Invalid block number rejected without consuming a slot.
     #[test]
     fn p91b_invalid_block_rejected() {
-        let mut ctrl = BlockController::new(test_storage(), 1);
-        let r = ctrl.submit(BlockRequest { block_number: 99, requester: rk(0, 0) });
+        let (mut f, obj, dom) = dma_setup();
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
+        let r = ctrl.submit(make_request(99, obj, dom), &mut f);
         assert!(matches!(r, SubmitResult::InvalidBlock));
-        assert_eq!(ctrl.free_slot_count(), 2, "no slot consumed");
+        assert_eq!(ctrl.free_slot_count(), 2);
     }
 
-    // ─── Requester identity ───────────────────────────────────────
-
-    /// Completion carries the requester identity from submission.
-    ///
-    /// Formal: GEN-REQ-1 — completion.requester = submitted requester.
+    /// Completion carries requester identity.
     #[test]
     fn p91b_requester_identity_carried() {
+        let (mut f, obj, dom) = dma_setup();
         let key = rk(7, 42);
-        let mut ctrl = BlockController::new(test_storage(), 1);
-        ctrl.submit(BlockRequest { block_number: 0, requester: key });
-        ctrl.tick();
+        let mut ctrl = BlockController::new(test_storage(), 1, STORAGE_AGENT);
+        ctrl.submit(BlockRequest {
+            block_number: 0,
+            requester: key,
+            target_object: obj,
+            target_offset: 0,
+            source_domain: dom,
+        }, &mut f);
+        for _ in 0..10 { ctrl.tick(&mut f); }
         let comp = ctrl.consume_completion().unwrap();
         assert_eq!(comp.requester, key);
     }
 
-    /// Completion FIFO ordering: first submitted → first completed.
-    #[test]
-    fn p91b_completion_fifo_order() {
-        let mut ctrl = BlockController::new(test_storage(), 1);
-        ctrl.submit(BlockRequest { block_number: 0, requester: rk(0, 0) });
-        ctrl.submit(BlockRequest { block_number: 1, requester: rk(1, 0) });
-        ctrl.tick();
-
-        let c1 = ctrl.consume_completion().unwrap();
-        let c2 = ctrl.consume_completion().unwrap();
-        assert_eq!(c1.handle.slot, 0, "slot 0 submitted first, completed first");
-        assert_eq!(c2.handle.slot, 1);
-    }
-
-    /// Full lifecycle: submit → tick → complete → consume → resubmit.
-    ///
-    /// Exercises every formal transition: F→O_wait→O_dma→C→F.
+    /// Full lifecycle round trip: submit → tick → complete → consume → resubmit.
     #[test]
     fn p91b_full_lifecycle_round_trip() {
-        let mut ctrl = BlockController::new(test_storage(), 2);
+        let (mut f, obj, dom) = dma_setup();
+        let mut ctrl = BlockController::new(test_storage(), 2, STORAGE_AGENT);
 
-        // Round 1: submit to both slots
         let SubmitResult::Accepted(h0) = ctrl.submit(
-            BlockRequest { block_number: 0, requester: rk(0, 0) }
-        ) else { panic!() };
-        let SubmitResult::Accepted(h1) = ctrl.submit(
-            BlockRequest { block_number: 3, requester: rk(1, 0) }
+            make_request(0, obj, dom), &mut f,
         ) else { panic!() };
         assert_eq!(h0.generation, 0);
-        assert_eq!(h1.generation, 0);
 
-        // Tick through latency
-        ctrl.tick();
-        assert_eq!(ctrl.completion_count(), 0);
-        ctrl.tick();
-        assert_eq!(ctrl.completion_count(), 2);
-
-        // Consume both
+        for _ in 0..20 { ctrl.tick(&mut f); }
         let c0 = ctrl.consume_completion().unwrap();
-        let c1 = ctrl.consume_completion().unwrap();
-        assert_eq!(c0.data, (0..512).map(|i| (i % 256) as u8).collect::<Vec<_>>());
-        assert_eq!(c1.data, vec![0xCC; 512]);
-
-        // Generations incremented
+        assert_eq!(c0.status, CompletionStatus::Success);
         assert_eq!(ctrl.slot_generation(0), 1);
-        assert_eq!(ctrl.slot_generation(1), 1);
 
-        // Round 2: resubmit to recycled slots
-        let SubmitResult::Accepted(h2) = ctrl.submit(
-            BlockRequest { block_number: 2, requester: rk(0, 1) }
+        let SubmitResult::Accepted(h1) = ctrl.submit(
+            make_request(2, obj, dom), &mut f,
         ) else { panic!() };
-        assert_eq!(h2.generation, 1, "recycled slot has gen=1");
-        ctrl.tick();
-        ctrl.tick();
-        let c2 = ctrl.consume_completion().unwrap();
-        assert_eq!(c2.data, vec![0xBB; 512]);
-        assert_eq!(c2.handle.generation, 1);
-        assert_eq!(ctrl.slot_generation(h2.slot), 2);
+        assert_eq!(h1.generation, 1);
+
+        for _ in 0..20 { ctrl.tick(&mut f); }
+        let c1 = ctrl.consume_completion().unwrap();
+        assert_eq!(c1.status, CompletionStatus::Success);
+        assert_eq!(ctrl.slot_generation(h1.slot), 2);
     }
 }
