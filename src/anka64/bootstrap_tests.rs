@@ -7500,6 +7500,9 @@ mod tests {
             },
             grants: vec![],
             maps: vec![],
+            stack_vaddr: 0x10000,
+            stack_size: 0x4000,
+            trap_vaddr: 0x20000,
         };
 
         // Host creates the kernel and boots it
@@ -7551,6 +7554,9 @@ mod tests {
             },
             grants: vec![],
             maps: vec![],
+            stack_vaddr: 0x10000,
+            stack_size: 0x4000,
+            trap_vaddr: 0x20000,
         }
     }
 

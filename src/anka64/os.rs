@@ -99,6 +99,23 @@ struct ProcessImageDesc {
     entry: u64,          // image-relative entry point
 }
 
+/// Virtual address layout for a new process.
+///
+/// Process creation mechanism must not assume one universal virtual layout.
+/// The compiler's address space is not the tiny child's address space.
+struct ProcessLayout {
+    stack_vaddr: u64,
+    stack_size: u64,
+    trap_vaddr: u64,
+}
+
+/// Default layout used by SYS_EXEC children.
+const EXEC_DEFAULT_LAYOUT: ProcessLayout = ProcessLayout {
+    stack_vaddr: 0x10000,
+    stack_size: 0x4000,
+    trap_vaddr: 0x20000,
+};
+
 // ───────────────────────────────────────────────────────────────────
 // Boot contract types
 //
@@ -166,6 +183,12 @@ pub struct BootInfo {
     pub image: BootImage,
     pub grants: Vec<BootGrant>,
     pub maps: Vec<BootMap>,
+    /// Virtual address for init's stack.
+    pub stack_vaddr: u64,
+    /// Size of init's stack in bytes.
+    pub stack_size: u64,
+    /// Virtual address for init's trap handler.
+    pub trap_vaddr: u64,
 }
 
 /// Boot error — reason a boot descriptor was rejected.
@@ -245,14 +268,16 @@ impl Kernel {
     /// On failure, rolls back: destroys domain and any resources
     /// created during preparation.  No reachable domain, capability,
     /// mapping, or runnable process survives a failed preparation.
-    fn prepare_process(&mut self, dom: DomainId, desc: &ProcessImageDesc) -> u64 {
+    fn prepare_process(
+        &mut self, dom: DomainId, desc: &ProcessImageDesc, layout: &ProcessLayout,
+    ) -> u64 {
         // --- Stack ---
-        let stack_size: u64 = 0x4000;
-        let stack_obj = self.fabric.alloc_object("process_stack", stack_size, ObjectKind::Memory);
+        let stack_obj = self.fabric.alloc_object(
+            "process_stack", layout.stack_size, ObjectKind::Memory);
         let stack_phys = self.next_phys;
-        self.next_phys += stack_size;
+        self.next_phys += layout.stack_size;
         self.fabric.place_object(stack_obj, stack_phys);
-        self.fabric.grant(dom, stack_obj, 0, stack_size, Permissions::RW);
+        self.fabric.grant(dom, stack_obj, 0, layout.stack_size, Permissions::RW);
 
         // --- Trap handler: alloc → initialize → seal → grant RX ---
         // W⊕X: no exceptional executable-object creation path.
@@ -283,10 +308,10 @@ impl Kernel {
                 desc.lit_start, lit_length, desc.code_obj,
                 desc.code_offset + desc.lit_start);
         }
-        core.address_map.add(0x10000, stack_size, stack_obj);
-        core.address_map.add(0x20000, trap_size, trap_obj);
-        core.r[SP as usize] = 0x10000 + stack_size;
-        core.trap_vector = 0x20000;
+        core.address_map.add(layout.stack_vaddr, layout.stack_size, stack_obj);
+        core.address_map.add(layout.trap_vaddr, trap_size, trap_obj);
+        core.r[SP as usize] = layout.stack_vaddr + layout.stack_size;
+        core.trap_vector = layout.trap_vaddr;
 
         self.spawn(core)
     }
@@ -383,9 +408,6 @@ impl Kernel {
 
         // ── Validate maps ──
         // Collect implicit virtual ranges: code, literals, stack, trap.
-        let stack_vaddr: u64 = 0x10000;
-        let stack_size: u64 = 0x4000;
-        let trap_vaddr: u64 = 0x20000;
         let trap_size: u64 = 0x1000;
 
         let mut ranges: Vec<(u64, u64)> = Vec::new();
@@ -396,9 +418,9 @@ impl Kernel {
             let lit_length = image_size - img.lit_start;
             ranges.push((img.lit_start, img.lit_start + lit_length));
         }
-        // Stack and trap
-        ranges.push((stack_vaddr, stack_vaddr + stack_size));
-        ranges.push((trap_vaddr, trap_vaddr + trap_size));
+        // Stack and trap from descriptor
+        ranges.push((info.stack_vaddr, info.stack_vaddr + info.stack_size));
+        ranges.push((info.trap_vaddr, info.trap_vaddr + trap_size));
 
         for m in &info.maps {
             let mobj = self.fabric.objects.get(&m.obj)
@@ -456,7 +478,12 @@ impl Kernel {
             image_size,
             entry: img.entry,
         };
-        let _init_pid = self.prepare_process(dom, &desc);
+        let boot_layout = ProcessLayout {
+            stack_vaddr: info.stack_vaddr,
+            stack_size: info.stack_size,
+            trap_vaddr: info.trap_vaddr,
+        };
+        let _init_pid = self.prepare_process(dom, &desc, &boot_layout);
 
         // Additional address maps
         for m in &info.maps {
@@ -935,7 +962,7 @@ impl Kernel {
             image_size,
             entry: 0,
         };
-        let child_pid = self.prepare_process(child_dom, &desc);
+        let child_pid = self.prepare_process(child_dom, &desc, &EXEC_DEFAULT_LAYOUT);
         let child_idx = child_pid as usize;
         self.run_to_completion(child_idx, 100_000);
 
