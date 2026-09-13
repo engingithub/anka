@@ -138,3 +138,105 @@ policy, which is not the validator's job.
 Normalization, escapes, grapheme segmentation, and Unicode identifiers
 are deferred.  An HTTP server does not need any of them.  It needs
 reliable bytes and valid text.
+
+---
+
+## DN-5: Harness inventory and the boot contract boundary
+
+**Date:** 2026-09-12 (Phase 8.0)
+
+**Context:**
+
+Before Phase 8, every test created an Anka64Core directly, wired up
+address maps and capabilities by hand, and called `kernel.spawn()`.
+This meant the host test harness performed process instantiation — the
+host knew how to build a runnable process, not just how to build a
+machine.
+
+The existing harnesses perform these responsibilities:
+
+| Step | Responsibility | Owner (pre-8.0) |
+|------|---------------|-----------------|
+| Allocate physical memory (Fabric) | Machine instantiation | Host |
+| Create objects, write code into them | Machine instantiation | Host |
+| Seal executable objects | Machine instantiation | Host |
+| Create domain + grant capabilities | Process instantiation | Host |
+| Create Anka64Core, set up address map | Process instantiation | Host |
+| Set PC, SP, trap vector | Process instantiation | Host |
+| Call kernel.spawn() | Process instantiation | Host |
+| Call kernel.run() | Scheduling | Host |
+
+**Decision:**
+
+The boot contract draws the boundary: host owns machine instantiation
+(Fabric, objects, sealing); Anka owns process instantiation (domain,
+capabilities, core, address map, stack, trap handler).
+
+After Phase 8.0, the host:
+
+1. Creates the machine (Fabric with physical memory)
+2. Creates objects and loads trusted code into them
+3. Seals executable objects
+4. Calls `kernel.boot(BootInfo)` — Anka takes over process creation
+5. Calls `kernel.run()` — Anka schedules
+
+The host never constructs an Anka64Core.  The `p80_boot_return_42` test
+proves this: it boots and runs a process without touching Core, Process,
+AgentId, or DomainId.
+
+Old-style harnesses (`run_6b4_harness`, `run_ccb_harness`) remain for
+testing the compiler pipeline.  They will be retired in Phase 8.6 when
+the boot contract replaces all direct-construction test paths.
+
+---
+
+## DN-6: Boot as root of authority
+
+**Date:** 2026-09-12 (Phase 8.0)
+
+**Context:**
+
+SYS_EXEC derives child authority from a parent domain's capabilities
+(Invariant I7: a child capability cannot exceed its parent).  But
+the initial process (init) has no parent domain.  Authority must be
+established from a different root.
+
+**Decision:**
+
+Boot authority is established from trusted boot state, not derived
+from any existing domain.  The boot contract types separate the
+concerns:
+
+- **BootImage**: identifies the sealed executable object.  The kernel
+  implicitly creates RX authority for code and R authority for
+  literals.  This is not derived from any domain — it is the root
+  grant.
+
+- **BootGrant**: additional authority (e.g., data objects for I/O
+  buffers).  Grants may not overlap the BootImage backing range,
+  preserving Rule 28 (one semantic fact, one definition) and Rule 29
+  (data that names executable code is not authority to transfer
+  control to it).
+
+- **BootMap**: virtual address placement, separate from authority
+  (Rule 1: authority != placement).  Maps may not overlap each other
+  or implicit code/literal/stack/trap mappings.
+
+The shared primitive `prepare_process()` is used by both SYS_EXEC and
+`boot()`.  The only difference is the authority source:
+
+```text
+SYS_EXEC:  parent domain → derive child caps → prepare_process()
+boot():    trusted boot state → grant root caps → prepare_process()
+```
+
+One-success-only semantics: a successful boot sets a permanent flag.
+A failed boot leaves no reachable domain, capability, mapping,
+runnable process, or live allocated object — the kernel remains
+bootable for a subsequent attempt.  This is "one-success-only,
+not one-attempt-only."
+
+`boot()` installs init as runnable and returns.  It does not call
+`run()`.  Scheduling is the host's responsibility.  This preserves
+the separation: Anka creates the process; the host decides when to
+start the machine.

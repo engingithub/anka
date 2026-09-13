@@ -343,7 +343,27 @@ Key sub-phases:
 
 Phase 7.4 established a post-self-hosting development process: new compiler semantics are implemented in canonical source and tested through CC_B, without modifying the CC_A bootstrap seed.  This was the first phase to fully embrace the distinction between CC_A (bootstrap seed) and CC_B (authoritative compiler).
 
-At the current stage, the project has **393 tests with zero failures**.
+At the current stage, the project has **407 tests with zero failures**.
+
+### Stage 19 — Boot contract (Phase 8.0)
+
+Phase 8.0 established the boundary between host machine instantiation and Anka process instantiation.  Before Phase 8, the host test harness performed both: it created objects and also constructed Anka64Core, set up address maps, and called `kernel.spawn()`.
+
+The boot contract draws the line:
+
+- **Host owns machine instantiation**: create Fabric, allocate objects, write and seal code.
+- **Anka owns process instantiation**: create domain, grant capabilities, create stack, trap handler, address map, core.
+
+The host calls `kernel.boot(BootInfo)` and then `kernel.run()`.  It never constructs an Anka64Core.
+
+Key design elements:
+
+- **Authority != placement (Rule 1)**: `BootImage` (what to execute), `BootGrant` (additional authority), and `BootMap` (virtual placement) are separate.
+- **Shared primitive**: `prepare_process()` is used by both SYS_EXEC and `boot()`.  The only difference is the authority source: SYS_EXEC derives from a parent domain; boot grants from trusted boot state.
+- **BootGrant may not overlap BootImage backing range**: preserves Rule 28 (one semantic fact, one definition) and Rule 29 (data is not control authority).
+- **BootMap virtual ranges may not overlap**: each other or implicit code/literal/stack/trap mappings.
+- **One-success-only**: successful boot sets a permanent flag.  Failed boot is transactional — no domain, capability, mapping, process, or object survives.
+- **boot() returns without running**: it installs init as runnable.  The host calls `run()` afterward.  Scheduling is the host's responsibility.
 
 ---
 
@@ -1190,7 +1210,7 @@ Design questions, with current status.
 ### New (post-self-hosting)
 
 11. **Text and string semantics** — **Resolved in Phase 7.**  `Bytes ≠ UTF8Text`.  UTF-8 string literals are validated at compile time (RFC 3629 scalar-value legality).  Representation: explicit byte length, no NUL termination, immutable R-only literal object.  Validation is a gate (not a transcoder): input bytes = output bytes.  Codepoint count and grapheme count are not tracked; only byte length.  No normalization, escapes, or Unicode identifiers yet.
-12. **Host independence** — Reducing host-side orchestration for loading, sealing, and launching the self-hosted compiler.  The self-hosted compiler currently depends on a Rust test harness for process setup.  The next step (Phase 8) is native process/service orchestration: the host boots Anka once; Anka itself launches programs without host harness involvement.
+12. **Host independence** — **Partially resolved in Phase 8.0.**  The boot contract (`kernel.boot(BootInfo)`) eliminates host-side process construction.  The host creates the machine and calls boot; Anka creates the process.  Remaining: boot the compiler via the boot contract (requires layout parameterization), retire old-style test harnesses, implement ankad (user-space init).
 
 ---
 
@@ -1336,7 +1356,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions, 63,808 bytes |
 | Canonical source | ~17 KB |
-| Tests | 393 |
+| Tests | 407 |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -1347,6 +1367,8 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | SYS_WRITE | Buffer-based, capability-checked, output-atomic |
 | Literal authority | Immutable R-only, two-ended image allocator |
 | Bootstrap development model | CC_A frozen; new features via canonical source + CC_B |
+| Boot contract | `kernel.boot(BootInfo)` — host owns machine, Anka owns process |
+| Shared process primitive | `prepare_process()` used by both SYS_EXEC and boot() |
 
 ---
 
@@ -1359,6 +1381,8 @@ Anka64 preserved the lessons that survived those encounters and discarded the hi
 The self-hosting result (Phase 6B) demonstrated that the 29-instruction ISA is already expressive enough for a nontrivial self-hosted software stack: recursion, variables, pointers, control flow, calls, syscalls, code generation, and a self-reproducing fixed-point compiler.
 
 Phase 7 demonstrated that the self-hosted compiler can evolve semantically (UTF-8 validation, buffer I/O) without expanding the ISA or modifying the bootstrap seed.  The canonical compiler is now the authoritative compiler; CC_A is a frozen seed sufficient to construct it.
+
+Phase 8.0 established the boot contract: the host creates the machine, Anka creates the process.  The test `p80_boot_return_42` proves the boundary — it boots and runs a process without the test ever constructing an Anka64Core.  13 hostile boot descriptor tests verify that invalid descriptors are rejected without corrupting kernel state.
 
 The project continues to evolve by the same rule that produced its strongest results:
 
