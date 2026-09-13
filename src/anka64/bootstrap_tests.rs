@@ -7616,9 +7616,21 @@ mod tests {
         assert!(ws_funcs > 0, "CC_B should compile at least one function");
         assert!(out_pos > 0, "CC_B should produce output");
 
-        eprintln!("8.1b: boot(CC_B) compiled {} functions, {} output bytes ✓",
-            ws_funcs, out_pos);
-        eprintln!("      test never constructed an Anka64Core ✓");
+        // The decisive assertion: CC_B compiled the child, sealed it,
+        // SYS_EXEC'd it, and the child returned 42.  CC_B's exit code
+        // is the child's exit code (from SYS_EXEC return value).
+        let exit_code = kernel.processes[0].exit_code;
+        assert_eq!(exit_code, 42,
+            "CC_B should receive child exit code 42 (got {})", exit_code);
+
+        // Count processes: should be 2 (CC_B + child)
+        let total_procs = kernel.processes.len();
+        assert!(total_procs >= 2,
+            "should have at least 2 processes (init + child), got {}", total_procs);
+
+        eprintln!("8.1d: host → boot(CC_B) → compile → seal → exec → child(42) ✓");
+        eprintln!("      CC_B compiled {} functions, {} bytes", ws_funcs, out_pos);
+        eprintln!("      {} total processes, test never constructed a core ✓", total_procs);
     }
 
     // ─── 8.0e: Hostile boot descriptors ──────────────────────
