@@ -165,6 +165,16 @@ pub struct Anka64Core {
     /// M=1 means masked, interrupts_enabled=false).
     pub interrupts_enabled: bool,
 
+    /// Pending asynchronous event awaiting delivery (Phase 9.0b).
+    ///
+    /// At most one event can be pending at a time (coalescing for
+    /// timer-class sources).  `deliver_pending()` is the only
+    /// consumer; event sources (timer, future devices) are producers.
+    ///
+    /// Formal basis: place P in anka_interrupts.kleis.
+    /// CONS-1: P+Q=1.  COALESCE-2: P≤1 at reachable markings.
+    pub pending_event: Option<EventCause>,
+
     /// Protected return-authority stack (6S.2 + 6S.2a).
     ///
     /// Not in ordinary memory.  Not accessible through capabilities.
@@ -193,6 +203,7 @@ impl Anka64Core {
             trap_vector: 0,
             event_frames: Vec::new(),
             interrupts_enabled: true,
+            pending_event: None,
             return_stack: Vec::new(),
         }
     }
@@ -211,6 +222,50 @@ impl Anka64Core {
         self.privilege = frame.return_privilege;
         self.interrupts_enabled = frame.interrupts_were_enabled;
         Some(frame.return_pc)
+    }
+
+    /// Generic architectural interrupt-delivery gate (Phase 9.0b).
+    ///
+    /// If a pending asynchronous event exists and interrupts are enabled,
+    /// consume the pending token, push a protected EventFrame, enter
+    /// Supervisor with interrupts masked, and redirect to trap_vector.
+    ///
+    /// Returns true if delivery occurred, false otherwise.
+    ///
+    /// This is the implementation of formal transition T_deliver:
+    ///   U + P → H + F + M  (with Q restored, P consumed).
+    ///
+    /// Called at instruction boundaries — after I_n commits, after
+    /// devices tick, before I_{n+1} fetches.  This method does NOT
+    /// decide when to call itself; callers (run_process, Phase 9.0d)
+    /// are responsible for machine sequencing.
+    ///
+    /// Formal properties witnessed:
+    ///   INT-2:  M=1 ⇒ no delivery (masked gate).
+    ///   INT-3:  delivery consumes exactly one P, restores Q.
+    ///   INT-6a: delivery requires committed boundary + P + ¬M.
+    ///   INT-9a: one delivered event creates exactly one H token.
+    pub fn deliver_pending(&mut self) -> bool {
+        if let Some(cause) = self.pending_event.take() {
+            if self.interrupts_enabled {
+                self.event_frames.push(EventFrame {
+                    return_pc: self.pc,
+                    return_privilege: self.privilege,
+                    interrupts_were_enabled: self.interrupts_enabled,
+                    cause,
+                });
+                self.privilege = Privilege::Supervisor;
+                self.interrupts_enabled = false;
+                self.pc = self.trap_vector;
+                true
+            } else {
+                // INT-2: masked — put the event back, delivery blocked.
+                self.pending_event = Some(cause);
+                false
+            }
+        } else {
+            false
+        }
     }
 
     /// Execute one instruction cycle through the fabric.
@@ -1321,5 +1376,242 @@ mod tests {
             _ => panic!("expected IllegalInstruction fault, got {:?}", result),
         }
         assert!(!core.halted, "illegal instruction must not set halted flag");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.0b — Interrupt delivery micro-tests
+    //
+    // These directly witness the formal Petri net transitions and
+    // invariants from anka_interrupts.kleis without any timer device
+    // or scheduler involvement.
+    // ═══════════════════════════════════════════════════════════════
+
+    /// T_deliver witness: pending + enabled → frame pushed, masked,
+    /// Supervisor, pc = trap_vector, pending consumed.
+    ///
+    /// Formal: T_deliver fires from M0→M1→M2, verifying INT-3, INT-6a,
+    /// INT-9a, and the CONS-4 (F=M) invariant.
+    #[test]
+    fn p90b_deliver_pending_enabled() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.pc = 0x1000;
+        core.trap_vector = 0x2000;
+        core.privilege = Privilege::User;
+        core.interrupts_enabled = true;
+
+        // Post: P := 1  (formal T_post: M0 → M1)
+        core.pending_event = Some(EventCause::TimerInterrupt);
+
+        // Deliver (formal T_deliver: M1 → M2)
+        let delivered = core.deliver_pending();
+
+        assert!(delivered, "delivery must succeed when P=1, M=0");
+        assert_eq!(core.pc, 0x2000, "pc must be trap_vector");
+        assert_eq!(core.privilege, Privilege::Supervisor);
+        assert!(!core.interrupts_enabled, "interrupts must be masked (CONS-4: F=M)");
+        assert!(core.pending_event.is_none(), "P must be consumed (INT-3)");
+        assert_eq!(core.event_frames.len(), 1, "exactly one EventFrame (INT-9a)");
+
+        let frame = &core.event_frames[0];
+        assert_eq!(frame.return_pc, 0x1000, "return_pc = interrupted pc");
+        assert_eq!(frame.return_privilege, Privilege::User);
+        assert!(frame.interrupts_were_enabled, "saved enable state = true");
+        assert_eq!(frame.cause, EventCause::TimerInterrupt);
+    }
+
+    /// T_deliver + T_eret round-trip: deliver then event_return()
+    /// restores the exact interrupted control state.
+    ///
+    /// Formal: T_deliver; T_eret = M0 → M1 → M2 → M3 → M0.
+    /// Witnesses INT-4, INT-8a, INT-8b.
+    #[test]
+    fn p90b_deliver_then_return() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.pc = 0x400;
+        core.trap_vector = 0x800;
+        core.privilege = Privilege::User;
+        core.interrupts_enabled = true;
+
+        core.pending_event = Some(EventCause::TimerInterrupt);
+        assert!(core.deliver_pending());
+
+        // Now in handler state: Supervisor, masked, at trap_vector.
+        assert_eq!(core.pc, 0x800);
+        assert_eq!(core.privilege, Privilege::Supervisor);
+        assert!(!core.interrupts_enabled);
+
+        // T_eret: consume the EventFrame.
+        let return_pc = core.event_return();
+        assert_eq!(return_pc, Some(0x400), "INT-8a: exact saved PC");
+        assert_eq!(core.privilege, Privilege::User);
+        assert!(core.interrupts_enabled, "INT-8b: prior enable state restored");
+        assert!(core.event_frames.is_empty(), "INT-4: frame consumed");
+    }
+
+    /// INT-2: masked state blocks delivery; pending event preserved.
+    ///
+    /// Formal: M=1 disables T_deliver.  P persists.
+    #[test]
+    fn p90b_deliver_masked_preserves_pending() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.pc = 0x100;
+        core.trap_vector = 0x200;
+        core.interrupts_enabled = false;  // masked
+
+        core.pending_event = Some(EventCause::TimerInterrupt);
+        let delivered = core.deliver_pending();
+
+        assert!(!delivered, "INT-2: delivery must not fire when masked");
+        assert!(core.pending_event.is_some(), "pending event must survive");
+        assert_eq!(core.pc, 0x100, "pc unchanged");
+        assert!(core.event_frames.is_empty(), "no frame created");
+    }
+
+    /// No delivery when pending_event is None.
+    ///
+    /// Formal: Q=1 (no pending) means T_deliver is disabled.
+    #[test]
+    fn p90b_deliver_empty_pending_noop() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.pc = 0x100;
+        core.trap_vector = 0x200;
+        core.interrupts_enabled = true;
+        core.pending_event = None;
+
+        let delivered = core.deliver_pending();
+
+        assert!(!delivered, "no pending event → no delivery");
+        assert_eq!(core.pc, 0x100, "pc unchanged");
+        assert!(core.event_frames.is_empty(), "no frame created");
+        assert!(core.interrupts_enabled, "enable state unchanged");
+    }
+
+    /// INT-10b: pending event survives ERET and becomes deliverable.
+    ///
+    /// Formal: M3a → (T_eret) → M1 → (T_deliver) → M2.
+    /// A second event posted during handling persists through ERET,
+    /// then immediately becomes deliverable on the restored boundary.
+    #[test]
+    fn p90b_pending_survives_eret() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.pc = 0x400;
+        core.trap_vector = 0x800;
+        core.interrupts_enabled = true;
+
+        // First event: post + deliver (M0 → M1 → M2)
+        core.pending_event = Some(EventCause::TimerInterrupt);
+        assert!(core.deliver_pending());
+        assert_eq!(core.pc, 0x800);
+
+        // Simulate handler completion + second event posted while
+        // masked (M2 → M2a via T_post, then M2a → M3a via T_handler).
+        // For the Petri model we only need pending + frame + masked.
+        core.pending_event = Some(EventCause::TimerInterrupt);
+
+        // T_eret with pending event (M3a → M1): pending preserved.
+        let return_pc = core.event_return();
+        assert_eq!(return_pc, Some(0x400), "return to interrupted pc");
+        assert!(core.interrupts_enabled, "unmasked after return");
+        assert!(core.pending_event.is_some(), "INT-10b: pending survives ERET");
+
+        // Now immediately deliverable again (M1 → M2)
+        assert!(core.deliver_pending(), "re-delivery after ERET must succeed");
+        assert_eq!(core.pc, 0x800, "back at trap_vector");
+        assert!(!core.interrupts_enabled, "masked again");
+        assert_eq!(core.event_frames.len(), 1, "one fresh frame");
+    }
+
+    /// INT-9b: delivery cannot fire twice from a single pending event.
+    ///
+    /// After one successful delivery, a second deliver_pending() with
+    /// no new event posted must return false.
+    #[test]
+    fn p90b_no_double_delivery() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.pc = 0x100;
+        core.trap_vector = 0x200;
+        core.interrupts_enabled = true;
+
+        core.pending_event = Some(EventCause::TimerInterrupt);
+        assert!(core.deliver_pending());
+
+        // After delivery: P=0, M=1.  Second deliver must be a no-op.
+        let second = core.deliver_pending();
+        assert!(!second, "INT-9b: no double delivery");
+        assert_eq!(core.event_frames.len(), 1, "still exactly one frame");
+    }
+
+    /// Syscall cause uses the same frame-entry law as timer.
+    ///
+    /// Formal: FRAME-UNIFIED-1.  Manually posting a Syscall cause
+    /// through deliver_pending() must produce the same structural
+    /// effect as TimerInterrupt — the generic gate is cause-agnostic.
+    #[test]
+    fn p90b_deliver_syscall_cause_unified() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.pc = 0x300;
+        core.trap_vector = 0x600;
+        core.interrupts_enabled = true;
+
+        core.pending_event = Some(EventCause::Syscall);
+        assert!(core.deliver_pending());
+
+        assert_eq!(core.pc, 0x600);
+        assert_eq!(core.privilege, Privilege::Supervisor);
+        assert!(!core.interrupts_enabled);
+        assert_eq!(core.event_frames.len(), 1);
+        assert_eq!(core.event_frames[0].cause, EventCause::Syscall);
+        assert_eq!(core.event_frames[0].return_pc, 0x300);
+
+        // Return restores regardless of cause (FRAME-UNIFIED-3).
+        let pc = core.event_return();
+        assert_eq!(pc, Some(0x300));
+        assert!(core.interrupts_enabled);
+    }
+
+    /// INT-10a: pending event survives handler completion while masked.
+    ///
+    /// With interrupts masked and a pending event, deliver_pending()
+    /// refuses, but the pending event remains intact for future
+    /// delivery when interrupts are re-enabled.
+    #[test]
+    fn p90b_pending_survives_masked_handler() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.interrupts_enabled = false;
+        core.pending_event = Some(EventCause::TimerInterrupt);
+
+        // Masked: no delivery.
+        assert!(!core.deliver_pending());
+        assert!(core.pending_event.is_some(), "INT-10a: pending preserved");
+
+        // Re-enable and retry: delivery succeeds.
+        core.interrupts_enabled = true;
+        core.trap_vector = 0x500;
+        core.pc = 0x100;
+        assert!(core.deliver_pending());
+        assert_eq!(core.pc, 0x500);
+        assert!(core.pending_event.is_none());
+    }
+
+    /// COALESCE: posting while already pending is idempotent (P+Q=1).
+    ///
+    /// This is a source-policy property: a second post while P=1
+    /// simply overwrites with the same value.  The Petri net enforces
+    /// this through the complement place Q (CONS-1, COALESCE-1).
+    #[test]
+    fn p90b_coalesce_pending() {
+        let mut core = Anka64Core::new(CPU0, DomainId(0));
+        core.pending_event = Some(EventCause::TimerInterrupt);
+
+        // Simulate a second post (source-level coalescing).
+        core.pending_event = Some(EventCause::TimerInterrupt);
+
+        // Still exactly one pending event.
+        assert!(core.pending_event.is_some());
+        // After delivery, consumed once.
+        core.interrupts_enabled = true;
+        core.trap_vector = 0x100;
+        assert!(core.deliver_pending());
+        assert!(core.pending_event.is_none());
     }
 }
