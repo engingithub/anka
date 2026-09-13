@@ -1033,3 +1033,173 @@ implementation = same software behavior.  Machine state is correctly separated
 from image state.
 
 490/490 tests; 29 instructions.  Phase 9.0 is complete.
+
+
+## DN-14: Asynchronous Capability-Mediated Block I/O
+
+**Phase**: 9.1 (Chapter 9: Anka64 as an Independent Architecture)
+
+**Problem**: Phase 9.0 proved Anka could be interrupted.  Phase 9.1 asks whether
+Anka can safely perform asynchronous I/O — where the *cause* (request submission)
+and the *consequence* (DMA completion) are separated in time, and every layer must
+preserve identity and authority across that gap.
+
+Before any block-device code was written, the block-device client exposed a
+concrete Fabric bug: `execute_write` authorized based on `request.width` (at most
+8 bytes) but committed based on `write_data.len()` (potentially 512 bytes).  A
+request authorized for 8 bytes could silently write 512.  This led to Phase
+9.1-pre, which hardened the Fabric before formalization could begin.
+
+**Formal model**: `theories/anka_block_device.kleis` — bounded Petri net with
+2 request slots and 2-entry completion queue.  63 intended properties pass; 3
+deliberate falsifiability witnesses are rejected by Z3.  The model covers:
+
+- Two-slot request lifecycle: F → O\_wait → O\_dma → C → F
+- Conservation: F + O\_wait + O\_dma + C = 2
+- Completion truth is the queue; interrupt is notification
+- Level-triggered source: L\_dev := (C > 0), derived, not stored
+- Multi-source pending state: (P\_timer, P\_device) independent
+- Bounded-service arbitration: turn bit guarantees both sources served
+  within two eligible delivery opportunities
+- DMA delegation: commit ⇒ requested span ⊆ delegated span
+- Generation-qualified identity: stale request handle ≢ recycled slot;
+  late completion cannot wake a recycled process
+
+**Design — layered decomposition** (no layer does another's job):
+
+1. **BlockStorage** — in-memory byte array.  Knows only blocks and bytes.
+   No DMA, no interrupts, no processes.
+
+2. **BlockController** — two-slot lifecycle machine.  Manages request
+   submission, latency countdown, DMA transaction orchestration via
+   Fabric, and completion ordering.  Does not know about processes
+   or interrupt delivery.  `requires_attention()` is the level-triggered
+   source predicate.
+
+3. **Fabric DMA** — the existing Fabric transaction lifecycle
+   (submit → advance → advance → terminal).  DMA authority is delegated
+   at request *acceptance* time as a narrow, request-local domain.  The
+   DMA domain is destroyed only after the transaction becomes terminal.
+
+4. **Multi-source interrupt architecture** — `pending_event: Option<EventCause>`
+   replaced by independent per-source pending bits `(P_timer, P_device)` with
+   a turn-based arbiter.  `deliver_pending()` selects at most one source per
+   eligible boundary.  Bounded service: both sources served within two
+   opportunities when both are continuously pending.
+
+5. **Kernel integration** — `tick_devices()` advances the block controller,
+   collects the level assertion, and posts `P_device` when completions are
+   pending.  `drain_block_completions()` consumes completions, validates
+   both RequesterKey (process incarnation) and RequestHandle (I/O operation),
+   performs `event_return()` to pop the suspended syscall EventFrame, and
+   resumes the caller at user PC.
+
+**Key architectural decisions**:
+
+1. **Completion queue is truth; interrupt is notification.**
+   Consuming P\_device does not consume completion records.  If C > 0 remains
+   true after delivery, the source re-asserts.  No lost notifications.
+
+2. **Per-source pending bits replace `Option<EventCause>`.**
+   Timer and device are independent facts.  Both may be simultaneously pending.
+   The old single-slot pending model literally could not express this state.
+
+3. **DMA authority is delegated, not inherent.**
+   At submission, a 512-byte WRITE-only capability is derived into a fresh
+   request-local DMA domain.  DMA-DELEGATION: authority available to the
+   request ⊆ authority explicitly delegated for that request.  Revocation
+   before or during DMA produces StaleGeneration + error completion + zero
+   mutation.
+
+4. **Request identity is device-local and bounded.**
+   `RequestHandle { slot: u8, generation: u64 }` uniquely identifies a
+   request across the device's lifetime.  `RequesterKey { slot: u32,
+   generation: u32 }` identifies the process incarnation.  Both must match
+   before the kernel performs `event_return()`.
+
+5. **Suspended syscall continuation via EventFrame.**
+   `SYS_BLOCK_READ` leaves the syscall EventFrame outstanding while the
+   process is I/O-blocked.  On completion, `event_return()` pops the
+   frame — the same primitive used by ERET and resume\_from\_trap().
+   The EventFrame architecture from Phase 9.0 becomes the continuation
+   mechanism for asynchronous system calls.
+
+6. **IoWait provides double identity protection.**
+   `io_wait: Option<IoWait>` replaces the earlier `io_blocked: bool`.
+   `IoWait` stores the `RequestHandle`, giving the completion path two
+   independent stale-identity checks: RequesterKey (which process?) and
+   RequestHandle (which operation?).
+
+7. **Matched completion implies outstanding EventFrame (executable invariant).**
+   `drain_block_completions()` uses `.expect()` on `event_return()`.  A
+   violation is an immediate panic, not a silently corrupted process.
+
+**Phase 9.1-pre: Fabric hardening** (before formalization):
+
+- `MemoryRequest` carries explicit `length: u64`.  CPU constructors derive it
+  from `Width`; DMA sets it directly.  Fabric authority is expressed in bytes,
+  not ISA widths.
+- All-or-nothing precommit gate: `validate_precommit()` performs generation
+  revalidation, length match, physical bounds, and payload validation before
+  any memory access.  Both `phase_commit()` and `execute_atomic_xchg()` use
+  the same gate.
+- Checked arithmetic: `offset+length`, `physical+length`, `base+size` all use
+  `checked_add`.  Zero-length requests rejected as InvalidSpan.
+- Write with absent payload faults LengthMismatch.
+- 15 adversarial DMA-span tests.
+
+**I-format immediate range hardening** (discovered during 9.1e):
+
+The block-device test pushed guest buffer addresses beyond the MOVI signed
+18-bit immediate range (0x30000 = 196608 > 131071).  The assembler silently
+aliased the value: `encode_i` masked to 18 bits, `decode` sign-extended bit
+17, producing a large negative address.  The CPU correctly executed the
+ISA-defined encoding; the toolchain accepted an impossible operand.
+
+Fix: `fits_imm18()` in `isa.rs` is the single definition of representability,
+shared by both assembler and compiler.  `emit_i_named()` asserts the predicate.
+`cc.rs` removes its `v & 0x3FFFF` pre-masking and rejects unmaterializable
+literals.  Invariant: no code-generation layer may silently alias an immediate.
+
+**Known architectural limitation — machine-time model**:
+
+The device clock currently advances only on committed instruction boundaries
+(`tick_devices()`).  The scheduler skips I/O-blocked processes.  Therefore:
+
+> All runnable processes blocked on I/O ⇒ no committed instructions
+> ⇒ devices do not advance ⇒ no completions ⇒ deadlock.
+
+This is a genuine machine-time limitation, not a bug.  The current decisive
+test avoids it by having process B run while A waits.  Future resolution
+requires either an architectural idle task that generates machine boundaries,
+or a device clock that can advance during CPU idle.  This is recorded as a
+named pressure point for Phase 9.2 or later.
+
+**Decisive test** (`p91e_decisive_guest_async_read`):
+
+Process A issues `SYS_BLOCK_READ(block=0, buf=0x04000)` and blocks with its
+syscall EventFrame outstanding.  Process B runs an infinite counter.  The block
+controller completes A's request via narrow DMA delegation.  A device interrupt
+fires during B's execution.  The handler drains the completion, validates both
+RequesterKey and RequestHandle against A's `io_wait`, performs `event_return()`,
+and resumes A at user PC.  A then verifies all 512 bytes of the DMA buffer:
+
+    64 iterations × LD 8-byte word × CMP against expected u64(1)
+
+Two independent observations agree: the guest verifies every word through its
+own address space; the host independently verifies the underlying physical buffer.
+
+**What one deliberately primitive fake disk forced into existence**:
+
+- Byte-span Fabric authority (replacing ISA-width authorization)
+- Atomic DMA precommit validation (all-or-nothing gate)
+- Narrow DMA delegation (request-local domain)
+- Multi-source pending interrupts (independent per-source bits)
+- Bounded-service arbitration (turn-bit fairness proof)
+- Level-triggered notification (completion truth ≠ interrupt)
+- Completion queues (bounded, generation-qualified)
+- Generation-qualified asynchronous identity (two independent checks)
+- Blocked syscall continuations (EventFrame reuse)
+- Toolchain immediate correctness (assembler/compiler range invariant)
+
+557/557 tests; 29 instructions.  Phase 9.1 is complete.
