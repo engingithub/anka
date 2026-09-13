@@ -848,3 +848,92 @@ the compiler lineage is:
   CC_B(canonical source) → CC_C → CC_B = CC_C
 
 No compiler incarnation is fabricated by the host.  458/458; 29 instructions.
+
+---
+
+## DN-12: System Image — Declarative Boot Construction Manifest
+
+**Date:** 2026-09-13 (Phase 8.6)
+
+A system image is a declarative boot construction manifest.  It is not:
+
+- a runtime snapshot (no ObjectIds, generations, process slots, domains)
+- a filesystem image (no files, directories, or storage layout)
+- a machine configuration (no RAM size, device topology, or physical addresses)
+
+It describes the initial software object graph: logical objects, their
+initial bytes/state, boot authority, and virtual placement.  The host
+creates the machine (Fabric); the loader resolves image-local identity
+and chooses physical placement; `kernel.boot()` establishes authoritative
+boot semantics.
+
+**Six-way identity distinction:**
+
+  name ≠ ImageObjectRef ≠ ObjectId ≠ authority ≠ virtual placement ≠ physical placement
+
+- `name`: diagnostic metadata, never identity or authority.
+- `ImageObjectRef(u32)`: index into the image's object table.  Exists
+  only within the context of a single image.
+- `ObjectId`: runtime identity within a single machine instance.
+  Two machines loading the same image may assign different ObjectIds.
+- Authority: capabilities derived from boot grants, validated by
+  `kernel.boot()`.  Not encoded as ObjectIds in the image.
+- Virtual placement: ABI-level addresses in boot maps.  Part of the
+  software contract between ankad and the compiler.
+- Physical placement: chosen by the host-side loader via `phys_base`.
+  The image contains no physical addresses.
+
+**Loader API:**
+
+The primary operation is `load_into(fabric, phys_base)` — the host
+creates the Fabric (machine instantiation), the loader populates it
+(software instantiation).  This preserves the Phase 8.0 boundary:
+host owns machine instantiation; Anka owns process instantiation.
+
+Fabric is consumed by value: on error the partially constructed
+machine is dropped.  No partially loaded Fabric escapes.
+
+**Sparse payload semantics:**
+
+  initial object bytes = contents || 0^(size - |contents|)
+
+The loader zeros each object's physical extent before initializing
+the contents prefix, guaranteeing this semantic regardless of prior
+Fabric memory contents.  Output objects carry empty contents; workspace
+carries only the WS_LIT_POS initialization bytes.
+
+**Wire format (V1):**
+
+Custom little-endian, no external dependencies.  Explicit wire
+encodings for ObjectKind (0/1/2), seal_after_load (0/1), and
+permissions (via `from_bits_checked`).  Reserved fields on every
+record.  Never transmute.  V1 rejects trailing bytes and nonzero
+reserved fields.  Deterministic: `decode(encode(I)) = I` and
+`encode(decode(B)) = B` for canonical bytes.
+
+**Permission validation:**
+
+`Permissions::from_bits_checked(u64)` is the single definition of
+legal permission bits, replacing `VALID_PERMS_MASK`.  The `u64`
+parameter prevents silent truncation when validating the SPAWN ABI's
+native register-width field (a `u8` parameter would accept 0x100
+via `as u8` → 0x00).
+
+**Phase 8.6 completion (2026-09-13):**
+
+The decisive test `p86_system_image_boot` encodes one image, decodes
+it, and loads it into two independent machines at different physical
+bases (0x100000, 0x300000) with deliberately different ObjectId mappings
+(a pre-allocated dummy shifts ImageObjectRef(0) → ObjectId(1) in
+machine B).  Both machines boot ankad → CC_B → 42.
+
+This proves:
+
+  same image bytes + different physical placement + different ObjectIds
+  = identical architectural behavior
+
+The ankad supervisor program has a single authoritative source in
+`ankad.rs`, used by both `run_supervised_compiler` (test helper)
+and `build_compiler_system_image` (production image builder).
+
+468/468 tests; 29 instructions.  Phase 8 is complete.

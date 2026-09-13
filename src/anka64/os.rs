@@ -279,8 +279,7 @@ const SPAWN_GRANT_SIZE: u64 = 40;
 ///   [4] _reserved: u64     — must be zero
 const SPAWN_MAP_SIZE: u64 = 40;
 
-/// Valid permission bits mask: R | W | X | ATOMIC | SEAL = 0x1F.
-const VALID_PERMS_MASK: u8 = 0x1F;
+// Permission validation now uses Permissions::from_bits_checked (state.rs).
 
 /// In-memory SpawnLayout descriptor: 5 × u64 = 40 bytes.
 ///   [0] code_vaddr: u64    — where to place the child's code
@@ -1803,12 +1802,14 @@ impl Kernel {
             }
 
             // Validate permission bits
-            if perms_raw > VALID_PERMS_MASK as u64 {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
-                self.resume_from_trap(idx);
-                return None;
-            }
-            let child_perms = Permissions(perms_raw as u8);
+            let child_perms = match Permissions::from_bits_checked(perms_raw) {
+                Some(p) => p,
+                None => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return None;
+                }
+            };
 
             // Size must be nonzero
             if size == 0 {

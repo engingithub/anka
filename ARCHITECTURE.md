@@ -1527,7 +1527,22 @@ The decisive Phase 8.4 result: ankad boots as init, constructs SpawnGrant/SpawnM
 
 Phase 8.5 retired the last host-side compiler construction paths.  `run_6b4_harness`, `build_ccb`, `run_ccb_harness`, and `compile_with_ccb` now delegate to a single `run_supervised_compiler` helper that boots ankad and uses `SYS_SPAWN`/`SYS_WAIT` to execute every compiler invocation.  The closure invariant: compiler/system integration tests ∩ host-side process construction = ∅.  The host still constructs executable artifacts (AST → code bytes); Anka constructs every compiler process.  ankad preserves the structured `SYS_WAIT` result (tag in R10, detail as exit code), so the host can distinguish normal exits from faults without consuming `byte_output`.  The parent-side compiler mapping always uses `SUPERVISOR_COMPILER_VADDR = 0x30000`, while `SpawnLayout.code_vaddr` is parameterized: 0 for CC_A, `CCB_CODE_BASE` for CC_B.
 
-Through self-hosting, capabilities, multicore, W⊕X, protected calls/returns, process lifecycle, formal Petri nets, reclamation, a genuine supervisor, an explicitly delegated initial-environment ABI, a compiler managed by Anka rather than merely running inside it, and now zero host-fabricated compiler processes, the ISA still has not demanded instruction 30.  Twenty-nine instructions.  The software keeps asking for better abstractions rather than instruction proliferation.
+Phase 8.6 packaged the entire initial software object graph as a declarative system image — a deterministic byte stream that the host loads into a Fabric and boots without manually constructing the trusted object graph.  A system image is a boot construction manifest, not a runtime snapshot, filesystem image, or machine configuration.  It carries logical objects, their initial bytes/state, boot authority, and virtual placement.  The host-side loader resolves image-local identity (`ImageObjectRef`) into runtime identity (`ObjectId`) and chooses physical placement; `kernel.boot()` remains the single authority on boot semantics.
+
+Six concepts remain distinct throughout the load path:
+
+- **name** — diagnostic metadata, never identity
+- **ImageObjectRef** — image-local index into the object table
+- **ObjectId** — runtime identity within a single machine instance
+- **authority** — capabilities derived from boot grants
+- **virtual placement** — ABI-level addresses in boot maps
+- **physical placement** — host-chosen, image-independent
+
+The decisive Phase 8.6 test encodes one image, decodes it, and loads it into two independent machines at different physical bases (0x100000 and 0x300000) with deliberately different ObjectId mappings (a pre-allocated dummy object shifts IDs in machine B).  Both machines boot ankad → CC_B → compiled program → 42.  Same image bytes, different physical placement, different runtime ObjectIds, identical architectural behavior.
+
+`Permissions::from_bits_checked(u64)` is now the single authority for valid permission bits, replacing the previous `VALID_PERMS_MASK` constant.  The wide `u64` parameter prevents silent truncation when validating the SPAWN ABI's native register-width permission field.  The ankad supervisor program has a single authoritative source in `ankad.rs`, used by both the test helper and the production image builder.
+
+Through self-hosting, capabilities, multicore, W⊕X, protected calls/returns, process lifecycle, formal Petri nets, reclamation, a genuine supervisor, an explicitly delegated initial-environment ABI, a compiler managed by Anka rather than merely running inside it, zero host-fabricated compiler processes, and now a declarative system image, the ISA still has not demanded instruction 30.  Twenty-nine instructions.  468/468 tests.  The software keeps asking for better abstractions rather than instruction proliferation.
 
 The project continues to evolve by the same rule that produced its strongest results:
 

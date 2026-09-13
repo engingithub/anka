@@ -4040,10 +4040,8 @@ mod tests {
     //  Host may construct executable artifacts; Anka constructs processes.
     // ═══════════════════════════════════════════════════════
 
-    /// Where ankad maps the compiler object in its own address space.
-    /// SYS_SPAWN.R1 is always this value regardless of whether the
-    /// compiler is CC_A (child code_vaddr=0) or CC_B (child code_vaddr=0x30000).
-    const SUPERVISOR_COMPILER_VADDR: u64 = 0x30000;
+    // SUPERVISOR_COMPILER_VADDR is now in ankad.rs (single source of truth).
+    use crate::anka64::ankad::SUPERVISOR_COMPILER_VADDR;
 
     /// Result of a supervised compiler run.
     struct SupervisedResult {
@@ -4111,146 +4109,12 @@ mod tests {
             0x220000 + (WS_LIT_POS - LAYOUT_WS) as u64,
             &(OUTPUT_SIZE as u64).to_le_bytes());
 
-        // ── Assemble ankad ──
-        //
-        // Virtual memory layout for ankad:
-        //   0x00000 - 0x02000 : ankad code (Sealed, RX)
-        //   0x07000 - 0x0C000 : source (R)
-        //   0x0C000 - 0x12000 : workspace (RW)
-        //   0x12000 - 0x22000 : output (RWS)
-        //   0x30000+          : compiler code (RX, sealed)
-        //   0x50000 - 0x54000 : stack (kernel-allocated)
-        //   0x54000 - 0x55000 : trap (kernel-allocated)
-        //
-        // Values above MOVI 18-bit limit use MOVI half; ADD Rx,Rx,Rx.
-        // Register plan:
-        //   R4 = grant_base (SP - 0x300), becomes SYS_SPAWN R4
-        //   R6 = map_base   (SP - 0x200), becomes SYS_SPAWN R6
-        //   R8 = layout_base(SP - 0x100), becomes SYS_SPAWN R8
-        //   R9 = zero constant during construction, then handle after SPAWN
-        //   R3, R10 = temporaries
-        {
-            let mut asm = Asm64::new();
-
-            // ── Phase 1: base addresses ──
-            asm.subi(R4, SP, 0x300);          // grant_base
-            asm.subi(R6, SP, 0x200);          // map_base
-            asm.subi(R8, SP, 0x100);          // layout_base
-            asm.movi(R9, 0);                  // zero constant
-
-            // ── Phase 2a: Grant[0] — source = R ──
-            // [parent_vaddr, offset, size, perms, reserved]
-            asm.movi(R3, 0x07000);
-            asm.st(R3, R4, 0);               // parent_vaddr = 0x07000
-            asm.st(R9, R4, 8);               // offset = 0
-            asm.movi(R3, 0x5000);
-            asm.st(R3, R4, 16);              // size = SOURCE_SIZE
-            asm.movi(R3, 1);
-            asm.st(R3, R4, 24);              // perms = READ
-            asm.st(R9, R4, 32);              // reserved = 0
-
-            // ── Phase 2b: Grant[1] — output = RWS ──
-            asm.movi(R3, 0x9000);
-            asm.add(R3, R3, R3);             // R3 = 0x12000
-            asm.st(R3, R4, 40);              // parent_vaddr
-            asm.st(R9, R4, 48);              // offset = 0
-            asm.movi(R3, 0x8000);
-            asm.add(R3, R3, R3);             // R3 = 0x10000
-            asm.st(R3, R4, 56);              // size = OUTPUT_SIZE
-            asm.movi(R3, 0x13);
-            asm.st(R3, R4, 64);              // perms = RWS
-            asm.st(R9, R4, 72);              // reserved = 0
-
-            // ── Phase 2c: Grant[2] — workspace = RW ──
-            asm.movi(R3, 0x6000);
-            asm.add(R3, R3, R3);             // R3 = 0x0C000
-            asm.st(R3, R4, 80);              // parent_vaddr
-            asm.st(R9, R4, 88);              // offset = 0
-            asm.movi(R3, 0x6000);
-            asm.st(R3, R4, 96);              // size = WS_SIZE
-            asm.movi(R3, 3);
-            asm.st(R3, R4, 104);             // perms = RW
-            asm.st(R9, R4, 112);             // reserved = 0
-
-            // ── Phase 2d: Map[0] — source (identity mapping) ──
-            // [child_vaddr, parent_vaddr, offset, size, reserved]
-            asm.movi(R3, 0x07000);
-            asm.st(R3, R6, 0);               // child_vaddr = 0x07000
-            asm.st(R3, R6, 8);               // parent_vaddr = 0x07000
-            asm.st(R9, R6, 16);              // offset = 0
-            asm.movi(R3, 0x5000);
-            asm.st(R3, R6, 24);              // size = SOURCE_SIZE
-            asm.st(R9, R6, 32);              // reserved = 0
-
-            // ── Phase 2e: Map[1] — workspace (identity mapping) ──
-            asm.movi(R3, 0x6000);
-            asm.add(R3, R3, R3);             // R3 = 0x0C000
-            asm.st(R3, R6, 40);              // child_vaddr
-            asm.st(R3, R6, 48);              // parent_vaddr
-            asm.st(R9, R6, 56);              // offset = 0
-            asm.movi(R3, 0x6000);
-            asm.st(R3, R6, 64);              // size = WS_SIZE
-            asm.st(R9, R6, 72);              // reserved = 0
-
-            // ── Phase 2f: Map[2] — output (identity mapping) ──
-            asm.movi(R3, 0x9000);
-            asm.add(R3, R3, R3);             // R3 = 0x12000
-            asm.st(R3, R6, 80);              // child_vaddr
-            asm.st(R3, R6, 88);              // parent_vaddr
-            asm.st(R9, R6, 96);              // offset = 0
-            asm.movi(R3, 0x8000);
-            asm.add(R3, R3, R3);             // R3 = 0x10000
-            asm.st(R3, R6, 104);             // size = OUTPUT_SIZE
-            asm.st(R9, R6, 112);             // reserved = 0
-
-            // ── Phase 2g: SpawnLayout ──
-            // [code_vaddr, stack_vaddr, stack_size, trap_vaddr, reserved]
-            // child_code_vaddr is parameterized: 0 for CC_A, 0x30000 for CC_B
-            let half_code = (child_code_vaddr / 2) as i32;
-            asm.movi(R3, half_code);
-            asm.add(R3, R3, R3);             // R3 = child_code_vaddr
-            asm.st(R3, R8, 0);               // code_vaddr
-            asm.movi(R3, 0x11000);
-            asm.add(R3, R3, R3);             // R3 = 0x22000
-            asm.st(R3, R8, 8);               // stack_vaddr = LAYOUT_STACK
-            asm.movi(R3, 0x4000);
-            asm.st(R3, R8, 16);              // stack_size = 0x4000
-            asm.movi(R3, 0x13000);
-            asm.add(R3, R3, R3);             // R3 = 0x26000
-            asm.st(R3, R8, 24);              // trap_vaddr
-            asm.st(R9, R8, 32);              // reserved = 0
-
-            // ── Phase 3: SYS_SPAWN(R1-R8) ──
-            // R1 = SUPERVISOR_COMPILER_VADDR (parent mapping), always 0x30000
-            asm.movi(R1, 0x18000);
-            asm.add(R1, R1, R1);             // R1 = 0x30000
-            asm.movi(R2, compiler_len as i32); // R2 = code_size (fits MOVI)
-            asm.movi(R3, 0);                 // R3 = lit_start = 0
-            asm.movi(R5, 3);                 // R5 = grant_count
-            asm.movi(R7, 3);                 // R7 = map_count
-            // R4 = grant_base, R6 = map_base, R8 = layout_base (already set)
-            asm.movi(R0, SYS_SPAWN as i32);
-            asm.trap(0);
-
-            // ── Phase 4: SYS_WAIT ──
-            asm.mov(R9, R0);                 // R9 = handle
-            asm.mov(R1, R9);
-            asm.movi(R0, SYS_WAIT as i32);
-            asm.trap(0);
-            // R0 = tag, R1 = detail
-
-            // ── Phase 5: preserve tag, exit with detail ──
-            // MOV R10, R0 preserves the WAIT tag for host inspection.
-            // SYS_EXIT(R1) propagates the compiler's result as ankad's exit code.
-            asm.mov(R10, R0);                // R10 = wait tag (survives exit)
-            asm.movi(R0, SYS_EXIT as i32);
-            asm.trap(0);
-
-            let code_bytes = asm.to_bytes();
-            assert!(code_bytes.len() < 0x2000,
-                "ankad code {} bytes exceeds 0x2000", code_bytes.len());
-            fabric.initialize_object(ankad_obj, 0, &code_bytes);
-        }
+        // ── Assemble ankad (single source of truth in ankad.rs) ──
+        let code_bytes = crate::anka64::ankad::build_ankad_code(
+            compiler_len, child_code_vaddr);
+        assert!(code_bytes.len() < 0x2000,
+            "ankad code {} bytes exceeds 0x2000", code_bytes.len());
+        fabric.initialize_object(ankad_obj, 0, &code_bytes);
         fabric.seal_object(ankad_obj);
 
         // ── Boot descriptor ──
@@ -9768,6 +9632,231 @@ mod tests {
         eprintln!("      {} total process slots, {} Free after reclamation",
             total_procs, free_slots.len());
         eprintln!("      output Sealed, delegated objects survive incarnation death ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  Phase 8.6: System Image
+    //
+    //  The initial software object graph is packaged as a
+    //  declarative boot construction manifest.  The host loads
+    //  the image, calls kernel.boot(), and Anka takes over.
+    //
+    //  Closure criterion: one deterministic byte stream →
+    //  host loads → kernel.boot → ankad → CC_B → 42,
+    //  at two different physical bases with different ObjectIds.
+    // ═══════════════════════════════════════════════════════════
+
+    use crate::anka64::system_image::*;
+
+    /// Phase 8.6 closure test: build image once, encode, decode,
+    /// load at two different physical bases with different ObjectId
+    /// mappings, and get 42 both times.
+    #[test]
+    fn p86_system_image_boot() {
+        let ccb = build_ccb();
+        let image = build_compiler_system_image(&ccb, b"int main() { return 42; }");
+        let bytes = image.encode().unwrap();
+
+        eprintln!("8.6: system image: {} bytes encoded", bytes.len());
+
+        let decoded = SystemImage::decode(&bytes).unwrap();
+
+        // Machine A: fresh Fabric, load at 0x100000
+        let fabric_a = Fabric::new(8 * 1024 * 1024);
+        let loaded_a = decoded.load_into(fabric_a, 0x100000).unwrap();
+
+        // Machine B: Fabric with pre-allocated dummy object,
+        // load at 0x300000. This shifts ObjectIds so
+        // ImageObjectRef(0) → ObjectId(1) instead of ObjectId(0).
+        let mut fabric_b = Fabric::new(8 * 1024 * 1024);
+        fabric_b.alloc_object("dummy", 0x1000, ObjectKind::Memory);
+        let loaded_b = decoded.load_into(fabric_b, 0x300000).unwrap();
+
+        // Verify the two machines have different ObjectId mappings
+        let ankad_id_a = loaded_a.object_map[&ImageObjectRef(0)];
+        let ankad_id_b = loaded_b.object_map[&ImageObjectRef(0)];
+        assert_ne!(ankad_id_a, ankad_id_b,
+            "image identity must not depend on numeric ObjectId: \
+             machine A maps ankad to {:?}, machine B should differ",
+            ankad_id_a);
+
+        // Run both machines: same image bytes → same result
+        for (label, loaded) in [("P1=0x100000", loaded_a), ("P2=0x300000", loaded_b)] {
+            let mut kernel = loaded.kernel;
+            let boot_result = kernel.boot(&loaded.boot_info);
+            assert_eq!(boot_result, Ok(()),
+                "{label}: boot should succeed");
+
+            kernel.run(5_000_000, 200);
+
+            // ankad should have exited
+            assert!(kernel.processes[0].exited(),
+                "{label}: ankad should have exited");
+
+            // R10 = WAIT tag (0 = Exited)
+            let wait_tag = kernel.processes[0].core.r[R10 as usize];
+            assert_eq!(wait_tag, 0,
+                "{label}: WAIT tag should be 0 (Exited), got {wait_tag}");
+
+            // Exit code = 42 (compiler's result)
+            let exit_code = kernel.processes[0].exit_code;
+            assert_eq!(exit_code, 42,
+                "{label}: compiled program should return 42, got {exit_code}");
+
+            eprintln!("8.6: {label} → ankad → CC_B → 42 ✓");
+        }
+
+        eprintln!("8.6: same image bytes, different placement, different ObjectIds, \
+                   identical architectural behavior ✓");
+        eprintln!("8.6: logical identity ≠ runtime identity ≠ authority ≠ \
+                   virtual placement ≠ physical placement ✓");
+    }
+
+    // ── Codec tests ──
+
+    /// Build a small but valid system image for codec testing.
+    fn codec_test_image() -> SystemImage {
+        SystemImage {
+            version: IMAGE_VERSION,
+            objects: vec![
+                ImageObject {
+                    name: "code".to_string(),
+                    kind: ObjectKind::Memory,
+                    size: 0x1000,
+                    contents: vec![0xCC; 16],
+                    seal_after_load: true,
+                },
+                ImageObject {
+                    name: "data".to_string(),
+                    kind: ObjectKind::Memory,
+                    size: 0x2000,
+                    contents: vec![],
+                    seal_after_load: false,
+                },
+            ],
+            boot: ImageBootInfo {
+                image: ImageBootImage {
+                    obj: ImageObjectRef(0),
+                    code_offset: 0,
+                    code_size: 16,
+                    entry: 0,
+                    lit_start: 0,
+                },
+                grants: vec![
+                    ImageBootGrant {
+                        obj: ImageObjectRef(1),
+                        offset: 0,
+                        size: 0x2000,
+                        perms: Permissions::RW,
+                    },
+                ],
+                maps: vec![
+                    ImageBootMap {
+                        vaddr: 0x10000,
+                        size: 0x2000,
+                        obj: ImageObjectRef(1),
+                        obj_offset: 0,
+                    },
+                ],
+                code_vaddr: 0,
+                stack_vaddr: 0x20000,
+                stack_size: 0x4000,
+                trap_vaddr: 0x24000,
+            },
+        }
+    }
+
+    #[test]
+    fn p86_roundtrip() {
+        let image = codec_test_image();
+        let bytes = image.encode().unwrap();
+        let decoded = SystemImage::decode(&bytes).unwrap();
+
+        assert_eq!(decoded.version, image.version);
+        assert_eq!(decoded.objects.len(), image.objects.len());
+        for (a, b) in decoded.objects.iter().zip(image.objects.iter()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.kind, b.kind);
+            assert_eq!(a.size, b.size);
+            assert_eq!(a.contents, b.contents);
+            assert_eq!(a.seal_after_load, b.seal_after_load);
+        }
+        assert_eq!(decoded.boot.image.obj, image.boot.image.obj);
+        assert_eq!(decoded.boot.grants.len(), image.boot.grants.len());
+        assert_eq!(decoded.boot.maps.len(), image.boot.maps.len());
+        assert_eq!(decoded.boot.code_vaddr, image.boot.code_vaddr);
+        assert_eq!(decoded.boot.stack_vaddr, image.boot.stack_vaddr);
+        assert_eq!(decoded.boot.stack_size, image.boot.stack_size);
+        assert_eq!(decoded.boot.trap_vaddr, image.boot.trap_vaddr);
+    }
+
+    #[test]
+    fn p86_canonical_bytes() {
+        let image = codec_test_image();
+        let bytes1 = image.encode().unwrap();
+        let decoded = SystemImage::decode(&bytes1).unwrap();
+        let bytes2 = decoded.encode().unwrap();
+        assert_eq!(bytes1, bytes2, "encode(decode(B)) should equal B");
+    }
+
+    #[test]
+    fn p86_decode_bad_magic() {
+        let image = codec_test_image();
+        let mut bytes = image.encode().unwrap();
+        bytes[0] = b'X';
+        assert_eq!(SystemImage::decode(&bytes).unwrap_err(), ImageError::BadMagic);
+    }
+
+    #[test]
+    fn p86_decode_truncated() {
+        let image = codec_test_image();
+        let bytes = image.encode().unwrap();
+        assert_eq!(SystemImage::decode(&bytes[..20]).unwrap_err(), ImageError::Truncated);
+    }
+
+    #[test]
+    fn p86_decode_invalid_ref() {
+        let image = codec_test_image();
+        let mut bytes = image.encode().unwrap();
+        let ref_offset = HEADER_SIZE;
+        bytes[ref_offset] = 99;
+        assert_eq!(SystemImage::decode(&bytes).unwrap_err(), ImageError::InvalidObjectRef(99));
+    }
+
+    #[test]
+    fn p86_decode_bad_perms() {
+        let image = codec_test_image();
+        let mut bytes = image.encode().unwrap();
+        let grant_offset = HEADER_SIZE + BOOT_IMAGE_SIZE + BOOT_LAYOUT_SIZE;
+        bytes[grant_offset + 4] = 0xFF;
+        assert_eq!(SystemImage::decode(&bytes).unwrap_err(), ImageError::InvalidPermissions(0xFF));
+    }
+
+    #[test]
+    fn p86_decode_trailing_bytes() {
+        let image = codec_test_image();
+        let mut bytes = image.encode().unwrap();
+        bytes.push(0x42);
+        assert_eq!(SystemImage::decode(&bytes).unwrap_err(), ImageError::TrailingBytes);
+    }
+
+    #[test]
+    fn p86_decode_reserved_nonzero() {
+        let image = codec_test_image();
+        let mut bytes = image.encode().unwrap();
+        bytes[28] = 1;
+        assert_eq!(SystemImage::decode(&bytes).unwrap_err(), ImageError::ReservedNonZero);
+    }
+
+    #[test]
+    fn p86_decode_invalid_utf8_name() {
+        let image = codec_test_image();
+        let mut bytes = image.encode().unwrap();
+        let obj_start = HEADER_SIZE + BOOT_IMAGE_SIZE + BOOT_LAYOUT_SIZE
+            + image.boot.grants.len() * GRANT_RECORD_SIZE
+            + image.boot.maps.len() * MAP_RECORD_SIZE;
+        bytes[obj_start + 2] = 0xFF;
+        assert_eq!(SystemImage::decode(&bytes).unwrap_err(), ImageError::InvalidUtf8Name);
     }
 
 }

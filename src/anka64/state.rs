@@ -75,6 +75,20 @@ impl Permissions {
     /// emission buffer that will later be sealed.
     pub const RWS: Self = Self(0x13);
 
+    /// Mask of all defined permission bits (R|W|X|ATOMIC|SEAL).
+    pub const ALL_BITS: u64 = 0x1F;
+
+    /// Checked permission decoder — the single authority for valid
+    /// permission bits.  Accepts `u64` so the SPAWN ABI's native
+    /// register-width field can be validated without a truncating cast.
+    /// The system-image wire format widens its `u8` before calling.
+    pub fn from_bits_checked(bits: u64) -> Option<Self> {
+        if bits & !Self::ALL_BITS != 0 {
+            return None;
+        }
+        Some(Self(bits as u8))
+    }
+
     pub fn contains(self, required: Self) -> bool {
         self.0 & required.0 == required.0
     }

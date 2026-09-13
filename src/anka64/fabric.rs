@@ -137,6 +137,57 @@ impl Fabric {
         }
     }
 
+    /// Total physical memory size of this Fabric.
+    pub fn mem_size(&self) -> usize {
+        self.memory.len()
+    }
+
+    /// Page-aligned end of the highest physically placed object.
+    ///
+    /// Returns 0 if no Active/Sealed objects are placed.  Uses checked
+    /// arithmetic to prevent overflow from creating a bogus low watermark.
+    pub fn physical_high_watermark(&self) -> u64 {
+        let mut hwm: u64 = 0;
+        for (&id, &base) in &self.placement {
+            if let Some(obj) = self.objects.get(&id) {
+                if !matches!(obj.state, ObjectState::Active | ObjectState::Sealed) {
+                    continue;
+                }
+                let end = base.checked_add(obj.size).unwrap_or(u64::MAX);
+                let aligned = (end + 0xFFF) & !0xFFF;
+                if aligned > hwm {
+                    hwm = aligned;
+                }
+            }
+        }
+        hwm
+    }
+
+    /// Zero the entire physical extent of a placed Active object.
+    ///
+    /// This guarantees declarative payload semantics: the loader
+    /// can zero-fill before initializing contents, ensuring
+    /// `initial bytes = contents || 0^(size - |contents|)`
+    /// regardless of prior Fabric memory contents.
+    ///
+    /// Returns false if the object is not Active or not placed.
+    pub fn zero_object_extent(&mut self, id: ObjectId) -> bool {
+        let obj = match self.objects.get(&id) {
+            Some(o) if o.state == ObjectState::Active => o,
+            _ => return false,
+        };
+        let size = obj.size as usize;
+        let phys_base = match self.placement.get(&id) {
+            Some(&b) => b as usize,
+            None => return false,
+        };
+        let end = phys_base.saturating_add(size).min(self.memory.len());
+        for i in phys_base..end {
+            self.memory[i] = 0;
+        }
+        true
+    }
+
     // ───────────────── Domain management ─────────────────────────
 
     pub fn create_domain(&mut self) -> DomainId {
