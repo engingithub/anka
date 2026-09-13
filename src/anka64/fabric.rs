@@ -142,7 +142,10 @@ impl Fabric {
             Some(o) => o,
             None => return false,
         };
-        let new_end = physical_base + obj.size;
+        let new_end = match physical_base.checked_add(obj.size) {
+            Some(e) => e,
+            None => return false, // placement arithmetic overflow
+        };
 
         for (&existing_id, &existing_base) in &self.placement {
             if existing_id == id { continue; }
@@ -150,7 +153,10 @@ impl Fabric {
                 if !matches!(existing_obj.state, ObjectState::Active | ObjectState::Sealed) {
                     continue;
                 }
-                let existing_end = existing_base + existing_obj.size;
+                let existing_end = match existing_base.checked_add(existing_obj.size) {
+                    Some(e) => e,
+                    None => continue, // stale placement, skip
+                };
                 if physical_base < existing_end && new_end > existing_base {
                     return false; // overlap rejected (I9)
                 }
@@ -472,8 +478,11 @@ impl Fabric {
     ///
     /// Knows nothing about whether the caller is allowed.
     /// That decision has already happened (I3).
+    ///
+    /// Uses checked arithmetic: `base + offset` overflow returns `None`
+    /// rather than wrapping.
     pub fn translate(&self, object: ObjectId, offset: u64) -> Option<u64> {
-        self.placement.get(&object).map(|base| base + offset)
+        self.placement.get(&object).and_then(|&base| base.checked_add(offset))
     }
 
     // ───────────────── Transaction lifecycle ─────────────────────
@@ -557,29 +566,26 @@ impl Fabric {
         }
     }
 
-    /// Commit phase — all-or-nothing DMA span semantics.
+    /// Precommit gate — every mutating Fabric operation crosses this.
     ///
-    /// The write pipeline:
-    ///   1. Validate nonzero/representable span (done at submit)
-    ///   2. Revalidate generation (I5)
-    ///   3. Verify data.len() == declared length (LengthMismatch)
-    ///   4. Verify physical bounds (offset + length within memory)
-    ///   5. Mutate bytes
+    /// Validates (in order):
+    ///   1. Generation revalidation (I5)
+    ///   2. Physical address present
+    ///   3. Physical span fits in memory (checked arithmetic)
+    ///   4. For Write/Atomic: payload present and data.len() == declared length
     ///
-    /// No write occurs before step 5.  Any failure in steps 1-4
-    /// produces a fault with zero memory mutation.
-    fn phase_commit(&mut self, idx: usize) {
+    /// Returns `Ok((phys_base, phys_end))` on success.
+    /// On failure, faults the transaction and returns `Err(())`.
+    /// No memory is read or written before this gate passes.
+    fn validate_precommit(&mut self, idx: usize) -> Result<(usize, usize), ()> {
         let request = self.transactions[idx].request;
 
         // COMMIT-TIME REVALIDATION (I5)
-        //
-        // Re-authorize at the current generation.
-        // If the object was revoked since authorization, fault.
         match self.authorize(&request) {
             AuthResult::Authorized(_gen) => {}
             AuthResult::Denied(reason) => {
                 self.fault_transaction(idx, reason);
-                return;
+                return Err(());
             }
         }
 
@@ -587,7 +593,7 @@ impl Fabric {
             Some(p) => p,
             None => {
                 self.fault_transaction(idx, FaultReason::TranslationFault);
-                return;
+                return Err(());
             }
         };
 
@@ -598,23 +604,53 @@ impl Fabric {
             Some(end) if end <= self.memory.len() => end,
             _ => {
                 self.fault_transaction(idx, FaultReason::InvalidSpan);
-                return;
+                return Err(());
             }
         };
 
+        // For Write/Atomic: payload must be present and length-matched.
         match request.kind {
             AccessKind::Write | AccessKind::Atomic => {
-                if let Some(ref data) = self.transactions[idx].write_data {
-                    // Length mismatch: declared span vs actual data.
-                    // Protection boundary: mismatch => zero memory mutation.
-                    if data.len() != length {
+                match self.transactions[idx].write_data {
+                    Some(ref data) if data.len() == length => {}
+                    Some(_) => {
                         self.fault_transaction(idx, FaultReason::LengthMismatch);
-                        return;
+                        return Err(());
                     }
-                    // All validations passed — mutate bytes.
-                    let base = phys as usize;
-                    self.memory[base..phys_end].copy_from_slice(data);
+                    None => {
+                        self.fault_transaction(idx, FaultReason::LengthMismatch);
+                        return Err(());
+                    }
                 }
+            }
+            AccessKind::Read | AccessKind::Fetch => {}
+        }
+
+        Ok((phys as usize, phys_end))
+    }
+
+    /// Commit phase — all-or-nothing DMA span semantics.
+    ///
+    /// The write pipeline:
+    ///   1. Validate nonzero/representable span (done at submit)
+    ///   2. Revalidate generation (I5)
+    ///   3. Verify physical bounds (checked arithmetic)
+    ///   4. For Write/Atomic: verify payload present, data.len() == declared length
+    ///   5. Mutate bytes
+    ///
+    /// No write occurs before step 5.  Any failure in steps 1-4
+    /// produces a fault with zero memory mutation.
+    fn phase_commit(&mut self, idx: usize) {
+        let (base, end) = match self.validate_precommit(idx) {
+            Ok(span) => span,
+            Err(()) => return,
+        };
+
+        match self.transactions[idx].request.kind {
+            AccessKind::Write | AccessKind::Atomic => {
+                // Payload presence and length already validated by precommit.
+                let data = self.transactions[idx].write_data.as_ref().unwrap();
+                self.memory[base..end].copy_from_slice(data);
             }
             AccessKind::Read | AccessKind::Fetch => {
                 // Read data from physical memory — no mutation.
@@ -707,12 +743,15 @@ impl Fabric {
     /// Execute an atomic exchange: read old value, write new value,
     /// one indivisible transaction.  Under SC this is guaranteed
     /// atomic because only one core steps at a time.
+    ///
+    /// Both the old-value read and the new-value write cross the
+    /// same `validate_precommit` gate.  No memory is accessed before
+    /// all precommit checks pass.
     pub fn execute_atomic_xchg(
         &mut self,
         request: MemoryRequest,
         new_value: Vec<u8>,
     ) -> Result<Vec<u8>, FaultRecord> {
-        let length = request.length as usize;
         let idx = self.submit(request, Some(new_value));
         self.advance(idx); // authorize
         self.advance(idx); // translate -> Prepared
@@ -721,20 +760,24 @@ impl Fabric {
             return Err(self.transactions[idx].fault.clone().unwrap());
         }
 
-        // Capture old value while in Prepared state (before commit writes)
-        let phys = self.transactions[idx].physical_address.unwrap() as usize;
-        let old_value = self.memory[phys..phys + length].to_vec();
-
-        // Commit (writes new value, revalidates generation)
-        self.advance(idx);
-
-        match self.transactions[idx].state {
-            TxState::Committed => Ok(old_value),
-            TxState::Faulted => {
-                Err(self.transactions[idx].fault.clone().unwrap())
+        // Run the full precommit gate BEFORE reading memory.
+        // This validates generation, physical bounds, and payload length.
+        let (base, end) = match self.validate_precommit(idx) {
+            Ok(span) => span,
+            Err(()) => {
+                return Err(self.transactions[idx].fault.clone().unwrap());
             }
-            _ => unreachable!("transaction not terminal after 3 advances"),
-        }
+        };
+
+        // Precommit passed — safe to read old value.
+        let old_value = self.memory[base..end].to_vec();
+
+        // Write new value.  Payload presence and length already validated.
+        let data = self.transactions[idx].write_data.as_ref().unwrap();
+        self.memory[base..end].copy_from_slice(data);
+        self.transactions[idx].state = TxState::Committed;
+
+        Ok(old_value)
     }
 
     // ───────────────── Observation ───────────────────────────────
@@ -1832,5 +1875,82 @@ mod tests {
         assert_eq!(req.width, Width::Byte, "DMA placeholder width should be Byte");
         assert_eq!(req.length, 512, "DMA length should be explicit");
         assert_eq!(req.offset, 100);
+    }
+
+    /// Write transaction with no payload faults with LengthMismatch,
+    /// zero memory mutation.  Before this fix, absence of payload
+    /// bypassed the length check and the Fabric reported a successful
+    /// write that wrote nothing.
+    #[test]
+    fn p91pre_write_no_payload_faults() {
+        let (mut f, obj, dom) = setup_dma_span();
+        let snapshot: Vec<u8> = f.memory[0x4000..0x4000 + 0x1000].to_vec();
+
+        let req = dma_request(DMA0, dom, obj, 0, 512, AccessKind::Write);
+        let result = f.execute_write(req, vec![]);
+        assert!(result.is_err(), "write with empty payload must fail");
+        assert_eq!(result.unwrap_err().reason, FaultReason::LengthMismatch);
+        assert_eq!(&f.memory[0x4000..0x4000 + 0x1000], &snapshot[..],
+            "write with no payload must leave zero memory mutation");
+
+        // Also test submit with None directly via the transaction API.
+        let req2 = dma_request(DMA0, dom, obj, 0, 512, AccessKind::Write);
+        let idx = f.submit(req2, None);
+        f.advance(idx); // authorize
+        f.advance(idx); // translate
+        f.advance(idx); // commit
+        assert_eq!(f.transaction(idx).state, TxState::Faulted);
+        assert_eq!(f.transaction(idx).fault.as_ref().unwrap().reason,
+            FaultReason::LengthMismatch);
+        assert_eq!(&f.memory[0x4000..0x4000 + 0x1000], &snapshot[..],
+            "write with None payload must leave zero memory mutation");
+    }
+
+    /// Placement arithmetic overflow: placing a huge object at a high
+    /// base address that wraps u64 must be rejected.
+    /// Translation arithmetic overflow: translating with an offset that
+    /// wraps must produce TranslationFault, not a panic.
+    #[test]
+    fn p91pre_placement_translation_overflow() {
+        let mut f = Fabric::new(0x10000);
+
+        // Object at base near u64::MAX — base + size would overflow.
+        let obj = f.alloc_object("overflow_obj", 0x1000, ObjectKind::Memory);
+        let placed = f.place_object(obj, u64::MAX - 0x100);
+        assert!(!placed, "placement with base + size overflow must be rejected");
+
+        // Place it validly, then test translation overflow.
+        let placed = f.place_object(obj, 0x2000);
+        assert!(placed);
+
+        // Translate with offset that would overflow: base(0x2000) + offset(MAX-1)
+        let result = f.translate(obj, u64::MAX - 1);
+        assert!(result.is_none(),
+            "translate with arithmetic overflow must return None, not panic/wrap");
+    }
+
+    /// Atomic exchange on an invalid physical span must produce
+    /// InvalidSpan, never panic, zero mutation.  Before this fix,
+    /// execute_atomic_xchg read memory before the precommit gate.
+    #[test]
+    fn p91pre_atomic_invalid_span_no_panic() {
+        // Object placed so that offset 0x900 + 512 overruns physical memory.
+        let mut f = Fabric::new(0x5000);
+        let obj = f.alloc_object("atomic_buf", 0x1000, ObjectKind::Memory);
+        f.place_object(obj, 0x4800);
+        let dom = f.create_domain();
+        f.grant(dom, obj, 0, 0x1000, Permissions::ATOMIC);
+        for i in 0..0x5000usize { f.memory[i] = 0xDD; }
+        let snapshot: Vec<u8> = f.memory.clone();
+
+        // Atomic exchange at offset 0x900: phys = 0x5100, end = 0x5300 > 0x5000.
+        let mut req = dma_request(DMA0, dom, obj, 0x900, 512, AccessKind::Atomic);
+        req.context.privilege = Privilege::User;
+        let new_val = vec![0x42u8; 512];
+        let result = f.execute_atomic_xchg(req, new_val);
+        assert!(result.is_err(), "atomic on invalid physical span must fail");
+        assert_eq!(result.unwrap_err().reason, FaultReason::InvalidSpan);
+        assert_eq!(f.memory, snapshot,
+            "atomic on invalid span must produce zero memory mutation");
     }
 }
