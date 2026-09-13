@@ -326,3 +326,84 @@ correctness of the bootstrap root and initial compiler image.
 Freezing CC_A (DN-2) makes future diverse double compilation
 easier: a moving bootstrap compiler would constantly change the
 thing whose provenance you are trying to establish.
+
+---
+
+## DN-8: A name is not a capability — lifecycle authority
+
+**Date:** 2026-09-12 (Phase 8.2)
+
+**Context:**
+
+Phase 8.2 adds `SYS_SPAWN` and `SYS_WAIT` as the first
+capability-shaped process-lifecycle API in Anka.  A process that spawns
+a child receives a `LifecycleHandle` — the only way to observe (wait
+on) that child's termination.
+
+The design was initially implemented using a `ProcessHandle(pid, generation)`
+that was globally meaningful: any process that knew the bits could call
+`SYS_WAIT`.  This violated the architectural principle "authority cannot
+arise from nowhere" (Rule 8).  A raw PID is a name, not a capability.
+
+**Decision:**
+
+Replace the globally meaningful handle with a kernel-protected, per-parent
+lifecycle authority table.  Four distinct concepts:
+
+- **ProcessKey** `{ pid, generation }` — kernel-internal identity of a
+  specific process incarnation.  Never exposed to user space.
+- **LifecycleHandle** `(slot_generation:u32 | slot:u32)` — user-facing
+  opaque value.  Meaningful only in the lifecycle table of the process
+  that received it from `SYS_SPAWN`.
+- **LifecycleEntry** `{ slot_generation, child: ProcessKey, collected }` —
+  one slot in a parent's table.  Collected slots are recycled with a
+  bumped `slot_generation`.
+- **WaitState** `{ child: ProcessKey, kind: WaitKind, handle_slot }` —
+  suspended observation of a specific child incarnation.
+
+Two deliberate generations prevent two distinct stale-reference hazards:
+
+1. `slot_generation` prevents a consumed (collected) slot in a
+   long-lived parent from being confused with a new child that reuses
+   the same slot.
+2. `ProcessKey.generation` prevents a recycled kernel PID from being
+   confused with a former occupant of that process-table slot.
+
+The security property: knowing every bit of a `LifecycleHandle` does
+not create authority.  The handle resolves only in the calling
+process's own kernel-protected table.  Test `p82_wait_not_owner`
+demonstrates this: process B obtains the exact bit pattern of A's
+handle via IPC and attempts `SYS_WAIT` — rejected because B's table
+has no matching entry.
+
+**Orphan semantics:**
+
+When a parent exits without waiting on a child, the child becomes an
+orphan.  Phase 8.2 does not define orphan policy.  Possible policies
+(Phase 8.3+):
+
+- **Reparent to init:** orphaned children are adopted by the init
+  process, which can collect them.
+- **Kill on parent exit:** orphaned children are terminated.
+- **Detach (background):** orphans run until they exit, results discarded.
+
+The lifecycle table design supports all three: the table is per-parent,
+so orphan detection is simply "parent exited with uncollected entries."
+
+**Rejected alternative: global handle validation.**
+
+The original `validate_handle()` searched the global process table.
+This meant any process that knew a PID and generation could observe
+any other process.  Rejected because:
+
+- It conflates naming with authority (same flaw as Unix signal(pid)).
+- It makes cross-process information leaks possible.
+- It is inconsistent with Kleis capability semantics: authority must
+  be explicitly granted, not discovered.
+
+**Rule:**
+
+The lifecycle API follows Rule 8 ("authority cannot arise from
+nowhere"): `SYS_SPAWN` creates authority and returns it to the parent.
+`SYS_WAIT` consumes authority at the moment of result delivery.
+No other path creates lifecycle observation rights.

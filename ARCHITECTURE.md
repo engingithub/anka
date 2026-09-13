@@ -343,7 +343,7 @@ Key sub-phases:
 
 Phase 7.4 established a post-self-hosting development process: new compiler semantics are implemented in canonical source and tested through CC_B, without modifying the CC_A bootstrap seed.  This was the first phase to fully embrace the distinction between CC_A (bootstrap seed) and CC_B (authoritative compiler).
 
-At the current stage, the project has **407 tests with zero failures**.
+At the current stage, the project has **418 tests with zero failures**.
 
 ### Stage 19 — Boot contract (Phase 8.0)
 
@@ -364,6 +364,22 @@ Key design elements:
 - **BootMap virtual ranges may not overlap**: each other or implicit code/literal/stack/trap mappings.
 - **One-success-only**: successful boot sets a permanent flag.  Failed boot is transactional — no domain, capability, mapping, process, or object survives.
 - **boot() returns without running**: it installs init as runnable.  The host calls `run()` afterward.  Scheduling is the host's responsibility.
+
+### Stage 20 — Capability-shaped process lifecycle (Phase 8.2)
+
+Phase 8.2 established `SYS_SPAWN` (asynchronous process creation) and `SYS_WAIT` (lifecycle observation).  The decisive design property: **a name is not a capability** (DN-8, Rule 8).
+
+Key design elements:
+
+- **LifecycleHandle**: parent-local opaque reference `(slot_generation:u32 | slot:u32)`.  Meaningful only within the calling process's kernel-protected lifecycle table.  Returned by SYS_SPAWN, consumed by SYS_WAIT.
+- **ProcessKey**: kernel-internal identity `{ pid, generation }`.  Never exposed to user space.
+- **Two generations**: `slot_generation` prevents stale lifecycle-slot reuse within a long-lived parent; `ProcessKey.generation` prevents stale PID reuse across the kernel.
+- **WaitKind**: distinguishes `Exec` (historical single-register ABI, 0xDEAD for faults) from `Lifecycle` (two-register tagged ABI: R0=tag, R1=detail).
+- **Atomic consumption**: handle consumed at moment of result delivery, not before.  Second WAIT on same handle returns invalid.
+- **Security property**: full knowledge of a handle's bit representation does not create authority.  Non-owner WAIT is rejected because the handle resolves only in the caller's own table.
+- **Orphan semantics**: explicitly deferred to Phase 8.3+.
+
+Test count: 418 (408 prior + 10 lifecycle tests including stale slot reuse, cross-process non-owner rejection, fault-vs-exit tag distinction, SYS_EXEC 0xDEAD compatibility).
 
 ---
 

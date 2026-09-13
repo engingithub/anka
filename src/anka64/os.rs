@@ -38,8 +38,8 @@ pub struct Process {
     pub core: Anka64Core,
     pub exited: bool,
     pub exit_code: u64,
-    /// If Some(child_pid), this process is blocked waiting for child_pid to exit.
-    pub waiting_on: Option<u64>,
+    /// If Some, this process is blocked waiting for a specific child incarnation.
+    pub waiting_on: Option<WaitState>,
     /// PID of the parent process (None for init).
     pub parent: Option<u64>,
     /// Generation counter for lifecycle authority.
@@ -61,36 +61,104 @@ pub enum ProcessResult {
 }
 
 // ───────────────────────────────────────────────────────────────────
-// Lifecycle authority
-//
-// A process handle is (pid, generation).  A name is not a capability
-// (Rule 9).  Knowing a PID does not authorize observing a process.
-// The generation prevents stale handles from resolving after
-// process-slot reuse.
+// Result encoding (Rule 28: one authoritative encoder per ABI)
 // ───────────────────────────────────────────────────────────────────
 
-/// Opaque handle representing authority to observe a process lifecycle.
-/// Returned by SYS_SPAWN, consumed by SYS_WAIT.
-///
-/// Encoded as a single u64 for register passing:
-///   bits [63:32] = generation
-///   bits [31:0]  = pid
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProcessHandle(u64);
+/// Structured two-register WAIT ABI.
+///   R0 = tag:  0 = Exited, 1 = SupervisorFault, 2 = ProtectionFault, MAX = invalid
+///   R1 = detail: exit code for Exited, 0 otherwise
+/// Used by SYS_WAIT (lifecycle path) and wake_waiters (lifecycle path).
+fn encode_wait_result(result: &ProcessResult) -> (u64, u64) {
+    match result {
+        ProcessResult::Exited(code) => (0, *code),
+        ProcessResult::SupervisorFault => (1, 0),
+        ProcessResult::ProtectionFault => (2, 0),
+    }
+}
 
-impl ProcessHandle {
-    fn new(pid: u64, generation: u32) -> Self {
-        Self((generation as u64) << 32 | (pid & 0xFFFF_FFFF))
+/// Invalid handle sentinel for the two-register WAIT ABI.
+fn encode_wait_invalid() -> (u64, u64) {
+    (u64::MAX, 0)
+}
+
+/// Historical single-register EXEC ABI.
+/// Preserves exact legacy behavior: exit code for normal exit, 0xDEAD for faults.
+fn encode_exec_result(result: &ProcessResult) -> u64 {
+    match result {
+        ProcessResult::Exited(code) => *code,
+        ProcessResult::SupervisorFault | ProcessResult::ProtectionFault => 0xDEAD,
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Lifecycle authority
+//
+// Four distinct concepts:
+//   LifecycleHandle  = parent-local authority reference (user-facing)
+//   ProcessKey       = kernel identity of a specific process incarnation
+//   LifecycleEntry   = one slot in a parent's lifecycle authority table
+//   WaitState        = suspended observation of an exact ProcessKey
+//
+// Two deliberate generations:
+//   g_handle (slot_generation) — prevents stale lifecycle-slot reuse
+//                                within a long-lived parent
+//   g_process (ProcessKey.generation) — prevents stale PID/process-slot
+//                                       reuse across the kernel
+//
+// "Authority cannot arise from nowhere": knowing every bit of a
+// LifecycleHandle does not create authority.  The handle resolves
+// only in the calling process's own kernel-protected table.
+// ───────────────────────────────────────────────────────────────────
+
+/// Kernel-internal identity of a specific process incarnation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessKey {
+    pub pid: u64,
+    pub generation: u32,
+}
+
+/// User-facing lifecycle handle: (slot_generation:u32 | slot:u32).
+/// Returned by SYS_SPAWN, consumed by SYS_WAIT.
+/// Meaningful only within the parent process that received it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LifecycleHandle(u64);
+
+impl LifecycleHandle {
+    fn new(slot: u32, slot_generation: u32) -> Self {
+        Self((slot_generation as u64) << 32 | slot as u64)
     }
 
-    fn pid(&self) -> u64 { self.0 & 0xFFFF_FFFF }
-    fn generation(&self) -> u32 { (self.0 >> 32) as u32 }
+    fn slot(&self) -> u32 { self.0 as u32 }
+    fn slot_generation(&self) -> u32 { (self.0 >> 32) as u32 }
 
-    /// Encode as a single u64 for register passing.
     pub fn as_u64(&self) -> u64 { self.0 }
-
-    /// Decode from a u64 received from user space.
     pub fn from_u64(v: u64) -> Self { Self(v) }
+}
+
+/// One entry in a process's lifecycle authority table.
+#[derive(Debug, Clone)]
+struct LifecycleEntry {
+    slot_generation: u32,
+    child: ProcessKey,
+    collected: bool,
+}
+
+/// Distinguishes two wait ABIs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitKind {
+    /// SYS_EXEC: single-register historical ABI (R0 = exit_code or 0xDEAD).
+    Exec,
+    /// SYS_WAIT: two-register tagged ABI (R0 = tag, R1 = detail).
+    Lifecycle,
+}
+
+/// Suspended observation of a specific child incarnation.
+#[derive(Debug, Clone)]
+struct WaitState {
+    child: ProcessKey,
+    kind: WaitKind,
+    /// Index into the parent's lifecycle table (Lifecycle path only).
+    handle_slot: Option<usize>,
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -294,6 +362,9 @@ pub struct Kernel {
     pub next_agent: u64,
     /// One-success-only boot flag.  Set to true after a successful boot.
     booted: bool,
+    /// Per-process lifecycle authority tables.
+    /// lifecycle_tables[pid] = that process's lifecycle entries.
+    lifecycle_tables: Vec<Vec<LifecycleEntry>>,
 }
 
 impl Kernel {
@@ -307,6 +378,7 @@ impl Kernel {
             next_phys: 0x100000,
             next_agent: 100,
             booted: false,
+            lifecycle_tables: Vec::new(),
         }
     }
 
@@ -390,16 +462,49 @@ impl Kernel {
             result: None,
         });
         self.mailboxes.push(Vec::new());
+        self.lifecycle_tables.push(Vec::new());
         pid
     }
 
-    /// Validate a process handle and return the process index if valid.
-    fn validate_handle(&self, handle: ProcessHandle) -> Option<usize> {
-        let pid = handle.pid();
-        let handle_gen = handle.generation();
-        if pid as usize >= self.processes.len() { return None; }
-        let idx = pid as usize;
-        if self.processes[idx].generation != handle_gen { return None; }
+    /// Install a lifecycle entry in a parent's table.
+    /// Returns the LifecycleHandle for the new entry.
+    fn install_lifecycle(&mut self, parent_pid: u64, child_key: ProcessKey) -> LifecycleHandle {
+        let table = &mut self.lifecycle_tables[parent_pid as usize];
+        // Try to reuse a collected slot
+        for (i, entry) in table.iter_mut().enumerate() {
+            if entry.collected {
+                entry.slot_generation += 1;
+                entry.child = child_key;
+                entry.collected = false;
+                return LifecycleHandle::new(i as u32, entry.slot_generation);
+            }
+        }
+        // No reusable slot — append
+        let slot = table.len() as u32;
+        table.push(LifecycleEntry {
+            slot_generation: 0,
+            child: child_key,
+            collected: false,
+        });
+        LifecycleHandle::new(slot, 0)
+    }
+
+    /// Resolve a LifecycleHandle in a specific process's table.
+    /// Returns the LifecycleEntry index if valid and not yet collected.
+    fn resolve_lifecycle(&self, owner_pid: u64, handle: LifecycleHandle) -> Option<(usize, &LifecycleEntry)> {
+        let table = self.lifecycle_tables.get(owner_pid as usize)?;
+        let slot = handle.slot() as usize;
+        let entry = table.get(slot)?;
+        if entry.slot_generation != handle.slot_generation() { return None; }
+        if entry.collected { return None; }
+        Some((slot, entry))
+    }
+
+    /// Validate a ProcessKey against the process table.
+    fn validate_process_key(&self, key: &ProcessKey) -> Option<usize> {
+        let idx = key.pid as usize;
+        if idx >= self.processes.len() { return None; }
+        if self.processes[idx].generation != key.generation { return None; }
         Some(idx)
     }
 
@@ -594,26 +699,45 @@ impl Kernel {
                 self.run_process(i, quantum);
                 // After running, check if any newly-exited process
                 // has a parent waiting on it
-                self.reap_exited();
+                self.wake_waiters();
             }
         }
     }
 
     /// Check for exited processes and resume any parent waiting on them.
-    fn reap_exited(&mut self) {
-        // Collect (child_pid, exit_code) for exited children
-        let mut completions: Vec<(u64, u64)> = Vec::new();
+    fn wake_waiters(&mut self) {
+        // Collect (child_pid, child_gen, result) for exited children
+        let mut completions: Vec<(u64, u32, ProcessResult)> = Vec::new();
         for p in &self.processes {
             if p.exited {
-                completions.push((p.pid, p.exit_code));
+                let result = p.result.clone()
+                    .unwrap_or(ProcessResult::Exited(p.exit_code));
+                completions.push((p.pid, p.generation, result));
             }
         }
         // For each exited child, find any parent waiting on it
-        for (child_pid, child_exit) in completions {
+        for (child_pid, child_gen, result) in completions {
             for i in 0..self.processes.len() {
-                if self.processes[i].waiting_on == Some(child_pid) {
-                    self.processes[i].waiting_on = None;
-                    self.processes[i].core.r[R0 as usize] = child_exit;
+                let matches = self.processes[i].waiting_on.as_ref()
+                    .map(|ws| ws.child.pid == child_pid && ws.child.generation == child_gen)
+                    .unwrap_or(false);
+                if matches {
+                    let ws = self.processes[i].waiting_on.take().unwrap();
+                    match ws.kind {
+                        WaitKind::Exec => {
+                            self.processes[i].core.r[R0 as usize] = encode_exec_result(&result);
+                        }
+                        WaitKind::Lifecycle => {
+                            let (r0, r1) = encode_wait_result(&result);
+                            self.processes[i].core.r[R0 as usize] = r0;
+                            self.processes[i].core.r[R1 as usize] = r1;
+                            // Consume the lifecycle handle
+                            if let Some(slot) = ws.handle_slot {
+                                let parent_pid = self.processes[i].pid;
+                                self.lifecycle_tables[parent_pid as usize][slot].collected = true;
+                            }
+                        }
+                    }
                     self.resume_from_trap(i);
                 }
             }
@@ -1074,19 +1198,24 @@ impl Kernel {
 
     fn handle_exec(&mut self, idx: usize) {
         if let Some(child_pid) = self.create_child(idx) {
-            // Block the parent until the child exits.
-            self.processes[idx].waiting_on = Some(child_pid);
-            // Do NOT call resume_from_trap — the parent stays suspended.
-            // When the child exits, reap_exited() sets R0 and resumes.
+            let child_gen = self.processes[child_pid as usize].generation;
+            self.processes[idx].waiting_on = Some(WaitState {
+                child: ProcessKey { pid: child_pid, generation: child_gen },
+                kind: WaitKind::Exec,
+                handle_slot: None,
+            });
         }
         // On failure, create_child already set R0=MAX and resumed.
     }
 
     fn handle_spawn(&mut self, idx: usize) {
         if let Some(child_pid) = self.create_child(idx) {
-            // Return immediately with a ProcessHandle
-            let handle = ProcessHandle::new(
-                child_pid, self.processes[child_pid as usize].generation);
+            let child_key = ProcessKey {
+                pid: child_pid,
+                generation: self.processes[child_pid as usize].generation,
+            };
+            let parent_pid = self.processes[idx].pid;
+            let handle = self.install_lifecycle(parent_pid, child_key);
             self.processes[idx].core.r[R0 as usize] = handle.as_u64();
             self.resume_from_trap(idx);
         }
@@ -1094,39 +1223,55 @@ impl Kernel {
     }
 
     /// Wait for a child process to exit.
-    /// R1 = ProcessHandle (u64).
-    /// Returns: R0 = exit code on normal exit, R0 = MAX on error/fault.
+    /// R1 = LifecycleHandle (u64).
+    /// Returns: two-register ABI (R0=tag, R1=detail) via encode_wait_result.
     fn handle_wait(&mut self, idx: usize) {
         let raw_handle = self.processes[idx].core.r[R1 as usize];
-        let handle = ProcessHandle::from_u64(raw_handle);
+        let handle = LifecycleHandle::from_u64(raw_handle);
+        let parent_pid = self.processes[idx].pid;
 
-        // Validate the handle
-        let child_idx = match self.validate_handle(handle) {
-            Some(i) => i,
+        // Resolve in the caller's own lifecycle table
+        let (slot, child_key) = match self.resolve_lifecycle(parent_pid, handle) {
+            Some((s, entry)) => (s, entry.child),
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                let (r0, r1) = encode_wait_invalid();
+                self.processes[idx].core.r[R0 as usize] = r0;
+                self.processes[idx].core.r[R1 as usize] = r1;
                 self.resume_from_trap(idx);
                 return;
             }
         };
 
-        // Only the parent may wait on this child
-        if self.processes[child_idx].parent != Some(self.processes[idx].pid) {
-            self.processes[idx].core.r[R0 as usize] = u64::MAX;
-            self.resume_from_trap(idx);
-            return;
-        }
+        // Validate the child ProcessKey against the process table
+        let child_idx = match self.validate_process_key(&child_key) {
+            Some(i) => i,
+            None => {
+                let (r0, r1) = encode_wait_invalid();
+                self.processes[idx].core.r[R0 as usize] = r0;
+                self.processes[idx].core.r[R1 as usize] = r1;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
 
-        // If child already exited, return immediately
+        // If child already exited, return immediately and consume handle
         if self.processes[child_idx].exited {
-            let exit_code = self.processes[child_idx].exit_code;
-            self.processes[idx].core.r[R0 as usize] = exit_code;
+            let result = self.processes[child_idx].result.as_ref()
+                .expect("exited process must have a result");
+            let (r0, r1) = encode_wait_result(result);
+            self.lifecycle_tables[parent_pid as usize][slot].collected = true;
+            self.processes[idx].core.r[R0 as usize] = r0;
+            self.processes[idx].core.r[R1 as usize] = r1;
             self.resume_from_trap(idx);
             return;
         }
 
         // Child still running — block the parent
-        self.processes[idx].waiting_on = Some(handle.pid());
+        self.processes[idx].waiting_on = Some(WaitState {
+            child: child_key,
+            kind: WaitKind::Lifecycle,
+            handle_slot: Some(slot),
+        });
     }
 
     fn resume_from_trap(&mut self, idx: usize) {
@@ -1921,6 +2066,754 @@ mod tests {
         assert!(kernel.byte_output.is_empty(),
             "no bytes committed when R3 != 0");
         eprintln!("7.3h: R3 nonzero → u64::MAX, no output ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 8.2: Lifecycle authority tests — SYS_SPAWN / SYS_WAIT
+    // ═══════════════════════════════════════════════════════════
+    //
+    // Layout for lifecycle tests:
+    //   Parent text : virt 0x00000, phys 0x000000, size 0x4000
+    //   Output buf  : virt 0x10000, phys 0x010000, size 0x4000 (RWS → child code)
+    //   Stack       : virt 0x20000, phys 0x020000, size 0x4000
+    //   (Kernel alloc starts at 0x040000)
+    //
+    // Child code is pre-written to the output buffer's physical
+    // address before the parent is sealed.  The parent then:
+    //   SYS_SEAL(output_buf_vaddr) → SYS_SPAWN(output_buf_vaddr, child_size, 0)
+    //   → SYS_WAIT(handle) → SYS_EXIT(result).
+
+    /// Build a child program that exits with the given code.
+    fn child_exit_code(code: i32) -> Vec<u8> {
+        let mut asm = Asm64::new();
+        asm.movi(R1, code);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        asm.halt();
+        asm.to_bytes()
+    }
+
+    /// Build a child program that triggers a protection fault.
+    /// Attempts to write to address 0xDEAD_0000 (unmapped).
+    fn child_fault_program() -> Vec<u8> {
+        let mut asm = Asm64::new();
+        asm.movi(R5, 0xDEAD_u32 as i32);
+        asm.movi(R6, 16);
+        asm.shl(R5, R5, R6);
+        asm.movi(R6, 42);
+        asm.st(R6, R5, 0);
+        asm.halt();
+        asm.to_bytes()
+    }
+
+    /// Build a child program that loops forever (SYS_YIELD in a loop).
+    fn child_infinite_loop() -> Vec<u8> {
+        let mut asm = Asm64::new();
+        // word 0: SYS_YIELD
+        asm.movi(R0, SYS_YIELD as i32);
+        asm.trap(0);
+        // word 2: branch back to word 0 (target = PC + offset*4 = 8 + (-2)*4 = 0)
+        asm.bcc(super::super::isa::Cond::Al, -2);
+        asm.to_bytes()
+    }
+
+    /// Set up a lifecycle test: parent with RWS output buffer.
+    /// Returns (fabric, parent_core, parent_dom, text_obj, output_obj, stack_obj).
+    fn lifecycle_test_setup(fabric: &mut Fabric) -> (Anka64Core, DomainId, ObjectId, ObjectId, ObjectId) {
+        let text   = fabric.alloc_object("parent_text",   0x4000, ObjectKind::Memory);
+        let output = fabric.alloc_object("parent_output", 0x4000, ObjectKind::Memory);
+        let stack  = fabric.alloc_object("parent_stack",  0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text,   0x000000);
+        fabric.place_object(output, 0x010000);
+        fabric.place_object(stack,  0x020000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, output, 0, 0x4000, Permissions::RWS);
+        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
+
+        let mut core = Anka64Core::new(CPU0, dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x10000, 0x4000, output);
+        core.address_map.add(0x20000, 0x4000, stack);
+        core.r[SP as usize] = 0x20000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        (core, dom, text, output, stack)
+    }
+
+    /// Build parent code: SEAL → SPAWN → save handle → WAIT → EXIT(R0).
+    /// R0 after WAIT has the tag (0=Exited). R1 has the exit code.
+    /// Parent exits with R1 (the child's exit code) for simple tests.
+    fn parent_seal_spawn_wait_exit(child_code_size: i32) -> Vec<u8> {
+        let mut asm = Asm64::new();
+        // SYS_SEAL(0x10000)
+        asm.movi(R1, 0x10000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        // SYS_SPAWN(0x10000, child_code_size, 0)
+        asm.movi(R1, 0x10000_u32 as i32);
+        asm.movi(R2, child_code_size);
+        asm.movi(R3, 0);
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        // Save handle in R4
+        asm.mov(R4, R0);
+        // SYS_WAIT(handle)
+        asm.mov(R1, R4);
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+        // R0 = tag (0=Exited), R1 = exit code
+        // Exit with R1 (child's exit code)
+        asm.mov(R1, R1); // nop but clarifies intent: R1 already has the value
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        asm.to_bytes()
+    }
+
+    /// Build parent code: SEAL → SPAWN → EXIT(handle_as_u64).
+    /// Returns immediately after spawn without waiting.
+    fn parent_seal_spawn_exit_handle(child_code_size: i32) -> Vec<u8> {
+        let mut asm = Asm64::new();
+        // SYS_SEAL(0x10000)
+        asm.movi(R1, 0x10000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        // SYS_SPAWN(0x10000, child_code_size, 0)
+        asm.movi(R1, 0x10000_u32 as i32);
+        asm.movi(R2, child_code_size);
+        asm.movi(R3, 0);
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        // Exit with handle value (R0)
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        asm.to_bytes()
+    }
+
+    #[test]
+    fn p82_spawn_returns_immediately() {
+        // SYS_SPAWN returns immediately even when child loops forever.
+        // Parent exits with the handle value (nonzero, non-MAX).
+        let mut fabric = Fabric::new(0x400000);
+        let (core, dom, text, _output, _stack) = lifecycle_test_setup(&mut fabric);
+
+        let child_code = child_infinite_loop();
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        let parent_code = parent_seal_spawn_exit_handle(child_size);
+        fabric.write_physical(0x000000, &parent_code);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x040000;
+        kernel.spawn(core);
+        kernel.run(1000, 100);
+
+        assert!(kernel.processes[0].exited,
+            "parent must exit");
+        let handle_val = kernel.processes[0].exit_code;
+        assert_ne!(handle_val, u64::MAX,
+            "SPAWN must succeed (not MAX)");
+        // Child should still be running (or at least spawned)
+        assert!(kernel.processes.len() >= 2,
+            "child must have been spawned");
+        eprintln!("8.2e: spawn_returns_immediately → handle={:#x} ✓", handle_val);
+    }
+
+    #[test]
+    fn p82_spawn_wait_single() {
+        // Spawn one child that exits with 42, wait for it, parent
+        // exits with child's exit code.
+        let mut fabric = Fabric::new(0x400000);
+        let (core, dom, text, _output, _stack) = lifecycle_test_setup(&mut fabric);
+
+        let child_code = child_exit_code(42);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        let parent_code = parent_seal_spawn_wait_exit(child_size);
+        fabric.write_physical(0x000000, &parent_code);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x040000;
+        kernel.spawn(core);
+        kernel.run(1000, 100);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, 42,
+            "parent should exit with child's exit code 42");
+        eprintln!("8.2e: spawn_wait_single(42) ✓");
+    }
+
+    #[test]
+    fn p82_spawn_two_wait_both() {
+        // Parent spawns two children (exit 11 and 22), waits both,
+        // exits with the sum (33).
+        //
+        // Virtual layout (all addresses < 0x20000 for 18-bit MOVI):
+        //   text:    virt 0x00000, phys 0x000000
+        //   output1: virt 0x04000, phys 0x010000
+        //   output2: virt 0x08000, phys 0x030000
+        //   stack:   virt 0x10000, phys 0x020000
+        let mut fabric = Fabric::new(0x800000);
+
+        let text    = fabric.alloc_object("parent_text",   0x4000, ObjectKind::Memory);
+        let output1 = fabric.alloc_object("child1_output", 0x4000, ObjectKind::Memory);
+        let output2 = fabric.alloc_object("child2_output", 0x4000, ObjectKind::Memory);
+        let stack   = fabric.alloc_object("parent_stack",  0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text,    0x000000);
+        fabric.place_object(output1, 0x010000);
+        fabric.place_object(output2, 0x030000);
+        fabric.place_object(stack,   0x020000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, output1, 0, 0x4000, Permissions::RWS);
+        fabric.grant(dom, output2, 0, 0x4000, Permissions::RWS);
+        fabric.grant(dom, stack,   0, 0x4000, Permissions::RW);
+
+        let mut core = Anka64Core::new(CPU0, dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x04000, 0x4000, output1);
+        core.address_map.add(0x08000, 0x4000, output2);
+        core.address_map.add(0x10000, 0x4000, stack);
+        core.r[SP as usize] = 0x10000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        // Child 1: exit(11)
+        let child1 = child_exit_code(11);
+        fabric.write_physical(0x010000, &child1);
+        // Child 2: exit(22)
+        let child2 = child_exit_code(22);
+        fabric.write_physical(0x030000, &child2);
+
+        let child1_size = child1.len() as i32;
+        let child2_size = child2.len() as i32;
+
+        // Parent: SEAL buf1 → SPAWN buf1 → save H1
+        //         SEAL buf2 → SPAWN buf2 → save H2
+        //         WAIT H1 → save R1 (exit code) → WAIT H2 → ADD → EXIT
+        let mut asm = Asm64::new();
+        // SEAL output1
+        asm.movi(R1, 0x4000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        // SPAWN from output1
+        asm.movi(R1, 0x4000_u32 as i32);
+        asm.movi(R2, child1_size);
+        asm.movi(R3, 0);
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R4, R0); // H1 in R4
+        // SEAL output2
+        asm.movi(R1, 0x8000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        // SPAWN from output2
+        asm.movi(R1, 0x8000_u32 as i32);
+        asm.movi(R2, child2_size);
+        asm.movi(R3, 0);
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R5, R0); // H2 in R5
+        // WAIT H1
+        asm.mov(R1, R4);
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+        // R0=tag(0), R1=exit_code(11). Save R1 in R6.
+        asm.mov(R6, R1);
+        // WAIT H2
+        asm.mov(R1, R5);
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+        // R0=tag(0), R1=exit_code(22). Add R6+R1.
+        asm.add(R7, R6, R1);
+        // EXIT(sum)
+        asm.mov(R1, R7);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x040000;
+        kernel.spawn(core);
+        kernel.run(1000, 200);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, 33,
+            "parent should exit with 11 + 22 = 33");
+        eprintln!("8.2e: spawn_two_wait_both(11+22=33) ✓");
+    }
+
+    #[test]
+    fn p82_wait_already_exited() {
+        // Child exits before parent calls WAIT (parent yields first).
+        let mut fabric = Fabric::new(0x400000);
+        let (core, dom, text, _output, _stack) = lifecycle_test_setup(&mut fabric);
+
+        let child_code = child_exit_code(99);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // Parent: SEAL → SPAWN → YIELD → YIELD → YIELD → WAIT → EXIT(R1)
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x10000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x10000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R4, R0); // save handle
+        // Yield several times so child runs and exits
+        asm.movi(R0, SYS_YIELD as i32);
+        asm.trap(0);
+        asm.movi(R0, SYS_YIELD as i32);
+        asm.trap(0);
+        asm.movi(R0, SYS_YIELD as i32);
+        asm.trap(0);
+        // Now WAIT — child should already be exited
+        asm.mov(R1, R4);
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+        // R0=0(Exited), R1=99
+        asm.mov(R1, R1);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x040000;
+        kernel.spawn(core);
+        kernel.run(1000, 200);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, 99,
+            "WAIT on already-exited child should return its exit code");
+        eprintln!("8.2e: wait_already_exited(99) ✓");
+    }
+
+    #[test]
+    fn p82_wait_consumes_handle() {
+        // After WAIT succeeds, the handle is consumed.
+        // A second WAIT on the same handle returns invalid (R0=MAX).
+        let mut fabric = Fabric::new(0x400000);
+        let (core, dom, text, _output, _stack) = lifecycle_test_setup(&mut fabric);
+
+        let child_code = child_exit_code(7);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // Parent: SEAL → SPAWN → WAIT(H) → save tag in R5 →
+        //         WAIT(H) again → R0 should be MAX → EXIT(R0)
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x10000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x10000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R4, R0); // save handle
+        // First WAIT → should succeed
+        asm.mov(R1, R4);
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+        // R0=0(Exited), R1=7. Save to verify later.
+        asm.mov(R5, R1); // child exit code in R5
+        // Second WAIT on same handle → should return invalid
+        asm.mov(R1, R4);
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+        // R0 should be MAX (handle consumed). Exit with R0.
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x040000;
+        kernel.spawn(core);
+        kernel.run(1000, 200);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "second WAIT on consumed handle should return MAX");
+        eprintln!("8.2e: wait_consumes_handle ✓");
+    }
+
+    #[test]
+    fn p82_wait_forged_handle() {
+        // A process fabricates a handle value and calls WAIT.
+        // Must fail: the handle doesn't exist in the caller's table.
+        let mut fabric = Fabric::new(0x400000);
+        let (core, dom, text, _output, _stack) = lifecycle_test_setup(&mut fabric);
+
+        // Parent: just WAIT with a fabricated handle, no spawn at all
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x42_u32 as i32); // fabricated handle
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+        // R0 should be MAX
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x040000;
+        kernel.spawn(core);
+        kernel.run(1000, 100);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "forged handle must be rejected");
+        eprintln!("8.2e: wait_forged_handle → MAX ✓");
+    }
+
+    #[test]
+    fn p82_wait_not_owner() {
+        // Process A spawns child C and gets handle H.
+        // Process B knows the bits of H but has no entry in its table.
+        // B's WAIT(H) must fail.
+        //
+        // A: SEAL → SPAWN → EXIT(handle)
+        // B: receives handle from A via message → WAIT(H) → must fail
+        //
+        // We set up A and B as two separate spawned processes.
+        // A sends handle to B, B tries to WAIT on it.
+        let mut fabric = Fabric::new(0x800000);
+
+        // Process A objects
+        let a_text   = fabric.alloc_object("a_text",   0x4000, ObjectKind::Memory);
+        let a_output = fabric.alloc_object("a_output", 0x4000, ObjectKind::Memory);
+        let a_stack  = fabric.alloc_object("a_stack",  0x4000, ObjectKind::Memory);
+        fabric.place_object(a_text,   0x000000);
+        fabric.place_object(a_output, 0x010000);
+        fabric.place_object(a_stack,  0x020000);
+
+        // Process B objects
+        let b_text  = fabric.alloc_object("b_text",  0x4000, ObjectKind::Memory);
+        let b_stack = fabric.alloc_object("b_stack", 0x4000, ObjectKind::Memory);
+        fabric.place_object(b_text,  0x040000);
+        fabric.place_object(b_stack, 0x050000);
+
+        let dom_a = fabric.create_domain();
+        fabric.grant(dom_a, a_output, 0, 0x4000, Permissions::RWS);
+        fabric.grant(dom_a, a_stack,  0, 0x4000, Permissions::RW);
+
+        let dom_b = fabric.create_domain();
+        fabric.grant(dom_b, b_stack, 0, 0x4000, Permissions::RW);
+
+        // Child code: exit(77)
+        let child_code = child_exit_code(77);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // A: SEAL → SPAWN → get handle → SEND handle to B (pid=1) → EXIT(0)
+        let mut asm_a = Asm64::new();
+        asm_a.movi(R1, 0x10000_u32 as i32);
+        asm_a.movi(R0, SYS_SEAL as i32);
+        asm_a.trap(0);
+        asm_a.movi(R1, 0x10000_u32 as i32);
+        asm_a.movi(R2, child_size);
+        asm_a.movi(R3, 0);
+        asm_a.movi(R0, SYS_SPAWN as i32);
+        asm_a.trap(0);
+        asm_a.mov(R4, R0); // handle
+        // SEND(dest=1, value=handle)
+        asm_a.movi(R1, 1); // B's pid
+        asm_a.mov(R2, R4);
+        asm_a.movi(R0, SYS_SEND as i32);
+        asm_a.trap(0);
+        // EXIT(0)
+        asm_a.movi(R1, 0);
+        asm_a.movi(R0, SYS_EXIT as i32);
+        asm_a.trap(0);
+
+        fabric.write_physical(0x000000, &asm_a.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, a_text, dom_a);
+
+        // B: YIELD (let A run) → RECV → WAIT(received_handle) → EXIT(R0)
+        let mut asm_b = Asm64::new();
+        asm_b.movi(R0, SYS_YIELD as i32);
+        asm_b.trap(0);
+        asm_b.movi(R0, SYS_YIELD as i32);
+        asm_b.trap(0);
+        // RECV
+        asm_b.movi(R0, SYS_RECV as i32);
+        asm_b.trap(0);
+        // R0 = handle value. Try to WAIT on it.
+        asm_b.mov(R1, R0);
+        asm_b.movi(R0, SYS_WAIT as i32);
+        asm_b.trap(0);
+        // Should return MAX. Exit with R0.
+        asm_b.mov(R1, R0);
+        asm_b.movi(R0, SYS_EXIT as i32);
+        asm_b.trap(0);
+
+        fabric.write_physical(0x040000, &asm_b.to_bytes());
+        install_trap_handler(&mut fabric, 0x040000, 0x4000);
+        seal_code_object(&mut fabric, b_text, dom_b);
+
+        let mut core_a = Anka64Core::new(CPU0, dom_a);
+        core_a.address_map.add(0x00000, 0x4000, a_text);
+        core_a.address_map.add(0x10000, 0x4000, a_output);
+        core_a.address_map.add(0x20000, 0x4000, a_stack);
+        core_a.r[SP as usize] = 0x20000 + 0x4000;
+        core_a.trap_vector = 0x3FF0;
+
+        let mut core_b = Anka64Core::new(AgentId(1), dom_b);
+        core_b.address_map.add(0x00000, 0x4000, b_text);
+        core_b.address_map.add(0x20000, 0x4000, b_stack);
+        core_b.r[SP as usize] = 0x20000 + 0x4000;
+        core_b.trap_vector = 0x3FF0;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x060000;
+        kernel.spawn(core_a);
+        kernel.spawn(core_b);
+        kernel.run(1000, 200);
+
+        // B should have exited with MAX (handle not in B's table)
+        assert!(kernel.processes[1].exited);
+        assert_eq!(kernel.processes[1].exit_code, u64::MAX,
+            "non-owner WAIT must be rejected: authority survives full knowledge");
+        eprintln!("8.2e: wait_not_owner → MAX (security property confirmed) ✓");
+    }
+
+    #[test]
+    fn p82_fault_vs_exit() {
+        // Spawn a child that faults. WAIT should return
+        // R0=2 (ProtectionFault), not R0=0 (Exited).
+        let mut fabric = Fabric::new(0x400000);
+        let (core, dom, text, _output, _stack) = lifecycle_test_setup(&mut fabric);
+
+        let child_code = child_fault_program();
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // Parent: SEAL → SPAWN → WAIT → EXIT(R0)
+        // Exit with R0 (the tag), not R1, to distinguish fault from exit.
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x10000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x10000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R4, R0); // handle
+        asm.mov(R1, R4);
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+        // R0=tag. Exit with tag to distinguish.
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x040000;
+        kernel.spawn(core);
+        kernel.run(1000, 200);
+
+        assert!(kernel.processes[0].exited);
+        // Tag 2 = ProtectionFault
+        assert_eq!(kernel.processes[0].exit_code, 2,
+            "faulted child must return tag 2 (ProtectionFault), not 0 (Exited)");
+        eprintln!("8.2e: fault_vs_exit → tag=2 (ProtectionFault) ✓");
+    }
+
+    #[test]
+    fn p82_exec_compatibility_0xdead() {
+        // SYS_EXEC on a faulting child must still return 0xDEAD
+        // (historical single-register ABI), not the new tag encoding.
+        let mut fabric = Fabric::new(0x400000);
+        let (core, dom, text, _output, _stack) = lifecycle_test_setup(&mut fabric);
+
+        let child_code = child_fault_program();
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // Parent: SEAL → EXEC (not SPAWN) → EXIT(R0)
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x10000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        // SYS_EXEC(0x10000, child_size, 0)
+        asm.movi(R1, 0x10000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R0, SYS_EXEC as i32);
+        asm.trap(0);
+        // R0 = child exit code (or 0xDEAD for faults)
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x040000;
+        kernel.spawn(core);
+        kernel.run(1000, 200);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, 0xDEAD,
+            "SYS_EXEC on faulting child must return 0xDEAD (historical ABI)");
+        eprintln!("8.2e: exec_compatibility → 0xDEAD ✓");
+    }
+
+    #[test]
+    fn p82_stale_handle_after_slot_reuse() {
+        // Spawn A → H1(slot=0,gen=0), WAIT H1 (consumes it),
+        // Spawn B → H2 reuses slot 0 (gen=1),
+        // WAIT H1 → invalid (stale generation),
+        // WAIT H2 → succeeds with B's exit code.
+        //
+        // Virtual layout (all MOVI targets < 0x20000):
+        //   text:    virt 0x00000, phys 0x000000
+        //   output1: virt 0x04000, phys 0x010000
+        //   output2: virt 0x08000, phys 0x030000
+        //   stack:   virt 0x10000, phys 0x020000
+        let mut fabric = Fabric::new(0x800000);
+
+        let text    = fabric.alloc_object("parent_text",   0x4000, ObjectKind::Memory);
+        let output1 = fabric.alloc_object("child1_output", 0x4000, ObjectKind::Memory);
+        let output2 = fabric.alloc_object("child2_output", 0x4000, ObjectKind::Memory);
+        let stack   = fabric.alloc_object("parent_stack",  0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text,    0x000000);
+        fabric.place_object(output1, 0x010000);
+        fabric.place_object(output2, 0x030000);
+        fabric.place_object(stack,   0x020000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, output1, 0, 0x4000, Permissions::RWS);
+        fabric.grant(dom, output2, 0, 0x4000, Permissions::RWS);
+        fabric.grant(dom, stack,   0, 0x4000, Permissions::RW);
+
+        let mut core = Anka64Core::new(CPU0, dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x04000, 0x4000, output1);
+        core.address_map.add(0x08000, 0x4000, output2);
+        core.address_map.add(0x10000, 0x4000, stack);
+        core.r[SP as usize] = 0x10000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        // Child A: exit(10)
+        let child_a = child_exit_code(10);
+        fabric.write_physical(0x010000, &child_a);
+        // Child B: exit(20)
+        let child_b = child_exit_code(20);
+        fabric.write_physical(0x030000, &child_b);
+
+        let child_a_size = child_a.len() as i32;
+        let child_b_size = child_b.len() as i32;
+
+        // Parent program:
+        //   SEAL buf1 → SPAWN buf1 → H1 in R4
+        //   WAIT H1 → exit_code in R5 (10)
+        //   SEAL buf2 → SPAWN buf2 → H2 in R6
+        //   WAIT H1 again → R0 should be MAX (stale) → save in R7
+        //   WAIT H2 → exit_code in R8 (20)
+        //   If R7 == MAX, exit with R8 (20). Else exit with 0xFF (failure).
+        let mut asm = Asm64::new();
+        // SEAL + SPAWN child A
+        asm.movi(R1, 0x4000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x4000_u32 as i32);
+        asm.movi(R2, child_a_size);
+        asm.movi(R3, 0);
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R4, R0); // H1
+
+        // WAIT H1 (consume it)
+        asm.mov(R1, R4);
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+        asm.mov(R5, R1); // child A exit code (10)
+
+        // SEAL + SPAWN child B (reuses slot 0, gen 1)
+        asm.movi(R1, 0x8000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x8000_u32 as i32);
+        asm.movi(R2, child_b_size);
+        asm.movi(R3, 0);
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R6, R0); // H2
+
+        // WAIT H1 again (stale handle — slot 0, gen 0 → gen mismatch)
+        asm.mov(R1, R4);
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+        asm.mov(R7, R0); // should be MAX
+
+        // WAIT H2 (should succeed with 20)
+        asm.mov(R1, R6);
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+        asm.mov(R8, R1); // child B exit code (20)
+
+        // Verification: if R7 == MAX, exit with R8 (20).
+        // Use: CMPI R7, -1 (MAX as signed = -1); BEQ → exit(R8)
+        // else exit(0xFF)
+        asm.cmpi(R7, -1);
+        asm.bcc(super::super::isa::Cond::Eq, 4); // skip failure path (3 words) to success
+        // failure path
+        asm.movi(R1, 0xFF);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        // success path
+        asm.mov(R1, R8);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x060000;
+        kernel.spawn(core);
+        kernel.run(1000, 300);
+
+        assert!(kernel.processes[0].exited);
+        assert_eq!(kernel.processes[0].exit_code, 20,
+            "stale H1 must be rejected (MAX), H2 must return 20");
+        eprintln!("8.2e: stale_handle_after_slot_reuse → 20 ✓");
     }
 
 }
