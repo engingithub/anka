@@ -25,6 +25,8 @@ pub const SYS_SEND: u64 = 3;   // send(dest_pid, value)
 pub const SYS_RECV: u64 = 4;   // recv() → value
 pub const SYS_SEAL: u64 = 5;   // seal(addr) — RW→RX, W⊕X enforcement
 pub const SYS_EXEC: u64 = 6;   // exec(code_addr, code_size, lit_start) → child exit
+pub const SYS_SPAWN: u64 = 7;  // spawn(code_addr, code_size, lit_start) → handle
+pub const SYS_WAIT: u64 = 8;   // wait(handle) → result
 
 // ───────────────────────────────────────────────────────────────────
 // Process descriptor
@@ -668,8 +670,10 @@ impl Kernel {
 
         match syscall {
             SYS_EXIT => {
-                proc.exit_code = proc.core.r[R1 as usize];
+                let code = proc.core.r[R1 as usize];
+                proc.exit_code = code;
                 proc.exited = true;
+                proc.result = Some(ProcessResult::Exited(code));
             }
             SYS_WRITE => {
                 self.handle_buffer_write(idx);
@@ -704,6 +708,12 @@ impl Kernel {
             }
             SYS_EXEC => {
                 self.handle_exec(idx);
+            }
+            SYS_SPAWN => {
+                self.handle_spawn(idx);
+            }
+            SYS_WAIT => {
+                self.handle_wait(idx);
             }
             _ => {
                 eprintln!("Unknown syscall {} from pid {}", syscall, proc.pid);
@@ -944,7 +954,10 @@ impl Kernel {
     ///   - Code cap: derive RX from the RX parent (attenuation, I7)
     ///   - Literal cap: derive R from the R parent (Rule 29:
     ///     data is not authority to transfer control)
-    fn handle_exec(&mut self, idx: usize) {
+    /// Common validation and child creation for SYS_EXEC and SYS_SPAWN.
+    /// Returns Some(child_pid) on success, None on validation failure.
+    /// On failure, sets R0 = MAX and resumes the caller.
+    fn create_child(&mut self, idx: usize) -> Option<u64> {
         let code_vaddr = self.processes[idx].core.r[R1 as usize];
         let code_size = self.processes[idx].core.r[R2 as usize];
         let lit_start = self.processes[idx].core.r[R3 as usize];
@@ -954,52 +967,45 @@ impl Kernel {
             None => {
                 self.processes[idx].core.r[R0 as usize] = u64::MAX;
                 self.resume_from_trap(idx);
-                return;
+                return None;
             }
         };
 
-        // Check 1: object must be Sealed
         let is_sealed = self.fabric.objects.get(&code_obj)
             .map(|o| o.state == ObjectState::Sealed)
             .unwrap_or(false);
         if !is_sealed {
             self.processes[idx].core.r[R0 as usize] = u64::MAX;
             self.resume_from_trap(idx);
-            return;
+            return None;
         }
 
-        // Compute image_size = obj_size - code_offset
         let obj_size = match self.fabric.objects.get(&code_obj) {
             Some(o) => o.size,
             None => {
                 self.processes[idx].core.r[R0 as usize] = u64::MAX;
                 self.resume_from_trap(idx);
-                return;
+                return None;
             }
         };
         let image_size = obj_size - code_offset;
 
-        // Check 2: validate literal segment geometry (if present)
         let has_literals = lit_start != 0;
         if has_literals {
-            // code_size <= lit_start (disjoint regions, empty gap is OK)
             if lit_start < code_size {
                 self.processes[idx].core.r[R0 as usize] = u64::MAX;
                 self.resume_from_trap(idx);
-                return;
+                return None;
             }
-            // lit_start < image_size (strict: zero-width literal is meaningless)
             if image_size <= lit_start {
                 self.processes[idx].core.r[R0 as usize] = u64::MAX;
                 self.resume_from_trap(idx);
-                return;
+                return None;
             }
         }
 
         let domain = self.processes[idx].core.domain;
 
-        // Check 3: range-exact RX authority covering the code range.
-        // Search for READ|EXECUTE (RX) so the query matches what we derive.
         let code_parent = match self.fabric.find_authorizing_cap(
             domain, code_obj, code_offset, code_size, Permissions::RX
         ) {
@@ -1007,11 +1013,10 @@ impl Kernel {
             None => {
                 self.processes[idx].core.r[R0 as usize] = u64::MAX;
                 self.resume_from_trap(idx);
-                return;
+                return None;
             }
         };
 
-        // Check 4: if literals, find READ parent covering literal range
         let lit_parent = if has_literals {
             let lit_offset = code_offset + lit_start;
             let lit_length = image_size - lit_start;
@@ -1022,29 +1027,24 @@ impl Kernel {
                 None => {
                     self.processes[idx].core.r[R0 as usize] = u64::MAX;
                     self.resume_from_trap(idx);
-                    return;
+                    return None;
                 }
             }
         } else {
             None
         };
 
-        // --- Preflight complete: now create child domain ---
-        // Transactional: all checks passed before any domain/object creation.
         let child_dom = self.fabric.create_domain();
 
-        // Derive child's RX from code parent (I7).
         if self.fabric.derive(
             child_dom, &code_parent, code_offset, code_size, Permissions::RX,
         ).is_none() {
             self.fabric.destroy_domain(child_dom);
             self.processes[idx].core.r[R0 as usize] = u64::MAX;
             self.resume_from_trap(idx);
-            return;
+            return None;
         }
 
-        // If literals, derive child's R from literal parent.
-        // Rule 29: data is not authority to transfer control.
         if has_literals {
             let lit_offset = code_offset + lit_start;
             let lit_length = image_size - lit_start;
@@ -1055,11 +1055,10 @@ impl Kernel {
                 self.fabric.destroy_domain(child_dom);
                 self.processes[idx].core.r[R0 as usize] = u64::MAX;
                 self.resume_from_trap(idx);
-                return;
+                return None;
             }
         }
 
-        // --- Create child process using shared primitive ---
         let desc = ProcessImageDesc {
             code_obj,
             code_offset,
@@ -1070,12 +1069,64 @@ impl Kernel {
         };
         let child_pid = self.prepare_process(child_dom, &desc, &EXEC_DEFAULT_LAYOUT);
         self.processes[child_pid as usize].parent = Some(self.processes[idx].pid);
+        Some(child_pid)
+    }
 
-        // Block the parent until the child exits.
-        // The scheduler will resume the parent when it reaps the child.
-        self.processes[idx].waiting_on = Some(child_pid);
-        // Do NOT call resume_from_trap here — the parent stays suspended.
-        // When the child exits, complete_wait() will set R0 and resume.
+    fn handle_exec(&mut self, idx: usize) {
+        if let Some(child_pid) = self.create_child(idx) {
+            // Block the parent until the child exits.
+            self.processes[idx].waiting_on = Some(child_pid);
+            // Do NOT call resume_from_trap — the parent stays suspended.
+            // When the child exits, reap_exited() sets R0 and resumes.
+        }
+        // On failure, create_child already set R0=MAX and resumed.
+    }
+
+    fn handle_spawn(&mut self, idx: usize) {
+        if let Some(child_pid) = self.create_child(idx) {
+            // Return immediately with a ProcessHandle
+            let handle = ProcessHandle::new(
+                child_pid, self.processes[child_pid as usize].generation);
+            self.processes[idx].core.r[R0 as usize] = handle.as_u64();
+            self.resume_from_trap(idx);
+        }
+        // On failure, create_child already set R0=MAX and resumed.
+    }
+
+    /// Wait for a child process to exit.
+    /// R1 = ProcessHandle (u64).
+    /// Returns: R0 = exit code on normal exit, R0 = MAX on error/fault.
+    fn handle_wait(&mut self, idx: usize) {
+        let raw_handle = self.processes[idx].core.r[R1 as usize];
+        let handle = ProcessHandle::from_u64(raw_handle);
+
+        // Validate the handle
+        let child_idx = match self.validate_handle(handle) {
+            Some(i) => i,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+
+        // Only the parent may wait on this child
+        if self.processes[child_idx].parent != Some(self.processes[idx].pid) {
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return;
+        }
+
+        // If child already exited, return immediately
+        if self.processes[child_idx].exited {
+            let exit_code = self.processes[child_idx].exit_code;
+            self.processes[idx].core.r[R0 as usize] = exit_code;
+            self.resume_from_trap(idx);
+            return;
+        }
+
+        // Child still running — block the parent
+        self.processes[idx].waiting_on = Some(handle.pid());
     }
 
     fn resume_from_trap(&mut self, idx: usize) {
