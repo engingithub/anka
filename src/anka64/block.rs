@@ -90,11 +90,17 @@ impl BlockStorage {
 /// time.  After the slot cycles (C → F), the generation increments,
 /// making stale handles distinguishable from current ones.
 ///
+/// Generation is u64 to match the formal model (anka_block_device.kleis
+/// uses BitVec64 for request-slot generations).  This differs from
+/// RequesterKey.generation (u32), which follows the process lifecycle
+/// namespace.  A two-slot I/O controller can recycle its slots vastly
+/// more often than process identifiers.
+///
 /// Formal basis: anka_block_device.kleis GEN-1..GEN-4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestHandle {
     pub slot: u8,
-    pub generation: u32,
+    pub generation: u64,
 }
 
 /// A block read request.
@@ -148,10 +154,19 @@ enum SlotState {
     },
     /// Latency expired, ready for DMA.
     ///
-    /// In Phase 9.1b (no DMA), this state is transitional:
-    /// tick() immediately advances DmaReady → Completed by reading
-    /// from BlockStorage.  Phase 9.1c will give this state a real
-    /// DMA transaction to wait for.
+    /// **9.1b (no-DMA shortcut):** This state is an intra-tick()
+    /// microstate — Phase 1 creates it, Phase 2 immediately
+    /// consumes it into Completed by reading from BlockStorage.
+    /// It is never observable at a machine boundary.
+    ///
+    /// **9.1c removes this shortcut.**  Once real Fabric DMA exists,
+    /// the sequence becomes:
+    ///   O_dma → narrow delegated Fabric transaction
+    ///         → {commit, fault} → C
+    /// and DmaReady persists across tick boundaries until the
+    /// Fabric transaction terminates.  The controller must not
+    /// manufacture Completed merely because latency expired;
+    /// completion status must depend on the Fabric result.
     DmaReady {
         request: BlockRequest,
     },
@@ -177,7 +192,7 @@ enum SlotState {
 ///   LEVEL-1:         L_dev ≡ (C > 0), derived
 pub struct BlockController {
     slots: [SlotState; NUM_SLOTS],
-    slot_generations: [u32; NUM_SLOTS],
+    slot_generations: [u64; NUM_SLOTS],
     /// Completion ordering — slot indices, not completion data.
     /// An entry asserts "this slot is Completed."
     completion_order: VecDeque<u8>,
@@ -253,6 +268,11 @@ impl BlockController {
         }
 
         // Phase 2: DmaReady → Completed (9.1b: no-DMA shortcut).
+        // 9.1c removes this: DmaReady will persist until a real
+        // Fabric transaction terminates.  BlockCompletion.data will
+        // become CompletionStatus { Success, DmaFault(FaultReason) },
+        // and the 512 bytes will live in the guest buffer, not the
+        // completion record.
         for i in 0..NUM_SLOTS {
             if matches!(self.slots[i], SlotState::DmaReady { .. }) {
                 let state = std::mem::replace(&mut self.slots[i], SlotState::Free);
@@ -325,11 +345,15 @@ impl BlockController {
     }
 
     /// Current generation for a slot.
-    pub fn slot_generation(&self, slot: u8) -> u32 {
+    pub fn slot_generation(&self, slot: u8) -> u64 {
         self.slot_generations[slot as usize]
     }
 
     /// Structural conservation invariant: F + O_wait + O_dma + C = NUM_SLOTS.
+    ///
+    /// Also verifies completion-order queue coherence:
+    ///   |completion_order| = #C
+    ///   ∀ q ∈ completion_order, q names a distinct Completed slot.
     fn assert_conservation(&self) {
         let f = self.slots.iter().filter(|s| matches!(s, SlotState::Free)).count();
         let ow = self.slots.iter().filter(|s| matches!(s, SlotState::Waiting { .. })).count();
@@ -340,6 +364,30 @@ impl BlockController {
             "SLOT conservation violated: F={} + O_wait={} + O_dma={} + C={} ≠ {}",
             f, ow, od, c, NUM_SLOTS,
         );
+
+        // Queue length equals completion count.
+        debug_assert_eq!(
+            self.completion_order.len(), c,
+            "completion-order/slot coherence: |queue|={} ≠ #C={}",
+            self.completion_order.len(), c,
+        );
+
+        // Every queue entry names a distinct Completed slot.
+        let mut seen = [false; NUM_SLOTS];
+        for &slot_idx in &self.completion_order {
+            let idx = slot_idx as usize;
+            debug_assert!(
+                matches!(self.slots[idx], SlotState::Completed { .. }),
+                "queue entry {} names a non-Completed slot",
+                idx,
+            );
+            debug_assert!(
+                !seen[idx],
+                "queue entry {} appears more than once",
+                idx,
+            );
+            seen[idx] = true;
+        }
     }
 }
 
