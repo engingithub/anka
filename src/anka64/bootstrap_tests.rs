@@ -4031,6 +4031,281 @@ mod tests {
         eprintln!("halt: user HALT → exit(42) ✓");
     }
 
+    // ═══════════════════════════════════════════════════════
+    //  Phase 8.5: Supervised compiler helper
+    //
+    //  All compiler execution routes through:
+    //    host boots ankad → ankad SYS_SPAWN(compiler) → SYS_WAIT → SYS_EXIT
+    //
+    //  Host may construct executable artifacts; Anka constructs processes.
+    // ═══════════════════════════════════════════════════════
+
+    /// Where ankad maps the compiler object in its own address space.
+    /// SYS_SPAWN.R1 is always this value regardless of whether the
+    /// compiler is CC_A (child code_vaddr=0) or CC_B (child code_vaddr=0x30000).
+    const SUPERVISOR_COMPILER_VADDR: u64 = 0x30000;
+
+    /// Result of a supervised compiler run.
+    struct SupervisedResult {
+        kernel: Kernel,
+        output_phys: u64,
+        work_phys: u64,
+        /// SYS_WAIT tag preserved in R10 after ankad exits.
+        /// 0 = Exited, non-zero = fault.
+        wait_tag: u64,
+        /// Compiler exit detail (ankad's exit code = SYS_WAIT detail).
+        wait_detail: u64,
+    }
+
+    /// Boot ankad as supervisor, spawn a compiler with a fully delegated
+    /// environment, wait for it, and return the result for host inspection.
+    ///
+    /// `compiler_image`: compiled compiler bytes (CC_A or CC_B).
+    /// `child_code_vaddr`: where the child's code is placed (0 for CC_A,
+    ///   CCB_CODE_BASE for CC_B). Only affects SpawnLayout.code_vaddr.
+    /// `source`: source text bytes (will be length-prefixed in the source object).
+    fn run_supervised_compiler(
+        compiler_image: &[u8],
+        child_code_vaddr: u64,
+        source: &[u8],
+    ) -> SupervisedResult {
+        let compiler_len = compiler_image.len();
+        let compiler_size = ((compiler_len + 0xFFF) & !0xFFF) as u64;
+
+        assert!(compiler_len <= OUTPUT_SIZE as usize,
+            "compiler ({} bytes) exceeds output buffer", compiler_len);
+
+        // ── Host creates the machine ──
+        let mut fabric = Fabric::new(0x800000);
+
+        // ankad code object
+        let ankad_obj = fabric.alloc_object("ankad_code", 0x2000, ObjectKind::Memory);
+        fabric.place_object(ankad_obj, 0x000000);
+
+        // Compiler code object (sealed)
+        let compiler_obj = fabric.alloc_object("compiler_code", compiler_size, ObjectKind::Memory);
+        fabric.place_object(compiler_obj, 0x100000);
+        fabric.initialize_object(compiler_obj, 0, compiler_image);
+        fabric.seal_object(compiler_obj);
+
+        // Source object: length-prefixed
+        let source_obj = fabric.alloc_object("source", SOURCE_SIZE as u64, ObjectKind::Memory);
+        fabric.place_object(source_obj, 0x200000);
+        fabric.write_physical(0x200000, &(source.len() as u64).to_le_bytes());
+        fabric.write_physical(0x200008, source);
+
+        // Output object (active, empty)
+        let output_obj = fabric.alloc_object("output", OUTPUT_SIZE as u64, ObjectKind::Memory);
+        fabric.place_object(output_obj, 0x210000);
+
+        // Workspace object
+        let work_obj = fabric.alloc_object("workspace", WS_SIZE as u64, ObjectKind::Memory);
+        fabric.place_object(work_obj, 0x220000);
+
+        // Initialize two-ended allocator: WS_LIT_POS = OUTPUT_SIZE
+        // Required for CC_A (bootstrap compiler); redundant but harmless for CC_B.
+        fabric.write_physical(
+            0x220000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            &(OUTPUT_SIZE as u64).to_le_bytes());
+
+        // ── Assemble ankad ──
+        //
+        // Virtual memory layout for ankad:
+        //   0x00000 - 0x02000 : ankad code (Sealed, RX)
+        //   0x07000 - 0x0C000 : source (R)
+        //   0x0C000 - 0x12000 : workspace (RW)
+        //   0x12000 - 0x22000 : output (RWS)
+        //   0x30000+          : compiler code (RX, sealed)
+        //   0x50000 - 0x54000 : stack (kernel-allocated)
+        //   0x54000 - 0x55000 : trap (kernel-allocated)
+        //
+        // Values above MOVI 18-bit limit use MOVI half; ADD Rx,Rx,Rx.
+        // Register plan:
+        //   R4 = grant_base (SP - 0x300), becomes SYS_SPAWN R4
+        //   R6 = map_base   (SP - 0x200), becomes SYS_SPAWN R6
+        //   R8 = layout_base(SP - 0x100), becomes SYS_SPAWN R8
+        //   R9 = zero constant during construction, then handle after SPAWN
+        //   R3, R10 = temporaries
+        {
+            let mut asm = Asm64::new();
+
+            // ── Phase 1: base addresses ──
+            asm.subi(R4, SP, 0x300);          // grant_base
+            asm.subi(R6, SP, 0x200);          // map_base
+            asm.subi(R8, SP, 0x100);          // layout_base
+            asm.movi(R9, 0);                  // zero constant
+
+            // ── Phase 2a: Grant[0] — source = R ──
+            // [parent_vaddr, offset, size, perms, reserved]
+            asm.movi(R3, 0x07000);
+            asm.st(R3, R4, 0);               // parent_vaddr = 0x07000
+            asm.st(R9, R4, 8);               // offset = 0
+            asm.movi(R3, 0x5000);
+            asm.st(R3, R4, 16);              // size = SOURCE_SIZE
+            asm.movi(R3, 1);
+            asm.st(R3, R4, 24);              // perms = READ
+            asm.st(R9, R4, 32);              // reserved = 0
+
+            // ── Phase 2b: Grant[1] — output = RWS ──
+            asm.movi(R3, 0x9000);
+            asm.add(R3, R3, R3);             // R3 = 0x12000
+            asm.st(R3, R4, 40);              // parent_vaddr
+            asm.st(R9, R4, 48);              // offset = 0
+            asm.movi(R3, 0x8000);
+            asm.add(R3, R3, R3);             // R3 = 0x10000
+            asm.st(R3, R4, 56);              // size = OUTPUT_SIZE
+            asm.movi(R3, 0x13);
+            asm.st(R3, R4, 64);              // perms = RWS
+            asm.st(R9, R4, 72);              // reserved = 0
+
+            // ── Phase 2c: Grant[2] — workspace = RW ──
+            asm.movi(R3, 0x6000);
+            asm.add(R3, R3, R3);             // R3 = 0x0C000
+            asm.st(R3, R4, 80);              // parent_vaddr
+            asm.st(R9, R4, 88);              // offset = 0
+            asm.movi(R3, 0x6000);
+            asm.st(R3, R4, 96);              // size = WS_SIZE
+            asm.movi(R3, 3);
+            asm.st(R3, R4, 104);             // perms = RW
+            asm.st(R9, R4, 112);             // reserved = 0
+
+            // ── Phase 2d: Map[0] — source (identity mapping) ──
+            // [child_vaddr, parent_vaddr, offset, size, reserved]
+            asm.movi(R3, 0x07000);
+            asm.st(R3, R6, 0);               // child_vaddr = 0x07000
+            asm.st(R3, R6, 8);               // parent_vaddr = 0x07000
+            asm.st(R9, R6, 16);              // offset = 0
+            asm.movi(R3, 0x5000);
+            asm.st(R3, R6, 24);              // size = SOURCE_SIZE
+            asm.st(R9, R6, 32);              // reserved = 0
+
+            // ── Phase 2e: Map[1] — workspace (identity mapping) ──
+            asm.movi(R3, 0x6000);
+            asm.add(R3, R3, R3);             // R3 = 0x0C000
+            asm.st(R3, R6, 40);              // child_vaddr
+            asm.st(R3, R6, 48);              // parent_vaddr
+            asm.st(R9, R6, 56);              // offset = 0
+            asm.movi(R3, 0x6000);
+            asm.st(R3, R6, 64);              // size = WS_SIZE
+            asm.st(R9, R6, 72);              // reserved = 0
+
+            // ── Phase 2f: Map[2] — output (identity mapping) ──
+            asm.movi(R3, 0x9000);
+            asm.add(R3, R3, R3);             // R3 = 0x12000
+            asm.st(R3, R6, 80);              // child_vaddr
+            asm.st(R3, R6, 88);              // parent_vaddr
+            asm.st(R9, R6, 96);              // offset = 0
+            asm.movi(R3, 0x8000);
+            asm.add(R3, R3, R3);             // R3 = 0x10000
+            asm.st(R3, R6, 104);             // size = OUTPUT_SIZE
+            asm.st(R9, R6, 112);             // reserved = 0
+
+            // ── Phase 2g: SpawnLayout ──
+            // [code_vaddr, stack_vaddr, stack_size, trap_vaddr, reserved]
+            // child_code_vaddr is parameterized: 0 for CC_A, 0x30000 for CC_B
+            let half_code = (child_code_vaddr / 2) as i32;
+            asm.movi(R3, half_code);
+            asm.add(R3, R3, R3);             // R3 = child_code_vaddr
+            asm.st(R3, R8, 0);               // code_vaddr
+            asm.movi(R3, 0x11000);
+            asm.add(R3, R3, R3);             // R3 = 0x22000
+            asm.st(R3, R8, 8);               // stack_vaddr = LAYOUT_STACK
+            asm.movi(R3, 0x4000);
+            asm.st(R3, R8, 16);              // stack_size = 0x4000
+            asm.movi(R3, 0x13000);
+            asm.add(R3, R3, R3);             // R3 = 0x26000
+            asm.st(R3, R8, 24);              // trap_vaddr
+            asm.st(R9, R8, 32);              // reserved = 0
+
+            // ── Phase 3: SYS_SPAWN(R1-R8) ──
+            // R1 = SUPERVISOR_COMPILER_VADDR (parent mapping), always 0x30000
+            asm.movi(R1, 0x18000);
+            asm.add(R1, R1, R1);             // R1 = 0x30000
+            asm.movi(R2, compiler_len as i32); // R2 = code_size (fits MOVI)
+            asm.movi(R3, 0);                 // R3 = lit_start = 0
+            asm.movi(R5, 3);                 // R5 = grant_count
+            asm.movi(R7, 3);                 // R7 = map_count
+            // R4 = grant_base, R6 = map_base, R8 = layout_base (already set)
+            asm.movi(R0, SYS_SPAWN as i32);
+            asm.trap(0);
+
+            // ── Phase 4: SYS_WAIT ──
+            asm.mov(R9, R0);                 // R9 = handle
+            asm.mov(R1, R9);
+            asm.movi(R0, SYS_WAIT as i32);
+            asm.trap(0);
+            // R0 = tag, R1 = detail
+
+            // ── Phase 5: preserve tag, exit with detail ──
+            // MOV R10, R0 preserves the WAIT tag for host inspection.
+            // SYS_EXIT(R1) propagates the compiler's result as ankad's exit code.
+            asm.mov(R10, R0);                // R10 = wait tag (survives exit)
+            asm.movi(R0, SYS_EXIT as i32);
+            asm.trap(0);
+
+            let code_bytes = asm.to_bytes();
+            assert!(code_bytes.len() < 0x2000,
+                "ankad code {} bytes exceeds 0x2000", code_bytes.len());
+            fabric.initialize_object(ankad_obj, 0, &code_bytes);
+        }
+        fabric.seal_object(ankad_obj);
+
+        // ── Boot descriptor ──
+        let ankad_code_size = 0x2000_u64;
+        let info = BootInfo {
+            image: BootImage {
+                obj: ankad_obj,
+                code_offset: 0,
+                code_size: ankad_code_size,
+                entry: 0,
+                lit_start: 0,
+            },
+            grants: vec![
+                BootGrant { obj: compiler_obj, offset: 0, size: compiler_size,       perms: Permissions::RX },
+                BootGrant { obj: source_obj,   offset: 0, size: SOURCE_SIZE as u64,  perms: Permissions::READ },
+                BootGrant { obj: output_obj,   offset: 0, size: OUTPUT_SIZE as u64,  perms: Permissions::RWS },
+                BootGrant { obj: work_obj,     offset: 0, size: WS_SIZE as u64,      perms: Permissions::RW },
+            ],
+            maps: vec![
+                BootMap { vaddr: 0x07000, size: SOURCE_SIZE as u64, obj: source_obj,   obj_offset: 0 },
+                BootMap { vaddr: 0x0C000, size: WS_SIZE as u64,     obj: work_obj,     obj_offset: 0 },
+                BootMap { vaddr: 0x12000, size: OUTPUT_SIZE as u64,  obj: output_obj,   obj_offset: 0 },
+                BootMap { vaddr: SUPERVISOR_COMPILER_VADDR, size: compiler_size, obj: compiler_obj, obj_offset: 0 },
+            ],
+            code_vaddr: 0,
+            stack_vaddr: 0x50000,
+            stack_size: 0x4000,
+            trap_vaddr: 0x54000,
+        };
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x300000;
+        let result = kernel.boot(&info);
+        assert_eq!(result, Ok(()), "boot(ankad) should succeed");
+
+        // Run with enough cycles for compilation.
+        // CC_A needs ~2M cycles, CC_B needs ~4M.
+        kernel.run(5_000_000, 200);
+
+        // ── Extract structured result ──
+        // No assertions here — callers inspect the result and provide
+        // domain-specific diagnostics before asserting.
+        let (wait_tag, wait_detail) = if kernel.processes[0].exited() {
+            (kernel.processes[0].core.r[R10 as usize],
+             kernel.processes[0].exit_code)
+        } else {
+            (u64::MAX, u64::MAX)
+        };
+
+        SupervisedResult {
+            kernel,
+            output_phys: 0x210000,
+            work_phys: 0x220000,
+            wait_tag,
+            wait_detail,
+        }
+    }
+
     /// Run a 6B.4 test case: guest compiler with functions → expected result.
     fn run_6b4_test(source_text: &[u8], expected_exit: u64, expect_child: bool) {
         let kernel = run_6b4_harness(source_text, expected_exit, expect_child);
@@ -4039,41 +4314,12 @@ mod tests {
     }
 
     /// Run the 6B.4 harness and return the Kernel for output inspection.
+    ///
+    /// Phase 8.5: CC_A is now executed as a supervised process under ankad.
+    /// Host constructs the compiler artifact (AST → code bytes), but Anka
+    /// constructs the compiler process via boot → SYS_SPAWN → SYS_WAIT.
     fn run_6b4_harness(source_text: &[u8], expected_exit: u64, expect_child: bool) -> Kernel {
-        let mut fabric = Fabric::new(0x400000);
-
-        let text   = fabric.alloc_object("compiler_text",  TEXT_SIZE as u64, ObjectKind::Memory);
-        let source = fabric.alloc_object("source_data",    SOURCE_SIZE as u64, ObjectKind::Memory);
-        let output = fabric.alloc_object("output_buf",     OUTPUT_SIZE as u64, ObjectKind::Memory);
-        let work   = fabric.alloc_object("workspace",      WS_SIZE as u64, ObjectKind::Memory);
-        let stack  = fabric.alloc_object("compiler_stack", 0x4000, ObjectKind::Memory);
-
-        fabric.place_object(text,   0x000000);
-        fabric.place_object(source, 0x010000);
-        fabric.place_object(output, 0x020000);
-        fabric.place_object(work,   0x030000);
-        fabric.place_object(stack,  0x040000);
-
-        let dom = fabric.create_domain();
-        fabric.grant(dom, source, 0, SOURCE_SIZE as u64, Permissions::READ);
-        fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
-        fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
-        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
-
-        // Write source: [u64 length][text bytes]
-        let src_len = source_text.len() as u64;
-        fabric.write_physical(0x010000, &src_len.to_le_bytes());
-        fabric.write_physical(0x010008, source_text);
-
-        // Initialize two-ended allocator: WS_LIT_POS = OUTPUT_SIZE
-        fabric.write_physical(
-            0x030000 + (WS_LIT_POS - LAYOUT_WS) as u64,
-            &(OUTPUT_SIZE as u64).to_le_bytes());
-
-        // Trap handler at end of TEXT_SIZE text object
-        install_trap_handler(&mut fabric, 0x000000, TEXT_SIZE as u64);
-
-        // Compile the guest compiler from AST
+        // Compile the guest compiler from AST (toolchain artifact construction)
         let compiler_prog = build_6b4_compiler();
         let asm = cc::compile(&compiler_prog);
         let code_bytes = asm.to_bytes();
@@ -4089,104 +4335,74 @@ mod tests {
              Update TEXT_SIZE to {:#x}.",
             code_len, TEXT_SIZE,
             ((code_len + 0xFFF) & !0xFFF));
-        fabric.write_physical(0x000000, &code_bytes);
-        seal_code_object(&mut fabric, text, dom);
 
-        // Set up process — virtual layout derived from TEXT_SIZE
-        let mut core = Anka64Core::new(AgentId(0), dom);
-        core.address_map.add(0, TEXT_SIZE as u64, text);
-        core.address_map.add(LAYOUT_SRC as u64,   SOURCE_SIZE as u64, source);
-        core.address_map.add(LAYOUT_OUT as u64,    OUTPUT_SIZE as u64, output);
-        core.address_map.add(LAYOUT_WS as u64,     WS_SIZE as u64, work);
-        core.address_map.add(LAYOUT_STACK as u64,  0x4000, stack);
-        core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
-        core.trap_vector = TEXT_SIZE as u64 - 0x10;
+        // CC_A code_vaddr = 0 (data regions start at TEXT_SIZE)
+        let r = run_supervised_compiler(&code_bytes, 0, source_text);
 
-        let mut kernel = Kernel::new(fabric);
-        kernel.next_phys = 0x050000;
-        kernel.next_agent = 10;
-        kernel.spawn(core);
-        kernel.run(2000000, 10);
+        let ankad_exited = r.kernel.processes[0].exited();
+        let exit_code = r.wait_detail;
 
-        let exited = kernel.processes[0].exited();
-        let exit_code = kernel.processes[0].exit_code;
-        let child_spawned = kernel.processes.len() >= 2;
-
-        if !exited {
-            use crate::anka64::isa::{decode, disassemble};
-            let pc = kernel.processes[0].core.pc;
+        // Diagnostic: workspace dump when supervisor or compiler failed
+        if !ankad_exited || r.wait_tag != 0 || exit_code != expected_exit {
             let read = |off: u64| -> u64 {
-                let bytes = kernel.fabric.read_physical(0x030000 + off, 8);
+                let bytes = r.kernel.fabric.read_physical(r.work_phys + off, 8);
                 u64::from_le_bytes(bytes.try_into().unwrap())
             };
-            let ws_error = read(0x18);
-            let ws_tok   = read(0x20);
-            let ws_pos   = read(0x00);
-            let ws_out   = read(0x48);
-            let ws_func  = read(0x58);
-            let ws_fix   = read(0x60);
-            eprintln!("STUCK: PC={:#x} pos={} tok={} error={} out_pos={} funcs={} fixups={}",
-                pc, ws_pos, ws_tok, ws_error, ws_out, ws_func, ws_fix);
-            // Decode instructions around PC
-            for off in [0i64, -8, -16, 4, 8, 12] {
-                let addr = (pc as i64 + off) as u64;
-                if addr < TEXT_SIZE as u64 {
-                    let bytes = kernel.fabric.read_physical(addr, 4);
-                    let word = u32::from_le_bytes(bytes.try_into().unwrap());
-                    let insn = decode(word);
-                    let marker = if off == 0 { " <<<" } else { "" };
-                    eprintln!("  {:#06x}: {:08x} {}{}",
-                        addr, word, disassemble(&insn), marker);
+            if !ankad_exited {
+                eprintln!("STUCK: ankad did not exit (compiler may be hung)");
+                eprintln!("  ws: pos={} tok={} error={} out_pos={} funcs={} fixups={}",
+                    read(0x00), read(0x20), read(0x18),
+                    read(0x48), read(0x58), read(0x60));
+            } else if r.wait_tag != 0 {
+                eprintln!("FAULT: compiler faulted (wait_tag={})", r.wait_tag);
+                eprintln!("  ws: pos={} tok={} error={} out_pos={} funcs={} fixups={}",
+                    read(0x00), read(0x20), read(0x18),
+                    read(0x48), read(0x58), read(0x60));
+            } else {
+                eprintln!("DIAG: error={} tok={} pos={} out_pos={}",
+                    read(0x18), read(0x20), read(0x00), read(0x48));
+                eprintln!("DIAG: funcs={} fixups={}", read(0x58), read(0x60));
+                let func_count = read(0x58) as usize;
+                for i in 0..func_count.min(4) {
+                    let base = 0x368 + i as u64 * 32;
+                    eprintln!("  func[{}]: ns={} nl={} addr={} arity={}",
+                        i, read(base), read(base + 8),
+                        read(base + 16), read(base + 24));
+                }
+                let fix_count = read(0x60) as usize;
+                for i in 0..fix_count.min(4) {
+                    let base = 0xB68 + i as u64 * 32;
+                    eprintln!("  fix[{}]: call_pos={} ns={} nl={} argc={}",
+                        i, read(base), read(base + 8),
+                        read(base + 16), read(base + 24));
+                }
+                let sym_count = read(0x40) as usize;
+                for i in 0..sym_count.min(8) {
+                    let base = 0x68 + i as u64 * 24;
+                    eprintln!("  sym[{}]: ns={} nl={} offset={}",
+                        i, read(base), read(base + 8), read(base + 16) as i64);
                 }
             }
-            // Also dump registers
-            let core = &kernel.processes[0].core;
-            eprintln!("  R0={:#x} R4={:#x} R5={:#x} SP={:#x} FP={:#x} LR={:#x}",
-                core.r[0], core.r[4], core.r[5], core.r[15], core.r[13], core.r[14]);
         }
-        // Diagnostic dump when compiler exits with wrong code
-        if exited && exit_code != expected_exit {
-            let read = |off: u64| -> u64 {
-                let bytes = kernel.fabric.read_physical(0x030000 + off, 8);
-                u64::from_le_bytes(bytes.try_into().unwrap())
-            };
-            eprintln!("DIAG: error={} tok={} pos={} out_pos={}",
-                read(0x18), read(0x20), read(0x00), read(0x48));
-            eprintln!("DIAG: funcs={} fixups={}", read(0x58), read(0x60));
-            let func_count = read(0x58) as usize;
-            for i in 0..func_count.min(4) {
-                let base = 0x368 + i as u64 * 32;
-                eprintln!("  func[{}]: ns={} nl={} addr={} arity={}",
-                    i, read(base), read(base + 8),
-                    read(base + 16), read(base + 24));
-            }
-            let fix_count = read(0x60) as usize;
-            for i in 0..fix_count.min(4) {
-                let base = 0xB68 + i as u64 * 32;
-                eprintln!("  fix[{}]: call_pos={} ns={} nl={} argc={}",
-                    i, read(base), read(base + 8),
-                    read(base + 16), read(base + 24));
-            }
-            let sym_count = read(0x40) as usize;
-            for i in 0..sym_count.min(8) {
-                let base = 0x68 + i as u64 * 24;
-                eprintln!("  sym[{}]: ns={} nl={} offset={}",
-                    i, read(base), read(base + 8), read(base + 16) as i64);
-            }
-        }
-        assert!(exited, "compiler process should have exited");
+
+        assert!(ankad_exited, "ankad (supervisor) should have exited");
+        assert_eq!(r.wait_tag, 0,
+            "source {:?}: compiler faulted (wait_tag={})",
+            std::str::from_utf8(source_text).unwrap_or("<invalid>"),
+            r.wait_tag);
         assert_eq!(exit_code, expected_exit,
             "source {:?}: expected exit {}, got {}",
             std::str::from_utf8(source_text).unwrap_or("<invalid>"),
             expected_exit, exit_code);
 
         if expect_child {
+            // ankad + compiler + child = at least 3 process slots
+            let child_spawned = r.kernel.processes.len() >= 3;
             assert!(child_spawned,
                 "source {:?}: expected child process",
                 std::str::from_utf8(source_text).unwrap_or("<invalid>"));
-            // Post-8.3c: child is reclaimed after collection.
         }
-        kernel
+        r.kernel
     }
 
     // ═══════════════════════════════════════════════════════
@@ -6852,63 +7068,26 @@ mod tests {
 
     /// Extract CC_B binary: CC_A compiles canonical source → output buffer.
     /// Returns the CC_B code bytes.
+    /// Build CC_B by running CC_A (under ankad supervision) on the canonical source.
+    ///
+    /// Phase 8.5: host constructs CC_A artifact; ankad supervises CC_A execution.
     fn build_ccb() -> Vec<u8> {
-        let mut fabric = Fabric::new(0x400000);
-        let text   = fabric.alloc_object("compiler_text",  TEXT_SIZE as u64, ObjectKind::Memory);
-        let source = fabric.alloc_object("source_data",    SOURCE_SIZE as u64, ObjectKind::Memory);
-        let output = fabric.alloc_object("output_buf",     OUTPUT_SIZE as u64, ObjectKind::Memory);
-        let work   = fabric.alloc_object("workspace",      WS_SIZE as u64, ObjectKind::Memory);
-        let stack  = fabric.alloc_object("compiler_stack", 0x4000, ObjectKind::Memory);
-
-        fabric.place_object(text,   0x000000);
-        fabric.place_object(source, 0x010000);
-        fabric.place_object(output, 0x020000);
-        fabric.place_object(work,   0x030000);
-        fabric.place_object(stack,  0x040000);
-
-        let dom = fabric.create_domain();
-        fabric.grant(dom, source, 0, SOURCE_SIZE as u64, Permissions::READ);
-        fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
-        fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
-        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
-
-        let canon_src = canonical_compiler_source();
-        let src_bytes = canon_src.as_bytes();
-        fabric.write_physical(0x010000, &(src_bytes.len() as u64).to_le_bytes());
-        fabric.write_physical(0x010008, src_bytes);
-
-        // Initialize two-ended allocator: WS_LIT_POS = OUTPUT_SIZE
-        fabric.write_physical(
-            0x030000 + (WS_LIT_POS - LAYOUT_WS) as u64,
-            &(OUTPUT_SIZE as u64).to_le_bytes());
-
-        install_trap_handler(&mut fabric, 0x000000, TEXT_SIZE as u64);
         let compiler_prog = build_6b4_compiler();
         let asm = cc::compile(&compiler_prog);
-        fabric.write_physical(0x000000, &asm.to_bytes());
-        seal_code_object(&mut fabric, text, dom);
+        let code_bytes = asm.to_bytes();
 
-        let mut core = Anka64Core::new(AgentId(0), dom);
-        core.address_map.add(0, TEXT_SIZE as u64, text);
-        core.address_map.add(LAYOUT_SRC as u64,   SOURCE_SIZE as u64, source);
-        core.address_map.add(LAYOUT_OUT as u64,    OUTPUT_SIZE as u64, output);
-        core.address_map.add(LAYOUT_WS as u64,     WS_SIZE as u64, work);
-        core.address_map.add(LAYOUT_STACK as u64,  0x4000, stack);
-        core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
-        core.trap_vector = TEXT_SIZE as u64 - 0x10;
+        let canon_src = canonical_compiler_source();
+        // CC_A code_vaddr = 0
+        let r = run_supervised_compiler(&code_bytes, 0, canon_src.as_bytes());
 
-        let mut kernel = Kernel::new(fabric);
-        kernel.next_phys = 0x050000;
-        kernel.next_agent = 10;
-        kernel.spawn(core);
-        kernel.run(2000000, 10);
-
-        assert!(kernel.processes[0].exited(),
-            "CC_A did not exit while compiling canonical source");
+        assert!(r.kernel.processes[0].exited(),
+            "ankad did not exit while building CC_B");
+        assert_eq!(r.wait_tag, 0,
+            "CC_A faulted while compiling canonical source (tag={})", r.wait_tag);
 
         // Read output size from workspace
         let read_ws = |off: u64| -> u64 {
-            let bytes = kernel.fabric.read_physical(0x030000 + off, 8);
+            let bytes = r.kernel.fabric.read_physical(r.work_phys + off, 8);
             u64::from_le_bytes(bytes.try_into().unwrap())
         };
         let ws_error = read_ws(0x18);
@@ -6919,8 +7098,8 @@ mod tests {
             "CC_A compiled wrong function count (expected {})", CANONICAL_FUNC_COUNT);
 
         // Extract CC_B binary from output buffer
-        let ccb_bytes = kernel.fabric.read_physical(0x020000, out_pos).to_vec();
-        eprintln!("build_ccb: CC_B = {} bytes ({} functions)",
+        let ccb_bytes = r.kernel.fabric.read_physical(r.output_phys, out_pos).to_vec();
+        eprintln!("build_ccb: CC_B = {} bytes ({} functions) [supervised]",
             ccb_bytes.len(), ws_funcs);
         ccb_bytes
     }
@@ -6937,151 +7116,61 @@ mod tests {
     }
 
     /// CC_B harness returning the Kernel for byte_output inspection.
+    ///
+    /// Phase 8.5: CC_B is now executed as a supervised process under ankad.
     fn run_ccb_harness(ccb: &[u8], test_source: &[u8], expected_exit: u64) -> Kernel {
-        let ccb_size = ((ccb.len() + 0xFFF) & !0xFFF) as u64;
-        let mut fabric = Fabric::new(0x800000);
+        let r = run_supervised_compiler(ccb, CCB_CODE_BASE, test_source);
 
-        let code   = fabric.alloc_object("ccb_code",     ccb_size, ObjectKind::Memory);
-        let source = fabric.alloc_object("ccb_source",   SOURCE_SIZE as u64, ObjectKind::Memory);
-        let output = fabric.alloc_object("ccb_output",   OUTPUT_SIZE as u64, ObjectKind::Memory);
-        let work   = fabric.alloc_object("ccb_workspace", WS_SIZE as u64, ObjectKind::Memory);
-        let stack  = fabric.alloc_object("ccb_stack",    0x4000, ObjectKind::Memory);
+        let ankad_exited = r.kernel.processes[0].exited();
+        let exit_code = r.wait_detail;
 
-        fabric.place_object(code,   0x100000);
-        fabric.place_object(source, 0x200000);
-        fabric.place_object(output, 0x210000);
-        fabric.place_object(work,   0x220000);
-        fabric.place_object(stack,  0x230000);
-
-        let dom = fabric.create_domain();
-
-        fabric.write_physical(0x100000, ccb);
-        install_trap_handler(&mut fabric, 0x100000, ccb_size);
-        fabric.seal_object(code);
-        fabric.grant(dom, code, 0, ccb_size, Permissions::RX);
-
-        fabric.grant(dom, source, 0, SOURCE_SIZE as u64, Permissions::READ);
-        fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
-        fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
-        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
-
-        let src_len = test_source.len() as u64;
-        fabric.write_physical(0x200000, &src_len.to_le_bytes());
-        fabric.write_physical(0x200008, test_source);
-
-        // Initialize two-ended allocator: WS_LIT_POS = OUTPUT_SIZE
-        fabric.write_physical(
-            0x220000 + (WS_LIT_POS - LAYOUT_WS) as u64,
-            &(OUTPUT_SIZE as u64).to_le_bytes());
-
-        let mut core = Anka64Core::new(AgentId(0), dom);
-        core.address_map.add(CCB_CODE_BASE,          ccb_size, code);
-        core.address_map.add(LAYOUT_SRC as u64,      SOURCE_SIZE as u64, source);
-        core.address_map.add(LAYOUT_OUT as u64,      OUTPUT_SIZE as u64, output);
-        core.address_map.add(LAYOUT_WS as u64,       WS_SIZE as u64, work);
-        core.address_map.add(LAYOUT_STACK as u64,    0x4000, stack);
-        core.pc = CCB_CODE_BASE;
-        core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
-        core.trap_vector = CCB_CODE_BASE + ccb_size - 0x10;
-
-        let mut kernel = Kernel::new(fabric);
-        kernel.next_phys = 0x300000;
-        kernel.next_agent = 10;
-        kernel.spawn(core);
-        kernel.run(4000000, 10);
-
-        let exited = kernel.processes[0].exited();
-        let exit_code = kernel.processes[0].exit_code;
-
-        if !exited {
+        // Diagnostic dumps
+        if !ankad_exited || r.wait_tag != 0 || exit_code != expected_exit {
             let read_ws = |off: u64| -> u64 {
-                let bytes = kernel.fabric.read_physical(0x220000 + off, 8);
+                let bytes = r.kernel.fabric.read_physical(r.work_phys + off, 8);
                 u64::from_le_bytes(bytes.try_into().unwrap())
             };
-            let pc = kernel.processes[0].core.pc;
-            eprintln!("CC_B STUCK: PC={:#x} (offset {:#x})",
-                pc, pc.wrapping_sub(CCB_CODE_BASE));
-            eprintln!("  pos={} tok={} error={} out_pos={} funcs={} fixups={}",
-                read_ws(0x00), read_ws(0x20), read_ws(0x18),
-                read_ws(0x48), read_ws(0x58), read_ws(0x60));
-            let core = &kernel.processes[0].core;
-            eprintln!("  R0={:#x} R4={:#x} R5={:#x} SP={:#x} FP={:#x} LR={:#x}",
-                core.r[0], core.r[4], core.r[5], core.r[15], core.r[13], core.r[14]);
+            if !ankad_exited {
+                eprintln!("CC_B STUCK: ankad did not exit (compiler may be hung)");
+                eprintln!("  pos={} tok={} error={} out_pos={} funcs={} fixups={}",
+                    read_ws(0x00), read_ws(0x20), read_ws(0x18),
+                    read_ws(0x48), read_ws(0x58), read_ws(0x60));
+            } else if r.wait_tag != 0 {
+                eprintln!("CC_B FAULT: compiler faulted (wait_tag={})", r.wait_tag);
+            } else {
+                eprintln!("CC_B DIAG: error={} tok={} pos={} out_pos={} funcs={} fixups={}",
+                    read_ws(0x18), read_ws(0x20), read_ws(0x00),
+                    read_ws(0x48), read_ws(0x58), read_ws(0x60));
+            }
         }
-        if exited && exit_code != expected_exit {
-            let read_ws = |off: u64| -> u64 {
-                let bytes = kernel.fabric.read_physical(0x220000 + off, 8);
-                u64::from_le_bytes(bytes.try_into().unwrap())
-            };
-            eprintln!("CC_B DIAG: error={} tok={} pos={} out_pos={} funcs={} fixups={}",
-                read_ws(0x18), read_ws(0x20), read_ws(0x00),
-                read_ws(0x48), read_ws(0x58), read_ws(0x60));
-        }
-        assert!(exited, "CC_B did not exit");
+
+        assert!(ankad_exited, "ankad (CC_B supervisor) did not exit");
+        assert_eq!(r.wait_tag, 0,
+            "CC_B compiled {:?}: compiler faulted (wait_tag={})",
+            std::str::from_utf8(test_source).unwrap_or("<invalid>"),
+            r.wait_tag);
         assert_eq!(exit_code, expected_exit,
             "CC_B compiled {:?}: expected exit {}, got {}",
             std::str::from_utf8(test_source).unwrap_or("<invalid>"),
             expected_exit, exit_code);
-        kernel
+        r.kernel
     }
 
     /// Run CC_B (the canonical compiler) on source text and extract
     /// the compiled output bytes WITHOUT executing SYS_EXEC.
     /// Returns (output_bytes, func_count, error_flag).
+    ///
+    /// Phase 8.5: CC_B compilation-only path now runs under ankad supervision.
+    /// The compiler exits with 0 after sealing and SYS_EXEC-ing its output,
+    /// but we extract the compiled bytes from the output object before that.
     fn compile_with_ccb(ccb: &[u8], source: &[u8]) -> (Vec<u8>, u64, u64) {
-        let ccb_size = ((ccb.len() + 0xFFF) & !0xFFF) as u64;
-        let mut fabric = Fabric::new(0x800000);
+        let r = run_supervised_compiler(ccb, CCB_CODE_BASE, source);
 
-        let code   = fabric.alloc_object("ccb_code",     ccb_size, ObjectKind::Memory);
-        let src_obj = fabric.alloc_object("ccb_source",  SOURCE_SIZE as u64, ObjectKind::Memory);
-        let output = fabric.alloc_object("ccb_output",   OUTPUT_SIZE as u64, ObjectKind::Memory);
-        let work   = fabric.alloc_object("ccb_workspace", WS_SIZE as u64, ObjectKind::Memory);
-        let stack  = fabric.alloc_object("ccb_stack",    0x4000, ObjectKind::Memory);
-
-        fabric.place_object(code,    0x100000);
-        fabric.place_object(src_obj, 0x200000);
-        fabric.place_object(output,  0x210000);
-        fabric.place_object(work,    0x220000);
-        fabric.place_object(stack,   0x230000);
-
-        let dom = fabric.create_domain();
-        fabric.write_physical(0x100000, ccb);
-        install_trap_handler(&mut fabric, 0x100000, ccb_size);
-        fabric.seal_object(code);
-        fabric.grant(dom, code, 0, ccb_size, Permissions::RX);
-        fabric.grant(dom, src_obj, 0, SOURCE_SIZE as u64, Permissions::READ);
-        fabric.grant(dom, output, 0, OUTPUT_SIZE as u64, Permissions::RWS);
-        fabric.grant(dom, work,   0, WS_SIZE as u64, Permissions::RW);
-        fabric.grant(dom, stack,  0, 0x4000, Permissions::RW);
-
-        fabric.write_physical(0x200000, &(source.len() as u64).to_le_bytes());
-        fabric.write_physical(0x200008, source);
-
-        // Initialize two-ended allocator: WS_LIT_POS = OUTPUT_SIZE
-        fabric.write_physical(
-            0x220000 + (WS_LIT_POS - LAYOUT_WS) as u64,
-            &(OUTPUT_SIZE as u64).to_le_bytes());
-
-        let mut core = Anka64Core::new(AgentId(0), dom);
-        core.address_map.add(CCB_CODE_BASE,          ccb_size, code);
-        core.address_map.add(LAYOUT_SRC as u64,      SOURCE_SIZE as u64, src_obj);
-        core.address_map.add(LAYOUT_OUT as u64,      OUTPUT_SIZE as u64, output);
-        core.address_map.add(LAYOUT_WS as u64,       WS_SIZE as u64, work);
-        core.address_map.add(LAYOUT_STACK as u64,    0x4000, stack);
-        core.pc = CCB_CODE_BASE;
-        core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
-        core.trap_vector = CCB_CODE_BASE + ccb_size - 0x10;
-
-        let mut kernel = Kernel::new(fabric);
-        kernel.next_phys = 0x300000;
-        kernel.next_agent = 10;
-        kernel.spawn(core);
-        kernel.run(4000000, 10);
-
-        assert!(kernel.processes[0].exited(), "CC_B did not exit");
+        assert!(r.kernel.processes[0].exited(),
+            "ankad (CC_B supervisor) did not exit");
 
         let read_ws = |off: u64| -> u64 {
-            let bytes = kernel.fabric.read_physical(0x220000 + off, 8);
+            let bytes = r.kernel.fabric.read_physical(r.work_phys + off, 8);
             u64::from_le_bytes(bytes.try_into().unwrap())
         };
         let ws_error = read_ws(0x18);
@@ -7089,7 +7178,7 @@ mod tests {
         let ws_funcs = read_ws(0x58);
 
         let output_bytes = if ws_error == 0 && out_pos > 0 {
-            kernel.fabric.read_physical(0x210000, out_pos).to_vec()
+            r.kernel.fabric.read_physical(r.output_phys, out_pos).to_vec()
         } else {
             Vec::new()
         };
