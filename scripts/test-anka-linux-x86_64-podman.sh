@@ -1,51 +1,85 @@
 #!/usr/bin/env bash
-# Build and test Anka for Linux x86_64 from macOS using Podman.
+# Build, test, strip, and package Anka for Linux x86_64 from macOS using Podman.
 #
-# Usage:
-#   ./scripts/test-anka-linux-x86_64-podman.sh
-#   ./scripts/test-anka-linux-x86_64-podman.sh --debug
-#   ./scripts/test-anka-linux-x86_64-podman.sh --clean
+# Default usage:
+#   ./test-anka-linux-x86_64-podman.sh
+#
+# Optional:
+#   ./test-anka-linux-x86_64-podman.sh --clean
+#
+# Environment:
+#   ANKA_LINUX_BUILD_IMAGE   Container image (default: docker.io/library/rust:bookworm)
+#   ANKA_BIN_TARGET          Cargo binary target (default: anka)
+#   ANKA_OUTPUT_NAME         Output filename (default: anka-linux-x86_64)
+#
+# The test suite is intentionally single-threaded because linux/amd64 under
+# QEMU on an ARM Mac can consume excessive memory when Rust tests run in
+# parallel.
 #
 # Output:
 #   dist/anka-linux-x86_64
 #
 # The Linux build uses its own target-linux-x86_64/ directory and never
-# overwrites the native macOS target/ or anka binary.
+# overwrites the native macOS target/ directory or native binary.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Allow the script to live either in ./scripts/ or directly at project root.
+if [ -f "$SCRIPT_DIR/Cargo.toml" ]; then
+    PROJECT_ROOT="$SCRIPT_DIR"
+elif [ -f "$SCRIPT_DIR/../Cargo.toml" ]; then
+    PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+else
+    echo "error: could not find Cargo.toml in:" >&2
+    echo "  $SCRIPT_DIR" >&2
+    echo "  $SCRIPT_DIR/.." >&2
+    exit 1
+fi
 
 IMAGE="${ANKA_LINUX_BUILD_IMAGE:-docker.io/library/rust:bookworm}"
 PLATFORM="linux/amd64"
+BIN_TARGET="${ANKA_BIN_TARGET:-anka}"
+OUTPUT_NAME="${ANKA_OUTPUT_NAME:-anka-linux-x86_64}"
 
-BUILD_TYPE="release"
+TARGET_DIR="$PROJECT_ROOT/target-linux-x86_64"
+DIST_DIR="$PROJECT_ROOT/dist"
+OUTPUT_BINARY="$DIST_DIR/$OUTPUT_NAME"
+
 DO_CLEAN=false
 
 for arg in "$@"; do
     case "$arg" in
-        --debug)   BUILD_TYPE="debug" ;;
-        --clean)   DO_CLEAN=true ;;
+        --clean)
+            DO_CLEAN=true
+            ;;
         --help|-h)
-            cat <<'EOF'
-Build and test Anka for Linux x86_64 inside Podman.
+            cat <<EOF
+Build, test, strip, and package Anka for Linux x86_64 using Podman.
+
+Usage:
+  $0 [--clean]
 
 Options:
-  --debug       Build debug binary
-  --clean       Remove the dedicated Linux target directory first
-  --help        Show this help
+  --clean       Remove target-linux-x86_64 before building.
+  --help        Show this help.
 
 Environment:
-  ANKA_LINUX_BUILD_IMAGE    Container image (default rust:bookworm)
+  ANKA_LINUX_BUILD_IMAGE   Container image
+                           default: docker.io/library/rust:bookworm
+  ANKA_BIN_TARGET          Cargo binary target
+                           default: anka
+  ANKA_OUTPUT_NAME         Packaged output filename
+                           default: anka-linux-x86_64
 
 Output:
-  dist/anka-linux-x86_64
+  dist/\$ANKA_OUTPUT_NAME
 EOF
             exit 0
             ;;
         *)
-            echo "Unknown option: $arg" >&2
+            echo "error: unknown option: $arg" >&2
             exit 2
             ;;
     esac
@@ -56,14 +90,6 @@ command -v podman >/dev/null 2>&1 || {
     exit 1
 }
 
-if [ ! -f "$PROJECT_ROOT/Cargo.toml" ]; then
-    echo "error: Cargo.toml not found at project root: $PROJECT_ROOT" >&2
-    exit 1
-fi
-
-TARGET_DIR="$PROJECT_ROOT/target-linux-x86_64"
-DIST_DIR="$PROJECT_ROOT/dist"
-
 if [ "$DO_CLEAN" = true ]; then
     echo "Cleaning $TARGET_DIR"
     rm -rf "$TARGET_DIR"
@@ -71,11 +97,12 @@ fi
 
 mkdir -p "$TARGET_DIR" "$DIST_DIR"
 
-echo "Building Anka for Linux x86_64"
-echo "  Project:   $PROJECT_ROOT"
-echo "  Platform:  $PLATFORM"
-echo "  Image:     $IMAGE"
-echo "  Mode:      $BUILD_TYPE"
+echo "Anka Linux x86_64 portability build"
+echo "  Project:      $PROJECT_ROOT"
+echo "  Platform:     $PLATFORM"
+echo "  Image:        $IMAGE"
+echo "  Cargo binary: $BIN_TARGET"
+echo "  Output:       $OUTPUT_BINARY"
 echo
 
 podman run --rm -i \
@@ -83,7 +110,8 @@ podman run --rm -i \
     -v "$PROJECT_ROOT:/work:Z" \
     -w /work \
     -e CARGO_TARGET_DIR=/work/target-linux-x86_64 \
-    -e ANKA_BUILD_TYPE="$BUILD_TYPE" \
+    -e ANKA_BIN_TARGET="$BIN_TARGET" \
+    -e ANKA_OUTPUT_NAME="$OUTPUT_NAME" \
     "$IMAGE" \
     bash -s <<'CONTAINER_SCRIPT'
 set -euo pipefail
@@ -97,43 +125,33 @@ cargo --version
 rustc --version
 echo
 
-echo "Installing Linux build dependencies..."
+echo "Installing Linux build/package dependencies..."
 apt-get update
-
-PACKAGES=(
-    build-essential
-    pkg-config
-)
-
-apt-get install -y --no-install-recommends "${PACKAGES[@]}"
+apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
+    binutils \
+    file
 rm -rf /var/lib/apt/lists/*
-
-CARGO_ARGS=(build --bin anka)
-
-if [ "$ANKA_BUILD_TYPE" = "release" ]; then
-    CARGO_ARGS+=(--release)
-    TEST_ARGS=(test --release -- --test-threads=1)
-else
-    TEST_ARGS=(test -- --test-threads=1)
-fi
-
 echo
-echo "Running tests (serial — QEMU emulation is memory-hungry)..."
-cargo "${TEST_ARGS[@]}"
 
+echo "============================================================"
+echo "1/3  Linux portability test suite (release, single-threaded)"
+echo "============================================================"
+cargo test --release -- --test-threads=1
 echo
-printf 'Running: cargo'
-printf ' %q' "${CARGO_ARGS[@]}"
-printf '\n'
 
-cargo "${CARGO_ARGS[@]}"
-CONTAINER_SCRIPT
+echo "============================================================"
+echo "2/3  Release build"
+echo "============================================================"
 
-if [ "$BUILD_TYPE" = "release" ]; then
-    BUILT_BINARY="$TARGET_DIR/release/anka"
-else
-    BUILT_BINARY="$TARGET_DIR/debug/anka"
-fi
+# Ask rustc/Cargo not to retain symbol information in the final release
+# artifact. We still run GNU strip below as a packaging sanity step.
+CARGO_PROFILE_RELEASE_STRIP=symbols \
+    cargo build --release --bin "$ANKA_BIN_TARGET"
+
+BUILT_BINARY="/work/target-linux-x86_64/release/$ANKA_BIN_TARGET"
+OUTPUT_BINARY="/work/dist/$ANKA_OUTPUT_NAME"
 
 if [ ! -f "$BUILT_BINARY" ]; then
     echo "error: expected binary was not produced:" >&2
@@ -141,27 +159,50 @@ if [ ! -f "$BUILT_BINARY" ]; then
     exit 1
 fi
 
-OUTPUT_BINARY="$DIST_DIR/anka-linux-x86_64"
+echo
+echo "Built artifact before packaging:"
+ls -lh "$BUILT_BINARY"
+file "$BUILT_BINARY"
+
 cp "$BUILT_BINARY" "$OUTPUT_BINARY"
 chmod +x "$OUTPUT_BINARY"
 
-echo
-echo "Build successful."
-echo "Linux binary:"
-echo "  $OUTPUT_BINARY"
+# The old script copied an unstripped ELF.  Strip inside the Linux/amd64
+# container so the host does not need an ELF-aware strip tool.
+strip --strip-unneeded "$OUTPUT_BINARY"
 
-if command -v file >/dev/null 2>&1; then
-    echo
-    file "$OUTPUT_BINARY"
+echo
+echo "============================================================"
+echo "3/3  Packaged Linux artifact"
+echo "============================================================"
+ls -lh "$OUTPUT_BINARY"
+file "$OUTPUT_BINARY"
+
+echo
+echo "Dynamic dependencies:"
+ldd "$OUTPUT_BINARY" || true
+
+echo
+printf "Packaged size (bytes): "
+stat -c '%s' "$OUTPUT_BINARY"
+
+# Fail loudly if packaging somehow left the ELF unstripped.
+if file "$OUTPUT_BINARY" | grep -q 'not stripped'; then
+    echo "error: packaged ELF is still reported as not stripped" >&2
+    exit 1
 fi
 
 echo
-echo "Checking Linux dynamic dependencies inside amd64 container..."
-podman run --rm \
-    --platform "$PLATFORM" \
-    -v "$PROJECT_ROOT:/work:Z" \
-    "$IMAGE" \
-    bash -c 'ldd /work/dist/anka-linux-x86_64 || true'
+echo "Linux x86_64 test + build + strip completed successfully."
+CONTAINER_SCRIPT
 
 echo
-echo "Output name is intentionally separate from the native macOS binary."
+echo "============================================================"
+echo "DONE"
+echo "============================================================"
+echo "Linux artifact:"
+echo "  $OUTPUT_BINARY"
+ls -lh "$OUTPUT_BINARY"
+echo
+echo "If the test stage reported 440/440, the portability seal is:"
+echo "  440/440 macOS = 440/440 Linux x86_64"

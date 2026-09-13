@@ -1473,7 +1473,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | Supervision | ankad: native Anka64 supervisor (boot → spawn → wait → restart) |
 | Steady-state conservation | 100-cycle resource fixed point verified |
 | Formal lifecycle model | Kleis Petri net: 3 P-invariants, cycle closure, 26 properties |
-| Linux x86_64 binary | Built via Podman cross-compilation |
+| Linux x86_64 binary | Built and tested via Podman (440/440, stripped ELF, ~649 KiB) |
 
 ---
 
@@ -1492,6 +1492,14 @@ Phase 8.0 established the boot contract: the host creates the machine, Anka crea
 Phase 8.2 established capability-shaped process lifecycle: `SYS_SPAWN` creates a child and returns a `LifecycleHandle` — the only authority to observe that child's termination.  A name (PID) is not a capability (DN-8, Rule 8).
 
 Phase 8.3 closed the refinement chain from formal specification through implementation to empirical steady-state validation.  A Kleis Petri-net model established lifecycle uniqueness, extent conservation, and cycle closure as provable invariants.  The kernel implementation separated five distinct concepts (PID, slot, ProcessKey, lifecycle authority, physical placement), centralized all death transitions through `finish_process()`, terminated orphans depth-first, and reclaimed process-owned resources atomically.  ankad — a native Anka64 supervisor — demonstrated that ordinary process orchestration occurs inside Anka, not on the host.  The decisive result: after warm-up, 100 consecutive restart cycles produce zero resource drift — `next_phys`, domain count, object count, and process table size all remain constant while incarnation identity advances monotonically.  The formal model predicted cycle closure; the implementation confirmed it holds over sustained operation.
+
+The Linux x86_64 portability seal confirmed identical behavior on a different host:
+
+```text
+440/440 macOS = 440/440 Linux x86_64
+```
+
+The same Anka64 guest images, the same Petri-net invariants, the same steady-state conservation — under a different host executable on a different operating system.
 
 Through self-hosting, capabilities, multicore, W⊕X, protected calls/returns, process lifecycle, formal Petri nets, reclamation, and a genuine supervisor, the ISA still has not demanded instruction 30.  Twenty-nine instructions.  The software keeps asking for better abstractions rather than instruction proliferation.
 
