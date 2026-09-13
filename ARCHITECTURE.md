@@ -371,7 +371,7 @@ Key design elements:
 
 ### Stage 20 — Capability-shaped process lifecycle (Phase 8.2)
 
-Phase 8.2 established `SYS_SPAWN` (asynchronous process creation) and `SYS_WAIT` (lifecycle observation).  The decisive design property: **a name is not a capability** (DN-8, Rule 8).
+Phase 8.2 established `SYS_SPAWN` (asynchronous process creation) and `SYS_WAIT` (lifecycle observation).  The decisive design property: **a name is not a capability** (DN-8, Rule 8).  Phase 8.4 extended `SYS_SPAWN` to consume R1–R8, carrying an explicitly delegated initial environment (grants, maps, layout).  See DN-11 for the ABI design.
 
 Key design elements:
 
@@ -1305,7 +1305,7 @@ Design questions, with current status.
 ### New (post-self-hosting)
 
 11. **Text and string semantics** — **Resolved in Phase 7.**  `Bytes ≠ UTF8Text`.  UTF-8 string literals are validated at compile time (RFC 3629 scalar-value legality).  Representation: explicit byte length, no NUL termination, immutable R-only literal object.  Validation is a gate (not a transcoder): input bytes = output bytes.  Codepoint count and grapheme count are not tracked; only byte length.  No normalization, escapes, or Unicode identifiers yet.
-12. **Host independence** — **Substantially resolved through Phase 8.3.**  The boot contract (`kernel.boot(BootInfo)`) eliminates host-side process construction (Phase 8.0).  ankad is now a native Anka64 supervisor that spawns, waits on, and restarts children using only runtime interfaces — the host boots ankad, then observes a supervisor rather than impersonating one (Phase 8.3).  The Linux x86_64 host binary demonstrates that the same Anka64 guest images produce identical architectural behavior on a different host.  Remaining: boot the compiler via the boot contract (requires layout parameterization), retire old-style test harnesses.
+12. **Host independence** — **Substantially resolved through Phase 8.4.**  The boot contract (`kernel.boot(BootInfo)`) eliminates host-side process construction (Phase 8.0).  ankad is now a native Anka64 supervisor that spawns, waits on, and restarts children using only runtime interfaces — the host boots ankad, then observes a supervisor rather than impersonating one (Phase 8.3).  Phase 8.4 resolved compiler supervision: ankad spawns CC_B as an ordinary supervised process with an explicitly delegated initial environment, requiring no kernel-side compiler awareness.  The Linux x86_64 host binary demonstrates that the same Anka64 guest images produce identical architectural behavior on a different host.  Remaining: retire old-style test harnesses, package the system image.
 
 ---
 
@@ -1451,7 +1451,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions, 63,808 bytes |
 | Canonical source | ~17 KB |
-| Tests | 440 |
+| Tests | 458 |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -1463,14 +1463,15 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | Literal authority | Immutable R-only, two-ended image allocator |
 | Bootstrap development model | CC_A frozen; new features via canonical source + CC_B |
 | Boot contract | `kernel.boot(BootInfo)` — host owns machine, Anka owns process |
-| Shared process primitive | `prepare_process()` used by both SYS_EXEC and boot() |
-| Process lifecycle | SYS_SPAWN / SYS_WAIT with capability-shaped authority |
+| Shared process primitive | `prepare_process()` used by boot, SYS_EXEC, and SYS_SPAWN |
+| Process lifecycle | SYS_SPAWN (R1-R8) / SYS_WAIT with capability-shaped authority |
+| Initial environment | SpawnGrant (authority) ≠ SpawnMap (placement) ≠ SpawnLayout (process structure) |
 | Process states | Running, Zombie, Free, Retired (non-wrapping generations) |
 | Reclamation | Atomic collect/reclaim: domain, objects, extents, metadata |
 | Extent reuse | Scrubbed physical stack/trap extents returned to pools |
 | Orphan termination | Depth-first recursive on parent death |
 | Slot reuse | Free slots reused with advanced generation, fresh PID |
-| Supervision | ankad: native Anka64 supervisor (boot → spawn → wait → restart) |
+| Supervision | ankad: native Anka64 supervisor (boot → spawn → wait → restart → compiler service) |
 | Steady-state conservation | 100-cycle resource fixed point verified |
 | Formal lifecycle model | Kleis Petri net: 3 P-invariants, cycle closure, 26 properties |
 | Linux x86_64 binary | Built and tested via Podman (440/440, stripped ELF, ~649 KiB) |
@@ -1501,7 +1502,30 @@ The Linux x86_64 portability seal confirmed identical behavior on a different ho
 
 The same Anka64 guest images, the same Petri-net invariants, the same steady-state conservation — under a different host executable on a different operating system.
 
-Through self-hosting, capabilities, multicore, W⊕X, protected calls/returns, process lifecycle, formal Petri nets, reclamation, and a genuine supervisor, the ISA still has not demanded instruction 30.  Twenty-nine instructions.  The software keeps asking for better abstractions rather than instruction proliferation.
+Phase 8.4 extended `SYS_SPAWN` to accept an explicitly delegated initial environment and proved that the self-hosted compiler is an ordinary supervised service.  The canonical ABI now consumes R1–R8:
+
+| Register | Purpose |
+|---|---|
+| R1 | code_addr |
+| R2 | code_size |
+| R3 | lit_start |
+| R4 | grant_table_addr (ignored when R5=0) |
+| R5 | grant_count |
+| R6 | map_table_addr (ignored when R7=0) |
+| R7 | map_count |
+| R8 | layout_addr (0 = default ProcessLayout) |
+
+Three distinct concepts compose the initial environment:
+
+- **SpawnGrant** = initial authority (what the child may access)
+- **SpawnMap** = initial placement (where delegated objects appear in child virtual space)
+- **SpawnLayout** = process structure (where code, stack, and trap handler reside)
+
+A map never creates authority; every map must be covered by a corresponding grant.  All descriptor validation occurs transactionally before any child resources are allocated — failure is cheap and leaves no partial state.  Once a register acquires syscall meaning, callers must initialize it deliberately at every call site; stale caller state is not part of the ABI.
+
+The decisive Phase 8.4 result: ankad boots as init, constructs SpawnGrant/SpawnMap/SpawnLayout descriptors on its own stack using SP-relative addressing, and calls `SYS_SPAWN(R1–R8)` to launch CC_B with source=R, output=RWS, workspace=RW.  CC_B compiles `int main() { return 42; }`, seals its output, `SYS_EXEC` runs the compiled child, and ankad observes `Exited(42)` via `SYS_WAIT`.  No kernel change was required — the compiler became an ordinary client of the same mechanisms used for general process creation.  The ownership result confirmed the Phase 8.3 resource semantics under delegation: CC_B's process slot is reclaimed to Free while the delegated source, workspace, and output objects survive, because authority held by an incarnation is not resource owned by that incarnation.
+
+Through self-hosting, capabilities, multicore, W⊕X, protected calls/returns, process lifecycle, formal Petri nets, reclamation, a genuine supervisor, an explicitly delegated initial-environment ABI, and a compiler that is now managed by Anka rather than merely running inside it, the ISA still has not demanded instruction 30.  Twenty-nine instructions.  The software keeps asking for better abstractions rather than instruction proliferation.
 
 The project continues to evolve by the same rule that produced its strongest results:
 

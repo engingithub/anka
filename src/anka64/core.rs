@@ -54,6 +54,32 @@ impl AddressMap {
         }
         None
     }
+
+    /// Resolve a virtual range [vaddr, vaddr+size) and prove that
+    /// the entire range falls within exactly one AddressMapEntry.
+    ///
+    /// Returns (ObjectId, base_obj_offset) on success.
+    /// Unlike resolving two endpoints and comparing, this checks
+    /// structural containment: it finds the unique entry whose
+    /// [virt_base, virt_base+size) contains the requested range.
+    /// Adjacent entries mapping contiguous portions of the same
+    /// object cannot be stitched together.
+    pub fn resolve_range_single_entry(
+        &self, vaddr: u64, size: u64,
+    ) -> Option<(ObjectId, u64)> {
+        if size == 0 {
+            return None;
+        }
+        let last = vaddr.checked_add(size - 1)?;
+        for e in &self.entries {
+            let entry_end = e.virt_base.checked_add(e.size)?;
+            if vaddr >= e.virt_base && last < entry_end {
+                let obj_offset = e.obj_offset + (vaddr - e.virt_base);
+                return Some((e.object, obj_offset));
+            }
+        }
+        None
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────

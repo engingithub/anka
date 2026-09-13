@@ -8232,11 +8232,7 @@ mod tests {
 
         // Parent A: SYS_SPAWN(code, 16, 0) → SYS_EXIT(0)
         let mut asm_a = Asm64::new();
-        asm_a.movi(R1, 0x5000);         // code_vaddr
-        asm_a.movi(R2, 16);             // code_size (enough for child entry)
-        asm_a.movi(R3, 0);              // lit_start
-        asm_a.movi(R0, SYS_SPAWN as i32);
-        asm_a.trap(0);
+        emit_spawn_default(&mut asm_a, 0x5000, 16, 0);
         // R0 = LifecycleHandle (don't WAIT, just exit)
         asm_a.movi(R0, SYS_EXIT as i32);
         asm_a.movi(R1, 0);
@@ -8564,23 +8560,15 @@ mod tests {
             let mut asm = Asm64::new();
 
             // SPAWN child A (code at vaddr 0x5000, size=8)
-            asm.movi(R1, 0x5000);                // code_vaddr for A
-            asm.movi(R2, child_a_code_size);     // code_size
-            asm.movi(R3, 0);                     // lit_start
-            asm.movi(R0, SYS_SPAWN as i32);
-            asm.trap(0);
-            asm.mov(R8, R0);                     // R8 = handle_a
+            emit_spawn_default(&mut asm, 0x5000, child_a_code_size, 0);
+            asm.mov(R9, R0);                     // R9 = handle_a
 
             // SPAWN child B (code at vaddr 0x6000, size=8)
-            asm.movi(R1, 0x6000);                // code_vaddr for B
-            asm.movi(R2, child_b_code_size);
-            asm.movi(R3, 0);
-            asm.movi(R0, SYS_SPAWN as i32);
-            asm.trap(0);
-            asm.mov(R9, R0);                     // R9 = handle_b
+            emit_spawn_default(&mut asm, 0x6000, child_b_code_size, 0);
+            asm.mov(R10, R0);                    // R10 = handle_b
 
             // WAIT on child A
-            asm.mov(R1, R8);                     // handle_a
+            asm.mov(R1, R9);                     // handle_a
             asm.movi(R0, SYS_WAIT as i32);
             asm.trap(0);
             // R0 = tag_a, R1 = detail_a
@@ -8588,7 +8576,7 @@ mod tests {
             asm.mov(R5, R1);                     // R5 = detail_a
 
             // WAIT on child B
-            asm.mov(R1, R9);                     // handle_b
+            asm.mov(R1, R10);                    // handle_b
             asm.movi(R0, SYS_WAIT as i32);
             asm.trap(0);
             // R0 = tag_b, R1 = detail_b
@@ -8776,61 +8764,55 @@ mod tests {
             let mut asm = Asm64::new();
 
             // SPAWN A (code at 0x5000)
-            asm.movi(R1, 0x5000);
-            asm.movi(R2, 8);
-            asm.movi(R3, 0);
-            asm.movi(R0, SYS_SPAWN as i32);
-            asm.trap(0);
-            asm.mov(R8, R0);           // R8 = handle_a
+            emit_spawn_default(&mut asm, 0x5000, 8, 0);
+            asm.mov(R9, R0);           // R9 = handle_a
 
             // SPAWN B₁ (code at 0x6000)
-            asm.movi(R1, 0x6000);
-            asm.movi(R2, 12);          // 3 instructions × 4 bytes
-            asm.movi(R3, 0);
-            asm.movi(R0, SYS_SPAWN as i32);
-            asm.trap(0);
-            asm.mov(R9, R0);           // R9 = handle_b1
+            emit_spawn_default(&mut asm, 0x6000, 12, 0);  // 3 insns × 4 bytes
+            asm.mov(R10, R0);          // R10 = handle_b1
 
             // WAIT B₁ (collect faulting child first)
-            asm.mov(R1, R9);
-            asm.movi(R0, SYS_WAIT as i32);
-            asm.trap(0);
-            asm.mov(R4, R0);           // R4 = tag_b1
-            asm.mov(R5, R1);           // R5 = detail_b1
-
-            // SPAWN B₂ (same code, should reuse B₁'s slot)
-            asm.movi(R1, 0x6000);
-            asm.movi(R2, 12);
-            asm.movi(R3, 0);
-            asm.movi(R0, SYS_SPAWN as i32);
-            asm.trap(0);
-            asm.mov(R10, R0);          // R10 = handle_b2
-
-            // WAIT B₂
             asm.mov(R1, R10);
             asm.movi(R0, SYS_WAIT as i32);
             asm.trap(0);
+            asm.mov(R4, R0);           // R4 = tag_b1
+            // Store detail_b1 immediately to stack
+            asm.movi(R12, 0x10000_u32 as i32);
+            asm.st(R1, R12, 8);        // [0x10008] = detail_b1
+
+            // SPAWN B₂ (same code, should reuse B₁'s slot)
+            emit_spawn_default(&mut asm, 0x6000, 12, 0);
+            asm.mov(R11, R0);          // R11 = handle_b2
+
+            // WAIT B₂
+            asm.mov(R1, R11);
+            asm.movi(R0, SYS_WAIT as i32);
+            asm.trap(0);
             asm.mov(R6, R0);           // R6 = tag_b2
-            asm.mov(R7, R1);           // R7 = detail_b2
+            // Store detail_b2 immediately to stack
+            asm.movi(R12, 0x10000_u32 as i32);
+            asm.st(R1, R12, 24);       // [0x10018] = detail_b2
+
+            // Store handle_b1 and handle_b2 before WAIT A clobbers R11
+            asm.st(R10, R12, 48);      // [0x10030] = handle_b1
+            asm.st(R11, R12, 56);      // [0x10038] = handle_b2
 
             // WAIT A (collect clean service last)
-            asm.mov(R1, R8);
+            asm.mov(R1, R9);
             asm.movi(R0, SYS_WAIT as i32);
             asm.trap(0);
             // R0 = tag_a, R1 = detail_a
             asm.mov(R11, R0);          // R11 = tag_a
             asm.mov(R12, R1);          // R12 = detail_a
 
-            // Store 8 × u64 at stack base (0x10000)
+            // Store remaining 4 values at stack base (0x10000)
+            // detail_b1 [0x10008], detail_b2 [0x10018], handle_b1 [0x10030],
+            // handle_b2 [0x10038] already stored above
             asm.movi(R3, 0x10000_u32 as i32);
             asm.st(R4, R3, 0);         // tag_b1
-            asm.st(R5, R3, 8);         // detail_b1
             asm.st(R6, R3, 16);        // tag_b2
-            asm.st(R7, R3, 24);        // detail_b2
             asm.st(R11, R3, 32);       // tag_a
             asm.st(R12, R3, 40);       // detail_a
-            asm.st(R9, R3, 48);        // handle_b1
-            asm.st(R10, R3, 56);       // handle_b2
 
             // SYS_WRITE(0x10000, 64, 0)
             asm.movi(R1, 0x10000_u32 as i32);
@@ -9181,41 +9163,35 @@ mod tests {
 
             let mut asm = Asm64::new();
 
-            // Warm-up (words 0-8)
-            asm.movi(R1, 0x5000);
-            asm.movi(R2, child_code_size);
-            asm.movi(R3, 0);
-            asm.movi(R0, SYS_SPAWN as i32);
-            asm.trap(0);
-            asm.mov(R8, R0);
-            asm.mov(R1, R8);
-            asm.movi(R0, SYS_WAIT as i32);
-            asm.trap(0);
+            // Warm-up (words 0-11)
+            emit_spawn_default(&mut asm, 0x5000, child_code_size, 0); // 0-7
+            asm.mov(R9, R0);                   // 8: handle in R9
+            asm.mov(R1, R9);                   // 9
+            asm.movi(R0, SYS_WAIT as i32);   // 10
+            asm.trap(0);                       // 11
 
-            // Loop init (word 9)
-            asm.movi(R4, 100);
+            // Loop init (word 12)
+            asm.movi(R4, 100);                 // 12
 
-            // loop_top (word 10)
-            asm.movi(R1, 0x5000);
-            asm.movi(R2, child_code_size);
-            asm.movi(R3, 0);
-            asm.movi(R0, SYS_SPAWN as i32);
-            asm.trap(0);                       // 14
-            asm.mov(R8, R0);                   // 15
-            asm.mov(R1, R8);                   // 16
-            asm.movi(R0, SYS_WAIT as i32);   // 17
-            asm.trap(0);                       // 18
+            // loop_top (word 13)
+            emit_spawn_default(&mut asm, 0x5000, child_code_size, 0); // 13-20
+            asm.mov(R9, R0);                   // 21
+            asm.mov(R1, R9);                   // 22
+            asm.movi(R0, SYS_WAIT as i32);   // 23
+            asm.trap(0);                       // 24
 
-            asm.cmpi(R0, 2);                  // 19
-            asm.bcc(Cond::Eq, 4);             // 20: PC=20*4, target=20*4+(4*4)=24*4 ✓
+            asm.cmpi(R0, 2);                  // 25
+            asm.bcc(Cond::Eq, 4);             // 26: target = 26+1+4 = 31
 
-            // Error exit (words 21-23)
-            asm.movi(R1, 1);                   // 21
-            asm.movi(R0, SYS_EXIT as i32);    // 22
-            asm.trap(0);                        // 23
+            // Error exit (words 27-29)
+            asm.movi(R1, 1);                   // 27
+            asm.movi(R0, SYS_EXIT as i32);    // 28
+            asm.trap(0);                        // 29
 
-            // Decrement + loop (words 24-27)
-            asm.subi(R4, R4, 1);              // 24
+            // (word 30 unreachable — falls through from error exit trap)
+
+            // Decrement + loop (words 30-...)
+            asm.subi(R4, R4, 1);              // 30
             asm.cmpi(R4, 0);                  // 25
             // Back to loop_top (word 10): offset = 10 - 26 = -16
             asm.bcc(Cond::Ne, -16);           // 26: PC=26*4, target=26*4+(-16*4)=10*4 ✓
@@ -9400,15 +9376,11 @@ mod tests {
         {
             let mut asm = Asm64::new();
             // SPAWN child
-            asm.movi(R1, 0x5000);
-            asm.movi(R2, 8);
-            asm.movi(R3, 0);
-            asm.movi(R0, SYS_SPAWN as i32);
-            asm.trap(0);
-            asm.mov(R8, R0);
+            emit_spawn_default(&mut asm, 0x5000, 8, 0);
+            asm.mov(R9, R0);  // handle in R9
 
             // WAIT child
-            asm.mov(R1, R8);
+            asm.mov(R1, R9);
             asm.movi(R0, SYS_WAIT as i32);
             asm.trap(0);
 
@@ -9518,6 +9490,323 @@ mod tests {
             "SYS_SEND to dead process returns MAX (failure)");
 
         eprintln!("8.3g: SYS_SEND to dead process → MAX ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 8.4c: ankad spawns the self-hosted compiler as a service
+    //
+    //   host creates five objects (ankad code, sealed CC_B code,
+    //   source, output, workspace) and boots ankad as init.
+    //   ankad constructs SpawnGrant/SpawnMap/SpawnLayout descriptors
+    //   on its own stack and calls SYS_SPAWN(R1-R8) to launch CC_B
+    //   with an explicit initial environment:
+    //     source  = R
+    //     output  = RWS
+    //     workspace = RW
+    //
+    //   CC_B compiles "int main() { return 42; }", seals its output,
+    //   SYS_EXEC runs the compiled child, and ankad observes
+    //   Exited(42) via SYS_WAIT.
+    //
+    //   Key assertions:
+    //     ankad exits with 0
+    //     CC_B exits with 42 (observed via SYS_WAIT + SYS_WRITE)
+    //     CC_B's slot reclaimed to Free
+    //     compiled child's slot reclaimed to Free
+    //     output object sealed by CC_B
+    //     source/workspace/output objects survive CC_B's death
+    //       (authority held by an incarnation ≠ resource owned)
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p84c_ankad_spawns_compiler() {
+        // ── Build CC_B using the existing bootstrap path ──
+        let ccb = build_ccb();
+        let ccb_len = ccb.len();
+        let ccb_size = ((ccb_len + 0xFFF) & !0xFFF) as u64;
+
+        // CC_B cannot exceed the 64 KiB output buffer, so ccb_len
+        // always fits in MOVI's 18-bit signed immediate range.
+        assert!(ccb_len <= OUTPUT_SIZE as usize,
+            "CC_B ({} bytes) exceeds output buffer", ccb_len);
+
+        // ── Host creates the machine ──
+        let mut fabric = Fabric::new(0x800000);
+
+        // ankad code object
+        let ankad_obj = fabric.alloc_object("ankad_code", 0x2000, ObjectKind::Memory);
+        fabric.place_object(ankad_obj, 0x000000);
+
+        // CC_B code object (sealed)
+        let ccb_obj = fabric.alloc_object("ccb_code", ccb_size, ObjectKind::Memory);
+        fabric.place_object(ccb_obj, 0x100000);
+        fabric.initialize_object(ccb_obj, 0, &ccb);
+        fabric.seal_object(ccb_obj);
+
+        // Source object: length-prefixed "int main() { return 42; }"
+        let source_obj = fabric.alloc_object("source", SOURCE_SIZE as u64, ObjectKind::Memory);
+        fabric.place_object(source_obj, 0x200000);
+        let source_text = b"int main() { return 42; }";
+        fabric.write_physical(0x200000, &(source_text.len() as u64).to_le_bytes());
+        fabric.write_physical(0x200008, source_text);
+
+        // Output object (active, empty — CC_B will write + seal)
+        let output_obj = fabric.alloc_object("output", OUTPUT_SIZE as u64, ObjectKind::Memory);
+        fabric.place_object(output_obj, 0x210000);
+
+        // Workspace object (uninitialized — CC_B's main() self-initializes)
+        let work_obj = fabric.alloc_object("workspace", WS_SIZE as u64, ObjectKind::Memory);
+        fabric.place_object(work_obj, 0x220000);
+
+        // ── Assemble ankad ──
+        //
+        // Virtual memory layout for ankad:
+        //   0x00000 - 0x02000 : ankad code (Sealed, RX)
+        //   0x07000 - 0x0C000 : source (R)
+        //   0x0C000 - 0x12000 : workspace (RW)
+        //   0x12000 - 0x22000 : output (RWS)
+        //   0x30000+          : CC_B code (RX, sealed)
+        //   0x50000 - 0x54000 : stack (kernel-allocated)
+        //   0x54000 - 0x55000 : trap (kernel-allocated)
+        //
+        // Values above MOVI 18-bit limit use MOVI half; ADD Rx,Rx,Rx:
+        //   0x0C000 = 0x6000 << 1    0x12000 = 0x9000 << 1
+        //   0x10000 = 0x8000 << 1    0x22000 = 0x11000 << 1
+        //   0x26000 = 0x13000 << 1   0x30000 = 0x18000 << 1
+        //
+        // Register plan:
+        //   R4  = grant_base  (SP - 0x300), becomes SYS_SPAWN R4
+        //   R6  = map_base    (SP - 0x200), becomes SYS_SPAWN R6
+        //   R8  = layout_base (SP - 0x100), becomes SYS_SPAWN R8
+        //   R9  = zero constant during construction, then handle
+        //   R3, R10 = temporaries
+        {
+            let mut asm = Asm64::new();
+
+            // ── Phase 1: base addresses ──
+            asm.subi(R4, SP, 0x300);          // grant_base
+            asm.subi(R6, SP, 0x200);          // map_base
+            asm.subi(R8, SP, 0x100);          // layout_base
+            asm.movi(R9, 0);                  // zero constant
+
+            // ── Phase 2a: Grant[0] — source = R ──
+            // [parent_vaddr, offset, size, perms, reserved]
+            asm.movi(R3, 0x07000);
+            asm.st(R3, R4, 0);               // parent_vaddr = 0x07000
+            asm.st(R9, R4, 8);               // offset = 0
+            asm.movi(R3, 0x5000);
+            asm.st(R3, R4, 16);              // size = SOURCE_SIZE
+            asm.movi(R3, 1);
+            asm.st(R3, R4, 24);              // perms = READ
+            asm.st(R9, R4, 32);              // reserved = 0
+
+            // ── Phase 2b: Grant[1] — output = RWS ──
+            asm.movi(R3, 0x9000);
+            asm.add(R3, R3, R3);             // R3 = 0x12000
+            asm.st(R3, R4, 40);              // parent_vaddr
+            asm.st(R9, R4, 48);              // offset = 0
+            asm.movi(R3, 0x8000);
+            asm.add(R3, R3, R3);             // R3 = 0x10000
+            asm.st(R3, R4, 56);              // size = OUTPUT_SIZE
+            asm.movi(R3, 0x13);
+            asm.st(R3, R4, 64);              // perms = RWS
+            asm.st(R9, R4, 72);              // reserved = 0
+
+            // ── Phase 2c: Grant[2] — workspace = RW ──
+            asm.movi(R3, 0x6000);
+            asm.add(R3, R3, R3);             // R3 = 0x0C000
+            asm.st(R3, R4, 80);              // parent_vaddr
+            asm.st(R9, R4, 88);              // offset = 0
+            asm.movi(R3, 0x6000);
+            asm.st(R3, R4, 96);              // size = WS_SIZE
+            asm.movi(R3, 3);
+            asm.st(R3, R4, 104);             // perms = RW
+            asm.st(R9, R4, 112);             // reserved = 0
+
+            // ── Phase 2d: Map[0] — source (identity mapping) ──
+            // [child_vaddr, parent_vaddr, offset, size, reserved]
+            asm.movi(R3, 0x07000);
+            asm.st(R3, R6, 0);               // child_vaddr = 0x07000
+            asm.st(R3, R6, 8);               // parent_vaddr = 0x07000
+            asm.st(R9, R6, 16);              // offset = 0
+            asm.movi(R3, 0x5000);
+            asm.st(R3, R6, 24);              // size = SOURCE_SIZE
+            asm.st(R9, R6, 32);              // reserved = 0
+
+            // ── Phase 2e: Map[1] — workspace (identity mapping) ──
+            asm.movi(R3, 0x6000);
+            asm.add(R3, R3, R3);             // R3 = 0x0C000
+            asm.st(R3, R6, 40);              // child_vaddr
+            asm.st(R3, R6, 48);              // parent_vaddr
+            asm.st(R9, R6, 56);              // offset = 0
+            asm.movi(R3, 0x6000);
+            asm.st(R3, R6, 64);              // size = WS_SIZE
+            asm.st(R9, R6, 72);              // reserved = 0
+
+            // ── Phase 2f: Map[2] — output (identity mapping) ──
+            asm.movi(R3, 0x9000);
+            asm.add(R3, R3, R3);             // R3 = 0x12000
+            asm.st(R3, R6, 80);              // child_vaddr
+            asm.st(R3, R6, 88);              // parent_vaddr
+            asm.st(R9, R6, 96);              // offset = 0
+            asm.movi(R3, 0x8000);
+            asm.add(R3, R3, R3);             // R3 = 0x10000
+            asm.st(R3, R6, 104);             // size = OUTPUT_SIZE
+            asm.st(R9, R6, 112);             // reserved = 0
+
+            // ── Phase 2g: SpawnLayout ──
+            // [code_vaddr, stack_vaddr, stack_size, trap_vaddr, reserved]
+            asm.movi(R3, 0x18000);
+            asm.add(R3, R3, R3);             // R3 = 0x30000
+            asm.st(R3, R8, 0);               // code_vaddr = CCB_CODE_BASE
+            asm.movi(R3, 0x11000);
+            asm.add(R3, R3, R3);             // R3 = 0x22000
+            asm.st(R3, R8, 8);               // stack_vaddr = LAYOUT_STACK
+            asm.movi(R3, 0x4000);
+            asm.st(R3, R8, 16);              // stack_size = 0x4000
+            asm.movi(R3, 0x13000);
+            asm.add(R3, R3, R3);             // R3 = 0x26000
+            asm.st(R3, R8, 24);              // trap_vaddr
+            asm.st(R9, R8, 32);              // reserved = 0
+
+            // ── Phase 3: SYS_SPAWN(R1-R8) ──
+            asm.movi(R1, 0x18000);
+            asm.add(R1, R1, R1);             // R1 = 0x30000 (CC_B code vaddr)
+            asm.movi(R2, ccb_len as i32);    // R2 = ccb code_size (fits MOVI)
+            asm.movi(R3, 0);                 // R3 = lit_start = 0
+            asm.movi(R5, 3);                 // R5 = grant_count
+            asm.movi(R7, 3);                 // R7 = map_count
+            // R4 = grant_base, R6 = map_base, R8 = layout_base (already set)
+            asm.movi(R0, SYS_SPAWN as i32);
+            asm.trap(0);
+
+            // ── Phase 4: SYS_WAIT ──
+            asm.mov(R9, R0);                 // R9 = handle
+            asm.mov(R1, R9);
+            asm.movi(R0, SYS_WAIT as i32);
+            asm.trap(0);
+            // R0 = tag, R1 = detail
+
+            // ── Phase 5: SYS_WRITE(tag, detail) ──
+            asm.subi(R10, SP, 0x4000);       // R10 = stack base (scratch area)
+            asm.st(R0, R10, 0);              // [base + 0] = tag
+            asm.st(R1, R10, 8);              // [base + 8] = detail
+            asm.mov(R1, R10);                // R1 = addr
+            asm.movi(R2, 16);                // R2 = len (2 × u64)
+            asm.movi(R3, 0);
+            asm.movi(R0, SYS_WRITE as i32);
+            asm.trap(0);
+
+            // ── Phase 6: SYS_EXIT(0) ──
+            asm.movi(R1, 0);
+            asm.movi(R0, SYS_EXIT as i32);
+            asm.trap(0);
+
+            let code_bytes = asm.to_bytes();
+            assert!(code_bytes.len() < 0x2000,
+                "ankad code {} bytes exceeds 0x2000", code_bytes.len());
+            fabric.initialize_object(ankad_obj, 0, &code_bytes);
+        }
+        fabric.seal_object(ankad_obj);
+
+        // ── Boot descriptor ──
+        let ankad_code_size = 0x2000_u64;
+        let info = BootInfo {
+            image: BootImage {
+                obj: ankad_obj,
+                code_offset: 0,
+                code_size: ankad_code_size,
+                entry: 0,
+                lit_start: 0,
+            },
+            grants: vec![
+                BootGrant { obj: ccb_obj,    offset: 0, size: ccb_size,            perms: Permissions::RX },
+                BootGrant { obj: source_obj, offset: 0, size: SOURCE_SIZE as u64,  perms: Permissions::READ },
+                BootGrant { obj: output_obj, offset: 0, size: OUTPUT_SIZE as u64,  perms: Permissions::RWS },
+                BootGrant { obj: work_obj,   offset: 0, size: WS_SIZE as u64,      perms: Permissions::RW },
+            ],
+            maps: vec![
+                BootMap { vaddr: 0x07000, size: SOURCE_SIZE as u64, obj: source_obj, obj_offset: 0 },
+                BootMap { vaddr: 0x0C000, size: WS_SIZE as u64,     obj: work_obj,   obj_offset: 0 },
+                BootMap { vaddr: 0x12000, size: OUTPUT_SIZE as u64,  obj: output_obj, obj_offset: 0 },
+                BootMap { vaddr: 0x30000, size: ccb_size,            obj: ccb_obj,    obj_offset: 0 },
+            ],
+            code_vaddr: 0,
+            stack_vaddr: 0x50000,
+            stack_size: 0x4000,
+            trap_vaddr: 0x54000,
+        };
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x300000;
+        let result = kernel.boot(&info);
+        assert_eq!(result, Ok(()), "boot(ankad) should succeed");
+
+        // ── Run: CC_B compilation needs ~4M cycles ──
+        kernel.run(5_000_000, 200);
+
+        // ═══════════════════════════════════════════════════════
+        // Host-side assertions
+        // ═══════════════════════════════════════════════════════
+
+        // 1. ankad exited cleanly
+        assert!(kernel.processes[0].exited(), "ankad should have exited");
+        assert_eq!(kernel.processes[0].exit_code, 0,
+            "ankad exits with 0 (compiler supervised successfully)");
+
+        // 2. byte_output: tag = 0 (Exited), detail = 42
+        assert_eq!(kernel.byte_output.len(), 16,
+            "ankad wrote 16 bytes (tag + detail)");
+        let read_u64 = |off: usize| -> u64 {
+            u64::from_le_bytes(kernel.byte_output[off..off+8].try_into().unwrap())
+        };
+        let tag    = read_u64(0);
+        let detail = read_u64(8);
+        assert_eq!(tag, 0, "CC_B result tag = Exited (0)");
+        assert_eq!(detail, 42, "CC_B exit code = 42 (compiled child returned 42)");
+
+        // 3. At least 3 process slots: ankad + CC_B + compiled child
+        let total_procs = kernel.processes.len();
+        assert!(total_procs >= 3,
+            "should have at least 3 process slots (ankad + CC_B + child), got {}",
+            total_procs);
+
+        // 4. CC_B and compiled child reclaimed to Free
+        let free_slots: Vec<usize> = (1..kernel.processes.len())
+            .filter(|&i| kernel.processes[i].state == ProcessState::Free)
+            .collect();
+        assert!(free_slots.len() >= 2,
+            "CC_B and compiled child should both be Free, found {} Free slots",
+            free_slots.len());
+
+        // 5. Output object sealed by CC_B
+        assert_eq!(kernel.fabric.objects[&output_obj].state, ObjectState::Sealed,
+            "output object should be Sealed after CC_B's SYS_SEAL");
+
+        // 6. Delegated objects survive process death
+        //    (authority held by an incarnation ≠ resource owned by that incarnation)
+        assert!(kernel.fabric.objects.contains_key(&source_obj),
+            "source object still exists after CC_B reclaimed");
+        assert!(kernel.fabric.objects.contains_key(&work_obj),
+            "workspace object still exists after CC_B reclaimed");
+        assert!(kernel.fabric.objects.contains_key(&output_obj),
+            "output object still exists after CC_B reclaimed");
+
+        // 7. ankad's own resources intact (zombie, not yet reclaimed)
+        assert!(kernel.processes[0].resources.is_some(),
+            "ankad's OwnedResources intact while zombie");
+
+        // 8. Stack/trap extents returned from CC_B and compiled child
+        assert!(kernel.free_stack_extents.len() >= 2,
+            "at least 2 stack extents returned (CC_B + child)");
+        assert!(kernel.free_trap_extents.len() >= 2,
+            "at least 2 trap extents returned (CC_B + child)");
+
+        eprintln!("8.4c: host → boot(ankad) → SYS_SPAWN(CC_B, env) → compile → seal → exec → 42 ✓");
+        eprintln!("      ankad supervised compiler as ordinary process");
+        eprintln!("      {} total process slots, {} Free after reclamation",
+            total_procs, free_slots.len());
+        eprintln!("      output Sealed, delegated objects survive incarnation death ✓");
     }
 
 }

@@ -25,7 +25,7 @@ pub const SYS_SEND: u64 = 3;   // send(dest_pid, value)
 pub const SYS_RECV: u64 = 4;   // recv() → value
 pub const SYS_SEAL: u64 = 5;   // seal(addr) — RW→RX, W⊕X enforcement
 pub const SYS_EXEC: u64 = 6;   // exec(code_addr, code_size, lit_start) → child exit
-pub const SYS_SPAWN: u64 = 7;  // spawn(code_addr, code_size, lit_start) → handle
+pub const SYS_SPAWN: u64 = 7;  // spawn(R1-R8: code, grants, maps, layout) → handle
 pub const SYS_WAIT: u64 = 8;   // wait(handle) → result
 
 // ───────────────────────────────────────────────────────────────────
@@ -258,6 +258,44 @@ fn classify_halt(core: &Anka64Core) -> HaltDisposition {
 /// Prevents a malicious guest from forcing unbounded host allocation.
 const MAX_WRITE: u64 = 0x10000; // 64 KiB
 
+/// Maximum number of spawn grant/map descriptors.
+/// Prevents hostile code from forcing unbounded kernel allocation.
+const MAX_SPAWN_GRANTS: u64 = 64;
+const MAX_SPAWN_MAPS: u64 = 64;
+
+/// In-memory SpawnGrant descriptor: 5 × u64 = 40 bytes.
+///   [0] parent_vaddr: u64  — virtual address in parent identifying the object
+///   [1] offset: u64        — offset relative to the resolved mapping position
+///   [2] size: u64          — extent of the grant
+///   [3] perms: u64         — child permissions (R=0x01, W=0x02, X=0x04, S=0x10)
+///   [4] _reserved: u64     — must be zero
+const SPAWN_GRANT_SIZE: u64 = 40;
+
+/// In-memory SpawnMap descriptor: 5 × u64 = 40 bytes.
+///   [0] child_vaddr: u64   — where to place in the child's virtual space
+///   [1] parent_vaddr: u64  — virtual address in parent identifying the object
+///   [2] offset: u64        — offset relative to the resolved mapping position
+///   [3] size: u64          — extent of the mapping
+///   [4] _reserved: u64     — must be zero
+const SPAWN_MAP_SIZE: u64 = 40;
+
+/// Valid permission bits mask: R | W | X | ATOMIC | SEAL = 0x1F.
+const VALID_PERMS_MASK: u8 = 0x1F;
+
+/// In-memory SpawnLayout descriptor: 5 × u64 = 40 bytes.
+///   [0] code_vaddr: u64    — where to place the child's code
+///   [1] stack_vaddr: u64   — where to place the child's stack
+///   [2] stack_size: u64    — size of the child's stack
+///   [3] trap_vaddr: u64    — where to place the child's trap handler
+///   [4] _reserved: u64     — must be zero
+const SPAWN_LAYOUT_SIZE: u64 = 40;
+
+/// Minimum stack size for spawned processes.
+const MIN_STACK_SIZE: u64 = 0x1000;
+
+/// Maximum stack size for spawned processes.
+const MAX_STACK_SIZE: u64 = 0x100000; // 1 MiB
+
 /// Executable image geometry — already validated by caller.
 /// Used by the shared process-creation primitive (prepare_process).
 struct ProcessImageDesc {
@@ -287,6 +325,44 @@ const EXEC_DEFAULT_LAYOUT: ProcessLayout = ProcessLayout {
     stack_size: 0x4000,
     trap_vaddr: 0x20000,
 };
+
+// ───────────────────────────────────────────────────────────────────
+// Shared process-environment types
+//
+// Both boot() and SYS_SPAWN need to express "initial delegated
+// authority" and "initial virtual placement" for a new process.
+// The authority source differs (trusted boot root vs parent domain),
+// but the kernel-internal representation after resolution is the same.
+//
+// Authority != placement (Rule 1):
+//   InitialGrant = what the child may access
+//   InitialMap   = where it appears in virtual space
+//
+// A map never creates authority.  Every map must have a covering
+// grant in the child's domain; maps without covering authority are
+// rejected as descriptor errors.
+// ───────────────────────────────────────────────────────────────────
+
+/// Kernel-internal resolved grant: additional authority for a new process.
+/// The object and range are already validated; the caller is responsible
+/// for ensuring the grant is derivable from the authority source.
+#[derive(Debug, Clone)]
+pub(crate) struct InitialGrant {
+    pub obj: ObjectId,
+    pub offset: u64,
+    pub size: u64,
+    pub perms: Permissions,
+}
+
+/// Kernel-internal resolved map: additional virtual address mapping.
+/// The object and range are already validated by the caller.
+#[derive(Debug, Clone)]
+pub(crate) struct InitialMap {
+    pub vaddr: u64,
+    pub size: u64,
+    pub obj: ObjectId,
+    pub obj_offset: u64,
+}
 
 // ───────────────────────────────────────────────────────────────────
 // Boot contract types
@@ -469,26 +545,111 @@ impl Kernel {
         }
     }
 
+    // ─── Map-overlap validation ────────────────────────────────
+    //
+    // Shared by boot() and SYS_SPAWN.  Checks that a set of
+    // virtual ranges (implicit + explicit maps) do not overlap.
+    // Returns true if all ranges are disjoint.
+
+    // ─── Single-mapping range resolver ─────────────────────────
+    //
+    // Resolves [vaddr, vaddr+size) through a process's address map
+    // to (ObjectId, obj_offset) with the guarantee that the entire
+    // range falls within exactly one address-map entry.
+    //
+    // This prevents two adjacent virtual mappings from being stitched
+    // together to reach an unrelated part of an object.
+    //
+    // Used by: SYS_WRITE preflight, spawn descriptor table reads,
+    // spawn grant/map resolution.
+
+    /// Resolve a virtual range [vaddr, vaddr+size) through a process's
+    /// address map.  Returns (ObjectId, base_obj_offset) if the entire
+    /// range falls within exactly one AddressMapEntry.
+    ///
+    /// This is the exact-one-entry guarantee.  Two adjacent entries
+    /// mapping contiguous portions of the same object cannot be
+    /// stitched together — the structural containment check lives
+    /// in AddressMap::resolve_range_single_entry().
+    fn resolve_virtual_range(
+        &self, idx: usize, vaddr: u64, size: u64,
+    ) -> Option<(ObjectId, u64)> {
+        self.processes[idx].core.address_map.resolve_range_single_entry(vaddr, size)
+    }
+
+    /// Read `size` bytes from process `idx`'s virtual address space,
+    /// starting at `vaddr`.  The entire range must fall within a single
+    /// address-map entry and be authorized for READ by the process's
+    /// domain.  Returns None on any failure.
+    ///
+    /// This produces a kernel-owned copy.  Validation and commit
+    /// operate on this copy, not on the original memory.
+    fn read_virtual_bytes(&self, idx: usize, vaddr: u64, size: u64) -> Option<Vec<u8>> {
+        if size == 0 {
+            return Some(Vec::new());
+        }
+        let (obj, off) = self.resolve_virtual_range(idx, vaddr, size)?;
+
+        // Verify parent has READ authority over this range
+        let domain = self.processes[idx].core.domain;
+        self.fabric.find_authorizing_cap(
+            domain, obj, off, size, Permissions::READ,
+        )?;
+
+        // Translate to physical address and read
+        let phys = self.fabric.translate(obj, off)?;
+        Some(self.fabric.read_physical(phys, size).to_vec())
+    }
+
+    fn validate_no_map_overlap(ranges: &[(u64, u64)]) -> bool {
+        for i in 0..ranges.len() {
+            for j in (i + 1)..ranges.len() {
+                let (a_start, a_end) = ranges[i];
+                let (b_start, b_end) = ranges[j];
+                if a_start < b_end && b_start < a_end {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     // ─── Shared process-image creation primitive ────────────────
     //
-    // Used by both SYS_EXEC and Kernel::boot().  The caller is
-    // responsible for creating the domain and granting executable
-    // image authority (RX for code, R for literals).  This method
-    // creates stack, trap handler, address map, and core.
+    // Used by SYS_EXEC, SYS_SPAWN, and Kernel::boot().  The caller
+    // is responsible for:
+    //   1. Creating the domain
+    //   2. Granting executable image authority (RX for code, R for literals)
+    //   3. Granting any additional InitialGrants into the domain
+    //   4. Validating all maps for overlap
     //
-    // The difference between SYS_EXEC and boot() is the source of
-    // authority: SYS_EXEC derives it from a caller's domain;
-    // boot() establishes it from trusted boot state.  Everything
-    // after authority establishment is the same mechanism.
+    // This method creates stack, trap handler, address map, and core.
+    // It also installs any InitialMaps into the child's address map.
+    //
+    // The difference between boot() and SYS_SPAWN is the authority
+    // source: boot() establishes from trusted boot state; SYS_SPAWN
+    // derives from a parent domain.  SYS_EXEC passes no additional
+    // grants or maps.  Everything after authority establishment is
+    // the same mechanism.
 
     /// Create process infrastructure for a domain that already has
-    /// executable image authority.  Returns the spawned ProcessKey.
+    /// executable image authority (and any additional grants).
+    /// Returns the spawned ProcessKey.
+    ///
+    /// `initial_maps` are additional virtual address mappings installed
+    /// into the child's address map.  The caller must have already
+    /// validated that these do not overlap with implicit regions or
+    /// each other.
     ///
     /// On failure, rolls back: destroys domain and any resources
     /// created during preparation.  No reachable domain, capability,
     /// mapping, or runnable process survives a failed preparation.
     fn prepare_process(
-        &mut self, dom: DomainId, desc: &ProcessImageDesc, layout: &ProcessLayout,
+        &mut self,
+        dom: DomainId,
+        desc: &ProcessImageDesc,
+        layout: &ProcessLayout,
+        initial_maps: &[InitialMap],
     ) -> ProcessKey {
         // --- Stack: alloc extent (recycled or bump), create object ---
         let stack_extent = self.alloc_stack_extent(layout.stack_size);
@@ -527,6 +688,11 @@ impl Kernel {
         core.address_map.add(layout.trap_vaddr, trap_size, trap_obj);
         core.r[SP as usize] = layout.stack_vaddr + layout.stack_size;
         core.trap_vector = layout.trap_vaddr;
+
+        // --- Additional maps from initial environment ---
+        for m in initial_maps {
+            core.address_map.add_at(m.vaddr, m.size, m.obj, m.obj_offset);
+        }
 
         // --- Spawn and capture ownership ---
         let key = self.spawn(core);
@@ -875,14 +1041,11 @@ impl Kernel {
             if m.size > mobj.size || m.obj_offset > mobj.size - m.size {
                 return Err(BootError::MapOutOfBounds);
             }
-            let m_end = m.vaddr + m.size;
-            // Check against all existing ranges
-            for &(rs, re) in &ranges {
-                if m.vaddr < re && m_end > rs {
-                    return Err(BootError::OverlappingMaps);
-                }
-            }
-            ranges.push((m.vaddr, m_end));
+            ranges.push((m.vaddr, m.vaddr + m.size));
+        }
+
+        if !Self::validate_no_map_overlap(&ranges) {
+            return Err(BootError::OverlappingMaps);
         }
 
         // ── All validation passed — now mutate ──
@@ -931,14 +1094,15 @@ impl Kernel {
             stack_size: info.stack_size,
             trap_vaddr: info.trap_vaddr,
         };
-        let init_key = self.prepare_process(dom, &desc, &boot_layout);
+        // Convert BootMaps to InitialMaps for the shared primitive
+        let initial_maps: Vec<InitialMap> = info.maps.iter().map(|m| InitialMap {
+            vaddr: m.vaddr,
+            size: m.size,
+            obj: m.obj,
+            obj_offset: m.obj_offset,
+        }).collect();
 
-        // Additional address maps
-        for m in &info.maps {
-            self.processes[init_key.slot].core.address_map.add_at(
-                m.vaddr, m.size, m.obj, m.obj_offset,
-            );
-        }
+        let _init_key = self.prepare_process(dom, &desc, &boot_layout, &initial_maps);
 
         self.booted = true;
         Ok(())
@@ -1448,7 +1612,7 @@ impl Kernel {
             image_size,
             entry: 0,
         };
-        let child_key = self.prepare_process(child_dom, &desc, &EXEC_DEFAULT_LAYOUT);
+        let child_key = self.prepare_process(child_dom, &desc, &EXEC_DEFAULT_LAYOUT, &[]);
         let parent_key = ProcessKey {
             slot: idx,
             generation: self.processes[idx].generation,
@@ -1469,12 +1633,552 @@ impl Kernel {
     }
 
     fn handle_spawn(&mut self, idx: usize) {
-        if let Some(child_key) = self.create_child(idx) {
+        let grant_count = self.processes[idx].core.r[R5 as usize];
+        let map_count = self.processes[idx].core.r[R7 as usize];
+        let layout_addr = self.processes[idx].core.r[R8 as usize];
+
+        // Default environment: no grants, maps, or custom layout
+        if grant_count == 0 && map_count == 0 && layout_addr == 0 {
+            if let Some(child_key) = self.create_child(idx) {
+                let handle = self.install_lifecycle(idx, child_key);
+                self.processes[idx].core.r[R0 as usize] = handle.as_u64();
+                self.resume_from_trap(idx);
+            }
+            return;
+        }
+
+        // Extended spawn with grants and maps
+        if let Some(child_key) = self.create_child_with_env(idx) {
             let handle = self.install_lifecycle(idx, child_key);
             self.processes[idx].core.r[R0 as usize] = handle.as_u64();
             self.resume_from_trap(idx);
         }
-        // On failure, create_child already set R0=MAX and resumed.
+        // On failure, create_child_with_env already set R0=MAX and resumed.
+    }
+
+    // ─── Extended spawn: create child with initial environment ──
+    //
+    // Transaction order:
+    //   read R4-R7
+    //   validate counts / byte lengths (checked arithmetic)
+    //   copy grant + map tables through parent's address map
+    //   parse raw u64 descriptors
+    //   resolve every parent_vaddr/range through parent's address map
+    //   produce InitialGrant / InitialMap vectors
+    //   validate all authority (attenuation, no stitching)
+    //   validate all map geometry/overlap
+    //   create child domain
+    //   derive code/literals (reuses create_child validation)
+    //   derive all InitialGrants
+    //   prepare_process(... InitialMaps ...)
+    //   publish parent relation + LifecycleHandle
+    //
+    // Failure before prepare_process: destroy child domain, R0=MAX.
+    // Validation and commit use one kernel-owned copy of the
+    // descriptor tables (eliminates post-copy TOCTOU).
+
+    fn create_child_with_env(&mut self, idx: usize) -> Option<ProcessKey> {
+        let grant_table_addr = self.processes[idx].core.r[R4 as usize];
+        let grant_count = self.processes[idx].core.r[R5 as usize];
+        let map_table_addr = self.processes[idx].core.r[R6 as usize];
+        let map_count = self.processes[idx].core.r[R7 as usize];
+        let layout_addr = self.processes[idx].core.r[R8 as usize];
+
+        // ── Validate counts ──
+        if grant_count > MAX_SPAWN_GRANTS || map_count > MAX_SPAWN_MAPS {
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return None;
+        }
+
+        // ── Checked byte-length computation ──
+        let grant_bytes = match grant_count.checked_mul(SPAWN_GRANT_SIZE) {
+            Some(v) => v,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+        };
+        let map_bytes = match map_count.checked_mul(SPAWN_MAP_SIZE) {
+            Some(v) => v,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+        };
+
+        // ── Copy grant table from parent's virtual address space ──
+        let raw_grants = if grant_count > 0 {
+            match self.read_virtual_bytes(idx, grant_table_addr, grant_bytes) {
+                Some(bytes) => bytes,
+                None => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return None;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
+        // ── Copy map table from parent's virtual address space ──
+        let raw_maps = if map_count > 0 {
+            match self.read_virtual_bytes(idx, map_table_addr, map_bytes) {
+                Some(bytes) => bytes,
+                None => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return None;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
+        // ── Read SpawnLayout (R8) ──
+        // R8 = 0 → use EXEC_DEFAULT_LAYOUT.
+        // R8 ≠ 0 → read SpawnLayout descriptor from parent's address space.
+        let child_layout = if layout_addr == 0 {
+            EXEC_DEFAULT_LAYOUT
+        } else {
+            let raw_layout = match self.read_virtual_bytes(idx, layout_addr, SPAWN_LAYOUT_SIZE) {
+                Some(bytes) => bytes,
+                None => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return None;
+                }
+            };
+            let code_vaddr  = u64::from_le_bytes(raw_layout[0..8].try_into().unwrap());
+            let stack_vaddr = u64::from_le_bytes(raw_layout[8..16].try_into().unwrap());
+            let stack_size  = u64::from_le_bytes(raw_layout[16..24].try_into().unwrap());
+            let trap_vaddr  = u64::from_le_bytes(raw_layout[24..32].try_into().unwrap());
+            let reserved    = u64::from_le_bytes(raw_layout[32..40].try_into().unwrap());
+
+            if reserved != 0 {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+
+            // Validate resource bounds
+            if stack_size < MIN_STACK_SIZE || stack_size > MAX_STACK_SIZE {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+
+            // Validate alignment (page-aligned)
+            if stack_vaddr & 0xFFF != 0 || trap_vaddr & 0xFFF != 0 {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+
+            ProcessLayout {
+                code_vaddr,
+                stack_vaddr,
+                stack_size,
+                trap_vaddr,
+            }
+        };
+
+        // ── Parse and resolve grant descriptors ──
+        let mut initial_grants: Vec<InitialGrant> = Vec::new();
+        for i in 0..grant_count as usize {
+            let base = i * SPAWN_GRANT_SIZE as usize;
+            let parent_vaddr = u64::from_le_bytes(raw_grants[base..base+8].try_into().unwrap());
+            let offset       = u64::from_le_bytes(raw_grants[base+8..base+16].try_into().unwrap());
+            let size          = u64::from_le_bytes(raw_grants[base+16..base+24].try_into().unwrap());
+            let perms_raw    = u64::from_le_bytes(raw_grants[base+24..base+32].try_into().unwrap());
+            let reserved     = u64::from_le_bytes(raw_grants[base+32..base+40].try_into().unwrap());
+
+            // Reserved field must be zero
+            if reserved != 0 {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+
+            // Validate permission bits
+            if perms_raw > VALID_PERMS_MASK as u64 {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+            let child_perms = Permissions(perms_raw as u8);
+
+            // Size must be nonzero
+            if size == 0 {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+
+            // Resolve parent_vaddr to (ObjectId, map_base_offset)
+            // We resolve just the single byte at parent_vaddr to find the mapping.
+            let (obj, map_base) = match self.processes[idx].core.address_map.resolve(parent_vaddr) {
+                Some(r) => r,
+                None => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return None;
+                }
+            };
+
+            // Compute target offset: map_base + offset (checked)
+            let target_offset = match map_base.checked_add(offset) {
+                Some(v) => v,
+                None => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return None;
+                }
+            };
+
+            // Verify [target_offset, target_offset+size) stays within
+            // the same parent mapping (single-mapping guarantee).
+            // The parent virtual range [parent_vaddr+offset .. parent_vaddr+offset+size)
+            // must resolve through exactly one address-map entry.
+            let grant_parent_vaddr = match parent_vaddr.checked_add(offset) {
+                Some(v) => v,
+                None => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return None;
+                }
+            };
+            if self.resolve_virtual_range(idx, grant_parent_vaddr, size).is_none() {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+
+            // Validate attenuation: parent must have a single capability
+            // covering [target_offset, target_offset+size) on this object
+            // with permissions that are a superset of child_perms.
+            let parent_domain = self.processes[idx].core.domain;
+            if self.fabric.find_authorizing_cap(
+                parent_domain, obj, target_offset, size, child_perms,
+            ).is_none() {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+
+            initial_grants.push(InitialGrant {
+                obj,
+                offset: target_offset,
+                size,
+                perms: child_perms,
+            });
+        }
+
+        // ── Parse and resolve map descriptors ──
+        let mut initial_maps: Vec<InitialMap> = Vec::new();
+        for i in 0..map_count as usize {
+            let base = i * SPAWN_MAP_SIZE as usize;
+            let child_vaddr  = u64::from_le_bytes(raw_maps[base..base+8].try_into().unwrap());
+            let parent_vaddr = u64::from_le_bytes(raw_maps[base+8..base+16].try_into().unwrap());
+            let offset       = u64::from_le_bytes(raw_maps[base+16..base+24].try_into().unwrap());
+            let size          = u64::from_le_bytes(raw_maps[base+24..base+32].try_into().unwrap());
+            let reserved     = u64::from_le_bytes(raw_maps[base+32..base+40].try_into().unwrap());
+
+            if reserved != 0 || size == 0 {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+
+            // Resolve parent_vaddr to (ObjectId, map_base_offset)
+            let (obj, map_base) = match self.processes[idx].core.address_map.resolve(parent_vaddr) {
+                Some(r) => r,
+                None => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return None;
+                }
+            };
+
+            let target_offset = match map_base.checked_add(offset) {
+                Some(v) => v,
+                None => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return None;
+                }
+            };
+
+            // Single-mapping guarantee for the parent range
+            let map_parent_vaddr = match parent_vaddr.checked_add(offset) {
+                Some(v) => v,
+                None => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return None;
+                }
+            };
+            if self.resolve_virtual_range(idx, map_parent_vaddr, size).is_none() {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+
+            initial_maps.push(InitialMap {
+                vaddr: child_vaddr,
+                size,
+                obj,
+                obj_offset: target_offset,
+            });
+        }
+
+        // ── Validate: every map must be covered by prospective child authority ──
+        // Prospective authority = implicit code/literal grants + initial_grants.
+        // We check this after resolving maps so we have all the information.
+        // (Code/literal grants will be added below; for now check against initial_grants.)
+        // Defer this check until after code/lit validation so we know the full authority set.
+
+        // ── Now do the standard code/literal validation (from create_child) ──
+        let code_vaddr = self.processes[idx].core.r[R1 as usize];
+        let code_size = self.processes[idx].core.r[R2 as usize];
+        let lit_start = self.processes[idx].core.r[R3 as usize];
+
+        let (code_obj, code_offset) = match self.processes[idx].core.address_map.resolve(code_vaddr) {
+            Some(r) => r,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+        };
+
+        let is_sealed = self.fabric.objects.get(&code_obj)
+            .map(|o| o.state == ObjectState::Sealed)
+            .unwrap_or(false);
+        if !is_sealed {
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return None;
+        }
+
+        let obj_size = match self.fabric.objects.get(&code_obj) {
+            Some(o) => o.size,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+        };
+        let image_size = obj_size - code_offset;
+
+        let has_literals = lit_start != 0;
+        if has_literals {
+            if lit_start < code_size {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+            if image_size <= lit_start {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+        }
+
+        let domain = self.processes[idx].core.domain;
+
+        let code_parent = match self.fabric.find_authorizing_cap(
+            domain, code_obj, code_offset, code_size, Permissions::RX
+        ) {
+            Some(cap) => cap.clone(),
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+        };
+
+        let lit_parent = if has_literals {
+            let lit_offset = code_offset + lit_start;
+            let lit_length = image_size - lit_start;
+            match self.fabric.find_authorizing_cap(
+                domain, code_obj, lit_offset, lit_length, Permissions::READ
+            ) {
+                Some(cap) => Some(cap.clone()),
+                None => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
+
+        // ── Validate map overlap (checked arithmetic throughout) ──
+        let trap_size: u64 = 0x1000;
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+
+        let code_end = match child_layout.code_vaddr.checked_add(code_size) {
+            Some(v) => v,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+        };
+        ranges.push((child_layout.code_vaddr, code_end));
+
+        if has_literals {
+            let lit_length = image_size - lit_start;
+            let lit_vaddr = match child_layout.code_vaddr.checked_add(lit_start) {
+                Some(v) => v,
+                None => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return None;
+                }
+            };
+            let lit_end = match lit_vaddr.checked_add(lit_length) {
+                Some(v) => v,
+                None => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return None;
+                }
+            };
+            ranges.push((lit_vaddr, lit_end));
+        }
+
+        let stack_end = match child_layout.stack_vaddr.checked_add(child_layout.stack_size) {
+            Some(v) => v,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+        };
+        ranges.push((child_layout.stack_vaddr, stack_end));
+
+        let trap_end = match child_layout.trap_vaddr.checked_add(trap_size) {
+            Some(v) => v,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+        };
+        ranges.push((child_layout.trap_vaddr, trap_end));
+
+        for m in &initial_maps {
+            let m_end = match m.vaddr.checked_add(m.size) {
+                Some(v) => v,
+                None => {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return None;
+                }
+            };
+            ranges.push((m.vaddr, m_end));
+        }
+        if !Self::validate_no_map_overlap(&ranges) {
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return None;
+        }
+
+        // ── Validate: every map must be covered by prospective child authority ──
+        // Prospective authority: code (RX), literals (R), plus initial_grants.
+        for m in &initial_maps {
+            let has_covering_grant = initial_grants.iter().any(|g| {
+                g.obj == m.obj
+                    && g.offset <= m.obj_offset
+                    && m.obj_offset.checked_add(m.size)
+                        .map(|end| {
+                            g.offset.checked_add(g.size)
+                                .map(|g_end| end <= g_end)
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(false)
+            });
+            // Also check implicit code authority (RX: [code_offset, code_offset+code_size))
+            let has_code_rx = m.obj == code_obj
+                && m.obj_offset >= code_offset
+                && m.obj_offset.checked_add(m.size)
+                    .map(|end| end <= code_offset + code_size)
+                    .unwrap_or(false);
+            // And implicit literal authority (R: [code_offset+lit_start, code_offset+image_size))
+            let has_lit_r = has_literals && m.obj == code_obj
+                && m.obj_offset >= code_offset + lit_start
+                && m.obj_offset.checked_add(m.size)
+                    .map(|end| end <= code_offset + image_size)
+                    .unwrap_or(false);
+            if !has_covering_grant && !has_code_rx && !has_lit_r {
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+        }
+
+        // ── All validation passed — create child ──
+        let child_dom = self.fabric.create_domain();
+
+        if self.fabric.derive(
+            child_dom, &code_parent, code_offset, code_size, Permissions::RX,
+        ).is_none() {
+            self.fabric.destroy_domain(child_dom);
+            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.resume_from_trap(idx);
+            return None;
+        }
+
+        if has_literals {
+            let lit_offset = code_offset + lit_start;
+            let lit_length = image_size - lit_start;
+            if self.fabric.derive(
+                child_dom, lit_parent.as_ref().unwrap(),
+                lit_offset, lit_length, Permissions::READ,
+            ).is_none() {
+                self.fabric.destroy_domain(child_dom);
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+        }
+
+        // Derive all initial grants into child domain
+        for g in &initial_grants {
+            // Find the authorizing parent capability again (already validated above)
+            let parent_cap = self.fabric.find_authorizing_cap(
+                domain, g.obj, g.offset, g.size, g.perms,
+            ).unwrap().clone();
+            if self.fabric.derive(
+                child_dom, &parent_cap, g.offset, g.size, g.perms,
+            ).is_none() {
+                self.fabric.destroy_domain(child_dom);
+                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.resume_from_trap(idx);
+                return None;
+            }
+        }
+
+        let desc = ProcessImageDesc {
+            code_obj,
+            code_offset,
+            code_size,
+            lit_start,
+            image_size,
+            entry: 0,
+        };
+        let child_key = self.prepare_process(child_dom, &desc, &child_layout, &initial_maps);
+        let parent_key = ProcessKey {
+            slot: idx,
+            generation: self.processes[idx].generation,
+        };
+        self.processes[child_key.slot].parent = Some(parent_key);
+        Some(child_key)
     }
 
     /// Wait for a child process to exit.
@@ -1551,6 +2255,34 @@ impl Kernel {
     }
 }
 
+
+// ═══════════════════════════════════════════════════════════════════
+// Test helpers (module-scope, available to sibling test modules)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Emit a default SYS_SPAWN sequence: sets R1-R3, zeros R5/R7/R8,
+/// loads SYS_SPAWN into R0, and traps.  R4 and R6 are deliberately
+/// left untouched — with counts zero they are don't-care values.
+///
+/// Caller saves R0 (LifecycleHandle) afterward.
+///
+/// Emits 8 words (vs the old 5-word pattern without ABI zeroing).
+#[cfg(test)]
+pub(crate) fn emit_spawn_default(
+    asm: &mut Asm64,
+    code_vaddr: i32,
+    code_size: i32,
+    lit_start: i32,
+) {
+    asm.movi(R1, code_vaddr);
+    asm.movi(R2, code_size);
+    asm.movi(R3, lit_start);
+    asm.movi(R5, 0);
+    asm.movi(R7, 0);
+    asm.movi(R8, 0);
+    asm.movi(R0, SYS_SPAWN as i32);
+    asm.trap(0);
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Tests
@@ -2401,11 +3133,7 @@ mod tests {
         asm.movi(R0, SYS_SEAL as i32);
         asm.trap(0);
         // SYS_SPAWN(0x10000, child_code_size, 0)
-        asm.movi(R1, 0x10000_u32 as i32);
-        asm.movi(R2, child_code_size);
-        asm.movi(R3, 0);
-        asm.movi(R0, SYS_SPAWN as i32);
-        asm.trap(0);
+        emit_spawn_default(&mut asm, 0x10000_u32 as i32, child_code_size, 0);
         // Save handle in R4
         asm.mov(R4, R0);
         // SYS_WAIT(handle)
@@ -2429,11 +3157,7 @@ mod tests {
         asm.movi(R0, SYS_SEAL as i32);
         asm.trap(0);
         // SYS_SPAWN(0x10000, child_code_size, 0)
-        asm.movi(R1, 0x10000_u32 as i32);
-        asm.movi(R2, child_code_size);
-        asm.movi(R3, 0);
-        asm.movi(R0, SYS_SPAWN as i32);
-        asm.trap(0);
+        emit_spawn_default(&mut asm, 0x10000_u32 as i32, child_code_size, 0);
         // Exit with handle value (R0)
         asm.mov(R1, R0);
         asm.movi(R0, SYS_EXIT as i32);
@@ -2554,22 +3278,14 @@ mod tests {
         asm.movi(R0, SYS_SEAL as i32);
         asm.trap(0);
         // SPAWN from output1
-        asm.movi(R1, 0x4000_u32 as i32);
-        asm.movi(R2, child1_size);
-        asm.movi(R3, 0);
-        asm.movi(R0, SYS_SPAWN as i32);
-        asm.trap(0);
+        emit_spawn_default(&mut asm, 0x4000_u32 as i32, child1_size, 0);
         asm.mov(R4, R0); // H1 in R4
         // SEAL output2
         asm.movi(R1, 0x8000_u32 as i32);
         asm.movi(R0, SYS_SEAL as i32);
         asm.trap(0);
         // SPAWN from output2
-        asm.movi(R1, 0x8000_u32 as i32);
-        asm.movi(R2, child2_size);
-        asm.movi(R3, 0);
-        asm.movi(R0, SYS_SPAWN as i32);
-        asm.trap(0);
+        emit_spawn_default(&mut asm, 0x8000_u32 as i32, child2_size, 0);
         asm.mov(R5, R0); // H2 in R5
         // WAIT H1
         asm.mov(R1, R4);
@@ -2618,11 +3334,7 @@ mod tests {
         asm.movi(R1, 0x10000_u32 as i32);
         asm.movi(R0, SYS_SEAL as i32);
         asm.trap(0);
-        asm.movi(R1, 0x10000_u32 as i32);
-        asm.movi(R2, child_size);
-        asm.movi(R3, 0);
-        asm.movi(R0, SYS_SPAWN as i32);
-        asm.trap(0);
+        emit_spawn_default(&mut asm, 0x10000_u32 as i32, child_size, 0);
         asm.mov(R4, R0); // save handle
         // Yield several times so child runs and exits
         asm.movi(R0, SYS_YIELD as i32);
@@ -2672,11 +3384,7 @@ mod tests {
         asm.movi(R1, 0x10000_u32 as i32);
         asm.movi(R0, SYS_SEAL as i32);
         asm.trap(0);
-        asm.movi(R1, 0x10000_u32 as i32);
-        asm.movi(R2, child_size);
-        asm.movi(R3, 0);
-        asm.movi(R0, SYS_SPAWN as i32);
-        asm.trap(0);
+        emit_spawn_default(&mut asm, 0x10000_u32 as i32, child_size, 0);
         asm.mov(R4, R0); // save handle
         // First WAIT → should succeed
         asm.mov(R1, R4);
@@ -2784,11 +3492,7 @@ mod tests {
         asm_a.movi(R1, 0x10000_u32 as i32);
         asm_a.movi(R0, SYS_SEAL as i32);
         asm_a.trap(0);
-        asm_a.movi(R1, 0x10000_u32 as i32);
-        asm_a.movi(R2, child_size);
-        asm_a.movi(R3, 0);
-        asm_a.movi(R0, SYS_SPAWN as i32);
-        asm_a.trap(0);
+        emit_spawn_default(&mut asm_a, 0x10000_u32 as i32, child_size, 0);
         asm_a.mov(R4, R0); // handle
         // SEND(dest=1, value=handle)
         asm_a.movi(R1, 1); // B's pid
@@ -2869,11 +3573,7 @@ mod tests {
         asm.movi(R1, 0x10000_u32 as i32);
         asm.movi(R0, SYS_SEAL as i32);
         asm.trap(0);
-        asm.movi(R1, 0x10000_u32 as i32);
-        asm.movi(R2, child_size);
-        asm.movi(R3, 0);
-        asm.movi(R0, SYS_SPAWN as i32);
-        asm.trap(0);
+        emit_spawn_default(&mut asm, 0x10000_u32 as i32, child_size, 0);
         asm.mov(R4, R0); // handle
         asm.mov(R1, R4);
         asm.movi(R0, SYS_WAIT as i32);
@@ -3000,28 +3700,20 @@ mod tests {
         asm.movi(R1, 0x4000_u32 as i32);
         asm.movi(R0, SYS_SEAL as i32);
         asm.trap(0);
-        asm.movi(R1, 0x4000_u32 as i32);
-        asm.movi(R2, child_a_size);
-        asm.movi(R3, 0);
-        asm.movi(R0, SYS_SPAWN as i32);
-        asm.trap(0);
+        emit_spawn_default(&mut asm, 0x4000_u32 as i32, child_a_size, 0);
         asm.mov(R4, R0); // H1
 
         // WAIT H1 (consume it)
         asm.mov(R1, R4);
         asm.movi(R0, SYS_WAIT as i32);
         asm.trap(0);
-        asm.mov(R5, R1); // child A exit code (10)
+        asm.mov(R9, R1); // child A exit code (10) — R9 avoids ABI registers
 
         // SEAL + SPAWN child B (reuses slot 0, gen 1)
         asm.movi(R1, 0x8000_u32 as i32);
         asm.movi(R0, SYS_SEAL as i32);
         asm.trap(0);
-        asm.movi(R1, 0x8000_u32 as i32);
-        asm.movi(R2, child_b_size);
-        asm.movi(R3, 0);
-        asm.movi(R0, SYS_SPAWN as i32);
-        asm.trap(0);
+        emit_spawn_default(&mut asm, 0x8000_u32 as i32, child_b_size, 0);
         asm.mov(R6, R0); // H2
 
         // WAIT H1 again (stale handle — slot 0, gen 0 → gen mismatch)
@@ -3063,6 +3755,1004 @@ mod tests {
         assert_eq!(kernel.processes[0].exit_code, 20,
             "stale H1 must be rejected (MAX), H2 must return 20");
         eprintln!("8.2e: stale_handle_after_slot_reuse → 20 ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 8.4b: Extended SYS_SPAWN tests — grants and maps
+    // ═══════════════════════════════════════════════════════════
+    //
+    // Layout for extended-spawn tests (all vaddrs < MOVI 18-bit limit):
+    //   Parent text : virt 0x00000, phys 0x000000, size 0x4000
+    //   Child code  : virt 0x04000, phys 0x010000, size 0x4000 (RWS)
+    //   Data obj    : virt 0x08000, phys 0x020000, size 0x4000 (RW)
+    //   Stack       : virt 0x0C000, phys 0x030000, size 0x4000 (RW)
+    //   Kernel alloc starts at 0x080000.
+    //
+    // Child virtual layout (EXEC_DEFAULT_LAYOUT):
+    //   code:  0x00000   stack: 0x10000   trap: 0x20000
+    //   Data object mapped at child_vaddr 0x14000 (between stack end and trap).
+
+    /// Set up an extended-spawn test: parent with child-code buffer (RWS),
+    /// a data object (RW), and a stack.
+    fn ext_spawn_setup(fabric: &mut Fabric) -> (Anka64Core, DomainId, ObjectId, ObjectId, ObjectId, ObjectId) {
+        let text     = fabric.alloc_object("parent_text",   0x4000, ObjectKind::Memory);
+        let child_buf= fabric.alloc_object("child_code",    0x4000, ObjectKind::Memory);
+        let data     = fabric.alloc_object("data_obj",      0x4000, ObjectKind::Memory);
+        let stack    = fabric.alloc_object("parent_stack",   0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text,      0x000000);
+        fabric.place_object(child_buf, 0x010000);
+        fabric.place_object(data,      0x020000);
+        fabric.place_object(stack,     0x030000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, child_buf, 0, 0x4000, Permissions::RWS);
+        fabric.grant(dom, data,      0, 0x4000, Permissions::RW);
+        fabric.grant(dom, stack,     0, 0x4000, Permissions::RW);
+
+        let mut core = Anka64Core::new(CPU0, dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x04000, 0x4000, child_buf);
+        core.address_map.add(0x08000, 0x4000, data);
+        core.address_map.add(0x0C000, 0x4000, stack);
+        core.r[SP as usize] = 0x0C000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        (core, dom, text, child_buf, data, stack)
+    }
+
+    /// Write a SpawnGrant descriptor to physical memory at the given address.
+    /// Format: [parent_vaddr: u64, offset: u64, size: u64, perms: u64, reserved: u64]
+    fn write_spawn_grant(fabric: &mut Fabric, phys_addr: u64,
+                         parent_vaddr: u64, offset: u64, size: u64, perms: u64) {
+        fabric.write_physical(phys_addr,      &parent_vaddr.to_le_bytes());
+        fabric.write_physical(phys_addr + 8,  &offset.to_le_bytes());
+        fabric.write_physical(phys_addr + 16, &size.to_le_bytes());
+        fabric.write_physical(phys_addr + 24, &perms.to_le_bytes());
+        fabric.write_physical(phys_addr + 32, &0u64.to_le_bytes()); // reserved
+    }
+
+    /// Write a SpawnMap descriptor to physical memory at the given address.
+    /// Format: [child_vaddr: u64, parent_vaddr: u64, offset: u64, size: u64, reserved: u64]
+    fn write_spawn_map(fabric: &mut Fabric, phys_addr: u64,
+                       child_vaddr: u64, parent_vaddr: u64, offset: u64, size: u64) {
+        fabric.write_physical(phys_addr,      &child_vaddr.to_le_bytes());
+        fabric.write_physical(phys_addr + 8,  &parent_vaddr.to_le_bytes());
+        fabric.write_physical(phys_addr + 16, &offset.to_le_bytes());
+        fabric.write_physical(phys_addr + 24, &size.to_le_bytes());
+        fabric.write_physical(phys_addr + 32, &0u64.to_le_bytes()); // reserved
+    }
+
+    // ── Test 1: Extended spawn with one grant (R data→child) ──
+    //
+    // Parent spawns child with code from sealed child_buf and grants
+    // the child READ on data_obj.  Child reads from its mapped data
+    // and exits with the value found there.
+    #[test]
+    fn p84b_spawn_with_grant() {
+        let mut fabric = Fabric::new(0x800000);
+        let (core, dom, text, child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+
+        // Write child code: LD R1, [0x14000+0]; EXIT(R1)
+        // Child will have data_obj mapped at 0x14000 via SpawnMap.
+        let mut child_asm = Asm64::new();
+        child_asm.movi(R1, 0x14000_u32 as i32);
+        child_asm.ld(R1, R1, 0);       // R1 = [0x14000]
+        child_asm.movi(R0, SYS_EXIT as i32);
+        child_asm.trap(0);
+        let child_code = child_asm.to_bytes();
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // Write marker value 0xBEEF into data_obj at offset 0
+        fabric.write_physical(0x020000, &0xBEEFu64.to_le_bytes());
+
+        // Write grant descriptor onto parent's stack area (phys 0x030000)
+        // Grant: parent_vaddr=0x08000 (data obj), offset=0, size=0x4000, perms=R(0x01)
+        write_spawn_grant(&mut fabric, 0x030000, 0x08000, 0, 0x4000, 0x01);
+
+        // Write map descriptor at phys 0x030000 + 40 = 0x030028
+        // Map: child_vaddr=0x14000, parent_vaddr=0x08000, offset=0, size=0x4000
+        write_spawn_map(&mut fabric, 0x030028, 0x14000, 0x08000, 0, 0x4000);
+
+        // Parent code: SEAL child_buf → extended SPAWN with 1 grant + 1 map → WAIT → EXIT
+        let mut asm = Asm64::new();
+        // SYS_SEAL(0x04000) — child code buffer
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        // SYS_SPAWN: R1=code_vaddr, R2=code_size, R3=lit_start
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        // R4=grant_table_addr, R5=grant_count, R6=map_table_addr, R7=map_count
+        asm.movi(R4, 0x0C000_u32 as i32);  // grant table at stack base
+        asm.movi(R5, 1);                    // 1 grant
+        asm.movi(R6, 0x0C028_u32 as i32);  // map table at stack base + 40
+        asm.movi(R7, 1);                    // 1 map
+        asm.movi(R8, 0);                    // layout = default
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        // Save handle, WAIT, exit with child's exit code
+        asm.mov(R4, R0);
+        asm.mov(R1, R4);
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+        // R1 = child exit code (should be 0xBEEF)
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x080000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, 0xBEEF,
+            "child should read 0xBEEF from granted data object");
+        eprintln!("8.4b-1: spawn_with_grant → 0xBEEF ✓");
+    }
+
+    // ── Test 2: Extended spawn with RWS grant — child seals an object ──
+    #[test]
+    fn p84b_spawn_with_rws_grant() {
+        let mut fabric = Fabric::new(0x800000);
+        let (core, dom, text, _child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+
+        // Upgrade parent's data_obj authority to RWS (setup gives only RW).
+        // Parent needs SEAL to delegate it.
+        fabric.grant(dom, data, 0, 0x4000, Permissions::RWS);
+
+        // Child: seal data obj at child_vaddr 0x14000, exit(99) on success
+        let mut child_asm = Asm64::new();
+        child_asm.movi(R1, 0x14000_u32 as i32);
+        child_asm.movi(R0, SYS_SEAL as i32);
+        child_asm.trap(0);
+        child_asm.cmpi(R0, -1);
+        child_asm.bcc(super::super::isa::Cond::Eq, 2); // skip to failure
+        child_asm.movi(R1, 99);
+        child_asm.movi(R0, SYS_EXIT as i32);
+        child_asm.trap(0);
+        child_asm.movi(R1, 0);
+        child_asm.movi(R0, SYS_EXIT as i32);
+        child_asm.trap(0);
+        let child_code = child_asm.to_bytes();
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // Grant descriptor: RWS (0x13) on data_obj at parent_vaddr 0x08000
+        write_spawn_grant(&mut fabric, 0x030000, 0x08000, 0, 0x4000, 0x13);
+        // Map descriptor: data_obj at child vaddr 0x14000
+        write_spawn_map(&mut fabric, 0x030028, 0x14000, 0x08000, 0, 0x4000);
+
+        // Parent code
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R4, 0x0C000_u32 as i32);
+        asm.movi(R5, 1);
+        asm.movi(R6, 0x0C028_u32 as i32);
+        asm.movi(R7, 1);
+        asm.movi(R8, 0);                    // layout = default
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R4, R0);
+        asm.mov(R1, R4);
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x080000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, 99,
+            "child should successfully seal data_obj (RWS grant)");
+        eprintln!("8.4b-2: spawn_with_rws_grant → 99 ✓");
+    }
+
+    // ── Test 3: Grant with attenuated permissions (parent=RW, child=R) ──
+    #[test]
+    fn p84b_attenuated_grant() {
+        let mut fabric = Fabric::new(0x800000);
+        let (core, dom, text, child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+
+        // Child: try to write to data_obj at 0x14000 (should fault — only has R)
+        let mut child_asm = Asm64::new();
+        child_asm.movi(R1, 42);
+        child_asm.movi(R2, 0x14000_u32 as i32);
+        child_asm.st(R1, R2, 0);  // write → should cause ProtectionFault
+        child_asm.movi(R1, 0);
+        child_asm.movi(R0, SYS_EXIT as i32);
+        child_asm.trap(0);
+        let child_code = child_asm.to_bytes();
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        fabric.write_physical(0x020000, &0xBEEFu64.to_le_bytes());
+
+        // Grant: READ only (0x01) — parent has RW, child gets R (attenuation)
+        write_spawn_grant(&mut fabric, 0x030000, 0x08000, 0, 0x4000, 0x01);
+        write_spawn_map(&mut fabric, 0x030028, 0x14000, 0x08000, 0, 0x4000);
+
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R4, 0x0C000_u32 as i32);
+        asm.movi(R5, 1);
+        asm.movi(R6, 0x0C028_u32 as i32);
+        asm.movi(R7, 1);
+        asm.movi(R8, 0);                    // layout = default
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R4, R0);
+        asm.mov(R1, R4);
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+        // R0 = tag. ProtectionFault = 2.
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x080000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, 2,
+            "child with READ-only grant should fault on write (tag=2)");
+        eprintln!("8.4b-3: attenuated_grant → ProtectionFault ✓");
+    }
+
+    // ── Test 4: Permission escalation rejected ──
+    // Parent has RW on data_obj, tries to grant RWS (SEAL) to child.
+    // Spawn should fail (R0=MAX).
+    #[test]
+    fn p84b_escalation_rejected() {
+        let mut fabric = Fabric::new(0x800000);
+        let (core, dom, text, child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+
+        let child_code = child_exit_code(42);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // Grant: RWS (0x13) on data_obj — but parent only has RW → escalation
+        write_spawn_grant(&mut fabric, 0x030000, 0x08000, 0, 0x4000, 0x13);
+        write_spawn_map(&mut fabric, 0x030028, 0x14000, 0x08000, 0, 0x4000);
+
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R4, 0x0C000_u32 as i32);
+        asm.movi(R5, 1);
+        asm.movi(R6, 0x0C028_u32 as i32);
+        asm.movi(R7, 1);
+        asm.movi(R8, 0);                    // layout = default
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        // R0 should be MAX (spawn rejected)
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x080000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "escalation (RW→RWS) must be rejected");
+        eprintln!("8.4b-4: escalation_rejected → MAX ✓");
+    }
+
+    // ── Test 5: Map without covering grant rejected ──
+    // Map refers to data_obj, but no grant covers it.
+    #[test]
+    fn p84b_map_without_grant_rejected() {
+        let mut fabric = Fabric::new(0x800000);
+        let (core, dom, text, child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+
+        let child_code = child_exit_code(42);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // No grants — only a map
+        write_spawn_map(&mut fabric, 0x030000, 0x14000, 0x08000, 0, 0x4000);
+
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R4, 0x0C000_u32 as i32);  // grant table
+        asm.movi(R5, 0);                    // 0 grants
+        asm.movi(R6, 0x0C000_u32 as i32);  // map table at same addr
+        asm.movi(R7, 1);                    // 1 map
+        asm.movi(R8, 0);                    // layout = default
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x080000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "map without covering grant must be rejected");
+        eprintln!("8.4b-5: map_without_grant_rejected → MAX ✓");
+    }
+
+    // ── Test 6: Map overlapping child code region rejected ──
+    #[test]
+    fn p84b_map_overlaps_code_rejected() {
+        let mut fabric = Fabric::new(0x800000);
+        let (core, dom, text, child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+
+        let child_code = child_exit_code(42);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // Grant and map at child vaddr 0x0000 — overlaps child code region
+        write_spawn_grant(&mut fabric, 0x030000, 0x08000, 0, 0x4000, 0x01);
+        write_spawn_map(&mut fabric, 0x030028, 0x0000, 0x08000, 0, 0x4000);
+
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R4, 0x0C000_u32 as i32);
+        asm.movi(R5, 1);
+        asm.movi(R6, 0x0C028_u32 as i32);
+        asm.movi(R7, 1);
+        asm.movi(R8, 0);                    // layout = default
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x080000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "map overlapping child code must be rejected");
+        eprintln!("8.4b-6: map_overlaps_code_rejected → MAX ✓");
+    }
+
+    // ── Test 7: Descriptor-table byte-length overflow ──
+    // grant_count near u64::MAX, so grant_count × 40 overflows.
+    #[test]
+    fn p84b_descriptor_byte_overflow() {
+        let mut fabric = Fabric::new(0x800000);
+        let (mut core, dom, text, child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
+
+        let child_code = child_exit_code(42);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // Parent code: set R5 = huge value → SPAWN → R0 should be MAX
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R4, 0x0C000_u32 as i32);
+        // R5 set below — too large for MOVI
+        asm.movi(R6, 0x0C000_u32 as i32);
+        asm.movi(R7, 0);
+        asm.movi(R8, 0);                    // layout = default
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        // Set R5 to u64::MAX / 2 (way above MAX_SPAWN_GRANTS)
+        core.r[R5 as usize] = u64::MAX / 2;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x080000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "huge grant_count must be rejected before allocation");
+        eprintln!("8.4b-7: descriptor_byte_overflow → MAX ✓");
+    }
+
+    // ── Test 8: Descriptor table crossing two mappings rejected ──
+    // Grant table straddles two separate address-map entries.
+    #[test]
+    fn p84b_descriptor_table_cross_mapping() {
+        let mut fabric = Fabric::new(0x800000);
+        let (core, dom, text, child_buf, data, stack) = ext_spawn_setup(&mut fabric);
+
+        let child_code = child_exit_code(42);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // Place a grant descriptor straddling the end of data object.
+        // data is at virt 0x08000 size 0x4000 (ends at 0x0C000).
+        // Grant table at virt 0x0BFE0 (= 0x08000 + 0x3FE0) with size 40
+        // spans [0x0BFE0, 0x0C008), exceeding the data mapping end (0x0C000).
+        write_spawn_grant(&mut fabric, 0x023FE0, 0x08000, 0, 0x1000, 0x01);
+
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        // Grant table at virt 0x0BFE0: resolve_virtual_range rejects it.
+        asm.movi(R4, 0x0BFE0_u32 as i32);
+        asm.movi(R5, 1);
+        asm.movi(R6, 0x0C000_u32 as i32);
+        asm.movi(R7, 0);
+        asm.movi(R8, 0);                    // layout = default
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x080000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "descriptor table crossing mapping boundary must be rejected");
+        eprintln!("8.4b-8: descriptor_table_cross_mapping → MAX ✓");
+    }
+
+    // ── Test 9: Invalid permission bits rejected ──
+    // Grant with perms = 0x20 (undefined bit) must be rejected.
+    #[test]
+    fn p84b_invalid_permission_bits() {
+        let mut fabric = Fabric::new(0x800000);
+        let (core, dom, text, child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+
+        let child_code = child_exit_code(42);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // Grant with invalid perms 0x20
+        write_spawn_grant(&mut fabric, 0x030000, 0x08000, 0, 0x4000, 0x20);
+        write_spawn_map(&mut fabric, 0x030028, 0x14000, 0x08000, 0, 0x4000);
+
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R4, 0x0C000_u32 as i32);
+        asm.movi(R5, 1);
+        asm.movi(R6, 0x0C028_u32 as i32);
+        asm.movi(R7, 1);
+        asm.movi(R8, 0);                    // layout = default
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x080000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "invalid permission bits (0x20) must be rejected");
+        eprintln!("8.4b-9: invalid_permission_bits → MAX ✓");
+    }
+
+    // ── Test 10: Default spawn environment (R5=R7=R8=0) ──
+    #[test]
+    fn p84b_default_spawn_env() {
+        let mut fabric = Fabric::new(0x800000);
+        let (core, dom, text, output, _stack) = lifecycle_test_setup(&mut fabric);
+
+        let child_code = child_exit_code(77);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // R5=R7=R8=0 requests default process environment
+        let parent_code = parent_seal_spawn_wait_exit(child_size);
+        fabric.write_physical(0x000000, &parent_code);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x040000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, 77,
+            "default spawn env (R5=R7=R8=0) must work");
+        eprintln!("8.4b-10: default_spawn_env → 77 ✓");
+    }
+
+    // ── Test 10b: Default spawn ignores R4/R6 (adversarial) ──
+    //
+    // When R5=0 and R7=0, R4 (grant_table_addr) and R6 (map_table_addr)
+    // are don't-care values.  Set them to garbage to prove the kernel
+    // never reads them under zero counts.
+    #[test]
+    fn p84b_default_spawn_ignores_r4_r6() {
+        let mut fabric = Fabric::new(0x800000);
+        let (core, dom, text, output, _stack) = lifecycle_test_setup(&mut fabric);
+
+        let child_code = child_exit_code(55);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        let mut asm = Asm64::new();
+        // SEAL
+        asm.movi(R1, 0x10000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        // Set R4 and R6 to garbage before SYS_SPAWN
+        asm.movi(R4, 0x7FFF);   // garbage grant_table_addr
+        asm.movi(R6, 0x7FFF);   // garbage map_table_addr
+        // SYS_SPAWN with R5=R7=R8=0 (default env), R4/R6 = garbage
+        emit_spawn_default(&mut asm, 0x10000_u32 as i32, child_size, 0);
+        asm.mov(R4, R0); // save handle
+        // WAIT + EXIT
+        asm.mov(R1, R4);
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+        asm.mov(R1, R1);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x040000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, 55,
+            "default spawn must ignore garbage R4/R6 when R5=R7=0");
+        eprintln!("8.4b-10b: default_spawn_ignores_r4_r6 → 55 ✓");
+    }
+
+    // ── Test 11: Nonzero reserved field in grant rejected ──
+    #[test]
+    fn p84b_nonzero_reserved_rejected() {
+        let mut fabric = Fabric::new(0x800000);
+        let (core, dom, text, child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+
+        let child_code = child_exit_code(42);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // Write grant with nonzero reserved field
+        fabric.write_physical(0x030000,       &0x08000u64.to_le_bytes()); // parent_vaddr
+        fabric.write_physical(0x030000 + 8,   &0u64.to_le_bytes());       // offset
+        fabric.write_physical(0x030000 + 16,  &0x4000u64.to_le_bytes());  // size
+        fabric.write_physical(0x030000 + 24,  &0x01u64.to_le_bytes());    // perms = READ
+        fabric.write_physical(0x030000 + 32,  &1u64.to_le_bytes());       // reserved = 1 (bad)
+
+        write_spawn_map(&mut fabric, 0x030028, 0x14000, 0x08000, 0, 0x4000);
+
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R4, 0x0C000_u32 as i32);
+        asm.movi(R5, 1);
+        asm.movi(R6, 0x0C028_u32 as i32);
+        asm.movi(R7, 1);
+        asm.movi(R8, 0);                    // layout = default
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x080000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "nonzero reserved field in grant must be rejected");
+        eprintln!("8.4b-11: nonzero_reserved → MAX ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 8.4b.1: SpawnLayout, exact-one-entry, checked overflow
+    // ═══════════════════════════════════════════════════════════
+
+    /// Write a SpawnLayout descriptor to physical memory.
+    /// Format: [code_vaddr, stack_vaddr, stack_size, trap_vaddr, reserved]
+    fn write_spawn_layout(fabric: &mut Fabric, phys_addr: u64,
+                          code_vaddr: u64, stack_vaddr: u64,
+                          stack_size: u64, trap_vaddr: u64) {
+        fabric.write_physical(phys_addr,      &code_vaddr.to_le_bytes());
+        fabric.write_physical(phys_addr + 8,  &stack_vaddr.to_le_bytes());
+        fabric.write_physical(phys_addr + 16, &stack_size.to_le_bytes());
+        fabric.write_physical(phys_addr + 24, &trap_vaddr.to_le_bytes());
+        fabric.write_physical(phys_addr + 32, &0u64.to_le_bytes());
+    }
+
+    // ── Test 12: Custom SpawnLayout ──
+    // Spawn child with code at 0x8000, stack at 0x18000 (4K),
+    // trap at 0x1C000.  Child reads from granted data at 0x14000
+    // and exits with the value.  Proves non-default layout works.
+    #[test]
+    fn p84b1_custom_spawn_layout() {
+        let mut fabric = Fabric::new(0x800000);
+        let (core, dom, text, _child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+
+        // Child code: LD R1, [0x14000]; EXIT(R1)
+        // Child code will be placed at vaddr 0x8000 by SpawnLayout.
+        let mut child_asm = Asm64::new();
+        child_asm.movi(R1, 0x14000_u32 as i32);
+        child_asm.ld(R1, R1, 0);
+        child_asm.movi(R0, SYS_EXIT as i32);
+        child_asm.trap(0);
+        let child_code = child_asm.to_bytes();
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        fabric.write_physical(0x020000, &0xCAFEu64.to_le_bytes());
+
+        // Grant: R on data_obj
+        write_spawn_grant(&mut fabric, 0x030000, 0x08000, 0, 0x4000, 0x01);
+        // Map: data_obj at child vaddr 0x14000
+        write_spawn_map(&mut fabric, 0x030028, 0x14000, 0x08000, 0, 0x4000);
+        // Layout: code=0x8000, stack=0x18000 (4K), trap=0x1C000
+        write_spawn_layout(&mut fabric, 0x030050, 0x8000, 0x18000, 0x1000, 0x1C000);
+
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R4, 0x0C000_u32 as i32);  // grant table
+        asm.movi(R5, 1);
+        asm.movi(R6, 0x0C028_u32 as i32);  // map table
+        asm.movi(R7, 1);
+        asm.movi(R8, 0x0C050_u32 as i32);  // layout descriptor
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R4, R0);
+        asm.mov(R1, R4);
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x080000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, 0xCAFE,
+            "child with custom layout should read 0xCAFE");
+        eprintln!("8.4b.1-12: custom_spawn_layout → 0xCAFE ✓");
+    }
+
+    // ── Test 13: SpawnLayout with bad reserved field rejected ──
+    #[test]
+    fn p84b1_layout_reserved_rejected() {
+        let mut fabric = Fabric::new(0x800000);
+        let (core, dom, text, _child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
+
+        let child_code = child_exit_code(42);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // Write layout with nonzero reserved
+        fabric.write_physical(0x030000,      &0x8000u64.to_le_bytes());  // code_vaddr
+        fabric.write_physical(0x030000 + 8,  &0x18000u64.to_le_bytes()); // stack_vaddr
+        fabric.write_physical(0x030000 + 16, &0x1000u64.to_le_bytes());  // stack_size
+        fabric.write_physical(0x030000 + 24, &0x1C000u64.to_le_bytes()); // trap_vaddr
+        fabric.write_physical(0x030000 + 32, &1u64.to_le_bytes());       // reserved = 1 (bad)
+
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R4, 0x0C000_u32 as i32);
+        asm.movi(R5, 0);
+        asm.movi(R6, 0x0C000_u32 as i32);
+        asm.movi(R7, 0);
+        asm.movi(R8, 0x0C000_u32 as i32);  // layout at stack base (reused addr, 0 grants/maps)
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x080000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "layout with nonzero reserved must be rejected");
+        eprintln!("8.4b.1-13: layout_reserved_rejected → MAX ✓");
+    }
+
+    // ── Test 14: SpawnLayout with stack too small rejected ──
+    #[test]
+    fn p84b1_layout_stack_too_small() {
+        let mut fabric = Fabric::new(0x800000);
+        let (core, dom, text, _child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
+
+        let child_code = child_exit_code(42);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // Layout with stack_size = 0x100 (too small, MIN is 0x1000)
+        write_spawn_layout(&mut fabric, 0x030000, 0x8000, 0x18000, 0x100, 0x1C000);
+
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R4, 0x0C000_u32 as i32);
+        asm.movi(R5, 0);
+        asm.movi(R6, 0x0C000_u32 as i32);
+        asm.movi(R7, 0);
+        asm.movi(R8, 0x0C000_u32 as i32);
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x080000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "layout with stack_size < MIN must be rejected");
+        eprintln!("8.4b.1-14: layout_stack_too_small → MAX ✓");
+    }
+
+    // ── Test 15: Exact-one-entry: adjacent mappings can't stitch ──
+    // Two adjacent address-map entries map contiguous portions of the
+    // same object.  A grant descriptor that spans both entries must
+    // be rejected by resolve_virtual_range (exact-one-entry check).
+    #[test]
+    fn p84b1_adjacent_map_no_stitch() {
+        let mut fabric = Fabric::new(0x800000);
+
+        let text      = fabric.alloc_object("parent_text",  0x4000, ObjectKind::Memory);
+        let child_buf = fabric.alloc_object("child_code",   0x4000, ObjectKind::Memory);
+        // One big data object split across two address-map entries
+        let big_data  = fabric.alloc_object("big_data",     0x8000, ObjectKind::Memory);
+        let stack     = fabric.alloc_object("parent_stack",  0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text,      0x000000);
+        fabric.place_object(child_buf, 0x010000);
+        fabric.place_object(big_data,  0x020000);
+        fabric.place_object(stack,     0x030000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, child_buf, 0, 0x4000, Permissions::RWS);
+        fabric.grant(dom, big_data,  0, 0x8000, Permissions::RW);
+        fabric.grant(dom, stack,     0, 0x4000, Permissions::RW);
+
+        let mut core = Anka64Core::new(CPU0, dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x04000, 0x4000, child_buf);
+        // Map big_data as TWO adjacent entries of 0x4000 each:
+        //   virt 0x08000 → big_data[0..0x4000)
+        //   virt 0x0C000 → big_data[0x4000..0x8000)
+        core.address_map.add_at(0x08000, 0x4000, big_data, 0);
+        core.address_map.add_at(0x0C000, 0x4000, big_data, 0x4000);
+        core.address_map.add(0x10000, 0x4000, stack);
+        core.r[SP as usize] = 0x10000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        let child_code = child_exit_code(42);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // Write a grant descriptor that spans BOTH entries:
+        // parent_vaddr=0x08000, offset=0, size=0x8000
+        // This crosses the entry boundary at 0x0C000.
+        // The exact-one-entry check must reject it.
+        write_spawn_grant(&mut fabric, 0x030000, 0x08000, 0, 0x8000, 0x01);
+        write_spawn_map(&mut fabric, 0x030028, 0x14000, 0x08000, 0, 0x4000);
+
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R4, 0x10000_u32 as i32);
+        asm.movi(R5, 1);
+        asm.movi(R6, 0x10028_u32 as i32);
+        asm.movi(R7, 1);
+        asm.movi(R8, 0);
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x080000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "grant spanning two adjacent map entries must be rejected (no stitching)");
+        eprintln!("8.4b.1-15: adjacent_map_no_stitch → MAX ✓");
+    }
+
+    // ── Test 16: Map child_vaddr overflow rejected ──
+    // Map with child_vaddr near u64::MAX so vaddr+size overflows.
+    #[test]
+    fn p84b1_map_vaddr_overflow() {
+        let mut fabric = Fabric::new(0x800000);
+        let (mut core, dom, text, _child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
+
+        let child_code = child_exit_code(42);
+        let child_size = child_code.len() as i32;
+        fabric.write_physical(0x010000, &child_code);
+
+        // Grant: valid
+        write_spawn_grant(&mut fabric, 0x030000, 0x08000, 0, 0x4000, 0x01);
+        // Map: child_vaddr = u64::MAX - 1, size = 0x4000 → overflow
+        write_spawn_map(&mut fabric, 0x030028,
+                        u64::MAX - 1,    // child_vaddr
+                        0x08000,         // parent_vaddr
+                        0, 0x4000);
+
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R0, SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0x04000_u32 as i32);
+        asm.movi(R2, child_size);
+        asm.movi(R3, 0);
+        asm.movi(R4, 0x0C000_u32 as i32);
+        asm.movi(R5, 1);
+        asm.movi(R6, 0x0C028_u32 as i32);
+        asm.movi(R7, 1);
+        asm.movi(R8, 0);
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+        asm.mov(R1, R0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x080000;
+        kernel.spawn(core);
+        kernel.run(500, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, u64::MAX,
+            "map with child_vaddr+size overflow must be rejected");
+        eprintln!("8.4b.1-16: map_vaddr_overflow → MAX ✓");
     }
 
 }

@@ -686,3 +686,128 @@ They are sequenced, not conflated.  A supervisor that collects
 and restarts reaches a resource fixed point; one that merely
 collects without reclaiming leaks.  One that reclaims without
 collecting loses the result.
+
+---
+
+## DN-11: Canonical SYS_SPAWN initial-environment ABI
+
+**Date:** 2026-09-13 (Phase 8.4)
+
+**Context:**
+
+Phase 8.2 defined SYS_SPAWN with three input registers (R1=code_addr,
+R2=code_size, R3=lit_start).  R4–R8 had no assigned meaning; callers
+were free to leave arbitrary values in them.
+
+Phase 8.4 extended SYS_SPAWN to carry an explicitly delegated initial
+environment via R4–R8.  The kernel now reads all eight registers:
+
+```
+R1  code_addr
+R2  code_size
+R3  lit_start
+R4  grant_table_addr       (ignored when R5=0)
+R5  grant_count
+R6  map_table_addr         (ignored when R7=0)
+R7  map_count
+R8  layout_addr            (0 = default ProcessLayout)
+```
+
+**Decision — one evolving syscall, not SYS_SPAWN_ENV:**
+
+An initial proposal created a separate SYS_SPAWN_ENV syscall to avoid
+breaking "old callers."  This was rejected because there are no
+deployed callers — only test fixtures encoding an earlier convention.
+A separate syscall would introduce permanent ABI compatibility baggage
+to preserve test code, exactly the kind of complexity Anka is designed
+to avoid.
+
+Instead: SYS_SPAWN evolves.  Every call site must deliberately
+initialize R5, R7, and R8.  The combination R5=R7=R8=0 requests
+the default process environment — this is current ABI semantics,
+not backward compatibility.
+
+**Decision — three concepts, not one:**
+
+The initial environment separates three orthogonal concerns:
+
+- **SpawnGrant** = initial authority: what the child may access.
+  Descriptor: (parent_vaddr, offset, size, perms, reserved).
+  The parent's mapping is resolved to an (ObjectId, offset) pair;
+  only attenuated permissions are allowed — no escalation.
+
+- **SpawnMap** = initial placement: where delegated objects appear
+  in the child's virtual address space.  A map never creates
+  authority.  Every map must be covered by a corresponding grant
+  in the child's prospective domain.
+
+- **SpawnLayout** = process structure: where kernel-owned process
+  resources (code, stack, trap handler) reside.  Layout_addr=0
+  selects the default geometry; non-zero reads a SpawnLayout
+  descriptor from parent memory.
+
+This three-way split preserves the Anka authority principle:
+
+> authority ≠ placement ≠ process structure
+
+Grants decide *what*; maps decide *where*; layout decides *how*.
+
+**Decision — R4/R6 ignored under zero counts:**
+
+When R5=0 (grant_count=0), R4 (grant_table_addr) has no semantic
+effect.  When R7=0 (map_count=0), R6 (map_table_addr) has no
+semantic effect.  This is deliberate: the kernel gate checks
+counts before reading table pointers.  An adversarial test
+(p84b_default_spawn_ignores_r4_r6) verifies that garbage R4/R6
+values do not affect default-environment spawns.
+
+**Decision — caller discipline over implicit defaults:**
+
+Once a register acquires syscall meaning, callers must initialize
+it deliberately at every call site.  Relying on stale register
+values from earlier operations is not part of the ABI contract.
+
+This was discovered during 8.4b.1 implementation: two existing
+tests (p83e, p83f) stored LifecycleHandle values in R8 across
+consecutive SYS_SPAWN calls.  Under the extended ABI, R8 was
+misinterpreted as a layout_addr.  The fix: move persistent handles
+to non-ABI registers (R9–R12) and zero R5/R7/R8 at every call site.
+A test helper (`emit_spawn_default`) encodes the canonical default
+spawn sequence to prevent future drift.
+
+**Decision — transactional validation:**
+
+All descriptor validation occurs before any child resources are
+allocated.  The transaction order is:
+
+1. Read R4–R8
+2. Validate counts and byte lengths (checked arithmetic)
+3. Copy grant + map + layout tables through parent READ authority
+4. Parse and resolve descriptors against parent address map
+5. Validate authority (attenuation, no stitching, single-entry)
+6. Validate map geometry (no overlap, no overflow)
+7. Verify every map is covered by prospective child authority
+8. Create child domain and derive capabilities
+9. `prepare_process()` installs maps and boots the child
+
+Failure before step 8 is free: no resources have been allocated.
+Failure during step 8 requires explicit rollback.
+
+**Rule:**
+
+SYS_SPAWN consumes R1–R8.  R5=R7=R8=0 means default environment.
+SpawnGrant is authority; SpawnMap is placement; SpawnLayout is
+process structure.  A map never creates authority.  Callers initialize
+all ABI registers deliberately at every call site.
+
+**Phase 8.4 completion (2026-09-13):**
+
+The decisive test `p84c_ankad_spawns_compiler` proved that the
+self-hosted compiler is an ordinary client of the mechanisms described
+above, not a privileged execution mode.  ankad constructs all three
+descriptor classes on its own stack (SP-relative addressing), calls
+`SYS_SPAWN(R1–R8)` with source=R, output=RWS, workspace=RW, and
+CC_B compiles, seals, and executes a child program — all without any
+kernel-side compiler awareness.  The ownership invariant from Phase 8.3
+was confirmed under delegation: CC_B's slot is reclaimed while the
+delegated objects survive.  458/458 tests pass; 29 instructions.
