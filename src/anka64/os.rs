@@ -234,15 +234,24 @@ enum HaltDisposition {
     /// Implicit SYS_EXIT with exit_code = R0.
     UserExit(u64),
     /// Supervisor HALT at the trap gate: TRAP → handler → HALT.
-    /// R0 = syscall number.
+    /// R0 = syscall number.  EventFrame cause = Syscall.
     Syscall,
+    /// Supervisor HALT at the trap gate caused by a timer interrupt.
+    /// EventFrame cause = TimerInterrupt.
+    TimerInterrupt,
     /// Supervisor HALT not at the trap gate: kernel halt/panic.
     SupervisorFault,
 }
 
 fn classify_halt(core: &Anka64Core) -> HaltDisposition {
+    use super::state::EventCause;
     if core.privilege == Privilege::Supervisor && core.pc == core.trap_vector {
-        HaltDisposition::Syscall
+        // Peek at the top EventFrame to determine why we entered supervisor.
+        match core.event_frames.last().map(|f| &f.cause) {
+            Some(EventCause::Syscall) => HaltDisposition::Syscall,
+            Some(EventCause::TimerInterrupt) => HaltDisposition::TimerInterrupt,
+            None => HaltDisposition::SupervisorFault,
+        }
     } else if core.privilege == Privilege::Supervisor {
         HaltDisposition::SupervisorFault
     } else {
@@ -1187,6 +1196,15 @@ impl Kernel {
                     match classify_halt(&self.processes[idx].core) {
                         HaltDisposition::Syscall => {
                             self.handle_syscall(idx);
+                        }
+                        HaltDisposition::TimerInterrupt => {
+                            // Phase 9.0a: timer interrupt entry is
+                            // recognized but delivery is not yet
+                            // implemented.  resume_from_trap() performs
+                            // event_return() and the process continues.
+                            // Phase 9.0d will replace this with the
+                            // real handle_timer_interrupt().
+                            self.resume_from_trap(idx);
                         }
                         HaltDisposition::SupervisorFault => {
                             let core = &self.processes[idx].core;
@@ -2236,22 +2254,15 @@ impl Kernel {
 
     fn resume_from_trap(&mut self, idx: usize) {
         let proc = &mut self.processes[idx];
-        // TRAP set saved_pc and privilege. ERET restores them.
-        // But since we intercepted the HALT in the trap handler,
-        // we need to manually restore and advance.
-        // The trap saved PC+4 (instruction after TRAP).
-        // We restore privilege and jump to saved_pc.
-        proc.core.privilege = Privilege::User;
+        // Uses the unified event_return() primitive — same code path
+        // as Sem::Eret in the ISA.  This is the host-mediated
+        // equivalent: the kernel intercepted the HALT in the trap
+        // handler and now performs the return on behalf of the process.
+        //
+        // Formal basis: T_eret in anka_interrupts.kleis.
         proc.core.halted = false;
-        // PC is at the HALT in the trap handler. We need to go to
-        // the saved return address. The trap handler is:
-        //   HALT  (we intercepted here)
-        // So saved_pc points to the instruction after the TRAP.
-        if let Some(pc) = proc.core.saved_pc.take() {
+        if let Some(pc) = proc.core.event_return() {
             proc.core.pc = pc;
-        }
-        if let Some(priv_) = proc.core.saved_privilege.take() {
-            proc.core.privilege = priv_;
         }
     }
 }

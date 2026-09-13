@@ -140,8 +140,30 @@ pub struct Anka64Core {
     pub halted: bool,
 
     pub trap_vector: u64,
-    pub saved_pc: Option<u64>,
-    pub saved_privilege: Option<Privilege>,
+
+    /// Protected event-frame stack (Phase 9.0).
+    ///
+    /// Not in ordinary memory.  Not accessible through capabilities.
+    /// TRAP and interrupt delivery are the only producers;
+    /// `event_return()` (used by ERET and resume_from_trap) is the
+    /// only consumer.
+    ///
+    /// Replaces the old single-slot saved_pc / saved_privilege.
+    /// A stack rather than a single slot prevents baking the
+    /// no-nesting assumption into the architecture.
+    ///
+    /// Formal basis: place F in anka_interrupts.kleis.
+    /// CONS-2: U+F=1.  CONS-4: F=M.
+    pub event_frames: Vec<EventFrame>,
+
+    /// Whether asynchronous interrupt delivery is enabled.
+    ///
+    /// TRAP and interrupt delivery set this to false (mask).
+    /// event_return() restores the prior value from the EventFrame.
+    ///
+    /// Formal basis: place M in anka_interrupts.kleis (inverted sense:
+    /// M=1 means masked, interrupts_enabled=false).
+    pub interrupts_enabled: bool,
 
     /// Protected return-authority stack (6S.2 + 6S.2a).
     ///
@@ -169,10 +191,26 @@ impl Anka64Core {
             address_map: AddressMap::new(),
             halted: false,
             trap_vector: 0,
-            saved_pc: None,
-            saved_privilege: None,
+            event_frames: Vec::new(),
+            interrupts_enabled: true,
             return_stack: Vec::new(),
         }
+    }
+
+    /// Unified event return: validates and consumes one protected EventFrame.
+    ///
+    /// Used by both `Sem::Eret` (ISA instruction) and `resume_from_trap`
+    /// (host-mediated syscall return).  This is the single implementation
+    /// primitive corresponding to formal transition T_eret in
+    /// anka_interrupts.kleis:  R + F + M → U.
+    ///
+    /// Returns Some(return_pc) on success, None if the event-frame stack
+    /// is empty (INT-5: ¬F ⇒ ERET cannot fire).
+    pub fn event_return(&mut self) -> Option<u64> {
+        let frame = self.event_frames.pop()?;
+        self.privilege = frame.return_privilege;
+        self.interrupts_enabled = frame.interrupts_were_enabled;
+        Some(frame.return_pc)
     }
 
     /// Execute one instruction cycle through the fabric.
@@ -408,16 +446,40 @@ impl Anka64Core {
 
             // ─── System ─────────────────────────────────────────
             Sem::Trap => {
-                self.saved_pc = Some(self.pc + 4);
-                self.saved_privilege = Some(self.privilege);
+                // Formal T_deliver (syscall variant): push EventFrame,
+                // enter Supervisor, mask interrupts, jump to trap_vector.
+                self.event_frames.push(EventFrame {
+                    return_pc: self.pc + 4,
+                    return_privilege: self.privilege,
+                    interrupts_were_enabled: self.interrupts_enabled,
+                    cause: EventCause::Syscall,
+                });
                 self.privilege = Privilege::Supervisor;
+                self.interrupts_enabled = false;
                 next_pc = self.trap_vector;
             }
             Sem::Eret => {
-                if let Some(p) = self.saved_privilege.take() {
-                    self.privilege = p;
+                // Formal T_eret: consume one protected EventFrame.
+                // Unified with event_return() — one semantic primitive.
+                match self.event_return() {
+                    Some(pc) => { next_pc = pc; }
+                    None => {
+                        // INT-5: no EventFrame means ERET faults.
+                        return StepResult::Fault(FaultRecord {
+                            agent: self.agent,
+                            domain: self.domain,
+                            privilege: self.privilege,
+                            transaction: TransactionId(0),
+                            object: ObjectId(0),
+                            generation: None,
+                            offset: self.pc,
+                            width: Width::Word,
+                            kind: AccessKind::Fetch,
+                            pc: Some(self.pc),
+                            reason: FaultReason::ControlFlowViolation,
+                        });
+                    }
                 }
-                next_pc = self.saved_pc.take().unwrap_or(self.pc + 4);
             }
             Sem::Nop  => {}
             Sem::Halt => {

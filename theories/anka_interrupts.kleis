@@ -1,0 +1,605 @@
+// =============================================================================
+// Anka64 Architectural Timer Interrupts — Petri Net Model (Phase 9.0-formal)
+// =============================================================================
+//
+// Formal-first model for precise, coalesced, non-nested timer interrupt delivery.
+// The base net models one core.
+//
+// Places (7):
+//   0 = U  ordinary/user execution boundary
+//   1 = P  timer event pending
+//   2 = Q  no event pending (complement of P)
+//   3 = H  interrupt handler active
+//   4 = F  protected EventFrame exists
+//   5 = M  asynchronous interrupts masked
+//   6 = R  handler complete / event return ready
+//
+// Transitions (4):
+//   0 = post       Q -> P
+//   1 = deliver    U + P -> H + F + M + Q
+//   2 = handler    H -> R
+//   3 = eret       R + F + M -> U
+//
+// Reachable markings (6):
+//   M0  = U + Q
+//   M1  = U + P
+//   M2  = Q + H + F + M
+//   M2a = P + H + F + M
+//   M3  = Q + F + M + R
+//   M3a = P + F + M + R
+//
+// Re-fire paths M2 -> M2a and M3 -> M3a are essential: they prove that a
+// timer event posted while delivery is masked remains pending through ERET.
+//
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Arc weights
+// -----------------------------------------------------------------------------
+
+operation iw : ℤ × ℤ → ℤ
+operation ow : ℤ × ℤ → ℤ
+
+structure Net {
+
+    // t=0: post        Q -> P
+    axiom iw_0_2: iw(0, 2) = 1
+    axiom iw_0_z: iw(0, 0) = 0 ∧ iw(0, 1) = 0 ∧ iw(0, 3) = 0
+               ∧ iw(0, 4) = 0 ∧ iw(0, 5) = 0 ∧ iw(0, 6) = 0
+    axiom ow_0_1: ow(0, 1) = 1
+    axiom ow_0_z: ow(0, 0) = 0 ∧ ow(0, 2) = 0 ∧ ow(0, 3) = 0
+               ∧ ow(0, 4) = 0 ∧ ow(0, 5) = 0 ∧ ow(0, 6) = 0
+
+    // t=1: deliver     U + P -> H + F + M + Q
+    axiom iw_1_0: iw(1, 0) = 1
+    axiom iw_1_1: iw(1, 1) = 1
+    axiom iw_1_z: iw(1, 2) = 0 ∧ iw(1, 3) = 0 ∧ iw(1, 4) = 0
+               ∧ iw(1, 5) = 0 ∧ iw(1, 6) = 0
+    axiom ow_1_2: ow(1, 2) = 1
+    axiom ow_1_3: ow(1, 3) = 1
+    axiom ow_1_4: ow(1, 4) = 1
+    axiom ow_1_5: ow(1, 5) = 1
+    axiom ow_1_z: ow(1, 0) = 0 ∧ ow(1, 1) = 0 ∧ ow(1, 6) = 0
+
+    // t=2: handler     H -> R
+    axiom iw_2_3: iw(2, 3) = 1
+    axiom iw_2_z: iw(2, 0) = 0 ∧ iw(2, 1) = 0 ∧ iw(2, 2) = 0
+               ∧ iw(2, 4) = 0 ∧ iw(2, 5) = 0 ∧ iw(2, 6) = 0
+    axiom ow_2_6: ow(2, 6) = 1
+    axiom ow_2_z: ow(2, 0) = 0 ∧ ow(2, 1) = 0 ∧ ow(2, 2) = 0
+               ∧ ow(2, 3) = 0 ∧ ow(2, 4) = 0 ∧ ow(2, 5) = 0
+
+    // t=3: eret        R + F + M -> U
+    axiom iw_3_4: iw(3, 4) = 1
+    axiom iw_3_5: iw(3, 5) = 1
+    axiom iw_3_6: iw(3, 6) = 1
+    axiom iw_3_z: iw(3, 0) = 0 ∧ iw(3, 1) = 0 ∧ iw(3, 2) = 0
+               ∧ iw(3, 3) = 0
+    axiom ow_3_0: ow(3, 0) = 1
+    axiom ow_3_z: ow(3, 1) = 0 ∧ ow(3, 2) = 0 ∧ ow(3, 3) = 0
+               ∧ ow(3, 4) = 0 ∧ ow(3, 5) = 0 ∧ ow(3, 6) = 0
+}
+
+// -----------------------------------------------------------------------------
+// Markings: m(marking_id, place_id) = token count
+//
+// Marking ids:
+//   0=M0, 1=M1, 2=M2, 3=M2a, 4=M3, 5=M3a
+// -----------------------------------------------------------------------------
+
+operation m : ℤ × ℤ → ℤ
+
+structure Markings {
+    // M0 = U + Q
+    axiom m0_0: m(0, 0) = 1
+    axiom m0_1: m(0, 1) = 0
+    axiom m0_2: m(0, 2) = 1
+    axiom m0_3: m(0, 3) = 0
+    axiom m0_4: m(0, 4) = 0
+    axiom m0_5: m(0, 5) = 0
+    axiom m0_6: m(0, 6) = 0
+
+    // M1 = U + P
+    axiom m1_0: m(1, 0) = 1
+    axiom m1_1: m(1, 1) = 1
+    axiom m1_2: m(1, 2) = 0
+    axiom m1_3: m(1, 3) = 0
+    axiom m1_4: m(1, 4) = 0
+    axiom m1_5: m(1, 5) = 0
+    axiom m1_6: m(1, 6) = 0
+
+    // M2 = Q + H + F + M
+    axiom m2_0: m(2, 0) = 0
+    axiom m2_1: m(2, 1) = 0
+    axiom m2_2: m(2, 2) = 1
+    axiom m2_3: m(2, 3) = 1
+    axiom m2_4: m(2, 4) = 1
+    axiom m2_5: m(2, 5) = 1
+    axiom m2_6: m(2, 6) = 0
+
+    // M2a = P + H + F + M
+    axiom m3_0: m(3, 0) = 0
+    axiom m3_1: m(3, 1) = 1
+    axiom m3_2: m(3, 2) = 0
+    axiom m3_3: m(3, 3) = 1
+    axiom m3_4: m(3, 4) = 1
+    axiom m3_5: m(3, 5) = 1
+    axiom m3_6: m(3, 6) = 0
+
+    // M3 = Q + F + M + R
+    axiom m4_0: m(4, 0) = 0
+    axiom m4_1: m(4, 1) = 0
+    axiom m4_2: m(4, 2) = 1
+    axiom m4_3: m(4, 3) = 0
+    axiom m4_4: m(4, 4) = 1
+    axiom m4_5: m(4, 5) = 1
+    axiom m4_6: m(4, 6) = 1
+
+    // M3a = P + F + M + R
+    axiom m5_0: m(5, 0) = 0
+    axiom m5_1: m(5, 1) = 1
+    axiom m5_2: m(5, 2) = 0
+    axiom m5_3: m(5, 3) = 0
+    axiom m5_4: m(5, 4) = 1
+    axiom m5_5: m(5, 5) = 1
+    axiom m5_6: m(5, 6) = 1
+}
+
+// -----------------------------------------------------------------------------
+// Derived predicates used by proof obligations
+// -----------------------------------------------------------------------------
+
+define enabled(t : ℤ, k : ℤ) =
+       m(k, 0) ≥ iw(t, 0)
+    ∧  m(k, 1) ≥ iw(t, 1)
+    ∧  m(k, 2) ≥ iw(t, 2)
+    ∧  m(k, 3) ≥ iw(t, 3)
+    ∧  m(k, 4) ≥ iw(t, 4)
+    ∧  m(k, 5) ≥ iw(t, 5)
+    ∧  m(k, 6) ≥ iw(t, 6)
+
+// Instruction-phase bridge.  This is a definition of asynchronous-delivery
+// eligibility, not an Anka-specific axiom: delivery may occur only after the
+// instruction committed, never on a fault, with a pending event, while unmasked.
+define delivery_gate(
+    committed : Bool,
+    faulted : Bool,
+    pending : Bool,
+    masked : Bool
+) = committed ∧ ¬faulted ∧ pending ∧ ¬masked
+
+// Event-return bridge: protected state restoration is exact.
+define restore_pc(saved_pc : BitVec64) = saved_pc
+define restore_interrupt_enable(saved_enabled : Bool) = saved_enabled
+
+// Unified entry bridge: syscall/TRAP and timer interrupt are distinct causes,
+// but both use the same protected-frame accounting and the same return law.
+define CAUSE_SYSCALL = bvconst(0, 1)
+define CAUSE_TIMER   = bvconst(1, 1)
+define frame_after_entry(cause : BitVec1, before : BitVec8) =
+    bvadd(before, bvconst(1, 8))
+define frame_after_return(before : BitVec8) = bvsub(before, bvconst(1, 8))
+
+// =============================================================================
+// TRANSITION CORRECTNESS
+// =============================================================================
+
+// Helper expansion is intentionally explicit in each firing proof so that the
+// ground marking relation remains transparent to Z3 and to human review.
+
+example "FIRE-1: post(M0) = M1" {
+    assert(
+        enabled(0, 0) ∧
+        m(0, 0) - iw(0, 0) + ow(0, 0) = m(1, 0) ∧
+        m(0, 1) - iw(0, 1) + ow(0, 1) = m(1, 1) ∧
+        m(0, 2) - iw(0, 2) + ow(0, 2) = m(1, 2) ∧
+        m(0, 3) - iw(0, 3) + ow(0, 3) = m(1, 3) ∧
+        m(0, 4) - iw(0, 4) + ow(0, 4) = m(1, 4) ∧
+        m(0, 5) - iw(0, 5) + ow(0, 5) = m(1, 5) ∧
+        m(0, 6) - iw(0, 6) + ow(0, 6) = m(1, 6)
+    )
+}
+
+example "FIRE-2: deliver(M1) = M2" {
+    assert(
+        enabled(1, 1) ∧
+        m(1, 0) - iw(1, 0) + ow(1, 0) = m(2, 0) ∧
+        m(1, 1) - iw(1, 1) + ow(1, 1) = m(2, 1) ∧
+        m(1, 2) - iw(1, 2) + ow(1, 2) = m(2, 2) ∧
+        m(1, 3) - iw(1, 3) + ow(1, 3) = m(2, 3) ∧
+        m(1, 4) - iw(1, 4) + ow(1, 4) = m(2, 4) ∧
+        m(1, 5) - iw(1, 5) + ow(1, 5) = m(2, 5) ∧
+        m(1, 6) - iw(1, 6) + ow(1, 6) = m(2, 6)
+    )
+}
+
+example "FIRE-3: handler(M2) = M3" {
+    assert(
+        enabled(2, 2) ∧
+        m(2, 0) - iw(2, 0) + ow(2, 0) = m(4, 0) ∧
+        m(2, 1) - iw(2, 1) + ow(2, 1) = m(4, 1) ∧
+        m(2, 2) - iw(2, 2) + ow(2, 2) = m(4, 2) ∧
+        m(2, 3) - iw(2, 3) + ow(2, 3) = m(4, 3) ∧
+        m(2, 4) - iw(2, 4) + ow(2, 4) = m(4, 4) ∧
+        m(2, 5) - iw(2, 5) + ow(2, 5) = m(4, 5) ∧
+        m(2, 6) - iw(2, 6) + ow(2, 6) = m(4, 6)
+    )
+}
+
+example "FIRE-4: eret(M3) = M0" {
+    assert(
+        enabled(3, 4) ∧
+        m(4, 0) - iw(3, 0) + ow(3, 0) = m(0, 0) ∧
+        m(4, 1) - iw(3, 1) + ow(3, 1) = m(0, 1) ∧
+        m(4, 2) - iw(3, 2) + ow(3, 2) = m(0, 2) ∧
+        m(4, 3) - iw(3, 3) + ow(3, 3) = m(0, 3) ∧
+        m(4, 4) - iw(3, 4) + ow(3, 4) = m(0, 4) ∧
+        m(4, 5) - iw(3, 5) + ow(3, 5) = m(0, 5) ∧
+        m(4, 6) - iw(3, 6) + ow(3, 6) = m(0, 6)
+    )
+}
+
+example "FIRE-5: post(M2) = M2a" {
+    assert(
+        enabled(0, 2) ∧
+        m(2, 0) - iw(0, 0) + ow(0, 0) = m(3, 0) ∧
+        m(2, 1) - iw(0, 1) + ow(0, 1) = m(3, 1) ∧
+        m(2, 2) - iw(0, 2) + ow(0, 2) = m(3, 2) ∧
+        m(2, 3) - iw(0, 3) + ow(0, 3) = m(3, 3) ∧
+        m(2, 4) - iw(0, 4) + ow(0, 4) = m(3, 4) ∧
+        m(2, 5) - iw(0, 5) + ow(0, 5) = m(3, 5) ∧
+        m(2, 6) - iw(0, 6) + ow(0, 6) = m(3, 6)
+    )
+}
+
+example "FIRE-6: handler(M2a) = M3a" {
+    assert(
+        enabled(2, 3) ∧
+        m(3, 0) - iw(2, 0) + ow(2, 0) = m(5, 0) ∧
+        m(3, 1) - iw(2, 1) + ow(2, 1) = m(5, 1) ∧
+        m(3, 2) - iw(2, 2) + ow(2, 2) = m(5, 2) ∧
+        m(3, 3) - iw(2, 3) + ow(2, 3) = m(5, 3) ∧
+        m(3, 4) - iw(2, 4) + ow(2, 4) = m(5, 4) ∧
+        m(3, 5) - iw(2, 5) + ow(2, 5) = m(5, 5) ∧
+        m(3, 6) - iw(2, 6) + ow(2, 6) = m(5, 6)
+    )
+}
+
+example "FIRE-7: post(M3) = M3a" {
+    assert(
+        enabled(0, 4) ∧
+        m(4, 0) - iw(0, 0) + ow(0, 0) = m(5, 0) ∧
+        m(4, 1) - iw(0, 1) + ow(0, 1) = m(5, 1) ∧
+        m(4, 2) - iw(0, 2) + ow(0, 2) = m(5, 2) ∧
+        m(4, 3) - iw(0, 3) + ow(0, 3) = m(5, 3) ∧
+        m(4, 4) - iw(0, 4) + ow(0, 4) = m(5, 4) ∧
+        m(4, 5) - iw(0, 5) + ow(0, 5) = m(5, 5) ∧
+        m(4, 6) - iw(0, 6) + ow(0, 6) = m(5, 6)
+    )
+}
+
+example "FIRE-8: eret(M3a) = M1 (pending preserved)" {
+    assert(
+        enabled(3, 5) ∧
+        m(5, 0) - iw(3, 0) + ow(3, 0) = m(1, 0) ∧
+        m(5, 1) - iw(3, 1) + ow(3, 1) = m(1, 1) ∧
+        m(5, 2) - iw(3, 2) + ow(3, 2) = m(1, 2) ∧
+        m(5, 3) - iw(3, 3) + ow(3, 3) = m(1, 3) ∧
+        m(5, 4) - iw(3, 4) + ow(3, 4) = m(1, 4) ∧
+        m(5, 5) - iw(3, 5) + ow(3, 5) = m(1, 5) ∧
+        m(5, 6) - iw(3, 6) + ow(3, 6) = m(1, 6)
+    )
+}
+
+// =============================================================================
+// REACHABLE-SET CLOSURE / ENABLED TRANSITIONS
+// =============================================================================
+// These six obligations make the listed marking set explicit.  M2 and M3 each
+// admit two transitions because timer posting is asynchronous with respect to
+// handler completion / event return.
+
+example "ENABLE-M0: only post is enabled" {
+    assert(enabled(0,0) ∧ ¬enabled(1,0) ∧ ¬enabled(2,0) ∧ ¬enabled(3,0))
+}
+
+example "ENABLE-M1: only deliver is enabled" {
+    assert(¬enabled(0,1) ∧ enabled(1,1) ∧ ¬enabled(2,1) ∧ ¬enabled(3,1))
+}
+
+example "ENABLE-M2: post and handler are enabled" {
+    assert(enabled(0,2) ∧ ¬enabled(1,2) ∧ enabled(2,2) ∧ ¬enabled(3,2))
+}
+
+example "ENABLE-M2a: only handler is enabled" {
+    assert(¬enabled(0,3) ∧ ¬enabled(1,3) ∧ enabled(2,3) ∧ ¬enabled(3,3))
+}
+
+example "ENABLE-M3: post and ERET are enabled" {
+    assert(enabled(0,4) ∧ ¬enabled(1,4) ∧ ¬enabled(2,4) ∧ enabled(3,4))
+}
+
+example "ENABLE-M3a: only ERET is enabled" {
+    assert(¬enabled(0,5) ∧ ¬enabled(1,5) ∧ ¬enabled(2,5) ∧ enabled(3,5))
+}
+
+// =============================================================================
+// CONSERVATION INVARIANTS
+// =============================================================================
+
+example "CONS-1: P + Q = 1 at every reachable marking" {
+    assert(
+        m(0, 1) + m(0, 2) = 1 ∧
+        m(1, 1) + m(1, 2) = 1 ∧
+        m(2, 1) + m(2, 2) = 1 ∧
+        m(3, 1) + m(3, 2) = 1 ∧
+        m(4, 1) + m(4, 2) = 1 ∧
+        m(5, 1) + m(5, 2) = 1
+    )
+}
+
+example "CONS-2: U + F = 1 at every reachable marking" {
+    assert(
+        m(0, 0) + m(0, 4) = 1 ∧
+        m(1, 0) + m(1, 4) = 1 ∧
+        m(2, 0) + m(2, 4) = 1 ∧
+        m(3, 0) + m(3, 4) = 1 ∧
+        m(4, 0) + m(4, 4) = 1 ∧
+        m(5, 0) + m(5, 4) = 1
+    )
+}
+
+example "CONS-3: U + H + R = 1 at every reachable marking" {
+    assert(
+        m(0, 0) + m(0, 3) + m(0, 6) = 1 ∧
+        m(1, 0) + m(1, 3) + m(1, 6) = 1 ∧
+        m(2, 0) + m(2, 3) + m(2, 6) = 1 ∧
+        m(3, 0) + m(3, 3) + m(3, 6) = 1 ∧
+        m(4, 0) + m(4, 3) + m(4, 6) = 1 ∧
+        m(5, 0) + m(5, 3) + m(5, 6) = 1
+    )
+}
+
+example "CONS-4: F = M at every reachable marking" {
+    assert(
+        m(0, 4) = m(0, 5) ∧
+        m(1, 4) = m(1, 5) ∧
+        m(2, 4) = m(2, 5) ∧
+        m(3, 4) = m(3, 5) ∧
+        m(4, 4) = m(4, 5) ∧
+        m(5, 4) = m(5, 5)
+    )
+}
+
+// Structural incidence checks: each conservation law is preserved by every
+// transition, not merely observed in the listed markings.
+example "CONS-STRUCT-1: every transition preserves P+Q" {
+    assert(
+        ow(0,1)+ow(0,2)-iw(0,1)-iw(0,2) = 0 ∧
+        ow(1,1)+ow(1,2)-iw(1,1)-iw(1,2) = 0 ∧
+        ow(2,1)+ow(2,2)-iw(2,1)-iw(2,2) = 0 ∧
+        ow(3,1)+ow(3,2)-iw(3,1)-iw(3,2) = 0
+    )
+}
+
+example "CONS-STRUCT-2: every transition preserves U+F" {
+    assert(
+        ow(0,0)+ow(0,4)-iw(0,0)-iw(0,4) = 0 ∧
+        ow(1,0)+ow(1,4)-iw(1,0)-iw(1,4) = 0 ∧
+        ow(2,0)+ow(2,4)-iw(2,0)-iw(2,4) = 0 ∧
+        ow(3,0)+ow(3,4)-iw(3,0)-iw(3,4) = 0
+    )
+}
+
+example "CONS-STRUCT-3: every transition preserves U+H+R" {
+    assert(
+        ow(0,0)+ow(0,3)+ow(0,6)-iw(0,0)-iw(0,3)-iw(0,6) = 0 ∧
+        ow(1,0)+ow(1,3)+ow(1,6)-iw(1,0)-iw(1,3)-iw(1,6) = 0 ∧
+        ow(2,0)+ow(2,3)+ow(2,6)-iw(2,0)-iw(2,3)-iw(2,6) = 0 ∧
+        ow(3,0)+ow(3,3)+ow(3,6)-iw(3,0)-iw(3,3)-iw(3,6) = 0
+    )
+}
+
+example "CONS-STRUCT-4: every transition preserves F-M" {
+    assert(
+        (ow(0,4)-iw(0,4)) = (ow(0,5)-iw(0,5)) ∧
+        (ow(1,4)-iw(1,4)) = (ow(1,5)-iw(1,5)) ∧
+        (ow(2,4)-iw(2,4)) = (ow(2,5)-iw(2,5)) ∧
+        (ow(3,4)-iw(3,4)) = (ow(3,5)-iw(3,5))
+    )
+}
+
+// =============================================================================
+// INT-1 ... INT-10
+// =============================================================================
+
+example "INT-1: handler implies protected EventFrame" {
+    assert(
+        (m(0,3) ≥ 1 ⇒ m(0,4) ≥ 1) ∧
+        (m(1,3) ≥ 1 ⇒ m(1,4) ≥ 1) ∧
+        (m(2,3) ≥ 1 ⇒ m(2,4) ≥ 1) ∧
+        (m(3,3) ≥ 1 ⇒ m(3,4) ≥ 1) ∧
+        (m(4,3) ≥ 1 ⇒ m(4,4) ≥ 1) ∧
+        (m(5,3) ≥ 1 ⇒ m(5,4) ≥ 1)
+    )
+}
+
+example "INT-2: masked state disables interrupt delivery" {
+    assert(
+        (m(0,5) ≥ 1 ⇒ ¬enabled(1,0)) ∧
+        (m(1,5) ≥ 1 ⇒ ¬enabled(1,1)) ∧
+        (m(2,5) ≥ 1 ⇒ ¬enabled(1,2)) ∧
+        (m(3,5) ≥ 1 ⇒ ¬enabled(1,3)) ∧
+        (m(4,5) ≥ 1 ⇒ ¬enabled(1,4)) ∧
+        (m(5,5) ≥ 1 ⇒ ¬enabled(1,5))
+    )
+}
+
+example "INT-3: delivery consumes exactly one pending token and restores Q" {
+    assert(iw(1,1) = 1 ∧ ow(1,1) = 0 ∧ iw(1,2) = 0 ∧ ow(1,2) = 1)
+}
+
+example "INT-4: ERET consumes exactly one protected EventFrame" {
+    assert(iw(3,4) = 1 ∧ ow(3,4) = 0)
+}
+
+example "INT-5: no EventFrame means ERET cannot be enabled" {
+    assert(
+        (m(0,4) = 0 ⇒ ¬enabled(3,0)) ∧
+        (m(1,4) = 0 ⇒ ¬enabled(3,1)) ∧
+        (m(2,4) = 0 ⇒ ¬enabled(3,2)) ∧
+        (m(3,4) = 0 ⇒ ¬enabled(3,3)) ∧
+        (m(4,4) = 0 ⇒ ¬enabled(3,4)) ∧
+        (m(5,4) = 0 ⇒ ¬enabled(3,5))
+    )
+}
+
+example "INT-6a: delivery safety gate implies committed, pending, unmasked, nonfaulted" {
+    assert(
+        ∀(c : Bool). ∀(f : Bool). ∀(p : Bool). ∀(mask : Bool).
+            delivery_gate(c, f, p, mask)
+            ⇒ (c ∧ p ∧ ¬mask ∧ ¬f)
+    )
+}
+
+example "INT-6b: faulted instruction cannot admit asynchronous delivery" {
+    assert(
+        ∀(c : Bool). ∀(f : Bool). ∀(p : Bool). ∀(mask : Bool).
+            f ⇒ ¬delivery_gate(c, f, p, mask)
+    )
+}
+
+example "INT-6c: Petri delivery requires completed execution boundary U and pending P" {
+    assert(iw(1,0) = 1 ∧ iw(1,1) = 1)
+}
+
+example "INT-7: interrupt delivery changes only control/event places in the Petri model" {
+    assert(
+        // It consumes execution-boundary U and pending P, and produces only
+        // Q,H,F,M.  There is no ordinary-memory/object place in this net.
+        iw(1,0) = 1 ∧ iw(1,1) = 1 ∧ iw(1,2) = 0 ∧ iw(1,3) = 0
+        ∧ iw(1,4) = 0 ∧ iw(1,5) = 0 ∧ iw(1,6) = 0
+        ∧ ow(1,0) = 0 ∧ ow(1,1) = 0 ∧ ow(1,2) = 1 ∧ ow(1,3) = 1
+        ∧ ow(1,4) = 1 ∧ ow(1,5) = 1 ∧ ow(1,6) = 0
+    )
+}
+
+example "INT-8a: event return restores exact saved PC" {
+    assert(∀(pc : BitVec64). restore_pc(pc) = pc)
+}
+
+example "INT-8b: event return restores prior interrupt-enable state" {
+    assert(∀(e : Bool). restore_interrupt_enable(e) = e)
+}
+
+example "INT-8c: ERET preserves pending status across return" {
+    assert(
+        // no-pending return closes to M0
+        m(4,1) = 0 ∧ m(0,1) = 0 ∧
+        // pending return closes to M1
+        m(5,1) = 1 ∧ m(1,1) = 1
+    )
+}
+
+example "INT-9a: one delivered pending event creates exactly one handler token" {
+    assert(iw(1,1) = 1 ∧ ow(1,3) = 1)
+}
+
+example "INT-9b: delivery cannot immediately fire twice from M2" {
+    assert(¬enabled(1,2))
+}
+
+example "INT-10a: pending event survives handler completion while masked" {
+    assert(
+        m(3,1) = 1 ∧ m(5,1) = 1 ∧
+        // handler firing M2a -> M3a leaves P unchanged
+        m(3,1) - iw(2,1) + ow(2,1) = m(5,1)
+    )
+}
+
+example "INT-10b: pending event survives ERET and becomes deliverable" {
+    assert(
+        m(5,1) = 1 ∧
+        m(5,1) - iw(3,1) + ow(3,1) = m(1,1) ∧
+        enabled(1,1)
+    )
+}
+
+// =============================================================================
+// COALESCING, FRAME BOUND, AND UNIFIED ENTRY/RETURN LAW
+// =============================================================================
+
+example "COALESCE-1: post disabled whenever P=1 because Q=0" {
+    assert(
+        ¬enabled(0,1) ∧
+        ¬enabled(0,3) ∧
+        ¬enabled(0,5)
+    )
+}
+
+example "COALESCE-2: P never exceeds one at reachable markings" {
+    assert(
+        m(0,1) ≤ 1 ∧ m(1,1) ≤ 1 ∧ m(2,1) ≤ 1 ∧
+        m(3,1) ≤ 1 ∧ m(4,1) ≤ 1 ∧ m(5,1) ≤ 1
+    )
+}
+
+example "FRAME-BOUND: Phase 9.0 has at most one unmatched EventFrame" {
+    assert(
+        m(0,4) ≤ 1 ∧ m(1,4) ≤ 1 ∧ m(2,4) ≤ 1 ∧
+        m(3,4) ≤ 1 ∧ m(4,4) ≤ 1 ∧ m(5,4) ≤ 1
+    )
+}
+
+example "FRAME-UNIFIED-1: syscall and timer causes use identical frame-entry law" {
+    assert(
+        ∀(d : BitVec8).
+            frame_after_entry(CAUSE_SYSCALL, d) = frame_after_entry(CAUSE_TIMER, d)
+    )
+}
+
+example "FRAME-UNIFIED-2: either privilege-changing cause adds exactly one frame" {
+    assert(
+        ∀(d : BitVec8).
+            frame_after_entry(CAUSE_SYSCALL, d) = bvadd(d, bvconst(1, 8))
+            ∧ frame_after_entry(CAUSE_TIMER, d) = bvadd(d, bvconst(1, 8))
+    )
+}
+
+example "FRAME-UNIFIED-3: common event return consumes one frame" {
+    assert(
+        ∀(d : BitVec8).
+            frame_after_return(d) = bvsub(d, bvconst(1, 8))
+    )
+}
+
+example "FRAME-UNIFIED-4: syscall entry then common return restores depth (base witness)" {
+    assert(
+        frame_after_return(frame_after_entry(CAUSE_SYSCALL, bvconst(0, 8)))
+        = bvconst(0, 8)
+    )
+}
+
+example "FRAME-UNIFIED-5: timer entry then common return restores depth (base witness)" {
+    assert(
+        frame_after_return(frame_after_entry(CAUSE_TIMER, bvconst(0, 8)))
+        = bvconst(0, 8)
+    )
+}
+
+// =============================================================================
+// FALSIFIABILITY WITNESSES — deliberately false
+// =============================================================================
+
+// Total token count is NOT conserved: M0 has 2 tokens, M2 has 4.
+example "FALSE-1: total token count is conserved (deliberate falsifiability witness)" {
+    assert(
+        m(0,0)+m(0,1)+m(0,2)+m(0,3)+m(0,4)+m(0,5)+m(0,6)
+        =
+        m(2,0)+m(2,1)+m(2,2)+m(2,3)+m(2,4)+m(2,5)+m(2,6)
+    )
+}
+
+// Masking must block delivery.  M2 is masked and deliver is disabled.
+example "FALSE-2: masked handler state can deliver again (deliberate safety witness)" {
+    assert(enabled(1,2))
+}

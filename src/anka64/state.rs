@@ -444,6 +444,56 @@ pub struct ReturnAuthority {
     pub target: u64,
 }
 
+// ───────────────────────────────────────────────────────────────────
+// Event architecture (Phase 9.0)
+// ───────────────────────────────────────────────────────────────────
+
+/// Why a privilege-changing event entry occurred.
+///
+/// Every privilege-changing entry (TRAP, timer interrupt, future device
+/// interrupts, etc.) pushes a protected EventFrame whose cause field
+/// records why entry happened.  ERET consumes the frame regardless of
+/// cause — the return-integrity mechanism is unified.
+///
+/// Formal basis: anka_interrupts.kleis FRAME-UNIFIED-1 through
+/// FRAME-UNIFIED-5 prove that both causes use the identical
+/// frame-entry law and common event-return law.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventCause {
+    /// Synchronous syscall entry via TRAP instruction.
+    Syscall,
+    /// Asynchronous timer interrupt delivered at instruction boundary.
+    TimerInterrupt,
+    // Future: DeviceInterrupt { source }, InterprocessorInterrupt,
+    //         ProtectionFault, IllegalInstruction, ...
+    // Synchronous exceptions vs asynchronous interrupts differ in
+    // entry semantics but share the same return-integrity mechanism.
+}
+
+/// Protected event frame — architecturally protected, not in ordinary memory.
+///
+/// Captures the exact interrupted control state.  ERET (or the host's
+/// `event_return()` primitive) is the only consumer.  LD/ST/ALU cannot
+/// read, write, or forge frames.
+///
+/// Corresponds to formal place F in the interrupt Petri net.
+/// Formal invariants: CONS-2 (U+F=1), CONS-4 (F=M), INT-1 (H⇒F),
+/// INT-4 (ERET consumes exactly one frame), INT-5 (¬F⇒ERET disabled).
+#[derive(Debug, Clone)]
+pub struct EventFrame {
+    /// PC to resume at (instruction after TRAP, or next instruction
+    /// after asynchronous delivery).
+    pub return_pc: u64,
+    /// Privilege level at the time of entry.
+    pub return_privilege: Privilege,
+    /// Whether interrupts were enabled before this entry.
+    /// Stored rather than reconstructed, so the frame represents
+    /// the complete interrupted control state (INT-8b).
+    pub interrupts_were_enabled: bool,
+    /// Why this frame was created.
+    pub cause: EventCause,
+}
+
 /// A first-class architectural fault record.
 ///
 /// A DMA fault may have no meaningful PC.
