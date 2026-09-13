@@ -98,7 +98,11 @@ Canonical Anka source (~17 KB, 46 functions)
     │           │
     └─────┬─────┘
           ▼
-     Secure OS (SYS_EXIT, SYS_WRITE, SYS_SEAL, SYS_EXEC)
+  Secure OS (SYS_EXIT, SYS_WRITE, SYS_SEAL, SYS_EXEC,
+             SYS_SPAWN, SYS_WAIT, SYS_SEND, SYS_RECV)
+          │
+          ▼
+  ankad (native Anka64 supervisor — boot, spawn, wait, restart)
 ```
 
 The compiler is self-hosting.  The bootstrap relation is:
@@ -372,14 +376,89 @@ Phase 8.2 established `SYS_SPAWN` (asynchronous process creation) and `SYS_WAIT`
 Key design elements:
 
 - **LifecycleHandle**: parent-local opaque reference `(slot_generation:u32 | slot:u32)`.  Meaningful only within the calling process's kernel-protected lifecycle table.  Returned by SYS_SPAWN, consumed by SYS_WAIT.
-- **ProcessKey**: kernel-internal identity `{ pid, generation }`.  Never exposed to user space.
-- **Two generations**: `slot_generation` prevents stale lifecycle-slot reuse within a long-lived parent; `ProcessKey.generation` prevents stale PID reuse across the kernel.
+- **ProcessKey**: kernel-internal identity `{ slot, generation }`.  Never exposed to user space.  Slot is reusable kernel storage; PID is a separate monotonic public name (see DN-8 Phase 8.3 refinement).
+- **Two generations**: `slot_generation` prevents stale lifecycle-slot reuse within a long-lived parent; `ProcessKey.generation` prevents stale slot reuse across the kernel.
 - **WaitKind**: distinguishes `Exec` (historical single-register ABI, 0xDEAD for faults) from `Lifecycle` (two-register tagged ABI: R0=tag, R1=detail).
 - **Atomic consumption**: handle consumed at moment of result delivery, not before.  Second WAIT on same handle returns invalid.
 - **Security property**: full knowledge of a handle's bit representation does not create authority.  Non-owner WAIT is rejected because the handle resolves only in the caller's own table.
-- **Orphan semantics**: explicitly deferred to Phase 8.3+.
 
-Test count: 418 (408 prior + 10 lifecycle tests including stale slot reuse, cross-process non-owner rejection, fault-vs-exit tag distinction, SYS_EXEC 0xDEAD compatibility).
+Test count at Phase 8.2 close: 418.
+
+### Stage 21 — Supervised process lifecycle and reclamation (Phase 8.3)
+
+Phase 8.3 closed the refinement chain from formal specification through implementation to empirical steady-state validation.  The central result: repeated process death and restart converges to constant resource occupancy.
+
+**Formal model (Kleis Petri net):**
+
+A bounded Petri-net model of the single-slot lifecycle was verified by Z3.  13 places, 4 transitions, 4 reachable markings (M0–M3) as ground axioms.  Three meaningful P-invariants:
+
+- **Lifecycle uniqueness**: R + Z + C + F = 1 (a slot is in exactly one state).
+- **Stack extent conservation**: SE + FSE = 1 (stack extents are never leaked or duplicated).
+- **Trap extent conservation**: TE + FTE = 1 (trap extents are never leaked or duplicated).
+
+Total token count is *not* a P-invariant — it varies across markings (8, 8, 6, 3).  The meaningful conservation properties are the three above, plus cycle closure: spawn(M3) = M0 — no resources leak across incarnation cycles.  26 verified properties plus 1 intentional falsifiability witness.
+
+**Five-concept separation (now exercised end-to-end):**
+
+- **PID** — monotonic public name (u64, never reused).
+- **Process slot** — reusable kernel storage index.
+- **ProcessKey(slot, generation)** — incarnation identity.
+- **LifecycleHandle** — parent-local observation authority.
+- **PhysicalExtent** — physical memory placement.
+
+None of these may be substituted for another.  `resolve_pid()` is the only path from PID to slot, and it only resolves Running processes.
+
+**Process states:**
+
+`Running → Zombie → Free(g+1) → Running` (reuse), or `Free → Retired` when generation reaches `u32::MAX`.  Generation advances on reclaim (not allocation) via `checked_add(1)` — never wraps.
+
+**Reclamation:**
+
+`reclaim_process(slot)` atomically: destroys owned Fabric resources (domain, objects), returns physical extents to pools, clears incarnation metadata (parent, waiting_on, result, exit_code), clears mailbox and lifecycle table, advances generation.  `OwnedResources` (domain, stack_obj, trap_obj, stack_extent, trap_extent) tracks what each incarnation owns.
+
+**Scrubbed physical extent reuse:**
+
+`alloc_stack_extent()` / `alloc_trap_extent()` attempt exact-size pool reuse with scrubbing (zero bytes before reuse), then fall back to bump allocation from `next_phys`.  Stack and trap pools are separate.
+
+**Central death transition:**
+
+All termination paths (SYS_EXIT, user HALT, SupervisorFault, ProtectionFault, unknown syscalls) converge to `finish_process(slot, result)`.  This eliminates partial death states and ensures orphan handling is never skipped.
+
+**Depth-first orphan termination:**
+
+`terminate_orphans(dead_parent_key)` recursively discovers and reclaims descendants: grandchild first, then child, then parent is eventually collected.  No parent relation is erased before its subtree has been discovered.
+
+**Process-slot reuse:**
+
+`spawn()` searches for `Free` slots before appending.  Reuse preserves the existing generation and assigns a fresh PID.  `Retired` slots (generation `u32::MAX`) are skipped.
+
+**ankad — native Anka64 supervisor:**
+
+ankad is an ordinary booted Anka64 process that spawns and supervises other processes using only runtime interfaces (SYS_SPAWN, SYS_WAIT, SYS_WRITE, SYS_EXIT).  The host boots ankad; ankad spawns children.  The host observes a supervisor rather than impersonating one.
+
+**Same-code restart (B₁/B₂):**
+
+ankad restarts a faulting service into the same slot at a new generation: B₁ = (S, 0), B₂ = (S, 1).  Different PIDs, different ProcessKeys, different LifecycleHandles, same sealed executable, same fault behavior, reused scrubbed physical extents.
+
+**100-cycle resource steady state:**
+
+After one warm-up cycle, ankad performs 100 consecutive spawn-fault-collect-reclaim cycles.  Decisive assertions:
+
+- `next_phys` remains constant (no physical memory growth).
+- Domain count remains constant.
+- Object count remains constant.
+- Process table size remains constant.
+- The service slot is reused throughout; its generation advances monotonically.
+
+PID growth is intentional (monotonic names), not a leak — a useful negative control.
+
+**Adversarial checks:**
+
+- Stale `ProcessKey` rejected after slot reuse.
+- Physical extent scrubbed (no remanence from prior incarnation).
+- `SYS_SEND` to a dead process fails cleanly.
+
+Test count: 440 (418 prior + 5 extent allocation + 4 reclaim + 4 finish/orphan + 3 slot reuse + 1 ankad boot + 1 B₁/B₂ restart + 4 steady-state/adversarial).
 
 ---
 
@@ -1226,7 +1305,7 @@ Design questions, with current status.
 ### New (post-self-hosting)
 
 11. **Text and string semantics** — **Resolved in Phase 7.**  `Bytes ≠ UTF8Text`.  UTF-8 string literals are validated at compile time (RFC 3629 scalar-value legality).  Representation: explicit byte length, no NUL termination, immutable R-only literal object.  Validation is a gate (not a transcoder): input bytes = output bytes.  Codepoint count and grapheme count are not tracked; only byte length.  No normalization, escapes, or Unicode identifiers yet.
-12. **Host independence** — **Partially resolved in Phase 8.0.**  The boot contract (`kernel.boot(BootInfo)`) eliminates host-side process construction.  The host creates the machine and calls boot; Anka creates the process.  Remaining: boot the compiler via the boot contract (requires layout parameterization), retire old-style test harnesses, implement ankad (user-space init).
+12. **Host independence** — **Substantially resolved through Phase 8.3.**  The boot contract (`kernel.boot(BootInfo)`) eliminates host-side process construction (Phase 8.0).  ankad is now a native Anka64 supervisor that spawns, waits on, and restarts children using only runtime interfaces — the host boots ankad, then observes a supervisor rather than impersonating one (Phase 8.3).  The Linux x86_64 host binary demonstrates that the same Anka64 guest images produce identical architectural behavior on a different host.  Remaining: boot the compiler via the boot contract (requires layout parameterization), retire old-style test harnesses.
 
 ---
 
@@ -1372,7 +1451,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions, 63,808 bytes |
 | Canonical source | ~17 KB |
-| Tests | 407 |
+| Tests | 440 |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -1385,6 +1464,16 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | Bootstrap development model | CC_A frozen; new features via canonical source + CC_B |
 | Boot contract | `kernel.boot(BootInfo)` — host owns machine, Anka owns process |
 | Shared process primitive | `prepare_process()` used by both SYS_EXEC and boot() |
+| Process lifecycle | SYS_SPAWN / SYS_WAIT with capability-shaped authority |
+| Process states | Running, Zombie, Free, Retired (non-wrapping generations) |
+| Reclamation | Atomic collect/reclaim: domain, objects, extents, metadata |
+| Extent reuse | Scrubbed physical stack/trap extents returned to pools |
+| Orphan termination | Depth-first recursive on parent death |
+| Slot reuse | Free slots reused with advanced generation, fresh PID |
+| Supervision | ankad: native Anka64 supervisor (boot → spawn → wait → restart) |
+| Steady-state conservation | 100-cycle resource fixed point verified |
+| Formal lifecycle model | Kleis Petri net: 3 P-invariants, cycle closure, 26 properties |
+| Linux x86_64 binary | Built via Podman cross-compilation |
 
 ---
 
@@ -1399,6 +1488,12 @@ The self-hosting result (Phase 6B) demonstrated that the 29-instruction ISA is a
 Phase 7 demonstrated that the self-hosted compiler can evolve semantically (UTF-8 validation, buffer I/O) without expanding the ISA or modifying the bootstrap seed.  The canonical compiler is now the authoritative compiler; CC_A is a frozen seed sufficient to construct it.
 
 Phase 8.0 established the boot contract: the host creates the machine, Anka creates the process.  The test `p80_boot_return_42` proves the boundary — it boots and runs a process without the test ever constructing an Anka64Core.  13 hostile boot descriptor tests verify that invalid descriptors are rejected without corrupting kernel state.
+
+Phase 8.2 established capability-shaped process lifecycle: `SYS_SPAWN` creates a child and returns a `LifecycleHandle` — the only authority to observe that child's termination.  A name (PID) is not a capability (DN-8, Rule 8).
+
+Phase 8.3 closed the refinement chain from formal specification through implementation to empirical steady-state validation.  A Kleis Petri-net model established lifecycle uniqueness, extent conservation, and cycle closure as provable invariants.  The kernel implementation separated five distinct concepts (PID, slot, ProcessKey, lifecycle authority, physical placement), centralized all death transitions through `finish_process()`, terminated orphans depth-first, and reclaimed process-owned resources atomically.  ankad — a native Anka64 supervisor — demonstrated that ordinary process orchestration occurs inside Anka, not on the host.  The decisive result: after warm-up, 100 consecutive restart cycles produce zero resource drift — `next_phys`, domain count, object count, and process table size all remain constant while incarnation identity advances monotonically.  The formal model predicted cycle closure; the implementation confirmed it holds over sustained operation.
+
+Through self-hosting, capabilities, multicore, W⊕X, protected calls/returns, process lifecycle, formal Petri nets, reclamation, and a genuine supervisor, the ISA still has not demanded instruction 30.  Twenty-nine instructions.  The software keeps asking for better abstractions rather than instruction proliferation.
 
 The project continues to evolve by the same rule that produced its strongest results:
 

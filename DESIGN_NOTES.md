@@ -408,6 +408,38 @@ nowhere"): `SYS_SPAWN` creates authority and returns it to the parent.
 `SYS_WAIT` consumes authority at the moment of result delivery.
 No other path creates lifecycle observation rights.
 
+**Phase 8.3 refinement — PID ≠ slot:**
+
+Phase 8.3 introduced real process-slot reclamation and reuse.  This
+revealed that the Phase 8.2 description above was imprecise in a way
+that did not matter while slots were never reused, but became wrong
+afterward.
+
+The corrected definitions:
+
+- **PID** (u64) — a monotonically allocated public name.  Never reused.
+  `next_pid` increments on every `spawn()`.  PID is how user space
+  refers to a process (e.g., in `SYS_SEND`).
+- **Process slot** (usize) — reusable kernel storage.  An index into
+  the process table.  A slot may be `Free`, `Running`, `Zombie`, or
+  `Retired`.  Free slots are reused by `spawn()`.
+- **ProcessKey** `{ slot, generation }` — kernel-internal incarnation
+  identity.  The generation advances on reclaim (not allocation) via
+  `checked_add(1)` and never wraps.  A slot whose generation reaches
+  `u32::MAX` enters the `Retired` state and is never reused.
+- **`resolve_pid()`** — the only path from a PID to a slot.  Linear
+  scan; resolves only `Running` processes.
+
+The Phase 8.2 text described `ProcessKey { pid, generation }` and
+said generation protects "PID reuse."  The correct statement is:
+ProcessKey identifies a slot incarnation, PID identifies a public
+name, and these are distinct.  The generation protects *slot* reuse,
+not PID reuse — PIDs are never reused.
+
+This is exactly the separation the Petri-net model requires:
+physical slot placement is a reusable resource; process identity
+is not.
+
 ---
 
 ## DN-9: MOVI loads a signed 18-bit immediate
@@ -475,3 +507,182 @@ MOVI is a signed-immediate load, not an address-construction
 primitive.  The 18-bit field is part of the ISA encoding contract.
 When a client needs a wider constant, the compiler emits a multi-
 instruction sequence — the ISA does not grow a new opcode for it.
+
+---
+
+## DN-10: Process collection, reclamation, and supervision
+
+**Date:** 2026-09-12 (Phase 8.3)
+
+**Context:**
+
+Phase 8.2 established SYS_SPAWN and SYS_WAIT but left process
+resources permanently allocated.  A spawned child's domain, objects,
+stack/trap extents, mailbox, and lifecycle table survived indefinitely
+after death.  A supervisor that repeatedly restarts a service would
+eventually exhaust all physical memory and kernel data structures.
+
+Phase 8.3 was designed to close this gap: collection observes
+a terminated process's result; reclamation destroys its resources
+and returns its slot for reuse.
+
+**Decision — collection ≠ reclamation:**
+
+These are two distinct operations, not one:
+
+- **Collection** = the parent observes the child's `ProcessResult`
+  via SYS_WAIT.  The result is copied to the parent before anything
+  is destroyed.
+- **Reclamation** = the kernel destroys the child's owned resources
+  (domain, objects, extents) and transitions the slot from Zombie
+  to Free(g+1).
+
+Collection must precede reclamation.  The kernel copies the result
+before destroying the child.  After reclamation, the slot retains
+no trace of the prior incarnation.
+
+**Decision — process lifetime does not migrate implicitly:**
+
+A process's resources belong to its incarnation, not to the slot.
+When a slot is reclaimed and reused, the new incarnation gets
+fresh resources (new domain, new objects, new extents).  Nothing
+is inherited from the prior occupant.
+
+**Decision — five-concept separation:**
+
+Phase 8.3 exercises and enforces the distinction:
+
+1. **PID** — monotonic public name (u64).  Never reused.
+2. **Process slot** — reusable kernel storage index.
+3. **ProcessKey(slot, generation)** — incarnation identity.
+4. **LifecycleHandle** — parent-local observation authority.
+5. **PhysicalExtent** — physical memory placement.
+
+These five concepts are distinct.  None may be substituted for
+another.  The Phase 8.2 code contained three hidden `pid ≡ slot`
+assumptions that would have broken on slot reuse.  Phase 8.3a.1
+eliminated them before reclamation was introduced.
+
+**Decision — generation advances on reclaim, never wraps:**
+
+`checked_add(1)` at reclaim time, not at allocation time.
+If a slot's generation reaches `u32::MAX`, the slot enters
+the `Retired` state and is never reused.  This eliminates
+generation-wrap hazards entirely at the cost of eventually
+retiring long-lived slots — an acceptable trade because
+process-slot exhaustion is defined behavior, not undefined.
+
+**Decision — process-owned resources:**
+
+Each incarnation owns exactly:
+
+- One domain
+- One stack object + one stack PhysicalExtent
+- One trap object + one trap PhysicalExtent
+
+These are tracked in `OwnedResources`, created during
+`prepare_process()`, and consumed during `reclaim_process()`.
+Raw-spawned processes (created by the old `spawn()` path
+without `prepare_process`) have `resources: None` — reclaim
+skips resource destruction for them.
+
+**Decision — scrubbed physical extent reuse:**
+
+Reclaimed stack/trap extents are returned to separate pools.
+When a new process needs an extent, the allocator checks for
+an exact-size match in the pool.  If found, the extent is
+zeroed (scrubbed) before reuse.  This prevents remanence:
+a new incarnation never sees stale bytes from a prior one.
+
+If no pooled extent matches, the allocator bumps `next_phys`.
+
+**Decision — central death transition:**
+
+All termination paths converge to `finish_process(slot, result)`:
+
+```text
+SYS_EXIT
+user HALT
+SupervisorFault       →  finish_process()  →  Zombie
+ProtectionFault                               + terminate_orphans()
+unknown syscall
+```
+
+This ensures orphan handling, exit-code recording, and result
+installation are never skipped regardless of how a process dies.
+Before Phase 8.3, the unknown-syscall path set `state = Zombie`
+and `exit_code = 0xBAD` but did not install a `ProcessResult`,
+creating a partial death state.  The central gate eliminated it.
+
+**Decision — depth-first orphan termination:**
+
+When a parent dies, its descendants are terminated and reclaimed
+recursively: grandchild first, then child, then parent is
+eventually collected.
+
+```text
+P → C → G  dies as:  G reclaimed → C reclaimed → P collected
+```
+
+This guarantees no parent relation is erased before its subtree
+has been discovered.  Running children are terminated then
+reclaimed; Zombie children are directly reclaimed.
+
+**Decision — unrelated capabilities survive:**
+
+A process's death and reclamation affect only its own resources.
+Other processes' domains, capabilities, and objects are
+untouched.  This is the set-semantics property of capabilities
+(Rule 13): removing one entity's authority does not invalidate
+authority held by others.
+
+**Decision — boot remains the root authority:**
+
+The boot contract (DN-6) is unchanged.  The initial process
+authority comes from trusted boot state, not from any existing
+domain.  ankad is booted via this path and then uses SYS_SPAWN
+to create children — deriving their authority from its own
+domain, which was originally derived from boot grants.
+
+**Strongest Phase 8.3 result — resource steady state:**
+
+After warm-up, 100 consecutive restart cycles produce zero
+resource drift:
+
+- `next_phys` remains constant (extents are reused, not leaked).
+- Domain count remains constant.
+- Object count remains constant.
+- Process table size remains constant.
+
+The Kleis Petri-net model predicted cycle closure:
+`spawn(M_Free) → ... → reclaim → M_Free`.  The 100-cycle
+test confirmed no hidden state escapes that abstract cycle.
+
+The meaningful conservation properties are *not* total token
+count (which varies: 8, 8, 6, 3 across markings).  They are:
+
+- **Lifecycle uniqueness**: R + Z + C + F = 1
+- **Stack extent conservation**: SE + FSE = 1
+- **Trap extent conservation**: TE + FTE = 1
+- **Cycle closure**: spawn(M3) = M0
+
+Total token count is not a P-invariant.  This is an architectural
+lesson: "conservation" for a supervisor means *specific resource
+classes* are returned, not that some global count is preserved.
+
+**Rejected alternative — implicit orphan reparenting:**
+
+The Petri-net model was initially designed with a `ParentDead`
+place and orphan-reparenting transitions.  This made the
+single-slot model unbounded (tokens accumulated without limit).
+The implemented design terminates orphans immediately rather
+than reparenting them.  Reparenting may be revisited when a
+real client needs long-lived orphan processes.
+
+**Rule:**
+
+Collection is observation.  Reclamation is resource destruction.
+They are sequenced, not conflated.  A supervisor that collects
+and restarts reaches a resource fixed point; one that merely
+collects without reclaiming leaks.  One that reclaims without
+collecting loses the result.
