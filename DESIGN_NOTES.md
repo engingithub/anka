@@ -407,3 +407,71 @@ The lifecycle API follows Rule 8 ("authority cannot arise from
 nowhere"): `SYS_SPAWN` creates authority and returns it to the parent.
 `SYS_WAIT` consumes authority at the moment of result delivery.
 No other path creates lifecycle observation rights.
+
+---
+
+## DN-9: MOVI loads a signed 18-bit immediate
+
+**Date:** 2026-09-12 (Phase 8.2)
+
+**Context:**
+
+The I-format encoding stores an 18-bit signed immediate field.  The
+core sign-extends this to 64 bits before use:
+
+```text
+-2^17  <=  I  <=  2^17 - 1
+-131072       ...  131071  (0x1FFFF)
+```
+
+During Phase 8.2, lifecycle tests mapped a second output buffer at
+virtual address `0x30000` and loaded the address via `MOVI R1, 0x30000`.
+The value 196608 exceeds 131071.  Bit 17 is set, so the core
+sign-extends to `0xFFFF_FFFF_FFFF_0000` — a negative value — producing
+an unmapped address and silent misbehavior.
+
+This is the first time a real generated program broke the assumption
+that MOVI can represent an arbitrary low virtual address.
+
+**Observation:**
+
+```text
+MOVI Rd, 0x1FFFF   ✓   (largest positive representable)
+MOVI Rd, 0x20000   ✗   (sign-extended to negative value)
+```
+
+**Decision:**
+
+Do not change the encoding.  MOVI loads a signed 18-bit immediate,
+not an arbitrary address.  Software requiring constants above 0x1FFFF
+must construct them from multiple instructions or obtain them through
+an existing base register or pointer.  Do not reinterpret the
+encoding as unsigned.
+
+The existing ISA already supports full 64-bit value synthesis:
+
+```asm
+MOVI  R4, high_bits
+SHL   R4, R4, R5     ; shift left
+OR    R4, R4, R6     ; merge low bits
+```
+
+The compiler should learn this sequence only when a generated program
+actually needs it.  The kernel already sets values such as SP and PC
+directly when constructing a process, so high virtual addresses are
+not architecturally forbidden — only directly loadable via a single
+MOVI.
+
+**What changed:**
+
+Phase 8.2 lifecycle tests were restructured to keep all MOVI-targeted
+virtual addresses below `0x20000`.  Physical layout is unaffected
+(the kernel sets physical addresses during `prepare_process`, not
+through user instructions).
+
+**Rule:**
+
+MOVI is a signed-immediate load, not an address-construction
+primitive.  The 18-bit field is part of the ISA encoding contract.
+When a client needs a wider constant, the compiler emits a multi-
+instruction sequence — the ISA does not grow a new opcode for it.
