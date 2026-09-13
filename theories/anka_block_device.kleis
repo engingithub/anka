@@ -1,0 +1,773 @@
+// =============================================================================
+// Anka64 Asynchronous Capability-Mediated Block I/O (Phase 9.1-formal)
+// =============================================================================
+//
+// Formal-first specification for the second demanding client of the Chapter 9
+// event architecture.  The model deliberately separates:
+//
+//   request lifecycle      F -> O_wait -> O_dma -> C -> F
+//   completion truth       C > 0
+//   source assertion       L_dev := (C > 0)        [derived, not stored]
+//   core pending state     P_dev                    [stored]
+//   timer pending state    P_timer                  [independent]
+//   interrupt arbitration turn in {Timer, Device}
+//   DMA authority          explicit delegated span + generation
+//   requester identity     generation-qualified ProcessKey-style handle
+//
+// The request-slot Petri net is aggregate over two bounded slots.  Tokens are
+// requests/slots, not interrupt notifications.  Interrupt multiplicity is
+// intentionally separate from completion multiplicity.
+//
+// Three examples at the end are deliberately false falsifiability witnesses.
+// A successful run therefore has all intended examples pass and exactly those
+// three examples fail.
+// =============================================================================
+
+// =============================================================================
+// I. TWO-SLOT REQUEST LIFECYCLE PETRI NET
+// =============================================================================
+//
+// Places:
+//   0 = F       free request slot
+//   1 = O_wait  accepted request, latency not yet elapsed
+//   2 = O_dma   DMA phase ready/in progress
+//   3 = C       completion queued, awaiting consumption
+//
+// Transitions:
+//   0 = submit     F      -> O_wait
+//   1 = latency    O_wait -> O_dma
+//   2 = complete   O_dma  -> C
+//   3 = consume    C      -> F
+//
+// Structural invariant:
+//   F + O_wait + O_dma + C = 2
+//
+// All ten aggregate distributions of two indistinguishable slot tokens across
+// four lifecycle places are represented as markings M0..M9.
+// =============================================================================
+
+operation iw : ℤ × ℤ → ℤ
+operation ow : ℤ × ℤ → ℤ
+
+structure BlockNet {
+    // t=0 submit: F -> O_wait
+    axiom iw_0_0: iw(0,0) = 1
+    axiom iw_0_z: iw(0,1)=0 ∧ iw(0,2)=0 ∧ iw(0,3)=0
+    axiom ow_0_1: ow(0,1) = 1
+    axiom ow_0_z: ow(0,0)=0 ∧ ow(0,2)=0 ∧ ow(0,3)=0
+
+    // t=1 latency: O_wait -> O_dma
+    axiom iw_1_1: iw(1,1) = 1
+    axiom iw_1_z: iw(1,0)=0 ∧ iw(1,2)=0 ∧ iw(1,3)=0
+    axiom ow_1_2: ow(1,2) = 1
+    axiom ow_1_z: ow(1,0)=0 ∧ ow(1,1)=0 ∧ ow(1,3)=0
+
+    // t=2 complete: O_dma -> C
+    axiom iw_2_2: iw(2,2) = 1
+    axiom iw_2_z: iw(2,0)=0 ∧ iw(2,1)=0 ∧ iw(2,3)=0
+    axiom ow_2_3: ow(2,3) = 1
+    axiom ow_2_z: ow(2,0)=0 ∧ ow(2,1)=0 ∧ ow(2,2)=0
+
+    // t=3 consume: C -> F
+    axiom iw_3_3: iw(3,3) = 1
+    axiom iw_3_z: iw(3,0)=0 ∧ iw(3,1)=0 ∧ iw(3,2)=0
+    axiom ow_3_0: ow(3,0) = 1
+    axiom ow_3_z: ow(3,1)=0 ∧ ow(3,2)=0 ∧ ow(3,3)=0
+}
+
+operation m : ℤ × ℤ → ℤ
+
+structure BlockMarkings {
+    // M0 = (2,0,0,0)
+    axiom m0: m(0,0)=2 ∧ m(0,1)=0 ∧ m(0,2)=0 ∧ m(0,3)=0
+    // M1 = (1,1,0,0)
+    axiom m1: m(1,0)=1 ∧ m(1,1)=1 ∧ m(1,2)=0 ∧ m(1,3)=0
+    // M2 = (0,2,0,0)
+    axiom m2: m(2,0)=0 ∧ m(2,1)=2 ∧ m(2,2)=0 ∧ m(2,3)=0
+    // M3 = (1,0,1,0)
+    axiom m3: m(3,0)=1 ∧ m(3,1)=0 ∧ m(3,2)=1 ∧ m(3,3)=0
+    // M4 = (0,1,1,0)
+    axiom m4: m(4,0)=0 ∧ m(4,1)=1 ∧ m(4,2)=1 ∧ m(4,3)=0
+    // M5 = (0,0,2,0)
+    axiom m5: m(5,0)=0 ∧ m(5,1)=0 ∧ m(5,2)=2 ∧ m(5,3)=0
+    // M6 = (1,0,0,1)
+    axiom m6: m(6,0)=1 ∧ m(6,1)=0 ∧ m(6,2)=0 ∧ m(6,3)=1
+    // M7 = (0,1,0,1)
+    axiom m7: m(7,0)=0 ∧ m(7,1)=1 ∧ m(7,2)=0 ∧ m(7,3)=1
+    // M8 = (0,0,1,1)
+    axiom m8: m(8,0)=0 ∧ m(8,1)=0 ∧ m(8,2)=1 ∧ m(8,3)=1
+    // M9 = (0,0,0,2)
+    axiom m9: m(9,0)=0 ∧ m(9,1)=0 ∧ m(9,2)=0 ∧ m(9,3)=2
+}
+
+define enabled(t : ℤ, k : ℤ) =
+       m(k,0) ≥ iw(t,0)
+    ∧  m(k,1) ≥ iw(t,1)
+    ∧  m(k,2) ≥ iw(t,2)
+    ∧  m(k,3) ≥ iw(t,3)
+
+// Representative firing witnesses across one-request and two-request paths.
+example "BLK-FIRE-1: submit M0 -> M1" {
+    assert(
+        enabled(0,0) ∧
+        m(0,0)-iw(0,0)+ow(0,0)=m(1,0) ∧
+        m(0,1)-iw(0,1)+ow(0,1)=m(1,1) ∧
+        m(0,2)-iw(0,2)+ow(0,2)=m(1,2) ∧
+        m(0,3)-iw(0,3)+ow(0,3)=m(1,3)
+    )
+}
+
+example "BLK-FIRE-2: second submit M1 -> M2" {
+    assert(
+        enabled(0,1) ∧
+        m(1,0)-iw(0,0)+ow(0,0)=m(2,0) ∧
+        m(1,1)-iw(0,1)+ow(0,1)=m(2,1) ∧
+        m(1,2)-iw(0,2)+ow(0,2)=m(2,2) ∧
+        m(1,3)-iw(0,3)+ow(0,3)=m(2,3)
+    )
+}
+
+example "BLK-FIRE-3: latency M1 -> M3" {
+    assert(
+        enabled(1,1) ∧
+        m(1,0)-iw(1,0)+ow(1,0)=m(3,0) ∧
+        m(1,1)-iw(1,1)+ow(1,1)=m(3,1) ∧
+        m(1,2)-iw(1,2)+ow(1,2)=m(3,2) ∧
+        m(1,3)-iw(1,3)+ow(1,3)=m(3,3)
+    )
+}
+
+example "BLK-FIRE-4: complete M3 -> M6" {
+    assert(
+        enabled(2,3) ∧
+        m(3,0)-iw(2,0)+ow(2,0)=m(6,0) ∧
+        m(3,1)-iw(2,1)+ow(2,1)=m(6,1) ∧
+        m(3,2)-iw(2,2)+ow(2,2)=m(6,2) ∧
+        m(3,3)-iw(2,3)+ow(2,3)=m(6,3)
+    )
+}
+
+example "BLK-FIRE-5: consume M6 -> M0" {
+    assert(
+        enabled(3,6) ∧
+        m(6,0)-iw(3,0)+ow(3,0)=m(0,0) ∧
+        m(6,1)-iw(3,1)+ow(3,1)=m(0,1) ∧
+        m(6,2)-iw(3,2)+ow(3,2)=m(0,2) ∧
+        m(6,3)-iw(3,3)+ow(3,3)=m(0,3)
+    )
+}
+
+example "BLK-FIRE-6: two DMA-ready requests M4 latency -> M5" {
+    assert(
+        enabled(1,4) ∧
+        m(4,0)-iw(1,0)+ow(1,0)=m(5,0) ∧
+        m(4,1)-iw(1,1)+ow(1,1)=m(5,1) ∧
+        m(4,2)-iw(1,2)+ow(1,2)=m(5,2) ∧
+        m(4,3)-iw(1,3)+ow(1,3)=m(5,3)
+    )
+}
+
+example "BLK-FIRE-7: first of two completions M5 -> M8" {
+    assert(
+        enabled(2,5) ∧
+        m(5,0)-iw(2,0)+ow(2,0)=m(8,0) ∧
+        m(5,1)-iw(2,1)+ow(2,1)=m(8,1) ∧
+        m(5,2)-iw(2,2)+ow(2,2)=m(8,2) ∧
+        m(5,3)-iw(2,3)+ow(2,3)=m(8,3)
+    )
+}
+
+example "BLK-FIRE-8: second completion M8 -> M9" {
+    assert(
+        enabled(2,8) ∧
+        m(8,0)-iw(2,0)+ow(2,0)=m(9,0) ∧
+        m(8,1)-iw(2,1)+ow(2,1)=m(9,1) ∧
+        m(8,2)-iw(2,2)+ow(2,2)=m(9,2) ∧
+        m(8,3)-iw(2,3)+ow(2,3)=m(9,3)
+    )
+}
+
+example "BLK-FIRE-9: consuming one of two completions M9 -> M6" {
+    assert(
+        enabled(3,9) ∧
+        m(9,0)-iw(3,0)+ow(3,0)=m(6,0) ∧
+        m(9,1)-iw(3,1)+ow(3,1)=m(6,1) ∧
+        m(9,2)-iw(3,2)+ow(3,2)=m(6,2) ∧
+        m(9,3)-iw(3,3)+ow(3,3)=m(6,3)
+    )
+}
+
+// Slot conservation is checked both extensionally on all aggregate markings
+// and structurally from the incidence matrix.
+example "BLK-CONS-1: every represented marking has exactly two slot tokens" {
+    assert(
+        m(0,0)+m(0,1)+m(0,2)+m(0,3)=2 ∧
+        m(1,0)+m(1,1)+m(1,2)+m(1,3)=2 ∧
+        m(2,0)+m(2,1)+m(2,2)+m(2,3)=2 ∧
+        m(3,0)+m(3,1)+m(3,2)+m(3,3)=2 ∧
+        m(4,0)+m(4,1)+m(4,2)+m(4,3)=2 ∧
+        m(5,0)+m(5,1)+m(5,2)+m(5,3)=2 ∧
+        m(6,0)+m(6,1)+m(6,2)+m(6,3)=2 ∧
+        m(7,0)+m(7,1)+m(7,2)+m(7,3)=2 ∧
+        m(8,0)+m(8,1)+m(8,2)+m(8,3)=2 ∧
+        m(9,0)+m(9,1)+m(9,2)+m(9,3)=2
+    )
+}
+
+example "BLK-CONS-2: every lifecycle transition preserves total slot tokens" {
+    assert(
+        ow(0,0)+ow(0,1)+ow(0,2)+ow(0,3)-iw(0,0)-iw(0,1)-iw(0,2)-iw(0,3)=0 ∧
+        ow(1,0)+ow(1,1)+ow(1,2)+ow(1,3)-iw(1,0)-iw(1,1)-iw(1,2)-iw(1,3)=0 ∧
+        ow(2,0)+ow(2,1)+ow(2,2)+ow(2,3)-iw(2,0)-iw(2,1)-iw(2,2)-iw(2,3)=0 ∧
+        ow(3,0)+ow(3,1)+ow(3,2)+ow(3,3)-iw(3,0)-iw(3,1)-iw(3,2)-iw(3,3)=0
+    )
+}
+
+example "BLK-BOUND-1: no represented place count exceeds two" {
+    assert(
+        m(0,0)≤2 ∧ m(0,1)≤2 ∧ m(0,2)≤2 ∧ m(0,3)≤2 ∧
+        m(1,0)≤2 ∧ m(1,1)≤2 ∧ m(1,2)≤2 ∧ m(1,3)≤2 ∧
+        m(2,0)≤2 ∧ m(2,1)≤2 ∧ m(2,2)≤2 ∧ m(2,3)≤2 ∧
+        m(3,0)≤2 ∧ m(3,1)≤2 ∧ m(3,2)≤2 ∧ m(3,3)≤2 ∧
+        m(4,0)≤2 ∧ m(4,1)≤2 ∧ m(4,2)≤2 ∧ m(4,3)≤2 ∧
+        m(5,0)≤2 ∧ m(5,1)≤2 ∧ m(5,2)≤2 ∧ m(5,3)≤2 ∧
+        m(6,0)≤2 ∧ m(6,1)≤2 ∧ m(6,2)≤2 ∧ m(6,3)≤2 ∧
+        m(7,0)≤2 ∧ m(7,1)≤2 ∧ m(7,2)≤2 ∧ m(7,3)≤2 ∧
+        m(8,0)≤2 ∧ m(8,1)≤2 ∧ m(8,2)≤2 ∧ m(8,3)≤2 ∧
+        m(9,0)≤2 ∧ m(9,1)≤2 ∧ m(9,2)≤2 ∧ m(9,3)≤2
+    )
+}
+
+example "BLK-BACKPRESSURE-1: submit is disabled when both slots are occupied" {
+    assert(
+        ¬enabled(0,2) ∧ ¬enabled(0,4) ∧ ¬enabled(0,5) ∧
+        ¬enabled(0,7) ∧ ¬enabled(0,8) ∧ ¬enabled(0,9)
+    )
+}
+
+example "BLK-COMP-1: two independent completions are representable" {
+    assert(m(9,3)=2)
+}
+
+example "BLK-COMP-2: completing consumes one O_dma and creates one C" {
+    assert(iw(2,2)=1 ∧ ow(2,2)=0 ∧ iw(2,3)=0 ∧ ow(2,3)=1)
+}
+
+example "BLK-COMP-3: consuming completion frees exactly one slot" {
+    assert(iw(3,3)=1 ∧ ow(3,3)=0 ∧ iw(3,0)=0 ∧ ow(3,0)=1)
+}
+
+// =============================================================================
+// II. COMPLETION TRUTH, LEVEL SOURCE, AND MULTI-SOURCE PENDING STATE
+// =============================================================================
+
+// L_dev is derived from completion truth; it is not independently mutable.
+define dev_level(completions : ℤ) = completions > 0
+
+define route_needed(completions : ℤ, p_dev : Bool) =
+    dev_level(completions) ∧ ¬p_dev
+
+// Delivery consumes only the latched notification.  Completion records are
+// preserved; the handler consumes them separately via the lifecycle transition.
+define dev_delivery_step(
+    c_before : ℤ, c_after : ℤ,
+    p_before : Bool, p_after : Bool
+) =
+    p_before ∧ ¬p_after ∧ c_after = c_before
+
+// Timer/device core-pending states are independent state bits.
+define timer_delivery_step(
+    pt_before : Bool, pd_before : Bool,
+    pt_after : Bool, pd_after : Bool
+) =
+    pt_before ∧ ¬pt_after ∧ (pd_after ⟺ pd_before)
+
+define device_pending_delivery_step(
+    pt_before : Bool, pd_before : Bool,
+    pt_after : Bool, pd_after : Bool
+) =
+    pd_before ∧ ¬pd_after ∧ (pt_after ⟺ pt_before)
+
+example "IRQ-LEVEL-1: completion queue nonempty iff device level asserted" {
+    assert(
+        ∀(c : ℤ). dev_level(c) ⟺ (c > 0)
+    )
+}
+
+example "IRQ-LEVEL-2: empty completion queue deasserts source" {
+    assert(¬dev_level(0))
+}
+
+example "IRQ-LEVEL-3: one completion asserts source" {
+    assert(dev_level(1))
+}
+
+example "IRQ-LEVEL-4: two completions still produce one level condition" {
+    assert(dev_level(2))
+}
+
+example "IRQ-LEVEL-5: routing is needed after delivery if completions remain" {
+    assert(
+        ∀(cb : ℤ). ∀(ca : ℤ). ∀(pb : Bool). ∀(pa : Bool).
+            (dev_delivery_step(cb,ca,pb,pa) ∧ cb > 0)
+            ⇒ route_needed(ca,pa)
+    )
+}
+
+example "IRQ-LEVEL-6: consuming P_dev does not consume completion truth" {
+    assert(
+        ∀(cb : ℤ). ∀(ca : ℤ). ∀(pb : Bool). ∀(pa : Bool).
+            dev_delivery_step(cb,ca,pb,pa)
+            ⇒ ca = cb
+    )
+}
+
+example "IRQ-INDEP-1: timer delivery preserves device pending state" {
+    assert(
+        ∀(ptb : Bool). ∀(pdb : Bool). ∀(pta : Bool). ∀(pda : Bool).
+            timer_delivery_step(ptb,pdb,pta,pda)
+            ⇒ (pda ⟺ pdb)
+    )
+}
+
+example "IRQ-INDEP-2: device delivery preserves timer pending state" {
+    assert(
+        ∀(ptb : Bool). ∀(pdb : Bool). ∀(pta : Bool). ∀(pda : Bool).
+            device_pending_delivery_step(ptb,pdb,pta,pda)
+            ⇒ (pta ⟺ ptb)
+    )
+}
+
+example "IRQ-INDEP-3: simultaneous timer and device pending is satisfiable" {
+    assert(
+        ∃(pt : Bool). ∃(pd : Bool). pt ∧ pd
+    )
+}
+
+// Masking suppresses delivery, not pending truth.  This is the multi-source
+// counterpart of Phase 9.0 INT-10.
+define async_delivery_eligible(pending : Bool, masked : Bool) =
+    pending ∧ ¬masked
+
+define masked_pending_step(
+    p_before : Bool, p_after : Bool, masked : Bool
+) =
+    masked ∧ (p_after ⟺ p_before)
+
+example "IRQ-MASK-1: masked pending device interrupt is not deliverable" {
+    assert(
+        ∀(p : Bool). ∀(mask : Bool).
+            (p ∧ mask) ⇒ ¬async_delivery_eligible(p,mask)
+    )
+}
+
+example "IRQ-MASK-2: masking preserves latched pending truth" {
+    assert(
+        ∀(pb : Bool). ∀(pa : Bool). ∀(mask : Bool).
+            masked_pending_step(pb,pa,mask) ⇒ (pa ⟺ pb)
+    )
+}
+
+example "IRQ-MASK-3: preserved pending event becomes eligible after unmask" {
+    assert(
+        ∀(p : Bool).
+            p ⇒ async_delivery_eligible(p,¬p)
+    )
+}
+
+// =============================================================================
+// III. TWO-SOURCE ARBITER WITH BOUNDED SERVICE
+// =============================================================================
+
+// turn is one bit: 0 = Timer, 1 = Device.
+define TURN_TIMER  = bvconst(0,1)
+define TURN_DEVICE = bvconst(1,1)
+
+define choose_timer(pt : Bool, pd : Bool, turn : BitVec1) =
+    pt ∧ (¬pd ∨ turn = TURN_TIMER)
+
+define choose_device(pt : Bool, pd : Bool, turn : BitVec1) =
+    pd ∧ (¬pt ∨ turn = TURN_DEVICE)
+
+define turn_after_timer(turn : BitVec1) = TURN_DEVICE
+define turn_after_device(turn : BitVec1) = TURN_TIMER
+
+example "ARB-1: with both pending and Timer turn, Timer is selected" {
+    assert(
+        ∀(pt : Bool). ∀(pd : Bool).
+            (pt ∧ pd) ⇒ choose_timer(pt,pd,TURN_TIMER)
+    )
+}
+
+example "ARB-2: with both pending and Device turn, Device is selected" {
+    assert(
+        ∀(pt : Bool). ∀(pd : Bool).
+            (pt ∧ pd) ⇒ choose_device(pt,pd,TURN_DEVICE)
+    )
+}
+
+example "ARB-3: with both pending, Timer turn does not select Device" {
+    assert(
+        ∀(pt : Bool). ∀(pd : Bool).
+            (pt ∧ pd) ⇒ ¬choose_device(pt,pd,TURN_TIMER)
+    )
+}
+
+example "ARB-4: with both pending, Device turn does not select Timer" {
+    assert(
+        ∀(pt : Bool). ∀(pd : Bool).
+            (pt ∧ pd) ⇒ ¬choose_timer(pt,pd,TURN_DEVICE)
+    )
+}
+
+example "ARB-5: Timer service hands next tie to Device" {
+    assert(turn_after_timer(TURN_TIMER) = TURN_DEVICE)
+}
+
+example "ARB-6: Device service hands next tie to Timer" {
+    assert(turn_after_device(TURN_DEVICE) = TURN_TIMER)
+}
+
+example "ARB-7: bounded service from Timer turn -- both served within two opportunities" {
+    assert(
+        ∀(pt : Bool). ∀(pd : Bool).
+            (pt ∧ pd)
+            ⇒ (
+                choose_timer(pt,pd,TURN_TIMER)
+                ∧ choose_device(pt,pd,turn_after_timer(TURN_TIMER))
+            )
+    )
+}
+
+example "ARB-8: bounded service from Device turn -- both served within two opportunities" {
+    assert(
+        ∀(pt : Bool). ∀(pd : Bool).
+            (pt ∧ pd)
+            ⇒ (
+                choose_device(pt,pd,TURN_DEVICE)
+                ∧ choose_timer(pt,pd,turn_after_device(TURN_DEVICE))
+            )
+    )
+}
+
+example "ARB-9: if only Timer is pending it is selected independent of turn" {
+    assert(
+        ∀(pt : Bool). ∀(pd : Bool). ∀(turn : BitVec1).
+            (pt ∧ ¬pd) ⇒ choose_timer(pt,pd,turn)
+    )
+}
+
+example "ARB-10: if only Device is pending it is selected independent of turn" {
+    assert(
+        ∀(pt : Bool). ∀(pd : Bool). ∀(turn : BitVec1).
+            (pd ∧ ¬pt) ⇒ choose_device(pt,pd,turn)
+    )
+}
+
+example "ARB-11: arbiter never selects both sources at once" {
+    assert(
+        ∀(pt : Bool). ∀(pd : Bool). ∀(turn : BitVec1).
+            ¬(choose_timer(pt,pd,turn) ∧ choose_device(pt,pd,turn))
+    )
+}
+
+// =============================================================================
+// IV. DMA DELEGATION, COMMIT-TIME REVALIDATION, AND ALL-OR-NOTHING EFFECT
+// =============================================================================
+
+// Integer spans model the object-relative authority relation.  Rust's checked
+// u64 arithmetic was established by Phase 9.1-pre; here we reason over the
+// resulting mathematical spans.
+define span_within(
+    req_off : ℤ, req_len : ℤ,
+    cap_off : ℤ, cap_len : ℤ
+) =
+    req_len > 0 ∧ cap_len > 0
+    ∧ req_off ≥ cap_off
+    ∧ req_off + req_len ≤ cap_off + cap_len
+
+// 64-bit generation model matches Anka64 Object::generation (Generation(u64)).
+define generation_match(cap_gen : BitVec64, obj_gen : BitVec64) =
+    cap_gen = obj_gen
+
+define stale_generation(cap_gen : BitVec64, obj_gen : BitVec64) =
+    ¬generation_match(cap_gen,obj_gen)
+
+// A mutating DMA commit is allowed only if every precommit condition holds.
+define dma_commit_allowed(
+    cap_gen : BitVec64, obj_gen : BitVec64,
+    delegated_span_ok : Bool,
+    payload_length_ok : Bool,
+    physical_bounds_ok : Bool
+) =
+    generation_match(cap_gen,obj_gen)
+    ∧ delegated_span_ok
+    ∧ payload_length_ok
+    ∧ physical_bounds_ok
+
+// In this model memory mutation is exactly the successful commit case.
+define dma_mutates(
+    cap_gen : BitVec64, obj_gen : BitVec64,
+    delegated_span_ok : Bool,
+    payload_length_ok : Bool,
+    physical_bounds_ok : Bool
+) =
+    dma_commit_allowed(cap_gen,obj_gen,delegated_span_ok,payload_length_ok,physical_bounds_ok)
+
+example "DMA-1: 512-byte request fits exactly inside 512-byte delegation" {
+    assert(span_within(0,512,0,512))
+}
+
+example "DMA-2: 512-byte request does not fit 256-byte delegation" {
+    assert(¬span_within(0,512,0,256))
+}
+
+example "DMA-3: subspan inside delegation is permitted" {
+    assert(span_within(128,256,0,512))
+}
+
+example "DMA-4 DMA-DELEGATION: commit implies explicitly delegated span was sufficient" {
+    assert(
+        ∀(cg : BitVec64). ∀(og : BitVec64).
+        ∀(deleg : Bool). ∀(payload : Bool). ∀(bounds : Bool).
+            dma_commit_allowed(cg,og,deleg,payload,bounds)
+            ⇒ deleg
+    )
+}
+
+example "DMA-5: no ambient authority amplification outside delegated span" {
+    assert(
+        ∀(cg : BitVec64). ∀(og : BitVec64).
+        ∀(deleg : Bool). ∀(payload : Bool). ∀(bounds : Bool).
+            ¬deleg
+            ⇒ ¬dma_commit_allowed(cg,og,deleg,payload,bounds)
+    )
+}
+
+example "DMA-6: stale generation denies commit" {
+    assert(
+        ∀(cg : BitVec64). ∀(og : BitVec64).
+        ∀(deleg : Bool). ∀(payload : Bool). ∀(bounds : Bool).
+            stale_generation(cg,og)
+            ⇒ ¬dma_commit_allowed(cg,og,deleg,payload,bounds)
+    )
+}
+
+example "DMA-7: stale generation implies zero memory mutation" {
+    assert(
+        ∀(cg : BitVec64). ∀(og : BitVec64).
+        ∀(deleg : Bool). ∀(payload : Bool). ∀(bounds : Bool).
+            stale_generation(cg,og)
+            ⇒ ¬dma_mutates(cg,og,deleg,payload,bounds)
+    )
+}
+
+example "DMA-8: length mismatch implies zero memory mutation" {
+    assert(
+        ∀(cg : BitVec64). ∀(og : BitVec64).
+        ∀(deleg : Bool). ∀(payload : Bool). ∀(bounds : Bool).
+            ¬payload
+            ⇒ ¬dma_mutates(cg,og,deleg,payload,bounds)
+    )
+}
+
+example "DMA-9: physical bounds failure implies zero memory mutation" {
+    assert(
+        ∀(cg : BitVec64). ∀(og : BitVec64).
+        ∀(deleg : Bool). ∀(payload : Bool). ∀(bounds : Bool).
+            ¬bounds
+            ⇒ ¬dma_mutates(cg,og,deleg,payload,bounds)
+    )
+}
+
+example "DMA-10: successful mutation implies all precommit conditions held" {
+    assert(
+        ∀(cg : BitVec64). ∀(og : BitVec64).
+        ∀(deleg : Bool). ∀(payload : Bool). ∀(bounds : Bool).
+            dma_mutates(cg,og,deleg,payload,bounds)
+            ⇒ (generation_match(cg,og) ∧ deleg ∧ payload ∧ bounds)
+    )
+}
+
+// Completion status: success reflects committed DMA; denial still produces an
+// error completion, but never a successful completion.
+define successful_completion(commit_ok : Bool) = commit_ok
+define error_completion(commit_ok : Bool) = ¬commit_ok
+
+example "DMA-11: successful completion implies DMA commit" {
+    assert(
+        ∀(commit_ok : Bool).
+            successful_completion(commit_ok) ⇒ commit_ok
+    )
+}
+
+example "DMA-12: failed DMA produces error-completion status" {
+    assert(
+        ∀(commit_ok : Bool).
+            ¬commit_ok ⇒ error_completion(commit_ok)
+    )
+}
+
+// =============================================================================
+// V. GENERATION-QUALIFIED REQUEST AND REQUESTER IDENTITY
+// =============================================================================
+
+// Object generation advance used by the DMA/recycle composition witness.
+define next_object_generation(g : BitVec64) =
+    bvadd(g,bvconst(1,64))
+
+// ProcessKey-style identity: slot + generation.
+define process_key_matches(
+    saved_slot : BitVec32, saved_gen : BitVec32,
+    current_slot : BitVec32, current_gen : BitVec32
+) =
+    saved_slot = current_slot ∧ saved_gen = current_gen
+
+define next_process_generation(g : BitVec32) =
+    bvadd(g,bvconst(1,32))
+
+// Existing Anka lifecycle policy retires a process slot at max generation
+// rather than wrapping it into a fresh identity.
+define GEN_MAX = bvconst(4294967295,32)
+define recyclable_generation(g : BitVec32) = ¬(g = GEN_MAX)
+
+example "DMA-13: recycled object generation rejects stale delegated DMA" {
+    assert(
+        ∀(g : BitVec32).
+        ∀(deleg : Bool). ∀(payload : Bool). ∀(bounds : Bool).
+            ¬dma_commit_allowed(g,next_object_generation(g),deleg,payload,bounds)
+    )
+}
+
+example "ID-1: exact requester ProcessKey matches" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32).
+            process_key_matches(s,g,s,g)
+    )
+}
+
+example "ID-2: recycled requester generation does not match stale completion" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32).
+            recyclable_generation(g)
+            ⇒ ¬process_key_matches(s,g,s,next_process_generation(g))
+    )
+}
+
+example "ID-3: different process slot cannot consume completion" {
+    assert(
+        ∀(s1 : BitVec32). ∀(s2 : BitVec32).
+        ∀(g : BitVec32).
+            ¬(s1 = s2)
+            ⇒ ¬process_key_matches(s1,g,s2,g)
+    )
+}
+
+// Request-slot identity uses the same generation-qualified pattern.
+define request_handle_matches(
+    saved_slot : BitVec32, saved_gen : BitVec64,
+    current_slot : BitVec32, current_gen : BitVec64
+) =
+    saved_slot = current_slot ∧ saved_gen = current_gen
+
+define next_request_generation(g : BitVec64) =
+    bvadd(g,bvconst(1,64))
+
+example "ID-4: exact request handle matches current occupant" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec64).
+            request_handle_matches(s,g,s,g)
+    )
+}
+
+example "ID-5: C->F recycle invalidates prior request handle" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec64).
+            ¬request_handle_matches(s,g,s,next_request_generation(g))
+    )
+}
+
+// Wake eligibility is generation-qualified; process death and buffer
+// revocation are intentionally independent.  A completion can exist while its
+// requester handle is stale, but it cannot wake the recycled occupant.
+define wake_allowed(
+    saved_slot : BitVec32, saved_gen : BitVec32,
+    current_slot : BitVec32, current_gen : BitVec32
+) =
+    process_key_matches(saved_slot,saved_gen,current_slot,current_gen)
+
+example "ID-6: late completion cannot wake recycled requester identity" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32).
+            recyclable_generation(g)
+            ⇒ ¬wake_allowed(s,g,s,next_process_generation(g))
+    )
+}
+
+// =============================================================================
+// VI. CROSS-LAYER COMPOSITION OBLIGATIONS
+// =============================================================================
+
+// Accepted-request token cannot become a completion without passing through
+// O_dma because complete consumes O_dma, not O_wait or F.
+example "COMP-1: completion transition requires O_dma token" {
+    assert(iw(2,2)=1 ∧ iw(2,0)=0 ∧ iw(2,1)=0 ∧ iw(2,3)=0)
+}
+
+example "COMP-ONCE: completing consumes the O_dma token before another completion" {
+    assert(iw(2,2)=1 ∧ ow(2,2)=0 ∧ ow(2,3)=1)
+}
+
+example "COMP-2: successful completion can only be reported after allowed DMA" {
+    assert(
+        ∀(cg : BitVec32). ∀(og : BitVec32).
+        ∀(deleg : Bool). ∀(payload : Bool). ∀(bounds : Bool).
+            successful_completion(dma_commit_allowed(cg,og,deleg,payload,bounds))
+            ⇒ dma_commit_allowed(cg,og,deleg,payload,bounds)
+    )
+}
+
+// Coalescing is notification-only: two completion records can coexist while
+// the device source is represented by the same single asserted level.
+example "COMP-3: two queued completions still require device attention" {
+    assert(m(9,3)=2 ∧ dev_level(m(9,3)))
+}
+
+// After one completion is consumed from C=2, C remains nonempty, so level
+// assertion remains active and routing may re-latch P_dev.
+example "COMP-4: draining one of two completions leaves level asserted" {
+    assert(
+        m(9,3)-iw(3,3)+ow(3,3)=m(6,3)
+        ∧ m(6,3)=1
+        ∧ dev_level(m(6,3))
+    )
+}
+
+// =============================================================================
+// VII. FALSIFIABILITY WITNESSES — deliberately false
+// =============================================================================
+
+// False: a coalesced device notification does NOT imply exactly one completion.
+// There may be two queued completions while one level source is asserted.
+example "FALSE-1: one device notification implies exactly one completion" {
+    assert(
+        ∀(c : ℤ). dev_level(c) ⇒ c = 1
+    )
+}
+
+// False: timer and device pending bits are independent and can both be true.
+example "FALSE-2: timer and device pending are mutually exclusive" {
+    assert(
+        ∀(pt : Bool). ∀(pd : Bool). ¬(pt ∧ pd)
+    )
+}
+
+// False: delivering the device notification consumes P_dev, not completion
+// records.  A nonempty completion queue can remain after delivery.
+example "FALSE-3: consuming P_dev forces completion count to zero" {
+    assert(
+        ∀(cb : ℤ). ∀(ca : ℤ). ∀(pb : Bool). ∀(pa : Bool).
+            dev_delivery_step(cb,ca,pb,pa)
+            ⇒ ca = 0
+    )
+}
