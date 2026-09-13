@@ -5774,6 +5774,10 @@ mod tests {
         // lp == OUTPUT_SIZE → no literals → pass 0 as R3.
         // Otherwise pass lp (the literal frontier) as R3.
         // Equality check, not comparison: corruption should propagate.
+        //
+        // WS_LIT_POS is initialized to OUTPUT_SIZE here so the compiler
+        // is self-sufficient — the host does not need to write workspace
+        // fields before boot (Phase 8.1c).
         format!(
             "int main() {{ \
              int src = {layout_src}; \
@@ -5789,6 +5793,7 @@ mod tests {
              *{esp} = (0 - {espabs}); \
              *{fc} = 0; \
              *{fxc} = 0; \
+             *{litp} = {outsize}; \
              nexttoken(); \
              int sp = *{op}; \
              emit({call} << 26); \
@@ -7557,14 +7562,11 @@ mod tests {
         let output_obj = fabric.alloc_object("output", OUTPUT_SIZE as u64, ObjectKind::Memory);
         fabric.place_object(output_obj, 0x210000);
 
-        // Workspace object
+        // Workspace object — no host initialization needed.
+        // The compiler's main() initializes WS_LIT_POS = OUTPUT_SIZE
+        // and all other workspace fields (Phase 8.1c).
         let work_obj = fabric.alloc_object("workspace", WS_SIZE as u64, ObjectKind::Memory);
         fabric.place_object(work_obj, 0x220000);
-        // Initialize two-ended allocator: WS_LIT_POS = OUTPUT_SIZE
-        // (Phase 8.1c will move this inside the compiler; for now host does it)
-        fabric.write_physical(
-            0x220000 + (WS_LIT_POS - LAYOUT_WS) as u64,
-            &(OUTPUT_SIZE as u64).to_le_bytes());
 
         // Boot descriptor: CC_B at 0x30000, data at canonical addresses
         let info = BootInfo {
