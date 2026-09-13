@@ -7518,4 +7518,230 @@ mod tests {
         eprintln!("8.0: boot(return 42) succeeded — test never constructed a core ✓");
     }
 
+    // ─── 8.0e: Hostile boot descriptors ──────────────────────
+    //
+    // Each test verifies that boot() rejects an invalid descriptor
+    // with the correct BootError, and that the kernel remains
+    // bootable afterward (failed boot is not one-attempt-only).
+
+    /// Helper: create a fabric with a valid sealed code object
+    fn boot_test_fabric() -> (Fabric, ObjectId, u64) {
+        let mut fabric = Fabric::new(0x100000);
+        let code_obj = fabric.alloc_object("init_code", 0x1000, ObjectKind::Memory);
+        fabric.place_object(code_obj, 0x0000);
+        let mut asm = Asm64::new();
+        asm.movi(R0, 99);
+        asm.halt();
+        let code_bytes = asm.to_bytes();
+        let code_size = code_bytes.len() as u64;
+        fabric.initialize_object(code_obj, 0, &code_bytes);
+        fabric.seal_object(code_obj);
+        (fabric, code_obj, code_size)
+    }
+
+    /// Helper: valid BootInfo for the test fabric
+    fn valid_boot_info(code_obj: ObjectId, code_size: u64) -> BootInfo {
+        BootInfo {
+            image: BootImage {
+                obj: code_obj,
+                code_offset: 0,
+                code_size,
+                entry: 0,
+                lit_start: 0,
+            },
+            grants: vec![],
+            maps: vec![],
+        }
+    }
+
+    #[test]
+    fn p80e_image_not_sealed() {
+        let mut fabric = Fabric::new(0x100000);
+        let code_obj = fabric.alloc_object("init_code", 0x1000, ObjectKind::Memory);
+        fabric.place_object(code_obj, 0x0000);
+        let mut asm = Asm64::new();
+        asm.movi(R0, 1);
+        asm.halt();
+        fabric.initialize_object(code_obj, 0, &asm.to_bytes());
+        // Deliberately NOT sealed
+        let code_size = asm.to_bytes().len() as u64;
+        let info = valid_boot_info(code_obj, code_size);
+
+        let mut kernel = Kernel::new(fabric);
+        assert_eq!(kernel.boot(&info), Err(BootError::ImageNotSealed));
+        assert_eq!(kernel.processes.len(), 0, "no process after failed boot");
+    }
+
+    #[test]
+    fn p80e_zero_code() {
+        let (fabric, code_obj, _) = boot_test_fabric();
+        let mut info = valid_boot_info(code_obj, 0);
+        info.image.code_size = 0;
+        let mut kernel = Kernel::new(fabric);
+        assert_eq!(kernel.boot(&info), Err(BootError::ZeroCode));
+        assert_eq!(kernel.processes.len(), 0);
+    }
+
+    #[test]
+    fn p80e_entry_beyond_code() {
+        let (fabric, code_obj, code_size) = boot_test_fabric();
+        let mut info = valid_boot_info(code_obj, code_size);
+        info.image.entry = code_size; // entry == code_size is invalid
+        let mut kernel = Kernel::new(fabric);
+        assert_eq!(kernel.boot(&info), Err(BootError::InvalidEntry));
+        assert_eq!(kernel.processes.len(), 0);
+    }
+
+    #[test]
+    fn p80e_nonexistent_image_object() {
+        let fabric = Fabric::new(0x100000);
+        let bogus_obj = ObjectId(999);
+        let info = valid_boot_info(bogus_obj, 8);
+        let mut kernel = Kernel::new(fabric);
+        assert_eq!(kernel.boot(&info), Err(BootError::ImageNotFound));
+        assert_eq!(kernel.processes.len(), 0);
+    }
+
+    #[test]
+    fn p80e_grant_overlaps_image() {
+        let (fabric, code_obj, code_size) = boot_test_fabric();
+        let mut info = valid_boot_info(code_obj, code_size);
+        // Grant covers [0..code_size) which is exactly the image backing range
+        info.grants.push(BootGrant {
+            obj: code_obj,
+            offset: 0,
+            size: code_size,
+            perms: Permissions::READ,
+        });
+        let mut kernel = Kernel::new(fabric);
+        assert_eq!(kernel.boot(&info), Err(BootError::GrantOverlapsImage));
+        assert_eq!(kernel.processes.len(), 0);
+    }
+
+    #[test]
+    fn p80e_grant_partially_overlaps_image() {
+        let (fabric, code_obj, code_size) = boot_test_fabric();
+        let mut info = valid_boot_info(code_obj, code_size);
+        // Grant starts 1 byte before end of image backing range.
+        // Image backing range is [0 .. 0x1000) since code_offset=0, obj_size=0x1000.
+        info.grants.push(BootGrant {
+            obj: code_obj,
+            offset: 0x0FFF,
+            size: 1,
+            perms: Permissions::READ,
+        });
+        let mut kernel = Kernel::new(fabric);
+        assert_eq!(kernel.boot(&info), Err(BootError::GrantOverlapsImage));
+        assert_eq!(kernel.processes.len(), 0);
+    }
+
+    #[test]
+    fn p80e_grant_oob() {
+        let (mut fabric, code_obj, code_size) = boot_test_fabric();
+        // Create a small data object
+        let data_obj = fabric.alloc_object("data", 0x100, ObjectKind::Memory);
+        fabric.place_object(data_obj, 0x2000);
+        let mut info = valid_boot_info(code_obj, code_size);
+        // Grant exceeds the data object's size
+        info.grants.push(BootGrant {
+            obj: data_obj,
+            offset: 0,
+            size: 0x200, // larger than 0x100
+            perms: Permissions::READ,
+        });
+        let mut kernel = Kernel::new(fabric);
+        assert_eq!(kernel.boot(&info), Err(BootError::GrantOutOfBounds));
+        assert_eq!(kernel.processes.len(), 0);
+    }
+
+    #[test]
+    fn p80e_overlapping_maps() {
+        let (mut fabric, code_obj, code_size) = boot_test_fabric();
+        let data1 = fabric.alloc_object("data1", 0x2000, ObjectKind::Memory);
+        let data2 = fabric.alloc_object("data2", 0x1000, ObjectKind::Memory);
+        fabric.place_object(data1, 0x2000);
+        fabric.place_object(data2, 0x4000);
+        let mut info = valid_boot_info(code_obj, code_size);
+        info.grants.push(BootGrant { obj: data1, offset: 0, size: 0x2000, perms: Permissions::READ });
+        info.grants.push(BootGrant { obj: data2, offset: 0, size: 0x1000, perms: Permissions::READ });
+        // Two maps whose virtual ranges overlap: [0x30000..0x32000) and [0x31000..0x32000)
+        info.maps.push(BootMap { vaddr: 0x30000, size: 0x2000, obj: data1, obj_offset: 0 });
+        info.maps.push(BootMap { vaddr: 0x31000, size: 0x1000, obj: data2, obj_offset: 0 });
+        let mut kernel = Kernel::new(fabric);
+        assert_eq!(kernel.boot(&info), Err(BootError::OverlappingMaps));
+        assert_eq!(kernel.processes.len(), 0);
+    }
+
+    #[test]
+    fn p80e_map_overlaps_implicit_stack() {
+        let (mut fabric, code_obj, code_size) = boot_test_fabric();
+        let data = fabric.alloc_object("data", 0x1000, ObjectKind::Memory);
+        fabric.place_object(data, 0x2000);
+        let mut info = valid_boot_info(code_obj, code_size);
+        info.grants.push(BootGrant { obj: data, offset: 0, size: 0x1000, perms: Permissions::READ });
+        // Stack is at 0x10000..0x14000 — overlap it
+        info.maps.push(BootMap { vaddr: 0x13000, size: 0x1000, obj: data, obj_offset: 0 });
+        let mut kernel = Kernel::new(fabric);
+        assert_eq!(kernel.boot(&info), Err(BootError::OverlappingMaps));
+        assert_eq!(kernel.processes.len(), 0);
+    }
+
+    #[test]
+    fn p80e_map_overlaps_implicit_trap() {
+        let (mut fabric, code_obj, code_size) = boot_test_fabric();
+        let data = fabric.alloc_object("data", 0x1000, ObjectKind::Memory);
+        fabric.place_object(data, 0x2000);
+        let mut info = valid_boot_info(code_obj, code_size);
+        info.grants.push(BootGrant { obj: data, offset: 0, size: 0x1000, perms: Permissions::READ });
+        // Trap is at 0x20000..0x21000 — overlap it
+        info.maps.push(BootMap { vaddr: 0x20000, size: 0x1000, obj: data, obj_offset: 0 });
+        let mut kernel = Kernel::new(fabric);
+        assert_eq!(kernel.boot(&info), Err(BootError::OverlappingMaps));
+        assert_eq!(kernel.processes.len(), 0);
+    }
+
+    #[test]
+    fn p80e_map_overlaps_implicit_code() {
+        let (mut fabric, code_obj, code_size) = boot_test_fabric();
+        let data = fabric.alloc_object("data", 0x1000, ObjectKind::Memory);
+        fabric.place_object(data, 0x2000);
+        let mut info = valid_boot_info(code_obj, code_size);
+        info.grants.push(BootGrant { obj: data, offset: 0, size: 0x1000, perms: Permissions::READ });
+        // Code is at 0..code_size — map starting at 0 overlaps it
+        info.maps.push(BootMap { vaddr: 0, size: 0x1000, obj: data, obj_offset: 0 });
+        let mut kernel = Kernel::new(fabric);
+        assert_eq!(kernel.boot(&info), Err(BootError::OverlappingMaps));
+        assert_eq!(kernel.processes.len(), 0);
+    }
+
+    #[test]
+    fn p80e_double_boot() {
+        let (fabric, code_obj, code_size) = boot_test_fabric();
+        let info = valid_boot_info(code_obj, code_size);
+        let mut kernel = Kernel::new(fabric);
+        assert_eq!(kernel.boot(&info), Ok(()));
+        // Second boot must fail
+        assert_eq!(kernel.boot(&info), Err(BootError::AlreadyBooted));
+        // But init is still runnable from the first boot
+        kernel.run(1000, 100);
+        assert_eq!(kernel.processes[0].exit_code, 99);
+    }
+
+    #[test]
+    fn p80e_failed_then_valid() {
+        let (fabric, code_obj, code_size) = boot_test_fabric();
+        // First attempt: invalid entry
+        let mut bad_info = valid_boot_info(code_obj, code_size);
+        bad_info.image.entry = code_size; // invalid
+        let mut kernel = Kernel::new(fabric);
+        assert_eq!(kernel.boot(&bad_info), Err(BootError::InvalidEntry));
+        assert_eq!(kernel.processes.len(), 0, "no process after failed boot");
+        // Second attempt: valid — must succeed (failed boot is not one-attempt-only)
+        let good_info = valid_boot_info(code_obj, code_size);
+        assert_eq!(kernel.boot(&good_info), Ok(()));
+        kernel.run(1000, 100);
+        assert_eq!(kernel.processes[0].exit_code, 99);
+        eprintln!("8.0e: failed-then-valid boot succeeded ✓");
+    }
+
 }
