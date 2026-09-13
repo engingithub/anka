@@ -240,3 +240,89 @@ not one-attempt-only."
 `run()`.  Scheduling is the host's responsibility.  This preserves
 the separation: Anka creates the process; the host decides when to
 start the machine.
+
+---
+
+## DN-7: Fixed point is reproducibility, not provenance
+
+**Date:** 2026-09-12 (Phase 8.1 close)
+
+**Context:**
+
+The bootstrap fixed point CC_B == CC_C is a central result of
+Phase 6B.  It proves the compiler is a stable self-reproducing
+implementation of whatever semantics the bootstrap lineage has
+supplied.  However, a Thompson-style malicious bootstrap compiler
+(Reflections on Trusting Trust, Ken Thompson, 1984) could satisfy
+the same fixed-point condition:
+
+```text
+clean canonical source
+        ↓
+  malicious CC_A
+        ↓
+  CC_B containing hidden payload
+        ↓
+  CC_B compiles clean canonical source
+        ↓
+  CC_C containing same hidden payload
+        ↓
+  CC_B == CC_C  ← fixed point still holds
+```
+
+**Decision:**
+
+CC_B == CC_C proves bootstrap closure and deterministic
+self-reproduction.  It does not defeat the trusting-trust attack.
+A compromised bootstrap seed could inject behavior into CC_B that
+CC_B subsequently reproduces despite clean canonical source.
+
+Compiler provenance is therefore a separate verification problem
+from compiler reproducibility.
+
+**Anka's trust chain:**
+
+```text
+host Rust compiler/toolchain
+        ↓
+Anka emulator/runtime + CC_A (frozen bootstrap seed)
+        ↓
+CC_B (self-hosted compiler)
+        ↓
+CC_C == CC_B (fixed point)
+```
+
+Because Anka64 is a new ISA with a new compiler lineage, there is
+no decades-old ancestral Anka compiler carrying an invisible
+infection forward.  The trust problem collapses onto the bootstrap
+event: establishing that the initial transition CC_A(source) → CC_B
+is trustworthy.
+
+**Future countermeasures:**
+
+- Diverse double compilation (Wheeler, 2005): rebuild the compiler
+  through an independently trusted compiler/toolchain and compare.
+- Formal validation: the table-driven ISA semantics and Kleis/Z3
+  theories can potentially establish that the binary implements the
+  canonical source specification.
+- Translation correctness and execution correctness are separable:
+  does the binary implement the source?  Does the machine execute
+  the binary according to the ISA?
+
+**Connection to Phase 8:**
+
+The boot contract and the trust problem meet at the same point:
+where does the first trusted state come from?  Phase 8 formalizes
+the authority chain from trusted boot root through init to all
+subsequent processes.  A mature Anka system reduces the provenance
+problem to: verify the ISA, verify the bootstrap translator, verify
+the initial sealed image.
+
+**Rule:**
+
+The compiler fixed point establishes closure after bootstrap.  The
+remaining provenance problem is establishing the authenticity and
+correctness of the bootstrap root and initial compiler image.
+Freezing CC_A (DN-2) makes future diverse double compilation
+easier: a moving bootstrap compiler would constantly change the
+thing whose provenance you are trying to establish.
