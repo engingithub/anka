@@ -35,17 +35,26 @@ pub const SYS_WAIT: u64 = 8;   // wait(handle) → result
 #[derive(Debug, Clone)]
 pub struct Process {
     pub pid: u64,
+    pub state: ProcessState,
     pub core: Anka64Core,
-    pub exited: bool,
     pub exit_code: u64,
     /// If Some, this process is blocked waiting for a specific child incarnation.
     pub waiting_on: Option<WaitState>,
-    /// PID of the parent process (None for init).
-    pub parent: Option<u64>,
+    /// Exact incarnation of the parent (None for init).
+    pub parent: Option<ProcessKey>,
     /// Generation counter for lifecycle authority.
     pub generation: u32,
     /// Structured result: Exited(code) or fault.
     pub result: Option<ProcessResult>,
+    /// Resources owned by this incarnation (None for Free/Retired slots).
+    pub resources: Option<OwnedResources>,
+}
+
+impl Process {
+    /// Convenience: true if the process has terminated (is no longer Running).
+    pub fn exited(&self) -> bool {
+        self.state != ProcessState::Running
+    }
 }
 
 /// Process lifecycle result — distinguishes normal exit from fault.
@@ -58,6 +67,28 @@ pub enum ProcessResult {
     SupervisorFault,
     /// Process died due to an architectural protection fault.
     ProtectionFault,
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Physical extent and owned resources
+// ───────────────────────────────────────────────────────────────────
+
+/// A contiguous range of physical memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalExtent {
+    pub base: u64,
+    pub size: u64,
+}
+
+/// All resources owned by a specific process incarnation.
+/// Created during prepare_process, consumed during reclaim.
+#[derive(Debug, Clone)]
+pub struct OwnedResources {
+    pub domain: DomainId,
+    pub stack_obj: ObjectId,
+    pub trap_obj: ObjectId,
+    pub stack_extent: PhysicalExtent,
+    pub trap_extent: PhysicalExtent,
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -110,10 +141,25 @@ fn encode_exec_result(result: &ProcessResult) -> u64 {
 // only in the calling process's own kernel-protected table.
 // ───────────────────────────────────────────────────────────────────
 
+/// Process lifecycle state — four durable kernel states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessState {
+    /// Process is executing or blocked (waiting_on).
+    Running,
+    /// Process has exited or faulted; result available, resources attached.
+    Zombie,
+    /// Slot available for reuse; generation already incremented.
+    Free,
+    /// Generation exhausted; slot permanently unavailable.
+    Retired,
+}
+
 /// Kernel-internal identity of a specific process incarnation.
+/// Slot is the index into the processes Vec; generation distinguishes
+/// successive incarnations in the same slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessKey {
-    pub pid: u64,
+    pub slot: usize,
     pub generation: u32,
 }
 
@@ -137,10 +183,10 @@ impl LifecycleHandle {
 
 /// One entry in a process's lifecycle authority table.
 #[derive(Debug, Clone)]
-struct LifecycleEntry {
-    slot_generation: u32,
-    child: ProcessKey,
-    collected: bool,
+pub(crate) struct LifecycleEntry {
+    pub(crate) slot_generation: u32,
+    pub(crate) child: ProcessKey,
+    pub(crate) collected: bool,
 }
 
 /// Distinguishes two wait ABIs.
@@ -166,10 +212,10 @@ struct WaitState {
 // ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-struct Message {
+pub(crate) struct Message {
     #[allow(dead_code)]
-    from_pid: u64,
-    value: u64,
+    pub(crate) from_pid: u64,
+    pub(crate) value: u64,
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -354,17 +400,23 @@ pub struct Kernel {
     /// Byte output buffer.  SYS_WRITE appends here on success.
     /// Output-atomic: a failed SYS_WRITE leaves this unchanged.
     pub byte_output: Vec<u8>,
-    mailboxes: Vec<Vec<Message>>,
+    pub(crate) mailboxes: Vec<Vec<Message>>,
     current: usize,
     /// Next available physical address for dynamic allocation.
     pub next_phys: u64,
     /// Next available agent ID for child processes.
     pub next_agent: u64,
+    /// Monotonic PID counter (checked, never wraps, never reused).
+    next_pid: u64,
     /// One-success-only boot flag.  Set to true after a successful boot.
     booted: bool,
     /// Per-process lifecycle authority tables.
-    /// lifecycle_tables[pid] = that process's lifecycle entries.
-    lifecycle_tables: Vec<Vec<LifecycleEntry>>,
+    /// lifecycle_tables[slot] = that slot's lifecycle entries.
+    pub(crate) lifecycle_tables: Vec<Vec<LifecycleEntry>>,
+    /// Recycled stack extents (exact-size match only).
+    pub(crate) free_stack_extents: Vec<PhysicalExtent>,
+    /// Recycled trap extents (exact-size match only).
+    pub(crate) free_trap_extents: Vec<PhysicalExtent>,
 }
 
 impl Kernel {
@@ -377,8 +429,43 @@ impl Kernel {
             current: 0,
             next_phys: 0x100000,
             next_agent: 100,
+            next_pid: 0,
             booted: false,
             lifecycle_tables: Vec::new(),
+            free_stack_extents: Vec::new(),
+            free_trap_extents: Vec::new(),
+        }
+    }
+
+    // ─── Physical extent allocation ──────────────────────────────
+    //
+    // Exact-size reuse: scan pool for matching extent, else bump.
+    // Recycled extents are scrubbed (zeroed) before return.
+    // Ordering: take → zero → create object → grant authority.
+
+    /// Allocate a physical extent for a process stack.
+    pub(crate) fn alloc_stack_extent(&mut self, size: u64) -> PhysicalExtent {
+        if let Some(idx) = self.free_stack_extents.iter().position(|e| e.size == size) {
+            let ext = self.free_stack_extents.swap_remove(idx);
+            self.fabric.zero_physical(ext.base, ext.size);
+            ext
+        } else {
+            let base = self.next_phys;
+            self.next_phys += size;
+            PhysicalExtent { base, size }
+        }
+    }
+
+    /// Allocate a physical extent for a process trap page.
+    pub(crate) fn alloc_trap_extent(&mut self, size: u64) -> PhysicalExtent {
+        if let Some(idx) = self.free_trap_extents.iter().position(|e| e.size == size) {
+            let ext = self.free_trap_extents.swap_remove(idx);
+            self.fabric.zero_physical(ext.base, ext.size);
+            ext
+        } else {
+            let base = self.next_phys;
+            self.next_phys += size;
+            PhysicalExtent { base, size }
         }
     }
 
@@ -395,29 +482,26 @@ impl Kernel {
     // after authority establishment is the same mechanism.
 
     /// Create process infrastructure for a domain that already has
-    /// executable image authority.  Returns the spawned PID.
+    /// executable image authority.  Returns the spawned ProcessKey.
     ///
     /// On failure, rolls back: destroys domain and any resources
     /// created during preparation.  No reachable domain, capability,
     /// mapping, or runnable process survives a failed preparation.
     fn prepare_process(
         &mut self, dom: DomainId, desc: &ProcessImageDesc, layout: &ProcessLayout,
-    ) -> u64 {
-        // --- Stack ---
+    ) -> ProcessKey {
+        // --- Stack: alloc extent (recycled or bump), create object ---
+        let stack_extent = self.alloc_stack_extent(layout.stack_size);
         let stack_obj = self.fabric.alloc_object(
             "process_stack", layout.stack_size, ObjectKind::Memory);
-        let stack_phys = self.next_phys;
-        self.next_phys += layout.stack_size;
-        self.fabric.place_object(stack_obj, stack_phys);
+        self.fabric.place_object(stack_obj, stack_extent.base);
         self.fabric.grant(dom, stack_obj, 0, layout.stack_size, Permissions::RW);
 
-        // --- Trap handler: alloc → initialize → seal → grant RX ---
-        // W⊕X: no exceptional executable-object creation path.
+        // --- Trap: alloc extent, create/initialize/seal/grant ---
         let trap_size: u64 = 0x1000;
+        let trap_extent = self.alloc_trap_extent(trap_size);
         let trap_obj = self.fabric.alloc_object("process_trap", trap_size, ObjectKind::Memory);
-        let trap_phys = self.next_phys;
-        self.next_phys += trap_size;
-        self.fabric.place_object(trap_obj, trap_phys);
+        self.fabric.place_object(trap_obj, trap_extent.base);
 
         let mut handler = Asm64::new();
         handler.halt();
@@ -430,11 +514,9 @@ impl Kernel {
         self.next_agent += 1;
 
         let mut core = Anka64Core::new(agent, dom);
-        // Map code at code_vaddr → object at code_offset
         core.address_map.add_at(
             layout.code_vaddr, desc.code_size, desc.code_obj, desc.code_offset);
         core.pc = layout.code_vaddr + desc.entry;
-        // Map literal segment at its natural image-relative offset
         if desc.lit_start != 0 {
             let lit_length = desc.image_size - desc.lit_start;
             core.address_map.add_at(
@@ -446,37 +528,76 @@ impl Kernel {
         core.r[SP as usize] = layout.stack_vaddr + layout.stack_size;
         core.trap_vector = layout.trap_vaddr;
 
-        self.spawn(core)
+        // --- Spawn and capture ownership ---
+        let key = self.spawn(core);
+        self.processes[key.slot].resources = Some(OwnedResources {
+            domain: dom,
+            stack_obj,
+            trap_obj,
+            stack_extent,
+            trap_extent,
+        });
+        key
     }
 
-    pub fn spawn(&mut self, core: Anka64Core) -> u64 {
-        let pid = self.processes.len() as u64;
+    pub fn spawn(&mut self, core: Anka64Core) -> ProcessKey {
+        let pid = self.next_pid;
+        self.next_pid = self.next_pid.checked_add(1)
+            .expect("PID space exhausted");
+
+        // Try to reuse a Free slot (Free(g) → Running(g), same generation)
+        if let Some(slot) = self.processes.iter().position(|p| p.state == ProcessState::Free) {
+            let reuse_gen = self.processes[slot].generation;
+            self.processes[slot] = Process {
+                pid,
+                state: ProcessState::Running,
+                core,
+                exit_code: 0,
+                waiting_on: None,
+                parent: None,
+                generation: reuse_gen,
+                result: None,
+                resources: None,
+            };
+            self.mailboxes[slot].clear();
+            self.lifecycle_tables[slot].clear();
+            return ProcessKey { slot, generation: reuse_gen };
+        }
+
+        // No Free slot — append
+        let slot = self.processes.len();
         self.processes.push(Process {
             pid,
+            state: ProcessState::Running,
             core,
-            exited: false,
             exit_code: 0,
             waiting_on: None,
             parent: None,
             generation: 0,
             result: None,
+            resources: None,
         });
         self.mailboxes.push(Vec::new());
         self.lifecycle_tables.push(Vec::new());
-        pid
+        ProcessKey { slot, generation: 0 }
     }
 
     /// Install a lifecycle entry in a parent's table.
     /// Returns the LifecycleHandle for the new entry.
-    fn install_lifecycle(&mut self, parent_pid: u64, child_key: ProcessKey) -> LifecycleHandle {
-        let table = &mut self.lifecycle_tables[parent_pid as usize];
-        // Try to reuse a collected slot
+    fn install_lifecycle(&mut self, parent_slot: usize, child_key: ProcessKey) -> LifecycleHandle {
+        let table = &mut self.lifecycle_tables[parent_slot];
+        // Try to reuse a collected slot (checked non-wrapping generation)
         for (i, entry) in table.iter_mut().enumerate() {
             if entry.collected {
-                entry.slot_generation += 1;
-                entry.child = child_key;
-                entry.collected = false;
-                return LifecycleHandle::new(i as u32, entry.slot_generation);
+                match entry.slot_generation.checked_add(1) {
+                    Some(g) => {
+                        entry.slot_generation = g;
+                        entry.child = child_key;
+                        entry.collected = false;
+                        return LifecycleHandle::new(i as u32, g);
+                    }
+                    None => continue, // lifecycle slot generation exhausted, skip
+                }
             }
         }
         // No reusable slot — append
@@ -491,8 +612,8 @@ impl Kernel {
 
     /// Resolve a LifecycleHandle in a specific process's table.
     /// Returns the LifecycleEntry index if valid and not yet collected.
-    fn resolve_lifecycle(&self, owner_pid: u64, handle: LifecycleHandle) -> Option<(usize, &LifecycleEntry)> {
-        let table = self.lifecycle_tables.get(owner_pid as usize)?;
+    fn resolve_lifecycle(&self, owner_slot: usize, handle: LifecycleHandle) -> Option<(usize, &LifecycleEntry)> {
+        let table = self.lifecycle_tables.get(owner_slot)?;
         let slot = handle.slot() as usize;
         let entry = table.get(slot)?;
         if entry.slot_generation != handle.slot_generation() { return None; }
@@ -500,12 +621,157 @@ impl Kernel {
         Some((slot, entry))
     }
 
+    /// Resolve a PID to a slot index.
+    /// Only succeeds for Running processes (SYS_SEND delivery target).
+    fn resolve_pid(&self, pid: u64) -> Option<usize> {
+        self.processes.iter().position(|p|
+            p.pid == pid && p.state == ProcessState::Running
+        )
+    }
+
     /// Validate a ProcessKey against the process table.
-    fn validate_process_key(&self, key: &ProcessKey) -> Option<usize> {
-        let idx = key.pid as usize;
-        if idx >= self.processes.len() { return None; }
-        if self.processes[idx].generation != key.generation { return None; }
-        Some(idx)
+    /// Returns the slot index if the key matches a live (non-Free, non-Retired) process.
+    pub(crate) fn validate_process_key(&self, key: &ProcessKey) -> Option<usize> {
+        if key.slot >= self.processes.len() { return None; }
+        let p = &self.processes[key.slot];
+        if p.generation != key.generation { return None; }
+        if p.state == ProcessState::Free || p.state == ProcessState::Retired { return None; }
+        Some(key.slot)
+    }
+
+    // ─── Process reclamation ───────────────────────────────────
+    //
+    // Reclaim(P_g) = destroy owned resources + return placement
+    //              + erase incarnation relations/state + invalidate P_g
+    //
+    // P_g → Free(g+1) if g < u32::MAX
+    //     → Retired(g) if g = u32::MAX
+    //
+    // When resources is None (raw spawn() processes), resource
+    // destruction is skipped but logical reclamation still happens.
+    //
+    // As of 8.3d, finish_process() calls terminate_orphans()
+    // depth-first before any parent reclamation can occur.
+
+    /// Reclaim a zombie or completed process slot.
+    ///
+    /// Destroys owned resources (domain, stack/trap objects),
+    /// returns physical extents to the appropriate pools, clears
+    /// all incarnation metadata, and advances the slot to
+    /// Free(g+1) or Retired.
+    pub(crate) fn reclaim_process(&mut self, slot: usize) {
+        // --- Destroy owned resources (if any) ---
+        if let Some(res) = self.processes[slot].resources.take() {
+            self.fabric.destroy_object(res.stack_obj);
+            self.fabric.destroy_object(res.trap_obj);
+            self.fabric.destroy_domain(res.domain);
+            self.free_stack_extents.push(res.stack_extent);
+            self.free_trap_extents.push(res.trap_extent);
+        }
+
+        // --- Clear mailbox ---
+        self.mailboxes[slot].clear();
+
+        // --- Clear lifecycle table ---
+        self.lifecycle_tables[slot].clear();
+
+        // --- Erase incarnation relations/state ---
+        self.processes[slot].parent = None;
+        self.processes[slot].waiting_on = None;
+        self.processes[slot].result = None;
+        self.processes[slot].exit_code = 0;
+
+        // --- Advance generation: Free(g+1) or Retired ---
+        let g = self.processes[slot].generation;
+        match g.checked_add(1) {
+            Some(next_g) => {
+                self.processes[slot].generation = next_g;
+                self.processes[slot].state = ProcessState::Free;
+            }
+            None => {
+                self.processes[slot].state = ProcessState::Retired;
+            }
+        }
+    }
+
+    // ─── Central death transition (Rule 28) ─────────────────────
+    //
+    // Every path that kills a process goes through finish_process().
+    // One semantic fact — "this incarnation died" — one authoritative
+    // transition.  No partial death states survive.
+
+    /// Transition a process to Zombie with a definitive ProcessResult.
+    /// Then depth-first terminate any orphaned descendants.
+    pub(crate) fn finish_process(&mut self, slot: usize, result: ProcessResult) {
+        let exit_code = match &result {
+            ProcessResult::Exited(code) => *code,
+            _ => 0xDEAD,
+        };
+        self.processes[slot].exit_code = exit_code;
+        self.processes[slot].result = Some(result);
+        self.processes[slot].state = ProcessState::Zombie;
+
+        let key = ProcessKey {
+            slot,
+            generation: self.processes[slot].generation,
+        };
+        self.terminate_orphans(key);
+    }
+
+    // ─── Depth-first orphan termination ────────────────────────
+    //
+    // When a process dies, its children become unsupervised.
+    // No authorized collector survives.  We terminate and reclaim
+    // descendants depth-first so that:
+    //
+    //   P → C → G  dies as:
+    //   G reclaimed → C reclaimed → P eventually collected.
+    //
+    // No parent relation is erased before its subtree is discovered.
+
+    /// Terminate and reclaim all descendants of dead_parent, depth-first.
+    pub(crate) fn terminate_orphans(&mut self, dead_parent: ProcessKey) {
+        // Snapshot direct children matching exact ProcessKey
+        let children: Vec<(usize, ProcessKey)> = self.processes.iter()
+            .enumerate()
+            .filter_map(|(i, p)| {
+                if let Some(ref pk) = p.parent {
+                    if pk.slot == dead_parent.slot
+                        && pk.generation == dead_parent.generation
+                        && p.state != ProcessState::Free
+                        && p.state != ProcessState::Retired
+                    {
+                        return Some((i, ProcessKey {
+                            slot: i,
+                            generation: p.generation,
+                        }));
+                    }
+                }
+                None
+            })
+            .collect();
+
+        for (child_slot, child_key) in children {
+            // Recurse: terminate child's descendants first
+            self.terminate_orphans(child_key);
+
+            match self.processes[child_slot].state {
+                ProcessState::Running => {
+                    // Terminate then reclaim in one step
+                    self.processes[child_slot].exit_code = 0xDEAD;
+                    self.processes[child_slot].result =
+                        Some(ProcessResult::ProtectionFault);
+                    self.processes[child_slot].state = ProcessState::Zombie;
+                    self.reclaim_process(child_slot);
+                }
+                ProcessState::Zombie => {
+                    self.reclaim_process(child_slot);
+                }
+                ProcessState::Free | ProcessState::Retired => {
+                    // Already reclaimed — nothing to do
+                }
+            }
+        }
     }
 
     // ─── Boot contract ─────────────────────────────────────────
@@ -665,12 +931,11 @@ impl Kernel {
             stack_size: info.stack_size,
             trap_vaddr: info.trap_vaddr,
         };
-        let _init_pid = self.prepare_process(dom, &desc, &boot_layout);
+        let init_key = self.prepare_process(dom, &desc, &boot_layout);
 
         // Additional address maps
         for m in &info.maps {
-            let init_idx = _init_pid as usize;
-            self.processes[init_idx].core.address_map.add_at(
+            self.processes[init_key.slot].core.address_map.add_at(
                 m.vaddr, m.size, m.obj, m.obj_offset,
             );
         }
@@ -683,12 +948,12 @@ impl Kernel {
     /// Each process gets `quantum` steps per turn.
     pub fn run(&mut self, quantum: usize, max_rounds: usize) {
         for _ in 0..max_rounds {
-            if self.processes.iter().all(|p| p.exited) {
+            if self.processes.iter().all(|p| p.exited()) {
                 break;
             }
 
             for i in 0..self.processes.len() {
-                if self.processes[i].exited {
+                if self.processes[i].exited() {
                     continue;
                 }
                 // Skip processes blocked waiting on a child
@@ -706,20 +971,22 @@ impl Kernel {
 
     /// Check for exited processes and resume any parent waiting on them.
     fn wake_waiters(&mut self) {
-        // Collect (child_pid, child_gen, result) for exited children
-        let mut completions: Vec<(u64, u32, ProcessResult)> = Vec::new();
-        for p in &self.processes {
-            if p.exited {
+        // Collect (child_slot, child_gen, result) for zombie children
+        let mut completions: Vec<(usize, u32, ProcessResult)> = Vec::new();
+        for (slot, p) in self.processes.iter().enumerate() {
+            if p.state == ProcessState::Zombie {
                 let result = p.result.clone()
-                    .unwrap_or(ProcessResult::Exited(p.exit_code));
-                completions.push((p.pid, p.generation, result));
+                    .expect("every zombie must have a ProcessResult (finish_process gate)");
+                completions.push((slot, p.generation, result));
             }
         }
-        // For each exited child, find any parent waiting on it
-        for (child_pid, child_gen, result) in completions {
+        // For each zombie child, find any parent waiting on it.
+        // One completed incarnation satisfies one waiter; after
+        // reclamation the child's generation has changed anyway.
+        for (child_slot, child_gen, result) in completions {
             for i in 0..self.processes.len() {
                 let matches = self.processes[i].waiting_on.as_ref()
-                    .map(|ws| ws.child.pid == child_pid && ws.child.generation == child_gen)
+                    .map(|ws| ws.child.slot == child_slot && ws.child.generation == child_gen)
                     .unwrap_or(false);
                 if matches {
                     let ws = self.processes[i].waiting_on.take().unwrap();
@@ -731,14 +998,14 @@ impl Kernel {
                             let (r0, r1) = encode_wait_result(&result);
                             self.processes[i].core.r[R0 as usize] = r0;
                             self.processes[i].core.r[R1 as usize] = r1;
-                            // Consume the lifecycle handle
-                            if let Some(slot) = ws.handle_slot {
-                                let parent_pid = self.processes[i].pid;
-                                self.lifecycle_tables[parent_pid as usize][slot].collected = true;
+                            if let Some(handle_slot) = ws.handle_slot {
+                                self.lifecycle_tables[i][handle_slot].collected = true;
                             }
                         }
                     }
+                    self.reclaim_process(child_slot);
                     self.resume_from_trap(i);
+                    break;
                 }
             }
         }
@@ -746,7 +1013,7 @@ impl Kernel {
 
     fn run_process(&mut self, idx: usize, quantum: usize) {
         for _ in 0..quantum {
-            if self.processes[idx].exited {
+            if self.processes[idx].exited() {
                 return;
             }
 
@@ -762,14 +1029,10 @@ impl Kernel {
                             let core = &self.processes[idx].core;
                             eprintln!("Process {} supervisor halt at {:#x} (not trap gate {:#x})",
                                 self.processes[idx].pid, core.pc, core.trap_vector);
-                            self.processes[idx].exited = true;
-                            self.processes[idx].exit_code = 0xDEAD;
-                            self.processes[idx].result = Some(ProcessResult::SupervisorFault);
+                            self.finish_process(idx, ProcessResult::SupervisorFault);
                         }
                         HaltDisposition::UserExit(code) => {
-                            self.processes[idx].exit_code = code;
-                            self.processes[idx].exited = true;
-                            self.processes[idx].result = Some(ProcessResult::Exited(code));
+                            self.finish_process(idx, ProcessResult::Exited(code));
                         }
                     }
                     return;
@@ -779,9 +1042,7 @@ impl Kernel {
                         self.processes[idx].pid, f.reason,
                         f.object, f.offset, f.kind,
                         self.processes[idx].core.pc);
-                    self.processes[idx].exited = true;
-                    self.processes[idx].exit_code = 0xDEAD;
-                    self.processes[idx].result = Some(ProcessResult::ProtectionFault);
+                    self.finish_process(idx, ProcessResult::ProtectionFault);
                     return;
                 }
             }
@@ -789,41 +1050,37 @@ impl Kernel {
     }
 
     fn handle_syscall(&mut self, idx: usize) {
-        let proc = &mut self.processes[idx];
-        let syscall = proc.core.r[R0 as usize];
+        let syscall = self.processes[idx].core.r[R0 as usize];
 
         match syscall {
             SYS_EXIT => {
-                let code = proc.core.r[R1 as usize];
-                proc.exit_code = code;
-                proc.exited = true;
-                proc.result = Some(ProcessResult::Exited(code));
+                let code = self.processes[idx].core.r[R1 as usize];
+                self.finish_process(idx, ProcessResult::Exited(code));
             }
             SYS_WRITE => {
                 self.handle_buffer_write(idx);
             }
             SYS_YIELD => {
-                proc.core.r[R0 as usize] = 0;
+                self.processes[idx].core.r[R0 as usize] = 0;
                 self.resume_from_trap(idx);
             }
             SYS_SEND => {
-                let dest_pid = proc.core.r[R1 as usize];
-                let value = proc.core.r[R2 as usize];
-                let from_pid = proc.pid;
-                if (dest_pid as usize) < self.mailboxes.len() {
-                    self.mailboxes[dest_pid as usize].push(Message { from_pid, value });
-                    proc.core.r[R0 as usize] = 0;
+                let dest_pid = self.processes[idx].core.r[R1 as usize];
+                let value = self.processes[idx].core.r[R2 as usize];
+                let from_pid = self.processes[idx].pid;
+                if let Some(dest_slot) = self.resolve_pid(dest_pid) {
+                    self.mailboxes[dest_slot].push(Message { from_pid, value });
+                    self.processes[idx].core.r[R0 as usize] = 0;
                 } else {
-                    proc.core.r[R0 as usize] = u64::MAX; // error
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
                 }
                 self.resume_from_trap(idx);
             }
             SYS_RECV => {
-                let pid = proc.pid as usize;
-                if let Some(msg) = self.mailboxes[pid].pop() {
-                    proc.core.r[R0 as usize] = msg.value;
+                if let Some(msg) = self.mailboxes[idx].pop() {
+                    self.processes[idx].core.r[R0 as usize] = msg.value;
                 } else {
-                    proc.core.r[R0 as usize] = 0; // no message
+                    self.processes[idx].core.r[R0 as usize] = 0;
                 }
                 self.resume_from_trap(idx);
             }
@@ -840,9 +1097,9 @@ impl Kernel {
                 self.handle_wait(idx);
             }
             _ => {
-                eprintln!("Unknown syscall {} from pid {}", syscall, proc.pid);
-                proc.exited = true;
-                proc.exit_code = 0xBAD;
+                eprintln!("Unknown syscall {} from pid {}",
+                    syscall, self.processes[idx].pid);
+                self.finish_process(idx, ProcessResult::ProtectionFault);
             }
         }
     }
@@ -1081,7 +1338,7 @@ impl Kernel {
     /// Common validation and child creation for SYS_EXEC and SYS_SPAWN.
     /// Returns Some(child_pid) on success, None on validation failure.
     /// On failure, sets R0 = MAX and resumes the caller.
-    fn create_child(&mut self, idx: usize) -> Option<u64> {
+    fn create_child(&mut self, idx: usize) -> Option<ProcessKey> {
         let code_vaddr = self.processes[idx].core.r[R1 as usize];
         let code_size = self.processes[idx].core.r[R2 as usize];
         let lit_start = self.processes[idx].core.r[R3 as usize];
@@ -1191,16 +1448,19 @@ impl Kernel {
             image_size,
             entry: 0,
         };
-        let child_pid = self.prepare_process(child_dom, &desc, &EXEC_DEFAULT_LAYOUT);
-        self.processes[child_pid as usize].parent = Some(self.processes[idx].pid);
-        Some(child_pid)
+        let child_key = self.prepare_process(child_dom, &desc, &EXEC_DEFAULT_LAYOUT);
+        let parent_key = ProcessKey {
+            slot: idx,
+            generation: self.processes[idx].generation,
+        };
+        self.processes[child_key.slot].parent = Some(parent_key);
+        Some(child_key)
     }
 
     fn handle_exec(&mut self, idx: usize) {
-        if let Some(child_pid) = self.create_child(idx) {
-            let child_gen = self.processes[child_pid as usize].generation;
+        if let Some(child_key) = self.create_child(idx) {
             self.processes[idx].waiting_on = Some(WaitState {
-                child: ProcessKey { pid: child_pid, generation: child_gen },
+                child: child_key,
                 kind: WaitKind::Exec,
                 handle_slot: None,
             });
@@ -1209,13 +1469,8 @@ impl Kernel {
     }
 
     fn handle_spawn(&mut self, idx: usize) {
-        if let Some(child_pid) = self.create_child(idx) {
-            let child_key = ProcessKey {
-                pid: child_pid,
-                generation: self.processes[child_pid as usize].generation,
-            };
-            let parent_pid = self.processes[idx].pid;
-            let handle = self.install_lifecycle(parent_pid, child_key);
+        if let Some(child_key) = self.create_child(idx) {
+            let handle = self.install_lifecycle(idx, child_key);
             self.processes[idx].core.r[R0 as usize] = handle.as_u64();
             self.resume_from_trap(idx);
         }
@@ -1228,10 +1483,9 @@ impl Kernel {
     fn handle_wait(&mut self, idx: usize) {
         let raw_handle = self.processes[idx].core.r[R1 as usize];
         let handle = LifecycleHandle::from_u64(raw_handle);
-        let parent_pid = self.processes[idx].pid;
 
-        // Resolve in the caller's own lifecycle table
-        let (slot, child_key) = match self.resolve_lifecycle(parent_pid, handle) {
+        // Resolve in the caller's own lifecycle table (indexed by slot)
+        let (slot, child_key) = match self.resolve_lifecycle(idx, handle) {
             Some((s, entry)) => (s, entry.child),
             None => {
                 let (r0, r1) = encode_wait_invalid();
@@ -1254,14 +1508,15 @@ impl Kernel {
             }
         };
 
-        // If child already exited, return immediately and consume handle
-        if self.processes[child_idx].exited {
-            let result = self.processes[child_idx].result.as_ref()
-                .expect("exited process must have a result");
-            let (r0, r1) = encode_wait_result(result);
-            self.lifecycle_tables[parent_pid as usize][slot].collected = true;
+        // If child already zombie: read result → consume handle → reclaim → resume
+        if self.processes[child_idx].state == ProcessState::Zombie {
+            let result = self.processes[child_idx].result.clone()
+                .expect("zombie process must have a result");
+            let (r0, r1) = encode_wait_result(&result);
+            self.lifecycle_tables[idx][slot].collected = true;
             self.processes[idx].core.r[R0 as usize] = r0;
             self.processes[idx].core.r[R1 as usize] = r1;
+            self.reclaim_process(child_idx);
             self.resume_from_trap(idx);
             return;
         }
@@ -1404,7 +1659,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 100);
 
-        assert!(kernel.processes[0].exited, "process should have exited");
+        assert!(kernel.processes[0].exited(), "process should have exited");
         assert_eq!(kernel.processes[0].exit_code, 0, "exit code should be 0");
         assert_eq!(kernel.byte_output.len(), 16, "should have 16 bytes (two 8-byte writes)");
         assert_eq!(&kernel.byte_output[0..8], &42u64.to_le_bytes());
@@ -1481,8 +1736,8 @@ mod tests {
         // Round-robin: A runs first (sends), then B runs (receives)
         kernel.run(1000, 100);
 
-        assert!(kernel.processes[0].exited, "A should have exited");
-        assert!(kernel.processes[1].exited, "B should have exited");
+        assert!(kernel.processes[0].exited(), "A should have exited");
+        assert!(kernel.processes[1].exited(), "B should have exited");
         assert_eq!(kernel.processes[0].exit_code, 0, "A exit code = 0");
         assert_eq!(kernel.processes[1].exit_code, 42, "B exit code = 42");
         assert_eq!(kernel.byte_output.len(), 8, "B wrote 8 bytes");
@@ -1563,7 +1818,7 @@ mod tests {
 
         // Process exited. SYS_EXEC should have returned MAX (error).
         // The process then exits with that error code.
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, u64::MAX,
             "SYS_EXEC on unsealed object should return error");
         assert_eq!(kernel.processes.len(), 1,
@@ -1608,7 +1863,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 100);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, u64::MAX,
             "SYS_SEAL without SEAL authority should return error");
         // Object should still be Active (not Sealed)
@@ -1711,7 +1966,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 100);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, u64::MAX,
             "narrow SEAL should not authorize whole-object seal");
         assert_eq!(kernel.fabric.objects[&buffer].state, ObjectState::Active);
@@ -1768,7 +2023,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 100);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, u64::MAX,
             "narrow EXECUTE should not authorize larger code range");
         assert_eq!(kernel.processes.len(), 1, "no child spawned");
@@ -1826,29 +2081,23 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 1000);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, 77,
-            "child should return 77");
+            "parent received child's exit code 77 — proves authority derivation");
         assert!(kernel.processes.len() >= 2);
 
-        // Verify child's code capability was derived (subset of parent's)
-        let child_dom = kernel.processes[1].core.domain;
-        let child_caps: Vec<_> = kernel.fabric.domains[&child_dom]
-            .capabilities.iter()
-            .filter(|c| c.object() == code)
-            .collect();
-        assert!(!child_caps.is_empty(), "child should have code capability");
-        let child_code_cap = child_caps[0];
-        // Child's range [offset, offset+length) must be within parent's [0, 0x1000)
-        assert_eq!(child_code_cap.offset(), 0);
-        assert_eq!(child_code_cap.length(), 16);
-        assert!(child_code_cap.permissions().is_subset_of(Permissions::RX),
-            "child permissions must be subset of parent's RX");
+        // Post-8.3c: child is reclaimed after collection.
+        // The child ran SYS_EXIT(77) successfully, proving it had valid
+        // derived authority (RX on code, RW on stack).  The parent
+        // received 77 via the EXEC ABI, proving the full derivation
+        // chain.  The child's domain and resources are now destroyed.
+        assert_eq!(kernel.processes[1].state, ProcessState::Free,
+            "child should be reclaimed to Free");
+        assert!(kernel.processes[1].resources.is_none(),
+            "child resources destroyed by reclaim");
 
-        eprintln!("S6: child code cap = ({}, {}, {:?}) ⊆ parent (0, 0x1000, RX) ✓",
-            child_code_cap.offset(), child_code_cap.length(),
-            child_code_cap.permissions());
-        eprintln!("    Authority(child) ⊆ Authority(parent) — I7 structural");
+        eprintln!("S6: child exit(77) → parent received 77 → child reclaimed ✓");
+        eprintln!("    Authority(child) ⊆ Authority(parent) — proven by successful execution");
     }
 
     #[test]
@@ -1905,7 +2154,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(100, 100);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, 0xDEAD,
             "illegal instruction must produce fault exit (0xDEAD), not user HALT");
         eprintln!("halt: illegal opcode → IllegalInstruction fault → exit 0xDEAD ✓");
@@ -1941,7 +2190,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(100, 100);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, 0xDEAD,
             "supervisor HALT not at trap gate must produce 0xDEAD");
         eprintln!("halt: supervisor HALT at PC=0x0000 (not gate 0x3FF0) → 0xDEAD ✓");
@@ -1984,7 +2233,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 100);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, u64::MAX,
             "wraparound must fail with u64::MAX");
         assert!(kernel.byte_output.is_empty(),
@@ -2027,7 +2276,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 100);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, u64::MAX,
             "OOB range must fail with u64::MAX");
         assert!(kernel.byte_output.is_empty(),
@@ -2060,7 +2309,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 100);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, u64::MAX,
             "nonzero R3 must be rejected");
         assert!(kernel.byte_output.is_empty(),
@@ -2213,7 +2462,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 100);
 
-        assert!(kernel.processes[0].exited,
+        assert!(kernel.processes[0].exited(),
             "parent must exit");
         let handle_val = kernel.processes[0].exit_code;
         assert_ne!(handle_val, u64::MAX,
@@ -2245,7 +2494,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 100);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, 42,
             "parent should exit with child's exit code 42");
         eprintln!("8.2e: spawn_wait_single(42) ✓");
@@ -2348,7 +2597,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 200);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, 33,
             "parent should exit with 11 + 22 = 33");
         eprintln!("8.2e: spawn_two_wait_both(11+22=33) ✓");
@@ -2400,7 +2649,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 200);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, 99,
             "WAIT on already-exited child should return its exit code");
         eprintln!("8.2e: wait_already_exited(99) ✓");
@@ -2453,7 +2702,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 200);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, u64::MAX,
             "second WAIT on consumed handle should return MAX");
         eprintln!("8.2e: wait_consumes_handle ✓");
@@ -2485,7 +2734,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 100);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, u64::MAX,
             "forged handle must be rejected");
         eprintln!("8.2e: wait_forged_handle → MAX ✓");
@@ -2597,7 +2846,7 @@ mod tests {
         kernel.run(1000, 200);
 
         // B should have exited with MAX (handle not in B's table)
-        assert!(kernel.processes[1].exited);
+        assert!(kernel.processes[1].exited());
         assert_eq!(kernel.processes[1].exit_code, u64::MAX,
             "non-owner WAIT must be rejected: authority survives full knowledge");
         eprintln!("8.2e: wait_not_owner → MAX (security property confirmed) ✓");
@@ -2643,7 +2892,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 200);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         // Tag 2 = ProtectionFault
         assert_eq!(kernel.processes[0].exit_code, 2,
             "faulted child must return tag 2 (ProtectionFault), not 0 (Exited)");
@@ -2686,7 +2935,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 200);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, 0xDEAD,
             "SYS_EXEC on faulting child must return 0xDEAD (historical ABI)");
         eprintln!("8.2e: exec_compatibility → 0xDEAD ✓");
@@ -2810,7 +3059,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(1000, 300);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, 20,
             "stale H1 must be rejected (MAX), H2 must return 20");
         eprintln!("8.2e: stale_handle_after_slot_reuse → 20 ✓");

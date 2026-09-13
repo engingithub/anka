@@ -237,18 +237,18 @@ mod tests {
         // ─── Verify ───────────────────────────────────────────
 
         // Compiler process exited with child's result
-        assert!(kernel.processes[0].exited,
+        assert!(kernel.processes[0].exited(),
             "compiler process should have exited");
         assert_eq!(kernel.processes[0].exit_code, 42,
             "compiler should exit with child's result (42)");
 
-        // Child process was spawned and exited with 42
+        // Child process was spawned and collected
         assert!(kernel.processes.len() >= 2,
             "child process should have been spawned");
-        assert!(kernel.processes[1].exited,
-            "child process should have exited");
-        assert_eq!(kernel.processes[1].exit_code, 42,
-            "child should have returned 42");
+        // Post-8.3c: child is reclaimed after collection.
+        // Parent's exit_code=42 proves child returned 42.
+        assert_eq!(kernel.processes[1].state, ProcessState::Free,
+            "child should be reclaimed to Free");
 
         // ─── The three 42s ────────────────────────────────────
         //   First 42:  emulator executes code
@@ -649,7 +649,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(10000, 10000);
 
-        let exited = kernel.processes[0].exited;
+        let exited = kernel.processes[0].exited();
         let exit_code = kernel.processes[0].exit_code;
         let child_spawned = kernel.processes.len() >= 2;
 
@@ -663,8 +663,8 @@ mod tests {
             assert!(child_spawned,
                 "source {:?}: expected child process",
                 std::str::from_utf8(source_text).unwrap_or("<invalid>"));
-            assert!(kernel.processes[1].exited);
-            assert_eq!(kernel.processes[1].exit_code, expected_exit);
+            // Post-8.3c: child is reclaimed after collection.
+            // Parent's exit_code (verified above) is the source of truth.
         }
 
         (child_spawned, exit_code)
@@ -729,7 +729,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(10000, 10000);
 
-        assert!(kernel.processes[0].exited,
+        assert!(kernel.processes[0].exited(),
             "compiler process should have exited");
         assert_eq!(kernel.processes[0].exit_code, expected_exit,
             "declared_len={}, payload {:?}: expected exit {}, got {}",
@@ -740,8 +740,7 @@ mod tests {
         if expect_child {
             assert!(kernel.processes.len() >= 2,
                 "expected child process");
-            assert!(kernel.processes[1].exited);
-            assert_eq!(kernel.processes[1].exit_code, expected_exit);
+            // Post-8.3c: child is reclaimed after collection.
         }
     }
 
@@ -1361,7 +1360,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(50000, 50000);
 
-        assert!(kernel.processes[0].exited,
+        assert!(kernel.processes[0].exited(),
             "compiler process should have exited");
         assert_eq!(kernel.processes[0].exit_code, expected_exit,
             "source {:?}: expected exit {}, got {}",
@@ -1371,8 +1370,7 @@ mod tests {
         if expect_child {
             assert!(kernel.processes.len() >= 2,
                 "expected child process");
-            assert!(kernel.processes[1].exited);
-            assert_eq!(kernel.processes[1].exit_code, expected_exit);
+            // Post-8.3c: child is reclaimed after collection.
         }
     }
 
@@ -2384,7 +2382,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(100000, 100000);
 
-        assert!(kernel.processes[0].exited,
+        assert!(kernel.processes[0].exited(),
             "compiler process should have exited");
         assert_eq!(kernel.processes[0].exit_code, expected_exit,
             "source {:?}: expected exit {}, got {}",
@@ -2394,8 +2392,7 @@ mod tests {
         if expect_child {
             assert!(kernel.processes.len() >= 2,
                 "expected child process");
-            assert!(kernel.processes[1].exited);
-            assert_eq!(kernel.processes[1].exit_code, expected_exit);
+            // Post-8.3c: child is reclaimed after collection.
         }
     }
 
@@ -3606,7 +3603,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(100000, 100000);
 
-        let exited = kernel.processes[0].exited;
+        let exited = kernel.processes[0].exited();
         let exit_code = kernel.processes[0].exit_code;
         let child_spawned = kernel.processes.len() >= 2;
 
@@ -3620,8 +3617,7 @@ mod tests {
             assert!(child_spawned,
                 "source {:?}: expected child process",
                 std::str::from_utf8(source_text).unwrap_or("<invalid>"));
-            assert!(kernel.processes[1].exited);
-            assert_eq!(kernel.processes[1].exit_code, expected_exit);
+            // Post-8.3c: child is reclaimed after collection.
         }
     }
 
@@ -3992,7 +3988,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(100000, 100000);
 
-        assert!(kernel.processes[0].exited);
+        assert!(kernel.processes[0].exited());
         assert_eq!(kernel.processes[0].exit_code, 3,
             "while loop should produce x=3");
 
@@ -4112,7 +4108,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(2000000, 10);
 
-        let exited = kernel.processes[0].exited;
+        let exited = kernel.processes[0].exited();
         let exit_code = kernel.processes[0].exit_code;
         let child_spawned = kernel.processes.len() >= 2;
 
@@ -4188,8 +4184,7 @@ mod tests {
             assert!(child_spawned,
                 "source {:?}: expected child process",
                 std::str::from_utf8(source_text).unwrap_or("<invalid>"));
-            assert!(kernel.processes[1].exited);
-            assert_eq!(kernel.processes[1].exit_code, expected_exit);
+            // Post-8.3c: child is reclaimed after collection.
         }
         kernel
     }
@@ -6381,7 +6376,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(2000000, 10);
 
-        assert!(kernel.processes[0].exited,
+        assert!(kernel.processes[0].exited(),
             "host compiler did not exit");
 
         // Read workspace diagnostics
@@ -6520,7 +6515,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(2000000, 10);
 
-        assert!(kernel.processes[0].exited, "compiler should exit");
+        assert!(kernel.processes[0].exited(), "compiler should exit");
 
         // Read workspace state
         let read = |off: u64| -> u64 {
@@ -6641,7 +6636,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(2000000, 10);
 
-        assert!(kernel.processes[0].exited, "compiler should exit");
+        assert!(kernel.processes[0].exited(), "compiler should exit");
 
         let read_ws = |off: u64| -> u64 {
             let bytes = kernel.fabric.read_physical(0x030000 + off, 8);
@@ -6908,7 +6903,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(2000000, 10);
 
-        assert!(kernel.processes[0].exited,
+        assert!(kernel.processes[0].exited(),
             "CC_A did not exit while compiling canonical source");
 
         // Read output size from workspace
@@ -6995,7 +6990,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(4000000, 10);
 
-        let exited = kernel.processes[0].exited;
+        let exited = kernel.processes[0].exited();
         let exit_code = kernel.processes[0].exit_code;
 
         if !exited {
@@ -7083,7 +7078,7 @@ mod tests {
         kernel.spawn(core);
         kernel.run(4000000, 10);
 
-        assert!(kernel.processes[0].exited, "CC_B did not exit");
+        assert!(kernel.processes[0].exited(), "CC_B did not exit");
 
         let read_ws = |off: u64| -> u64 {
             let bytes = kernel.fabric.read_physical(0x220000 + off, 8);
@@ -7521,7 +7516,7 @@ mod tests {
 
         // Verify init exited with 42
         assert_eq!(kernel.processes.len(), 1, "exactly one process (init)");
-        assert!(kernel.processes[0].exited, "init should have exited");
+        assert!(kernel.processes[0].exited(), "init should have exited");
         assert_eq!(kernel.processes[0].exit_code, 42,
             "init should exit with 42");
         eprintln!("8.0: boot(return 42) succeeded — test never constructed a core ✓");
@@ -7601,7 +7596,7 @@ mod tests {
         // Host runs the kernel
         kernel.run(4_000_000, 100);
 
-        assert!(kernel.processes[0].exited, "CC_B should have exited");
+        assert!(kernel.processes[0].exited(), "CC_B should have exited");
 
         // Read workspace results
         let read_ws = |off: u64| -> u64 {
@@ -7861,6 +7856,1668 @@ mod tests {
         kernel.run(1000, 100);
         assert_eq!(kernel.processes[0].exit_code, 99);
         eprintln!("8.0e: failed-then-valid boot succeeded ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 8.3b: Physical extent allocation tests
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p83b_fresh_alloc_advances_next_phys() {
+        let fabric = Fabric::new(0x800000);
+        let mut kernel = Kernel::new(fabric);
+        let before = kernel.next_phys;
+        let ext = kernel.alloc_stack_extent(0x4000);
+        assert_eq!(ext.base, before, "fresh alloc starts at next_phys");
+        assert_eq!(ext.size, 0x4000);
+        assert_eq!(kernel.next_phys, before + 0x4000,
+            "next_phys advances by requested size");
+        eprintln!("8.3b: fresh alloc advances next_phys ✓");
+    }
+
+    #[test]
+    fn p83b_exact_size_reuse() {
+        let fabric = Fabric::new(0x800000);
+        let mut kernel = Kernel::new(fabric);
+        let recycled = PhysicalExtent { base: 0x200000, size: 0x4000 };
+        kernel.free_stack_extents.push(recycled);
+        let before = kernel.next_phys;
+        let ext = kernel.alloc_stack_extent(0x4000);
+        assert_eq!(ext.base, 0x200000, "reused extent has original base");
+        assert_eq!(ext.size, 0x4000);
+        assert_eq!(kernel.next_phys, before,
+            "next_phys unchanged — extent came from pool");
+        assert!(kernel.free_stack_extents.is_empty(),
+            "pool drained after reuse");
+        eprintln!("8.3b: exact-size reuse returns same base ✓");
+    }
+
+    #[test]
+    fn p83b_reused_extent_scrubbed() {
+        let mut fabric = Fabric::new(0x800000);
+        let base: u64 = 0x200000;
+        let size: u64 = 0x1000;
+        // Write non-zero pattern into the physical region
+        let pattern = vec![0xAB_u8; size as usize];
+        fabric.write_physical(base, &pattern);
+        // Verify it's dirty
+        assert_eq!(fabric.read_physical(base, 1)[0], 0xAB);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.free_stack_extents.push(PhysicalExtent { base, size });
+        let ext = kernel.alloc_stack_extent(size);
+        assert_eq!(ext.base, base);
+        // Verify scrubbing: every byte in the returned extent is zero
+        let data = kernel.fabric.read_physical(base, size);
+        assert!(data.iter().all(|&b| b == 0),
+            "recycled extent must be scrubbed to zero");
+        eprintln!("8.3b: reused extent is scrubbed to zero ✓");
+    }
+
+    #[test]
+    fn p83b_wrong_size_not_reused() {
+        let fabric = Fabric::new(0x800000);
+        let mut kernel = Kernel::new(fabric);
+        let recycled = PhysicalExtent { base: 0x200000, size: 0x2000 };
+        kernel.free_stack_extents.push(recycled);
+        let before = kernel.next_phys;
+        // Request a different size than what's in the pool
+        let ext = kernel.alloc_stack_extent(0x4000);
+        assert_eq!(ext.base, before,
+            "wrong-sized pool entry skipped — fresh alloc used");
+        assert_eq!(kernel.next_phys, before + 0x4000);
+        assert_eq!(kernel.free_stack_extents.len(), 1,
+            "wrong-sized entry stays in pool");
+        eprintln!("8.3b: wrong-sized extent not reused ✓");
+    }
+
+    #[test]
+    fn p83b_stack_pool_ne_trap_pool() {
+        let fabric = Fabric::new(0x800000);
+        let mut kernel = Kernel::new(fabric);
+        // Put an extent in the stack pool only
+        kernel.free_stack_extents.push(
+            PhysicalExtent { base: 0x200000, size: 0x4000 });
+        let before = kernel.next_phys;
+        // Trap alloc should NOT see the stack pool entry
+        let ext = kernel.alloc_trap_extent(0x4000);
+        assert_eq!(ext.base, before,
+            "trap alloc ignores stack pool — fresh alloc used");
+        assert_eq!(kernel.next_phys, before + 0x4000);
+        assert_eq!(kernel.free_stack_extents.len(), 1,
+            "stack pool untouched by trap alloc");
+        eprintln!("8.3b: stack pool ≠ trap pool ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 8.3c: Process reclamation tests
+    //
+    //   Collected(g) + Resources(g) → Free(g+1) + FreeExtents
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p83c_zombie_to_free_full_reclaim() {
+        // Boot a process that exits immediately.  Then manually
+        // reclaim the zombie and verify every field.
+        let (fabric, code_obj, code_size) = boot_test_fabric();
+        let info = valid_boot_info(code_obj, code_size);
+        let mut kernel = Kernel::new(fabric);
+        kernel.boot(&info).unwrap();
+        kernel.run(1000, 100);
+
+        // Init exited → Zombie
+        assert_eq!(kernel.processes[0].state, ProcessState::Zombie);
+        assert_eq!(kernel.processes[0].generation, 0);
+
+        // Capture pre-reclaim state
+        let res = kernel.processes[0].resources.as_ref()
+            .expect("booted process must have OwnedResources");
+        let stack_extent = res.stack_extent;
+        let trap_extent = res.trap_extent;
+        let domain_id = res.domain;
+        let stack_obj_id = res.stack_obj;
+        let trap_obj_id = res.trap_obj;
+
+        // Dirty the mailbox and lifecycle table
+        kernel.mailboxes[0].push(Message { from_pid: 999, value: 0xBEEF });
+        kernel.lifecycle_tables[0].push(LifecycleEntry {
+            slot_generation: 0,
+            child: ProcessKey { slot: 99, generation: 0 },
+            collected: false,
+        });
+
+        // Set parent edge to verify it's cleared
+        kernel.processes[0].parent = Some(ProcessKey { slot: 99, generation: 0 });
+
+        // --- Reclaim ---
+        kernel.reclaim_process(0);
+
+        // State
+        assert_eq!(kernel.processes[0].state, ProcessState::Free);
+        assert_eq!(kernel.processes[0].generation, 1, "generation advanced");
+
+        // Resources destroyed
+        assert!(kernel.processes[0].resources.is_none());
+
+        // Domain and objects gone from fabric
+        assert!(!kernel.fabric.domains.contains_key(&domain_id),
+            "domain destroyed");
+        assert!(!kernel.fabric.objects.contains_key(&stack_obj_id),
+            "stack object destroyed");
+        assert!(!kernel.fabric.objects.contains_key(&trap_obj_id),
+            "trap object destroyed");
+
+        // Extents returned to correct pools
+        assert_eq!(kernel.free_stack_extents.len(), 1);
+        assert_eq!(kernel.free_stack_extents[0].base, stack_extent.base);
+        assert_eq!(kernel.free_stack_extents[0].size, stack_extent.size);
+        assert_eq!(kernel.free_trap_extents.len(), 1);
+        assert_eq!(kernel.free_trap_extents[0].base, trap_extent.base);
+        assert_eq!(kernel.free_trap_extents[0].size, trap_extent.size);
+
+        // Incarnation metadata erased
+        assert!(kernel.processes[0].parent.is_none(), "parent cleared");
+        assert!(kernel.processes[0].result.is_none(), "result cleared");
+        assert_eq!(kernel.processes[0].exit_code, 0, "exit_code cleared");
+
+        // Mailbox and lifecycle table cleared
+        assert!(kernel.mailboxes[0].is_empty(), "mailbox cleared");
+        assert!(kernel.lifecycle_tables[0].is_empty(), "lifecycle table cleared");
+
+        // Old ProcessKey rejected
+        let old_key = ProcessKey { slot: 0, generation: 0 };
+        assert!(kernel.validate_process_key(&old_key).is_none(),
+            "old ProcessKey must be rejected after reclamation");
+
+        eprintln!("8.3c: Zombie(0) → Free(1), full resource + metadata reclamation ✓");
+    }
+
+    #[test]
+    fn p83c_max_generation_retires() {
+        let (fabric, code_obj, code_size) = boot_test_fabric();
+        let info = valid_boot_info(code_obj, code_size);
+        let mut kernel = Kernel::new(fabric);
+        kernel.boot(&info).unwrap();
+        kernel.run(1000, 100);
+        assert_eq!(kernel.processes[0].state, ProcessState::Zombie);
+
+        // Force generation to u32::MAX
+        kernel.processes[0].generation = u32::MAX;
+
+        kernel.reclaim_process(0);
+
+        assert_eq!(kernel.processes[0].state, ProcessState::Retired,
+            "u32::MAX generation → Retired, not Free");
+        assert_eq!(kernel.processes[0].generation, u32::MAX,
+            "generation stays at MAX (no wraparound)");
+        assert!(kernel.processes[0].resources.is_none(),
+            "resources still destroyed even on Retired");
+
+        eprintln!("8.3c: Zombie(MAX) → Retired (no wraparound) ✓");
+    }
+
+    #[test]
+    fn p83c_exec_child_reclaimed() {
+        // Parent spawns child via SYS_EXEC.  After collection,
+        // the child slot must be Free with resources returned.
+        let mut fabric = Fabric::new(0x200000);
+
+        let text  = fabric.alloc_object("text",  0x4000, ObjectKind::Memory);
+        let code  = fabric.alloc_object("code",  0x1000, ObjectKind::Memory);
+        let stack = fabric.alloc_object("stack", 0x4000, ObjectKind::Memory);
+
+        fabric.place_object(text,  0x000000);
+        fabric.place_object(code,  0x020000);
+        fabric.place_object(stack, 0x030000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, code,  0, 0x1000, Permissions::RWS);
+        fabric.grant(dom, stack, 0, 0x4000, Permissions::RW);
+
+        // Child: exit(55)
+        let mut child_asm = Asm64::new();
+        child_asm.movi(R1, 55);
+        child_asm.movi(R0, SYS_EXIT as i32);
+        child_asm.trap(0);
+        fabric.write_physical(0x020000, &child_asm.to_bytes());
+        fabric.seal_object(code);
+        fabric.grant(dom, code, 0, 0x1000, Permissions::RX);
+
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+
+        // Parent: SYS_EXEC(code_vaddr=0x5000, code_size=16, lit=0) → exit(R0)
+        {
+            let mut asm = Asm64::new();
+            asm.movi(R1, 0x5000);       // code_vaddr
+            asm.movi(R2, 16);           // code_size
+            asm.movi(R0, SYS_EXEC as i32);
+            asm.trap(0);
+            // R0 = child result → exit with it
+            asm.mov(R1, R0);
+            asm.movi(R0, SYS_EXIT as i32);
+            asm.trap(0);
+            fabric.write_physical(0x000000, &asm.to_bytes());
+        }
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x05000, 0x1000, code);
+        core.address_map.add(0x06000, 0x4000, stack);
+        core.r[SP as usize] = 0x06000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x040000;
+        kernel.next_agent = 10;
+        kernel.spawn(core);
+
+        let phys_before_run = kernel.next_phys;
+        kernel.run(1000, 1000);
+
+        // Parent got child's result
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, 55,
+            "parent received child exit code 55");
+
+        // Child reclaimed
+        assert!(kernel.processes.len() >= 2);
+        assert_eq!(kernel.processes[1].state, ProcessState::Free,
+            "EXEC child reclaimed to Free");
+        assert_eq!(kernel.processes[1].generation, 1,
+            "child generation advanced from 0 to 1");
+        assert!(kernel.processes[1].resources.is_none(),
+            "child resources destroyed");
+
+        // Extents returned to pools
+        assert_eq!(kernel.free_stack_extents.len(), 1,
+            "child stack extent returned to pool");
+        assert_eq!(kernel.free_trap_extents.len(), 1,
+            "child trap extent returned to pool");
+
+        // The child consumed physical space during prepare_process
+        assert!(kernel.next_phys > phys_before_run,
+            "child allocation advanced next_phys");
+
+        eprintln!("8.3c: EXEC child exit(55) → parent collected → child Free(1) ✓");
+        eprintln!("       stack pool={} trap pool={}",
+            kernel.free_stack_extents.len(), kernel.free_trap_extents.len());
+    }
+
+    #[test]
+    fn p83c_raw_spawn_reclaim_skips_resources() {
+        // Raw spawn() processes have resources=None.
+        // Reclaim should still perform logical cleanup without panicking.
+        let mut fabric = Fabric::new(0x100000);
+
+        let text  = fabric.alloc_object("raw_text",  0x4000, ObjectKind::Memory);
+        let stack = fabric.alloc_object("raw_stack", 0x4000, ObjectKind::Memory);
+        fabric.place_object(text,  0x000000);
+        fabric.place_object(stack, 0x020000);
+        let dom = fabric.create_domain();
+        fabric.grant(dom, stack, 0, 0x4000, Permissions::RW);
+
+        let mut asm = Asm64::new();
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.movi(R1, 7);
+        asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x20000, 0x4000, stack);
+        core.r[SP as usize] = 0x20000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.run(1000, 100);
+
+        assert_eq!(kernel.processes[0].state, ProcessState::Zombie);
+        assert!(kernel.processes[0].resources.is_none(),
+            "raw spawn has no OwnedResources");
+
+        assert!(kernel.free_stack_extents.is_empty());
+        assert!(kernel.free_trap_extents.is_empty());
+
+        kernel.reclaim_process(0);
+
+        assert_eq!(kernel.processes[0].state, ProcessState::Free);
+        assert_eq!(kernel.processes[0].generation, 1);
+
+        // No extents returned (none were owned)
+        assert!(kernel.free_stack_extents.is_empty(),
+            "no stack extents from raw spawn");
+        assert!(kernel.free_trap_extents.is_empty(),
+            "no trap extents from raw spawn");
+
+        eprintln!("8.3c: raw spawn() → reclaim skips resources, logical cleanup only ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 8.3d: Central death transition + depth-first orphan tests
+    //
+    //   finish_process() → Zombie → terminate_orphans(depth-first)
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p83d_parent_dies_running_child_terminated() {
+        // Parent A spawns child B via SYS_SPAWN.
+        // A exits immediately (doesn't WAIT on B).
+        // B is still running when A dies.
+        // finish_process(A) → terminate_orphans → B terminated + reclaimed.
+        let mut fabric = Fabric::new(0x200000);
+
+        let text_a = fabric.alloc_object("a_text", 0x4000, ObjectKind::Memory);
+        let stack_a = fabric.alloc_object("a_stack", 0x4000, ObjectKind::Memory);
+        fabric.place_object(text_a, 0x000000);
+        fabric.place_object(stack_a, 0x020000);
+        let dom_a = fabric.create_domain();
+        fabric.grant(dom_a, stack_a, 0, 0x4000, Permissions::RW);
+
+        // Child code at 0x100000: infinite loop (NOP; NOP; ...)
+        let code_obj = fabric.alloc_object("child_code", 0x1000, ObjectKind::Memory);
+        fabric.place_object(code_obj, 0x100000);
+        let mut child_asm = Asm64::new();
+        // 256 NOPs — child will never exit on its own
+        for _ in 0..256 {
+            child_asm.nop();
+        }
+        fabric.write_physical(0x100000, &child_asm.to_bytes());
+        fabric.seal_object(code_obj);
+        fabric.grant(dom_a, code_obj, 0, 0x1000, Permissions::RWS);
+        fabric.grant(dom_a, code_obj, 0, 0x1000, Permissions::RX);
+
+        // Parent A: SYS_SPAWN(code, 16, 0) → SYS_EXIT(0)
+        let mut asm_a = Asm64::new();
+        asm_a.movi(R1, 0x5000);         // code_vaddr
+        asm_a.movi(R2, 16);             // code_size (enough for child entry)
+        asm_a.movi(R3, 0);              // lit_start
+        asm_a.movi(R0, SYS_SPAWN as i32);
+        asm_a.trap(0);
+        // R0 = LifecycleHandle (don't WAIT, just exit)
+        asm_a.movi(R0, SYS_EXIT as i32);
+        asm_a.movi(R1, 0);
+        asm_a.trap(0);
+        fabric.write_physical(0x000000, &asm_a.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text_a, dom_a);
+
+        let mut core_a = Anka64Core::new(AgentId(0), dom_a);
+        core_a.address_map.add(0x00000, 0x4000, text_a);
+        core_a.address_map.add(0x05000, 0x1000, code_obj);
+        core_a.address_map.add(0x06000, 0x4000, stack_a);
+        core_a.r[SP as usize] = 0x06000 + 0x4000;
+        core_a.trap_vector = 0x3FF0;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x200000;
+        kernel.next_agent = 10;
+        kernel.spawn(core_a);
+        kernel.run(10000, 100);
+
+        // A exited
+        assert_eq!(kernel.processes[0].state, ProcessState::Zombie);
+        assert_eq!(kernel.processes[0].exit_code, 0);
+
+        // B was running when A died → terminated + reclaimed by finish_process
+        assert!(kernel.processes.len() >= 2);
+        assert_eq!(kernel.processes[1].state, ProcessState::Free,
+            "orphaned running child must be reclaimed");
+        assert_eq!(kernel.processes[1].generation, 1,
+            "child generation advanced from 0 to 1");
+        assert!(kernel.processes[1].resources.is_none(),
+            "child resources destroyed");
+
+        // Child's extents returned to pools
+        assert_eq!(kernel.free_stack_extents.len(), 1,
+            "orphaned child stack extent returned");
+        assert_eq!(kernel.free_trap_extents.len(), 1,
+            "orphaned child trap extent returned");
+
+        eprintln!("8.3d: A exits → running child B terminated + reclaimed ✓");
+    }
+
+    #[test]
+    fn p83d_depth_first_grandchild() {
+        // Boot init, which spawns A.  A spawns B.
+        // init exits → terminate_orphans(init) finds A.
+        //   recurse: terminate_orphans(A) finds B → reclaim B.
+        //   then reclaim A.
+        // Depth-first: B reclaimed before A.
+
+        // Use boot to get prepare_process resources on init.
+        let (fabric, code_obj, code_size) = boot_test_fabric();
+        let info = valid_boot_info(code_obj, code_size);
+        let mut kernel = Kernel::new(fabric);
+        kernel.boot(&info).unwrap();
+        kernel.run(1000, 100);
+
+        // init is Zombie. Now manually create A and B as children.
+        // We can't easily make init spawn via SYS_SPAWN (it's a
+        // simple exit(99) program), so we set up the parent edges
+        // directly to test the orphan traversal logic.
+
+        // A: child of init (slot 0, gen 0)
+        let init_key = ProcessKey { slot: 0, generation: 0 };
+        let mut core_a = Anka64Core::new(AgentId(10), DomainId(999));
+        core_a.trap_vector = 0;
+        let a_key = kernel.spawn(core_a);
+        kernel.processes[a_key.slot].parent = Some(init_key);
+        kernel.processes[a_key.slot].state = ProcessState::Running;
+
+        // B: child of A
+        let mut core_b = Anka64Core::new(AgentId(11), DomainId(998));
+        core_b.trap_vector = 0;
+        let b_key = kernel.spawn(core_b);
+        kernel.processes[b_key.slot].parent = Some(a_key);
+        kernel.processes[b_key.slot].state = ProcessState::Running;
+
+        // Now terminate init's orphans
+        kernel.terminate_orphans(init_key);
+
+        // B should be reclaimed first (depth-first), then A
+        assert_eq!(kernel.processes[b_key.slot].state, ProcessState::Free,
+            "grandchild B must be reclaimed");
+        assert_eq!(kernel.processes[b_key.slot].generation, 1);
+
+        assert_eq!(kernel.processes[a_key.slot].state, ProcessState::Free,
+            "child A must be reclaimed");
+        assert_eq!(kernel.processes[a_key.slot].generation, 1);
+
+        // Both have no parent
+        assert!(kernel.processes[a_key.slot].parent.is_none());
+        assert!(kernel.processes[b_key.slot].parent.is_none());
+
+        eprintln!("8.3d: P→C→G depth-first: G reclaimed → C reclaimed ✓");
+    }
+
+    #[test]
+    fn p83d_parent_dies_zombie_child_reclaimed() {
+        // Parent dies, child is already a Zombie (exited but uncollected).
+        // terminate_orphans should reclaim the zombie child.
+        let (fabric, code_obj, code_size) = boot_test_fabric();
+        let info = valid_boot_info(code_obj, code_size);
+        let mut kernel = Kernel::new(fabric);
+        kernel.boot(&info).unwrap();
+        kernel.run(1000, 100);
+
+        let init_key = ProcessKey { slot: 0, generation: 0 };
+
+        // Zombie child of init
+        let mut core_z = Anka64Core::new(AgentId(20), DomainId(997));
+        core_z.trap_vector = 0;
+        let z_key = kernel.spawn(core_z);
+        kernel.processes[z_key.slot].parent = Some(init_key);
+        kernel.processes[z_key.slot].state = ProcessState::Zombie;
+        kernel.processes[z_key.slot].result = Some(ProcessResult::Exited(42));
+        kernel.processes[z_key.slot].exit_code = 42;
+
+        kernel.terminate_orphans(init_key);
+
+        assert_eq!(kernel.processes[z_key.slot].state, ProcessState::Free,
+            "zombie orphan must be reclaimed");
+        assert_eq!(kernel.processes[z_key.slot].generation, 1);
+        assert_eq!(kernel.processes[z_key.slot].exit_code, 0,
+            "exit_code cleared by reclaim");
+
+        eprintln!("8.3d: parent dies → zombie child reclaimed ✓");
+    }
+
+    #[test]
+    fn p83d_finish_process_gate_unknown_syscall() {
+        // Unknown syscall now goes through finish_process().
+        // Verify it produces a definitive ProcessResult, not a
+        // partial death state.
+        let mut fabric = Fabric::new(0x100000);
+
+        let text = fabric.alloc_object("text", 0x4000, ObjectKind::Memory);
+        let stack = fabric.alloc_object("stack", 0x4000, ObjectKind::Memory);
+        fabric.place_object(text, 0x000000);
+        fabric.place_object(stack, 0x020000);
+        let dom = fabric.create_domain();
+        fabric.grant(dom, stack, 0, 0x4000, Permissions::RW);
+
+        // Process issues syscall 0xFF (unknown) → should die cleanly
+        let mut asm = Asm64::new();
+        asm.movi(R0, 0xFF);
+        asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x20000, 0x4000, stack);
+        core.r[SP as usize] = 0x20000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.run(1000, 100);
+
+        assert_eq!(kernel.processes[0].state, ProcessState::Zombie);
+        assert_eq!(kernel.processes[0].exit_code, 0xDEAD,
+            "unknown syscall → 0xDEAD via finish_process");
+        assert!(kernel.processes[0].result.is_some(),
+            "unknown syscall must have a definitive ProcessResult");
+        assert_eq!(kernel.processes[0].result, Some(ProcessResult::ProtectionFault),
+            "unknown syscall treated as ProtectionFault");
+
+        eprintln!("8.3d: unknown syscall → finish_process(ProtectionFault) ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 8.3d.1: Process-slot reuse tests
+    //
+    //   Free(S, g+1) → Running(S, g+1)
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p83d1_slot_reuse_same_slot_new_gen() {
+        // Spawn process → reclaim → spawn again.
+        // Second spawn reuses slot 0 with generation 1.
+        let fabric = Fabric::new(0x100000);
+        let mut kernel = Kernel::new(fabric);
+
+        let core1 = Anka64Core::new(AgentId(0), DomainId(0));
+        let key1 = kernel.spawn(core1);
+        assert_eq!(key1.slot, 0);
+        assert_eq!(key1.generation, 0);
+        assert_eq!(kernel.processes.len(), 1);
+
+        // Kill and reclaim
+        kernel.finish_process(0, ProcessResult::Exited(0));
+        kernel.reclaim_process(0);
+        assert_eq!(kernel.processes[0].state, ProcessState::Free);
+        assert_eq!(kernel.processes[0].generation, 1);
+
+        // Spawn again — should reuse slot 0
+        let core2 = Anka64Core::new(AgentId(1), DomainId(1));
+        let key2 = kernel.spawn(core2);
+        assert_eq!(key2.slot, 0, "reused slot 0");
+        assert_eq!(key2.generation, 1, "generation preserved from Free(1)");
+        assert_eq!(kernel.processes.len(), 1, "no new slot appended");
+        assert_eq!(kernel.processes[0].state, ProcessState::Running);
+        assert_ne!(kernel.processes[0].pid, key1.slot as u64,
+            "fresh PID, not old PID");
+
+        // Old key rejected
+        assert!(kernel.validate_process_key(&key1).is_none(),
+            "old ProcessKey(0, 0) must be rejected");
+        // New key valid
+        assert!(kernel.validate_process_key(&key2).is_some(),
+            "new ProcessKey(0, 1) must be valid");
+
+        eprintln!("8.3d.1: Free(0,1) → Running(0,1), old key rejected ✓");
+    }
+
+    #[test]
+    fn p83d1_retired_slot_not_reused() {
+        // A slot at generation u32::MAX → Retired.
+        // spawn() must skip Retired slots and append.
+        let fabric = Fabric::new(0x100000);
+        let mut kernel = Kernel::new(fabric);
+
+        let core1 = Anka64Core::new(AgentId(0), DomainId(0));
+        kernel.spawn(core1);
+
+        // Force generation to MAX, kill, reclaim → Retired
+        kernel.processes[0].generation = u32::MAX;
+        kernel.finish_process(0, ProcessResult::Exited(0));
+        kernel.reclaim_process(0);
+        assert_eq!(kernel.processes[0].state, ProcessState::Retired);
+
+        // Spawn must skip slot 0 and append at slot 1
+        let core2 = Anka64Core::new(AgentId(1), DomainId(1));
+        let key2 = kernel.spawn(core2);
+        assert_eq!(key2.slot, 1, "Retired slot skipped, new slot appended");
+        assert_eq!(key2.generation, 0);
+        assert_eq!(kernel.processes.len(), 2);
+
+        eprintln!("8.3d.1: Retired slot skipped, new slot appended ✓");
+    }
+
+    #[test]
+    fn p83d1_multiple_reuse_cycles() {
+        // Spawn, reclaim, spawn, reclaim, spawn — all in slot 0.
+        // Generation advances: 0 → 1 → 2.
+        let fabric = Fabric::new(0x100000);
+        let mut kernel = Kernel::new(fabric);
+
+        for expected_gen in 0..3u32 {
+            let core = Anka64Core::new(AgentId(expected_gen as u64), DomainId(0));
+            let key = kernel.spawn(core);
+            assert_eq!(key.slot, 0);
+            assert_eq!(key.generation, expected_gen);
+            assert_eq!(kernel.processes.len(), 1, "never grows beyond 1 slot");
+
+            kernel.finish_process(0, ProcessResult::Exited(expected_gen as u64));
+            kernel.reclaim_process(0);
+        }
+
+        assert_eq!(kernel.processes[0].state, ProcessState::Free);
+        assert_eq!(kernel.processes[0].generation, 3);
+
+        eprintln!("8.3d.1: 3 reuse cycles in slot 0, generation 0→1→2→Free(3) ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 8.3e: Tiny ankad via boot
+    //
+    // ankad (init) is booted, spawns two children:
+    //   A: clean exit(42)
+    //   B: deliberate protection fault (load from unmapped 0xF0000)
+    //
+    // ankad WAITs on both and writes the four result words
+    // (tag_a, detail_a, tag_b, detail_b) to byte_output.
+    //
+    // Test verifies:
+    //   tag_a = 0  (Exited), detail_a = 42
+    //   tag_b = 2  (ProtectionFault), detail_b = 0
+    //   child A reclaimed to Free
+    //   child B reclaimed to Free
+    //   ankad's own resources exist (it's still a booted process)
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p83e_ankad_spawns_clean_and_faulting() {
+        let mut fabric = Fabric::new(0x400000);
+
+        // --- Child A code object: MOVI R0, 42; HALT (implicit SYS_EXIT) ---
+        let child_a_obj = fabric.alloc_object("child_a_code", 0x1000, ObjectKind::Memory);
+        fabric.place_object(child_a_obj, 0x080000);
+        {
+            let mut asm = Asm64::new();
+            asm.movi(R0, 42);
+            asm.halt();
+            fabric.initialize_object(child_a_obj, 0, &asm.to_bytes());
+        }
+        fabric.seal_object(child_a_obj);
+
+        // --- Child B code object: LD R0, [0xF0000] → fault ---
+        let child_b_obj = fabric.alloc_object("child_b_code", 0x1000, ObjectKind::Memory);
+        fabric.place_object(child_b_obj, 0x090000);
+        {
+            let mut asm = Asm64::new();
+            // Load from unmapped address 0xF0000 → ProtectionFault
+            asm.movi(R1, 0xF000_u32 as i32);  // 0xF000 fits 18-bit
+            // Shift left by 4 to get 0xF0000 — but we don't have SHL.
+            // Instead: children are mapped with code at vaddr=0.
+            // Load from vaddr 0xF000 which exceeds their code object.
+            // Actually child_b code size = 8 bytes, child maps at 0.
+            // Address 0xF000 is unmapped in child's address map → fault.
+            asm.ld(R0, R1, 0);  // LD R0, [R1+0] where R1=0xF000
+            asm.halt();
+            fabric.initialize_object(child_b_obj, 0, &asm.to_bytes());
+        }
+        fabric.seal_object(child_b_obj);
+
+        // --- ankad code: spawn A, spawn B, wait A, wait B, write results ---
+        let ankad_obj = fabric.alloc_object("ankad_code", 0x2000, ObjectKind::Memory);
+        fabric.place_object(ankad_obj, 0x000000);
+        let child_a_code_size: i32 = 8;
+        let child_b_code_size: i32 = 8;
+        {
+            let mut asm = Asm64::new();
+
+            // SPAWN child A (code at vaddr 0x5000, size=8)
+            asm.movi(R1, 0x5000);                // code_vaddr for A
+            asm.movi(R2, child_a_code_size);     // code_size
+            asm.movi(R3, 0);                     // lit_start
+            asm.movi(R0, SYS_SPAWN as i32);
+            asm.trap(0);
+            asm.mov(R8, R0);                     // R8 = handle_a
+
+            // SPAWN child B (code at vaddr 0x6000, size=8)
+            asm.movi(R1, 0x6000);                // code_vaddr for B
+            asm.movi(R2, child_b_code_size);
+            asm.movi(R3, 0);
+            asm.movi(R0, SYS_SPAWN as i32);
+            asm.trap(0);
+            asm.mov(R9, R0);                     // R9 = handle_b
+
+            // WAIT on child A
+            asm.mov(R1, R8);                     // handle_a
+            asm.movi(R0, SYS_WAIT as i32);
+            asm.trap(0);
+            // R0 = tag_a, R1 = detail_a
+            asm.mov(R4, R0);                     // R4 = tag_a
+            asm.mov(R5, R1);                     // R5 = detail_a
+
+            // WAIT on child B
+            asm.mov(R1, R9);                     // handle_b
+            asm.movi(R0, SYS_WAIT as i32);
+            asm.trap(0);
+            // R0 = tag_b, R1 = detail_b
+            asm.mov(R6, R0);                     // R6 = tag_b
+            asm.mov(R7, R1);                     // R7 = detail_b
+
+            // Store results at stack base (0x10000) for SYS_WRITE
+            asm.movi(R10, 0x10000_u32 as i32);   // stack base
+            asm.st(R4, R10, 0);                   // [0x10000] = tag_a
+            asm.st(R5, R10, 8);                   // [0x10008] = detail_a
+            asm.st(R6, R10, 16);                  // [0x10010] = tag_b
+            asm.st(R7, R10, 24);                  // [0x10018] = detail_b
+
+            // SYS_WRITE(addr=0x10000, len=32, 0)
+            asm.movi(R1, 0x10000_u32 as i32);
+            asm.movi(R2, 32);
+            asm.movi(R3, 0);
+            asm.movi(R0, SYS_WRITE as i32);
+            asm.trap(0);
+
+            // SYS_EXIT(0) — success
+            asm.movi(R1, 0);
+            asm.movi(R0, SYS_EXIT as i32);
+            asm.trap(0);
+
+            let code_bytes = asm.to_bytes();
+            fabric.initialize_object(ankad_obj, 0, &code_bytes);
+        }
+        fabric.seal_object(ankad_obj);
+
+        // --- Boot descriptor ---
+        let code_size = 0x2000_u64;  // ankad obj size
+        let info = BootInfo {
+            image: BootImage {
+                obj: ankad_obj,
+                code_offset: 0,
+                code_size,
+                entry: 0,
+                lit_start: 0,
+            },
+            // Grant ankad RX on child code objects (for SYS_SPAWN derivation)
+            grants: vec![
+                BootGrant {
+                    obj: child_a_obj,
+                    offset: 0,
+                    size: 0x1000,
+                    perms: Permissions::RX,
+                },
+                BootGrant {
+                    obj: child_b_obj,
+                    offset: 0,
+                    size: 0x1000,
+                    perms: Permissions::RX,
+                },
+            ],
+            // Map child code objects into ankad's address space
+            maps: vec![
+                BootMap {
+                    vaddr: 0x5000,
+                    size: 0x1000,
+                    obj: child_a_obj,
+                    obj_offset: 0,
+                },
+                BootMap {
+                    vaddr: 0x6000,
+                    size: 0x1000,
+                    obj: child_b_obj,
+                    obj_offset: 0,
+                },
+            ],
+            code_vaddr: 0,
+            stack_vaddr: 0x10000,
+            stack_size: 0x4000,
+            trap_vaddr: 0x20000,
+        };
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.boot(&info).unwrap();
+        kernel.run(100000, 1000);
+
+        // --- Verify ankad results ---
+        assert!(kernel.processes[0].exited(), "ankad should have exited");
+        assert_eq!(kernel.processes[0].exit_code, 0,
+            "ankad exits with 0 (both children supervised)");
+
+        // Decode byte_output: 4 × u64 LE
+        assert_eq!(kernel.byte_output.len(), 32,
+            "ankad wrote 32 bytes (4 × u64)");
+        let read_u64 = |off: usize| -> u64 {
+            u64::from_le_bytes(kernel.byte_output[off..off+8].try_into().unwrap())
+        };
+        let tag_a    = read_u64(0);
+        let detail_a = read_u64(8);
+        let tag_b    = read_u64(16);
+        let detail_b = read_u64(24);
+
+        assert_eq!(tag_a, 0, "child A: Exited tag");
+        assert_eq!(detail_a, 42, "child A: exit code 42");
+        assert_eq!(tag_b, 2, "child B: ProtectionFault tag");
+        assert_eq!(detail_b, 0, "child B: fault detail = 0");
+
+        // Both children reclaimed (they were collected via WAIT)
+        assert!(kernel.processes.len() >= 3,
+            "ankad + 2 children = at least 3 process slots");
+
+        // Children are in slot 1 and 2 (or reused).
+        // After WAIT collection + reclaim, they should be Free.
+        let child_slots: Vec<usize> = (1..kernel.processes.len())
+            .filter(|&i| kernel.processes[i].state == ProcessState::Free)
+            .collect();
+        assert!(child_slots.len() >= 2,
+            "both children should be reclaimed to Free, found {} Free slots",
+            child_slots.len());
+
+        // ankad's own resources still exist (it hasn't been reclaimed)
+        assert!(kernel.processes[0].resources.is_some(),
+            "ankad's OwnedResources intact while it's still a zombie");
+
+        // Extents from both children returned to pools
+        assert!(kernel.free_stack_extents.len() >= 2,
+            "2 child stack extents returned");
+        assert!(kernel.free_trap_extents.len() >= 2,
+            "2 child trap extents returned");
+
+        eprintln!("8.3e: ankad ✓");
+        eprintln!("  child A: tag={} detail={} (Exited(42))", tag_a, detail_a);
+        eprintln!("  child B: tag={} detail={} (ProtectionFault)", tag_b, detail_b);
+        eprintln!("  {} Free child slots, {} stack extents, {} trap extents",
+            child_slots.len(),
+            kernel.free_stack_extents.len(),
+            kernel.free_trap_extents.len());
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 8.3f: Restart faulting B into same slot
+    //
+    // ankad spawns A (clean) and B₁ (faulting).
+    // Collects B₁ first → B₁'s slot becomes Free.
+    // Spawns B₂ (same code) → reuses B₁'s slot.
+    // Collects B₂, then A.
+    //
+    // Proves:
+    //   B₁=(S,g), B₂=(S,g+1)
+    //   PID(B₁) ≠ PID(B₂)
+    //   different LifecycleHandle
+    //   same fault behavior
+    //   reused scrubbed physical extents
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p83f_restart_faulting_b_same_slot() {
+        let mut fabric = Fabric::new(0x400000);
+
+        // --- Child A code: exit(42) ---
+        let child_a_obj = fabric.alloc_object("child_a_code", 0x1000, ObjectKind::Memory);
+        fabric.place_object(child_a_obj, 0x080000);
+        {
+            let mut asm = Asm64::new();
+            asm.movi(R0, 42);
+            asm.halt();
+            fabric.initialize_object(child_a_obj, 0, &asm.to_bytes());
+        }
+        fabric.seal_object(child_a_obj);
+
+        // --- Child B code: LD from unmapped → ProtectionFault ---
+        let child_b_obj = fabric.alloc_object("child_b_code", 0x1000, ObjectKind::Memory);
+        fabric.place_object(child_b_obj, 0x090000);
+        {
+            let mut asm = Asm64::new();
+            asm.movi(R1, 0xF000);
+            asm.ld(R0, R1, 0);
+            asm.halt();
+            fabric.initialize_object(child_b_obj, 0, &asm.to_bytes());
+        }
+        fabric.seal_object(child_b_obj);
+
+        // --- ankad code ---
+        //
+        // spawn A → spawn B₁ → WAIT B₁ → spawn B₂ → WAIT B₂ → WAIT A
+        // write 8×u64: [tag_b1, detail_b1, tag_b2, detail_b2,
+        //               tag_a, detail_a, handle_b1, handle_b2]
+        let ankad_obj = fabric.alloc_object("ankad_code", 0x2000, ObjectKind::Memory);
+        fabric.place_object(ankad_obj, 0x000000);
+        {
+            let mut asm = Asm64::new();
+
+            // SPAWN A (code at 0x5000)
+            asm.movi(R1, 0x5000);
+            asm.movi(R2, 8);
+            asm.movi(R3, 0);
+            asm.movi(R0, SYS_SPAWN as i32);
+            asm.trap(0);
+            asm.mov(R8, R0);           // R8 = handle_a
+
+            // SPAWN B₁ (code at 0x6000)
+            asm.movi(R1, 0x6000);
+            asm.movi(R2, 12);          // 3 instructions × 4 bytes
+            asm.movi(R3, 0);
+            asm.movi(R0, SYS_SPAWN as i32);
+            asm.trap(0);
+            asm.mov(R9, R0);           // R9 = handle_b1
+
+            // WAIT B₁ (collect faulting child first)
+            asm.mov(R1, R9);
+            asm.movi(R0, SYS_WAIT as i32);
+            asm.trap(0);
+            asm.mov(R4, R0);           // R4 = tag_b1
+            asm.mov(R5, R1);           // R5 = detail_b1
+
+            // SPAWN B₂ (same code, should reuse B₁'s slot)
+            asm.movi(R1, 0x6000);
+            asm.movi(R2, 12);
+            asm.movi(R3, 0);
+            asm.movi(R0, SYS_SPAWN as i32);
+            asm.trap(0);
+            asm.mov(R10, R0);          // R10 = handle_b2
+
+            // WAIT B₂
+            asm.mov(R1, R10);
+            asm.movi(R0, SYS_WAIT as i32);
+            asm.trap(0);
+            asm.mov(R6, R0);           // R6 = tag_b2
+            asm.mov(R7, R1);           // R7 = detail_b2
+
+            // WAIT A (collect clean service last)
+            asm.mov(R1, R8);
+            asm.movi(R0, SYS_WAIT as i32);
+            asm.trap(0);
+            // R0 = tag_a, R1 = detail_a
+            asm.mov(R11, R0);          // R11 = tag_a
+            asm.mov(R12, R1);          // R12 = detail_a
+
+            // Store 8 × u64 at stack base (0x10000)
+            asm.movi(R3, 0x10000_u32 as i32);
+            asm.st(R4, R3, 0);         // tag_b1
+            asm.st(R5, R3, 8);         // detail_b1
+            asm.st(R6, R3, 16);        // tag_b2
+            asm.st(R7, R3, 24);        // detail_b2
+            asm.st(R11, R3, 32);       // tag_a
+            asm.st(R12, R3, 40);       // detail_a
+            asm.st(R9, R3, 48);        // handle_b1
+            asm.st(R10, R3, 56);       // handle_b2
+
+            // SYS_WRITE(0x10000, 64, 0)
+            asm.movi(R1, 0x10000_u32 as i32);
+            asm.movi(R2, 64);
+            asm.movi(R3, 0);
+            asm.movi(R0, SYS_WRITE as i32);
+            asm.trap(0);
+
+            // SYS_EXIT(0)
+            asm.movi(R1, 0);
+            asm.movi(R0, SYS_EXIT as i32);
+            asm.trap(0);
+
+            fabric.initialize_object(ankad_obj, 0, &asm.to_bytes());
+        }
+        fabric.seal_object(ankad_obj);
+
+        // --- Boot descriptor ---
+        let info = BootInfo {
+            image: BootImage {
+                obj: ankad_obj,
+                code_offset: 0,
+                code_size: 0x2000,
+                entry: 0,
+                lit_start: 0,
+            },
+            grants: vec![
+                BootGrant { obj: child_a_obj, offset: 0, size: 0x1000, perms: Permissions::RX },
+                BootGrant { obj: child_b_obj, offset: 0, size: 0x1000, perms: Permissions::RX },
+            ],
+            maps: vec![
+                BootMap { vaddr: 0x5000, size: 0x1000, obj: child_a_obj, obj_offset: 0 },
+                BootMap { vaddr: 0x6000, size: 0x1000, obj: child_b_obj, obj_offset: 0 },
+            ],
+            code_vaddr: 0,
+            stack_vaddr: 0x10000,
+            stack_size: 0x4000,
+            trap_vaddr: 0x20000,
+        };
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.boot(&info).unwrap();
+        kernel.run(100000, 1000);
+
+        // --- Verify ankad completed ---
+        assert!(kernel.processes[0].exited(), "ankad should have exited");
+        assert_eq!(kernel.processes[0].exit_code, 0, "ankad exit(0)");
+        assert_eq!(kernel.byte_output.len(), 64, "ankad wrote 64 bytes (8×u64)");
+
+        let read_u64 = |off: usize| -> u64 {
+            u64::from_le_bytes(kernel.byte_output[off..off+8].try_into().unwrap())
+        };
+        let tag_b1    = read_u64(0);
+        let detail_b1 = read_u64(8);
+        let tag_b2    = read_u64(16);
+        let detail_b2 = read_u64(24);
+        let tag_a     = read_u64(32);
+        let detail_a  = read_u64(40);
+        let handle_b1 = read_u64(48);
+        let handle_b2 = read_u64(56);
+
+        // Both B incarnations faulted identically
+        assert_eq!(tag_b1, 2, "B₁: ProtectionFault");
+        assert_eq!(detail_b1, 0);
+        assert_eq!(tag_b2, 2, "B₂: ProtectionFault");
+        assert_eq!(detail_b2, 0);
+
+        // A exited cleanly
+        assert_eq!(tag_a, 0, "A: Exited");
+        assert_eq!(detail_a, 42, "A: exit code 42");
+
+        // Handles differ (different lifecycle entries)
+        assert_ne!(handle_b1, handle_b2,
+            "B₁ and B₂ have different LifecycleHandles");
+
+        // --- Host-side verification: slot reuse ---
+        // B₁ was spawned second (slot 2 if A is slot 1, or slot 1 if
+        // A took the other). After WAIT B₁ → reclaim → Free.
+        // B₂ reuses that Free slot.
+        //
+        // Find the child slot that ended at generation 2
+        // (spawned at gen 0, reclaimed to gen 1 = Free(1),
+        // respawned at gen 1, reclaimed to gen 2 = Free(2)).
+        let reused_slot = (1..kernel.processes.len())
+            .find(|&i| kernel.processes[i].generation == 2)
+            .expect("one child slot should be at generation 2 (two incarnations)");
+
+        assert_eq!(kernel.processes[reused_slot].state, ProcessState::Free,
+            "reused slot is Free after final collection");
+
+        // The other child slot (A) was used once: gen 0 → reclaimed to gen 1
+        let a_slot = (1..kernel.processes.len())
+            .find(|&i| i != reused_slot && kernel.processes[i].generation == 1)
+            .expect("A's slot should be at generation 1 (one incarnation)");
+        assert_eq!(kernel.processes[a_slot].state, ProcessState::Free);
+
+        // Process table didn't grow beyond 3 entries
+        // (ankad + A slot + B slot, B₂ reused B₁'s slot)
+        assert_eq!(kernel.processes.len(), 3,
+            "no extra slot appended — B₂ reused B₁'s slot");
+
+        eprintln!("8.3f: ankad restart-B ✓");
+        eprintln!("  B₁: tag={} detail={} handle={:#x}", tag_b1, detail_b1, handle_b1);
+        eprintln!("  B₂: tag={} detail={} handle={:#x}", tag_b2, detail_b2, handle_b2);
+        eprintln!("  A:  tag={} detail={}", tag_a, detail_a);
+        eprintln!("  B slot {}: gen 0 → Free(1) → Running(1) → Free(2)", reused_slot);
+        eprintln!("  A slot {}: gen 0 → Free(1)", a_slot);
+        eprintln!("  process table size: {} (no growth)", kernel.processes.len());
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 8.3g: 100-cycle steady-state conservation test
+    //
+    // ankad boots, performs 1 warm-up cycle + 100 steady-state
+    // cycles of spawn-B → wait-B → verify-fault.
+    //
+    // Proves: the supervisor reaches a resource-steady state and
+    // can continue restarting services without cumulative resource
+    // consumption, subject only to explicit finite identifier
+    // exhaustion (PID is u64, generation is u32).
+    //
+    // Formal backing:
+    //   Kleis Petri net: M_Free →(spawn)→...→(reclaim)→ M_Free
+    //   Extent P-invariants: SE+FSE=1, TE+FTE=1
+    //   This test: 100 concrete cycles with no drift
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p83g_100_cycle_steady_state() {
+        let mut fabric = Fabric::new(0x400000);
+
+        // --- Child B code: LD from unmapped → ProtectionFault ---
+        let child_b_obj = fabric.alloc_object("child_b_code", 0x1000, ObjectKind::Memory);
+        fabric.place_object(child_b_obj, 0x080000);
+        {
+            let mut asm = Asm64::new();
+            asm.movi(R1, 0xF000);
+            asm.ld(R0, R1, 0);
+            asm.halt();
+            fabric.initialize_object(child_b_obj, 0, &asm.to_bytes());
+        }
+        fabric.seal_object(child_b_obj);
+
+        // --- ankad code: 1 warm-up + 100 steady-state cycles ---
+        let ankad_obj = fabric.alloc_object("ankad_code", 0x2000, ObjectKind::Memory);
+        fabric.place_object(ankad_obj, 0x000000);
+        let child_code_size: i32 = 12;  // 3 instructions × 4 bytes
+        {
+            let mut asm = Asm64::new();
+
+            // --- Warm-up cycle ---
+            // SPAWN B
+            asm.movi(R1, 0x5000);
+            asm.movi(R2, child_code_size);
+            asm.movi(R3, 0);
+            asm.movi(R0, SYS_SPAWN as i32);
+            asm.trap(0);
+            asm.mov(R8, R0);           // handle
+
+            // WAIT B (warm-up)
+            asm.mov(R1, R8);
+            asm.movi(R0, SYS_WAIT as i32);
+            asm.trap(0);
+            // R0=tag — don't check warm-up, just consume
+
+            // --- Steady-state loop ---
+            asm.movi(R4, 100);         // counter = 100
+
+            let loop_top = asm.here();
+
+            // SPAWN B
+            asm.movi(R1, 0x5000);
+            asm.movi(R2, child_code_size);
+            asm.movi(R3, 0);
+            asm.movi(R0, SYS_SPAWN as i32);
+            asm.trap(0);
+            asm.mov(R8, R0);           // handle
+
+            // WAIT B
+            asm.mov(R1, R8);
+            asm.movi(R0, SYS_WAIT as i32);
+            asm.trap(0);
+            // R0 = tag
+
+            // Verify ProtectionFault (tag == 2)
+            asm.cmpi(R0, 2);
+            // If tag != 2, jump to error_exit
+            let error_patch = asm.here();
+            asm.bcc(Cond::Ne, 0);      // placeholder, patch later
+
+            // Decrement counter
+            asm.subi(R4, R4, 1);
+            asm.cmpi(R4, 0);
+            let back_offset = loop_top - asm.here() - 1;
+            asm.bcc(Cond::Ne, back_offset);
+
+            // --- Success: write cycle count + exit(0) ---
+            // Store the final counter (should be 0) on stack for SYS_WRITE
+            asm.movi(R5, 0x10000_u32 as i32);
+            asm.st(R4, R5, 0);         // [0x10000] = 0 (counter exhausted)
+            asm.movi(R1, 0x10000_u32 as i32);
+            asm.movi(R2, 8);
+            asm.movi(R3, 0);
+            asm.movi(R0, SYS_WRITE as i32);
+            asm.trap(0);
+
+            asm.movi(R1, 0);
+            asm.movi(R0, SYS_EXIT as i32);
+            asm.trap(0);
+
+            // --- Error exit ---
+            let error_exit = asm.here();
+            // Patch the Ne branch to jump here
+            let patch_offset = error_exit - error_patch - 1;
+            asm.words_mut()[error_patch as usize] =
+                asm.words_mut()[error_patch as usize]
+                    & 0xFFC0_0000  // clear immediate field
+                    | ((patch_offset as u32) & 0x003F_FFFF);
+
+            // Actually, let me just use a simpler approach — re-emit
+            // the branch with the correct offset. The bcc encoding puts
+            // the offset in bits [21:0] (22-bit signed).
+            // But modifying in-place is fragile. Let me restructure.
+
+            // ... I'll use a forward-reference pattern instead.
+            drop(asm);
+
+            // Rebuild with known layout
+            let mut asm = Asm64::new();
+
+            // --- Warm-up cycle ---
+            asm.movi(R1, 0x5000);             // 0
+            asm.movi(R2, child_code_size);    // 1
+            asm.movi(R3, 0);                  // 2
+            asm.movi(R0, SYS_SPAWN as i32);  // 3
+            asm.trap(0);                       // 4
+            asm.mov(R8, R0);                   // 5
+
+            asm.mov(R1, R8);                   // 6
+            asm.movi(R0, SYS_WAIT as i32);   // 7
+            asm.trap(0);                       // 8
+
+            // --- Loop init ---
+            asm.movi(R4, 100);                 // 9
+
+            // --- loop_top = 10 ---
+            asm.movi(R1, 0x5000);             // 10
+            asm.movi(R2, child_code_size);    // 11
+            asm.movi(R3, 0);                  // 12
+            asm.movi(R0, SYS_SPAWN as i32);  // 13
+            asm.trap(0);                       // 14
+            asm.mov(R8, R0);                   // 15
+
+            asm.mov(R1, R8);                   // 16
+            asm.movi(R0, SYS_WAIT as i32);   // 17
+            asm.trap(0);                       // 18
+            // R0 = tag
+
+            asm.cmpi(R0, 2);                  // 19
+            // BCC Ne → error_exit (word 29)
+            // from word 20, target word 29, offset = 29 - 20 - 1 = 8
+            asm.bcc(Cond::Ne, 8);             // 20
+
+            asm.subi(R4, R4, 1);              // 21
+            asm.cmpi(R4, 0);                  // 22
+            // BCC Ne → loop_top (word 10)
+            // from word 23, target word 10, offset = 10 - 23 - 1 = -14
+            asm.bcc(Cond::Ne, -14);           // 23
+
+            // --- Success path ---
+            asm.movi(R5, 0x10000_u32 as i32); // 24
+            asm.st(R4, R5, 0);                 // 25  [0x10000] = 0
+            asm.movi(R1, 0x10000_u32 as i32); // 26
+            asm.movi(R2, 8);                   // 27
+            asm.movi(R3, 0);                   // 28
+            asm.movi(R0, SYS_WRITE as i32);   // 29
+            asm.trap(0);                        // 30
+
+            asm.movi(R1, 0);                   // 31
+            asm.movi(R0, SYS_EXIT as i32);    // 32
+            asm.trap(0);                        // 33
+
+            // --- Error exit (word 29... wait, that conflicts) ---
+            // Let me recalculate. Error exit starts at word 34.
+            // BCC Ne at word 20: offset = 34 - 20 - 1 = 13
+
+            // Hmm, I numbered wrong. Let me just re-count the
+            // error BCC offset. The SYS_WRITE sequence takes words
+            // 24-30, then SYS_EXIT takes words 31-33.
+            // Error exit at word 34.
+
+            // Fix: BCC Ne at word 20 should jump to word 34.
+            // offset = 34 - 20 - 1 = 13
+
+            // But I already emitted bcc(Ne, 8) at word 20.
+            // Need to patch it.
+            // Actually the bcc(Ne, 8) at word 20 would jump to 20+1+8=29
+            // which is SYS_WRITE. That's wrong.
+
+            // Let me just put error_exit BEFORE success and restructure.
+            drop(asm);
+
+            // Final clean version with error exit via unconditional path
+            let mut asm = Asm64::new();
+
+            // --- Warm-up cycle (words 0-8) ---
+            asm.movi(R1, 0x5000);             // 0
+            asm.movi(R2, child_code_size);    // 1
+            asm.movi(R3, 0);                  // 2
+            asm.movi(R0, SYS_SPAWN as i32);  // 3
+            asm.trap(0);                       // 4
+            asm.mov(R8, R0);                   // 5
+            asm.mov(R1, R8);                   // 6
+            asm.movi(R0, SYS_WAIT as i32);   // 7
+            asm.trap(0);                       // 8
+
+            // --- Loop init (word 9) ---
+            asm.movi(R4, 100);                 // 9
+
+            // --- loop_top = word 10 ---
+            asm.movi(R1, 0x5000);             // 10
+            asm.movi(R2, child_code_size);    // 11
+            asm.movi(R3, 0);                  // 12
+            asm.movi(R0, SYS_SPAWN as i32);  // 13
+            asm.trap(0);                       // 14
+            asm.mov(R8, R0);                   // 15
+            asm.mov(R1, R8);                   // 16
+            asm.movi(R0, SYS_WAIT as i32);   // 17
+            asm.trap(0);                       // 18
+
+            // Verify tag == 2 (ProtectionFault)
+            asm.cmpi(R0, 2);                  // 19
+            // If tag == 2, skip error exit (jump over 3 error insns)
+            asm.bcc(Cond::Eq, 2);             // 20 → word 23
+
+            // Error exit (words 21-23)
+            asm.movi(R1, 1);                   // 21
+            asm.movi(R0, SYS_EXIT as i32);    // 22
+            asm.trap(0);                        // 23 (unreachable on Eq)
+
+            // Continue loop (word 24, reached from bcc Eq at 20)
+            // Wait — bcc(Eq, 2) at word 20 → target = 20 + 1 + 2 = 23.
+            // That lands on TRAP which IS the error exit. Off by one.
+            // bcc offset: PC_next + offset = (20+1) + offset
+            // Want to land at word 24 (post-error).
+            // offset = 24 - 21 = 3
+            drop(asm);
+
+            let mut asm = Asm64::new();
+
+            // Warm-up (words 0-8)
+            asm.movi(R1, 0x5000);
+            asm.movi(R2, child_code_size);
+            asm.movi(R3, 0);
+            asm.movi(R0, SYS_SPAWN as i32);
+            asm.trap(0);
+            asm.mov(R8, R0);
+            asm.mov(R1, R8);
+            asm.movi(R0, SYS_WAIT as i32);
+            asm.trap(0);
+
+            // Loop init (word 9)
+            asm.movi(R4, 100);
+
+            // loop_top (word 10)
+            asm.movi(R1, 0x5000);
+            asm.movi(R2, child_code_size);
+            asm.movi(R3, 0);
+            asm.movi(R0, SYS_SPAWN as i32);
+            asm.trap(0);                       // 14
+            asm.mov(R8, R0);                   // 15
+            asm.mov(R1, R8);                   // 16
+            asm.movi(R0, SYS_WAIT as i32);   // 17
+            asm.trap(0);                       // 18
+
+            asm.cmpi(R0, 2);                  // 19
+            asm.bcc(Cond::Eq, 4);             // 20: PC=20*4, target=20*4+(4*4)=24*4 ✓
+
+            // Error exit (words 21-23)
+            asm.movi(R1, 1);                   // 21
+            asm.movi(R0, SYS_EXIT as i32);    // 22
+            asm.trap(0);                        // 23
+
+            // Decrement + loop (words 24-27)
+            asm.subi(R4, R4, 1);              // 24
+            asm.cmpi(R4, 0);                  // 25
+            // Back to loop_top (word 10): offset = 10 - 26 = -16
+            asm.bcc(Cond::Ne, -16);           // 26: PC=26*4, target=26*4+(-16*4)=10*4 ✓
+
+            // Success: write + exit (words 27+)
+            asm.movi(R5, 0x10000_u32 as i32); // 27
+            asm.st(R4, R5, 0);                 // 28
+            asm.movi(R1, 0x10000_u32 as i32); // 29
+            asm.movi(R2, 8);                   // 30
+            asm.movi(R3, 0);                   // 31
+            asm.movi(R0, SYS_WRITE as i32);   // 32
+            asm.trap(0);                        // 33
+
+            asm.movi(R1, 0);                   // 34
+            asm.movi(R0, SYS_EXIT as i32);    // 35
+            asm.trap(0);                        // 36
+
+            fabric.initialize_object(ankad_obj, 0, &asm.to_bytes());
+        }
+        fabric.seal_object(ankad_obj);
+
+        // --- Boot descriptor ---
+        let info = BootInfo {
+            image: BootImage {
+                obj: ankad_obj,
+                code_offset: 0,
+                code_size: 0x2000,
+                entry: 0,
+                lit_start: 0,
+            },
+            grants: vec![
+                BootGrant { obj: child_b_obj, offset: 0, size: 0x1000, perms: Permissions::RX },
+            ],
+            maps: vec![
+                BootMap { vaddr: 0x5000, size: 0x1000, obj: child_b_obj, obj_offset: 0 },
+            ],
+            code_vaddr: 0,
+            stack_vaddr: 0x10000,
+            stack_size: 0x4000,
+            trap_vaddr: 0x20000,
+        };
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.boot(&info).unwrap();
+
+        // Capture baseline after boot (before any child cycles)
+        let domains_at_boot = kernel.fabric.domains.len();
+        let objects_at_boot = kernel.fabric.objects.len();
+
+        kernel.run(10000000, 10000);
+
+        // --- Verify ankad completed ---
+        assert!(kernel.processes[0].exited(), "ankad should have exited");
+        assert_eq!(kernel.processes[0].exit_code, 0,
+            "ankad exit(0) — all 100 cycles verified ProtectionFault");
+        assert_eq!(kernel.byte_output.len(), 8, "ankad wrote 8 bytes");
+        let counter = u64::from_le_bytes(
+            kernel.byte_output[0..8].try_into().unwrap());
+        assert_eq!(counter, 0, "loop counter exhausted to 0");
+
+        // --- Steady-state conservation assertions ---
+
+        // Process table: ankad (slot 0) + one reused child slot = 2 entries
+        assert_eq!(kernel.processes.len(), 2,
+            "process table size stable at 2 (ankad + 1 reused child slot)");
+
+        // Child slot generation = 101 (warm-up g=0, then 100 more cycles,
+        // each reclaim advances generation: final = 101 as Free(101))
+        assert_eq!(kernel.processes[1].state, ProcessState::Free);
+        assert_eq!(kernel.processes[1].generation, 101,
+            "child slot generation = 101 (1 warm-up + 100 cycles)");
+
+        // next_phys: should not have grown beyond the warm-up allocation.
+        // The warm-up allocates stack(0x4000) + trap(0x1000) = 0x5000.
+        // All subsequent cycles reuse from the free pools.
+        // boot allocates ankad's stack + trap first, then warm-up child
+        // allocates its stack + trap.
+        // After that, every cycle reuses the child's returned extents.
+        // next_phys should be boot_base + ankad_alloc + warm-up_child_alloc.
+        let expected_next_phys = 0x100000  // Kernel::new base
+            + 0x4000                        // ankad stack
+            + 0x1000                        // ankad trap
+            + 0x4000                        // warm-up child stack
+            + 0x1000;                       // warm-up child trap
+        assert_eq!(kernel.next_phys, expected_next_phys,
+            "next_phys unchanged after warm-up — no physical extent leaks");
+
+        // Domains: ankad's domain + 0 child domains (all destroyed)
+        // Plus the implicit domains for the sealed code objects? Let me check.
+        // Actually boot creates ankad's domain. Children get their own via
+        // create_child → create_domain, but those are destroyed by reclaim.
+        // The boot code objects don't have domains — they're just objects.
+        // So only ankad's domain should survive.
+        // But ankad is Zombie, not reclaimed yet. Its domain survives.
+        let domains_at_end = kernel.fabric.domains.len();
+        assert_eq!(domains_at_end, domains_at_boot,
+            "domain count unchanged: no child domains leaked");
+
+        // Objects: same count as after boot (sealed code objects +
+        // ankad's stack/trap). No child stack/trap objects leaked.
+        let objects_at_end = kernel.fabric.objects.len();
+        assert_eq!(objects_at_end, objects_at_boot,
+            "object count unchanged: no child objects leaked");
+
+        // Free extent pools: exactly 1 stack + 1 trap (from last child)
+        assert_eq!(kernel.free_stack_extents.len(), 1,
+            "1 stack extent in pool (last child's)");
+        assert_eq!(kernel.free_trap_extents.len(), 1,
+            "1 trap extent in pool (last child's)");
+
+        // PID advanced: 1 (ankad) + 1 (warm-up) + 100 (cycles) = 102
+        // next_pid should be at least 102 (ankad itself is PID 0).
+        // Actually ankad is PID 0 from boot's spawn. warm-up child
+        // gets PID 1. Then 100 more children get PIDs 2..101.
+        // next_pid = 102.
+        // Wait — boot calls spawn() which also increments next_pid.
+        // Let me think. boot → prepare_process → spawn(core).
+        // spawn: next_pid starts at 0, ankad gets PID 0, next_pid = 1.
+        // warm-up child: spawn inside prepare_process → PID 1, next_pid = 2.
+        // 100 cycles: PIDs 2..101, next_pid = 102.
+        // That's the total: 102 PIDs consumed.
+        // But with slot reuse, warm-up child and cycle 1 child both use
+        // spawn → new PID. So yes, 102 total.
+
+        eprintln!("8.3g: 100-cycle steady-state conservation ✓");
+        eprintln!("  ankad exit_code = 0 (all cycles verified ProtectionFault)");
+        eprintln!("  process table size: {}", kernel.processes.len());
+        eprintln!("  child slot generation: {}", kernel.processes[1].generation);
+        eprintln!("  next_phys: {:#x} (expected {:#x})", kernel.next_phys, expected_next_phys);
+        eprintln!("  domains: {} (boot: {})", domains_at_end, domains_at_boot);
+        eprintln!("  objects: {} (boot: {})", objects_at_end, objects_at_boot);
+        eprintln!("  free_stack_extents: {}", kernel.free_stack_extents.len());
+        eprintln!("  free_trap_extents: {}", kernel.free_trap_extents.len());
+        eprintln!("  Formal: cycle closure + 100 concrete cycles = no drift");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 8.3g adversarial: stale key, remanence, send-to-dead
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p83g_stale_key_rejected_after_reuse() {
+        // Spawn → reclaim → reuse slot → old ProcessKey is invalid.
+        let fabric = Fabric::new(0x100000);
+        let mut kernel = Kernel::new(fabric);
+
+        let core1 = Anka64Core::new(AgentId(0), DomainId(0));
+        let key1 = kernel.spawn(core1);
+        kernel.finish_process(key1.slot, ProcessResult::Exited(0));
+        kernel.reclaim_process(key1.slot);
+
+        let core2 = Anka64Core::new(AgentId(1), DomainId(1));
+        let key2 = kernel.spawn(core2);
+        assert_eq!(key2.slot, key1.slot, "reused same slot");
+        assert_ne!(key2.generation, key1.generation, "different generation");
+
+        assert!(kernel.validate_process_key(&key1).is_none(),
+            "old key must be rejected");
+        assert!(kernel.validate_process_key(&key2).is_some(),
+            "new key must be valid");
+
+        eprintln!("8.3g: stale ProcessKey rejected after slot reuse ✓");
+    }
+
+    #[test]
+    fn p83g_remanence_scrubbed() {
+        // Write dirty data, reclaim, reuse → extent is scrubbed.
+        let mut fabric = Fabric::new(0x400000);
+
+        let child_obj = fabric.alloc_object("child_code", 0x1000, ObjectKind::Memory);
+        fabric.place_object(child_obj, 0x080000);
+        {
+            let mut asm = Asm64::new();
+            asm.movi(R0, 99);
+            asm.halt();
+            fabric.initialize_object(child_obj, 0, &asm.to_bytes());
+        }
+        fabric.seal_object(child_obj);
+
+        let ankad_obj = fabric.alloc_object("ankad_code", 0x1000, ObjectKind::Memory);
+        fabric.place_object(ankad_obj, 0x000000);
+        {
+            let mut asm = Asm64::new();
+            // SPAWN child
+            asm.movi(R1, 0x5000);
+            asm.movi(R2, 8);
+            asm.movi(R3, 0);
+            asm.movi(R0, SYS_SPAWN as i32);
+            asm.trap(0);
+            asm.mov(R8, R0);
+
+            // WAIT child
+            asm.mov(R1, R8);
+            asm.movi(R0, SYS_WAIT as i32);
+            asm.trap(0);
+
+            // Exit
+            asm.movi(R1, 0);
+            asm.movi(R0, SYS_EXIT as i32);
+            asm.trap(0);
+
+            fabric.initialize_object(ankad_obj, 0, &asm.to_bytes());
+        }
+        fabric.seal_object(ankad_obj);
+
+        let info = BootInfo {
+            image: BootImage {
+                obj: ankad_obj, code_offset: 0, code_size: 0x1000,
+                entry: 0, lit_start: 0,
+            },
+            grants: vec![
+                BootGrant { obj: child_obj, offset: 0, size: 0x1000, perms: Permissions::RX },
+            ],
+            maps: vec![
+                BootMap { vaddr: 0x5000, size: 0x1000, obj: child_obj, obj_offset: 0 },
+            ],
+            code_vaddr: 0, stack_vaddr: 0x10000, stack_size: 0x4000, trap_vaddr: 0x20000,
+        };
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.boot(&info).unwrap();
+        kernel.run(100000, 1000);
+
+        assert_eq!(kernel.processes[0].exit_code, 0);
+
+        // The child's stack extent was returned to the pool.
+        // Verify it's been scrubbed: all zeros.
+        assert_eq!(kernel.free_stack_extents.len(), 1);
+        let ext = &kernel.free_stack_extents[0];
+        let data = kernel.fabric.read_physical(ext.base, ext.size);
+        assert!(data.iter().all(|&b| b == 0),
+            "returned stack extent must be scrubbed to zero (no remanence)");
+
+        eprintln!("8.3g: returned extent scrubbed — no data remanence ✓");
+    }
+
+    #[test]
+    fn p83g_send_to_dead_process_fails() {
+        // After a process dies, SYS_SEND to its PID should fail.
+        let mut fabric = Fabric::new(0x100000);
+        let text_a = fabric.alloc_object("a_text", 0x4000, ObjectKind::Memory);
+        let stack_a = fabric.alloc_object("a_stack", 0x4000, ObjectKind::Memory);
+        let text_b = fabric.alloc_object("b_text", 0x4000, ObjectKind::Memory);
+        let stack_b = fabric.alloc_object("b_stack", 0x4000, ObjectKind::Memory);
+        fabric.place_object(text_a, 0x000000);
+        fabric.place_object(stack_a, 0x020000);
+        fabric.place_object(text_b, 0x040000);
+        fabric.place_object(stack_b, 0x060000);
+        let dom_a = fabric.create_domain();
+        let dom_b = fabric.create_domain();
+        fabric.grant(dom_a, stack_a, 0, 0x4000, Permissions::RW);
+        fabric.grant(dom_b, stack_b, 0, 0x4000, Permissions::RW);
+
+        // A: exit(0) immediately
+        let mut asm_a = Asm64::new();
+        asm_a.movi(R0, SYS_EXIT as i32);
+        asm_a.movi(R1, 0);
+        asm_a.trap(0);
+        fabric.write_physical(0x000000, &asm_a.to_bytes());
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        seal_code_object(&mut fabric, text_a, dom_a);
+
+        // B: send(pid=0, value=42) → R0 should be MAX → exit(R0)
+        let mut asm_b = Asm64::new();
+        asm_b.movi(R0, SYS_SEND as i32);
+        asm_b.movi(R1, 0);    // dest pid = 0 (A's PID)
+        asm_b.movi(R2, 42);
+        asm_b.trap(0);
+        // R0 = 0 (success) or MAX (failure)
+        asm_b.mov(R1, R0);
+        asm_b.movi(R0, SYS_EXIT as i32);
+        asm_b.trap(0);
+        fabric.write_physical(0x040000, &asm_b.to_bytes());
+        install_trap_handler(&mut fabric, 0x040000, 0x4000);
+        seal_code_object(&mut fabric, text_b, dom_b);
+
+        let mut core_a = Anka64Core::new(AgentId(0), dom_a);
+        core_a.address_map.add(0x00000, 0x4000, text_a);
+        core_a.address_map.add(0x20000, 0x4000, stack_a);
+        core_a.r[SP as usize] = 0x20000 + 0x4000;
+        core_a.trap_vector = 0x3FF0;
+
+        let mut core_b = Anka64Core::new(AgentId(1), dom_b);
+        core_b.address_map.add(0x00000, 0x4000, text_b);
+        core_b.address_map.add(0x20000, 0x4000, stack_b);
+        core_b.r[SP as usize] = 0x20000 + 0x4000;
+        core_b.trap_vector = 0x3FF0;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core_a);
+        kernel.spawn(core_b);
+        kernel.run(1000, 100);
+
+        // A exited first (PID 0, round-robin), then B tried to send to PID 0
+        assert!(kernel.processes[0].exited());
+        assert!(kernel.processes[1].exited());
+        // B's exit code = return value from SYS_SEND.
+        // Since A is Zombie (not Running), resolve_pid returns None → MAX.
+        assert_eq!(kernel.processes[1].exit_code, u64::MAX,
+            "SYS_SEND to dead process returns MAX (failure)");
+
+        eprintln!("8.3g: SYS_SEND to dead process → MAX ✓");
     }
 
 }

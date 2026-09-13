@@ -1,0 +1,563 @@
+// =============================================================================
+// Anka Process Lifecycle — Petri Net Model (Phase 8.3-petri)
+// =============================================================================
+//
+// Bounded model checking of single-slot lifecycle invariants.
+// All 4 reachable markings computed by hand, provided as ground axioms.
+// Z3 verifies: transition correctness, cycle closure, safety, conservation.
+//
+// Places (13):
+//   0  = Running        1  = Zombie         2  = Collected
+//   3  = Free           4  = Domain         5  = Stack
+//   6  = Trap           7  = StackExtent    8  = TrapExtent
+//   9  = LifecycleAuth  10 = ParentLink
+//   11 = FreeStackExtent  12 = FreeTrapExtent
+//
+// Transitions (4):
+//   0 = exit_or_fault     Running -> Zombie
+//   1 = wait_collect      Zombie + Auth + ParentLink -> Collected
+//   2 = reclaim           Collected + resources -> Free + free extents
+//   3 = spawn_into_free   Free + free extents -> Running + resources + auth
+//
+// Markings:
+//   M0 = Running   (initial, after spawn)
+//   M1 = Zombie    (after exit_or_fault)
+//   M2 = Collected (after wait_collect)
+//   M3 = Free      (after reclaim)
+//
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Arc Weights
+// -----------------------------------------------------------------------------
+
+operation iw : ℤ × ℤ → ℤ
+operation ow : ℤ × ℤ → ℤ
+
+structure Net {
+
+    // ─── t=0: exit_or_fault ─────────────────────────────────
+    axiom iw_0_0: iw(0, 0) = 1
+    axiom iw_0_z: iw(0, 1) = 0 ∧ iw(0, 2) = 0 ∧ iw(0, 3) = 0
+               ∧ iw(0, 4) = 0 ∧ iw(0, 5) = 0 ∧ iw(0, 6) = 0
+               ∧ iw(0, 7) = 0 ∧ iw(0, 8) = 0 ∧ iw(0, 9) = 0
+               ∧ iw(0, 10) = 0 ∧ iw(0, 11) = 0 ∧ iw(0, 12) = 0
+    axiom ow_0_1: ow(0, 1) = 1
+    axiom ow_0_z: ow(0, 0) = 0 ∧ ow(0, 2) = 0 ∧ ow(0, 3) = 0
+               ∧ ow(0, 4) = 0 ∧ ow(0, 5) = 0 ∧ ow(0, 6) = 0
+               ∧ ow(0, 7) = 0 ∧ ow(0, 8) = 0 ∧ ow(0, 9) = 0
+               ∧ ow(0, 10) = 0 ∧ ow(0, 11) = 0 ∧ ow(0, 12) = 0
+
+    // ─── t=1: wait_collect ──────────────────────────────────
+    axiom iw_1_1:  iw(1, 1) = 1
+    axiom iw_1_9:  iw(1, 9) = 1
+    axiom iw_1_10: iw(1, 10) = 1
+    axiom iw_1_z:  iw(1, 0) = 0 ∧ iw(1, 2) = 0 ∧ iw(1, 3) = 0
+                ∧ iw(1, 4) = 0 ∧ iw(1, 5) = 0 ∧ iw(1, 6) = 0
+                ∧ iw(1, 7) = 0 ∧ iw(1, 8) = 0
+                ∧ iw(1, 11) = 0 ∧ iw(1, 12) = 0
+    axiom ow_1_2: ow(1, 2) = 1
+    axiom ow_1_z: ow(1, 0) = 0 ∧ ow(1, 1) = 0 ∧ ow(1, 3) = 0
+               ∧ ow(1, 4) = 0 ∧ ow(1, 5) = 0 ∧ ow(1, 6) = 0
+               ∧ ow(1, 7) = 0 ∧ ow(1, 8) = 0 ∧ ow(1, 9) = 0
+               ∧ ow(1, 10) = 0 ∧ ow(1, 11) = 0 ∧ ow(1, 12) = 0
+
+    // ─── t=2: reclaim ───────────────────────────────────────
+    axiom iw_2_2: iw(2, 2) = 1
+    axiom iw_2_4: iw(2, 4) = 1
+    axiom iw_2_5: iw(2, 5) = 1
+    axiom iw_2_6: iw(2, 6) = 1
+    axiom iw_2_7: iw(2, 7) = 1
+    axiom iw_2_8: iw(2, 8) = 1
+    axiom iw_2_z: iw(2, 0) = 0 ∧ iw(2, 1) = 0 ∧ iw(2, 3) = 0
+               ∧ iw(2, 9) = 0 ∧ iw(2, 10) = 0
+               ∧ iw(2, 11) = 0 ∧ iw(2, 12) = 0
+    axiom ow_2_3:  ow(2, 3) = 1
+    axiom ow_2_11: ow(2, 11) = 1
+    axiom ow_2_12: ow(2, 12) = 1
+    axiom ow_2_z:  ow(2, 0) = 0 ∧ ow(2, 1) = 0 ∧ ow(2, 2) = 0
+                ∧ ow(2, 4) = 0 ∧ ow(2, 5) = 0 ∧ ow(2, 6) = 0
+                ∧ ow(2, 7) = 0 ∧ ow(2, 8) = 0 ∧ ow(2, 9) = 0
+                ∧ ow(2, 10) = 0
+
+    // ─── t=3: spawn_into_free ───────────────────────────────
+    axiom iw_3_3:  iw(3, 3) = 1
+    axiom iw_3_11: iw(3, 11) = 1
+    axiom iw_3_12: iw(3, 12) = 1
+    axiom iw_3_z:  iw(3, 0) = 0 ∧ iw(3, 1) = 0 ∧ iw(3, 2) = 0
+                ∧ iw(3, 4) = 0 ∧ iw(3, 5) = 0 ∧ iw(3, 6) = 0
+                ∧ iw(3, 7) = 0 ∧ iw(3, 8) = 0 ∧ iw(3, 9) = 0
+                ∧ iw(3, 10) = 0
+    axiom ow_3_0:  ow(3, 0) = 1
+    axiom ow_3_4:  ow(3, 4) = 1
+    axiom ow_3_5:  ow(3, 5) = 1
+    axiom ow_3_6:  ow(3, 6) = 1
+    axiom ow_3_7:  ow(3, 7) = 1
+    axiom ow_3_8:  ow(3, 8) = 1
+    axiom ow_3_9:  ow(3, 9) = 1
+    axiom ow_3_10: ow(3, 10) = 1
+    axiom ow_3_z:  ow(3, 1) = 0 ∧ ow(3, 2) = 0 ∧ ow(3, 3) = 0
+                ∧ ow(3, 11) = 0 ∧ ow(3, 12) = 0
+}
+
+// -----------------------------------------------------------------------------
+// Markings: m(marking_id, place_id) = token count
+// -----------------------------------------------------------------------------
+
+operation m : ℤ × ℤ → ℤ
+
+structure Markings {
+
+    // ─── M0: Running (initial / after spawn) ────────────────
+    //   lifecycle: Running=1
+    //   resources: all present
+    //   authority: both granted
+    //   pool: empty
+    axiom m0_0:  m(0, 0) = 1
+    axiom m0_1:  m(0, 1) = 0
+    axiom m0_2:  m(0, 2) = 0
+    axiom m0_3:  m(0, 3) = 0
+    axiom m0_4:  m(0, 4) = 1
+    axiom m0_5:  m(0, 5) = 1
+    axiom m0_6:  m(0, 6) = 1
+    axiom m0_7:  m(0, 7) = 1
+    axiom m0_8:  m(0, 8) = 1
+    axiom m0_9:  m(0, 9) = 1
+    axiom m0_10: m(0, 10) = 1
+    axiom m0_11: m(0, 11) = 0
+    axiom m0_12: m(0, 12) = 0
+
+    // ─── M1: Zombie (after exit_or_fault from M0) ──────────
+    //   lifecycle: Zombie=1
+    //   resources: still attached to corpse
+    //   authority: parent still holds both
+    //   pool: empty
+    axiom m1_0:  m(1, 0) = 0
+    axiom m1_1:  m(1, 1) = 1
+    axiom m1_2:  m(1, 2) = 0
+    axiom m1_3:  m(1, 3) = 0
+    axiom m1_4:  m(1, 4) = 1
+    axiom m1_5:  m(1, 5) = 1
+    axiom m1_6:  m(1, 6) = 1
+    axiom m1_7:  m(1, 7) = 1
+    axiom m1_8:  m(1, 8) = 1
+    axiom m1_9:  m(1, 9) = 1
+    axiom m1_10: m(1, 10) = 1
+    axiom m1_11: m(1, 11) = 0
+    axiom m1_12: m(1, 12) = 0
+
+    // ─── M2: Collected (after wait_collect from M1) ─────────
+    //   lifecycle: Collected=1
+    //   resources: still attached
+    //   authority: CONSUMED (auth=0, plink=0)
+    //   pool: empty
+    axiom m2_0:  m(2, 0) = 0
+    axiom m2_1:  m(2, 1) = 0
+    axiom m2_2:  m(2, 2) = 1
+    axiom m2_3:  m(2, 3) = 0
+    axiom m2_4:  m(2, 4) = 1
+    axiom m2_5:  m(2, 5) = 1
+    axiom m2_6:  m(2, 6) = 1
+    axiom m2_7:  m(2, 7) = 1
+    axiom m2_8:  m(2, 8) = 1
+    axiom m2_9:  m(2, 9) = 0
+    axiom m2_10: m(2, 10) = 0
+    axiom m2_11: m(2, 11) = 0
+    axiom m2_12: m(2, 12) = 0
+
+    // ─── M3: Free (after reclaim from M2) ───────────────────
+    //   lifecycle: Free=1
+    //   resources: DESTROYED (all 0)
+    //   authority: already consumed
+    //   pool: extents returned
+    axiom m3_0:  m(3, 0) = 0
+    axiom m3_1:  m(3, 1) = 0
+    axiom m3_2:  m(3, 2) = 0
+    axiom m3_3:  m(3, 3) = 1
+    axiom m3_4:  m(3, 4) = 0
+    axiom m3_5:  m(3, 5) = 0
+    axiom m3_6:  m(3, 6) = 0
+    axiom m3_7:  m(3, 7) = 0
+    axiom m3_8:  m(3, 8) = 0
+    axiom m3_9:  m(3, 9) = 0
+    axiom m3_10: m(3, 10) = 0
+    axiom m3_11: m(3, 11) = 1
+    axiom m3_12: m(3, 12) = 1
+}
+
+// =============================================================================
+// TRANSITION CORRECTNESS: Z3 verifies each firing produces the next marking
+// =============================================================================
+
+// For each transition t fired at marking Mi, verify:
+//   (a) preconditions satisfied: m(i, p) >= iw(t, p) for all p
+//   (b) result matches Mi+1: m(i, p) - iw(t, p) + ow(t, p) = m(i+1, p) for all p
+
+example "FIRE-0: exit_or_fault(M0) = M1" {
+    assert(
+        // preconditions
+        m(0, 0) ≥ iw(0, 0) ∧ m(0, 1) ≥ iw(0, 1) ∧ m(0, 2) ≥ iw(0, 2) ∧
+        m(0, 3) ≥ iw(0, 3) ∧ m(0, 4) ≥ iw(0, 4) ∧ m(0, 5) ≥ iw(0, 5) ∧
+        m(0, 6) ≥ iw(0, 6) ∧ m(0, 7) ≥ iw(0, 7) ∧ m(0, 8) ≥ iw(0, 8) ∧
+        m(0, 9) ≥ iw(0, 9) ∧ m(0, 10) ≥ iw(0, 10) ∧
+        m(0, 11) ≥ iw(0, 11) ∧ m(0, 12) ≥ iw(0, 12) ∧
+        // result = M1
+        m(0, 0) - iw(0, 0) + ow(0, 0) = m(1, 0) ∧
+        m(0, 1) - iw(0, 1) + ow(0, 1) = m(1, 1) ∧
+        m(0, 2) - iw(0, 2) + ow(0, 2) = m(1, 2) ∧
+        m(0, 3) - iw(0, 3) + ow(0, 3) = m(1, 3) ∧
+        m(0, 4) - iw(0, 4) + ow(0, 4) = m(1, 4) ∧
+        m(0, 5) - iw(0, 5) + ow(0, 5) = m(1, 5) ∧
+        m(0, 6) - iw(0, 6) + ow(0, 6) = m(1, 6) ∧
+        m(0, 7) - iw(0, 7) + ow(0, 7) = m(1, 7) ∧
+        m(0, 8) - iw(0, 8) + ow(0, 8) = m(1, 8) ∧
+        m(0, 9) - iw(0, 9) + ow(0, 9) = m(1, 9) ∧
+        m(0, 10) - iw(0, 10) + ow(0, 10) = m(1, 10) ∧
+        m(0, 11) - iw(0, 11) + ow(0, 11) = m(1, 11) ∧
+        m(0, 12) - iw(0, 12) + ow(0, 12) = m(1, 12)
+    )
+}
+
+example "FIRE-1: wait_collect(M1) = M2" {
+    assert(
+        m(1, 0) ≥ iw(1, 0) ∧ m(1, 1) ≥ iw(1, 1) ∧ m(1, 2) ≥ iw(1, 2) ∧
+        m(1, 3) ≥ iw(1, 3) ∧ m(1, 4) ≥ iw(1, 4) ∧ m(1, 5) ≥ iw(1, 5) ∧
+        m(1, 6) ≥ iw(1, 6) ∧ m(1, 7) ≥ iw(1, 7) ∧ m(1, 8) ≥ iw(1, 8) ∧
+        m(1, 9) ≥ iw(1, 9) ∧ m(1, 10) ≥ iw(1, 10) ∧
+        m(1, 11) ≥ iw(1, 11) ∧ m(1, 12) ≥ iw(1, 12) ∧
+        m(1, 0) - iw(1, 0) + ow(1, 0) = m(2, 0) ∧
+        m(1, 1) - iw(1, 1) + ow(1, 1) = m(2, 1) ∧
+        m(1, 2) - iw(1, 2) + ow(1, 2) = m(2, 2) ∧
+        m(1, 3) - iw(1, 3) + ow(1, 3) = m(2, 3) ∧
+        m(1, 4) - iw(1, 4) + ow(1, 4) = m(2, 4) ∧
+        m(1, 5) - iw(1, 5) + ow(1, 5) = m(2, 5) ∧
+        m(1, 6) - iw(1, 6) + ow(1, 6) = m(2, 6) ∧
+        m(1, 7) - iw(1, 7) + ow(1, 7) = m(2, 7) ∧
+        m(1, 8) - iw(1, 8) + ow(1, 8) = m(2, 8) ∧
+        m(1, 9) - iw(1, 9) + ow(1, 9) = m(2, 9) ∧
+        m(1, 10) - iw(1, 10) + ow(1, 10) = m(2, 10) ∧
+        m(1, 11) - iw(1, 11) + ow(1, 11) = m(2, 11) ∧
+        m(1, 12) - iw(1, 12) + ow(1, 12) = m(2, 12)
+    )
+}
+
+example "FIRE-2: reclaim(M2) = M3" {
+    assert(
+        m(2, 0) ≥ iw(2, 0) ∧ m(2, 1) ≥ iw(2, 1) ∧ m(2, 2) ≥ iw(2, 2) ∧
+        m(2, 3) ≥ iw(2, 3) ∧ m(2, 4) ≥ iw(2, 4) ∧ m(2, 5) ≥ iw(2, 5) ∧
+        m(2, 6) ≥ iw(2, 6) ∧ m(2, 7) ≥ iw(2, 7) ∧ m(2, 8) ≥ iw(2, 8) ∧
+        m(2, 9) ≥ iw(2, 9) ∧ m(2, 10) ≥ iw(2, 10) ∧
+        m(2, 11) ≥ iw(2, 11) ∧ m(2, 12) ≥ iw(2, 12) ∧
+        m(2, 0) - iw(2, 0) + ow(2, 0) = m(3, 0) ∧
+        m(2, 1) - iw(2, 1) + ow(2, 1) = m(3, 1) ∧
+        m(2, 2) - iw(2, 2) + ow(2, 2) = m(3, 2) ∧
+        m(2, 3) - iw(2, 3) + ow(2, 3) = m(3, 3) ∧
+        m(2, 4) - iw(2, 4) + ow(2, 4) = m(3, 4) ∧
+        m(2, 5) - iw(2, 5) + ow(2, 5) = m(3, 5) ∧
+        m(2, 6) - iw(2, 6) + ow(2, 6) = m(3, 6) ∧
+        m(2, 7) - iw(2, 7) + ow(2, 7) = m(3, 7) ∧
+        m(2, 8) - iw(2, 8) + ow(2, 8) = m(3, 8) ∧
+        m(2, 9) - iw(2, 9) + ow(2, 9) = m(3, 9) ∧
+        m(2, 10) - iw(2, 10) + ow(2, 10) = m(3, 10) ∧
+        m(2, 11) - iw(2, 11) + ow(2, 11) = m(3, 11) ∧
+        m(2, 12) - iw(2, 12) + ow(2, 12) = m(3, 12)
+    )
+}
+
+example "FIRE-3: spawn_into_free(M3) = M0 (cycle closes)" {
+    assert(
+        m(3, 0) ≥ iw(3, 0) ∧ m(3, 1) ≥ iw(3, 1) ∧ m(3, 2) ≥ iw(3, 2) ∧
+        m(3, 3) ≥ iw(3, 3) ∧ m(3, 4) ≥ iw(3, 4) ∧ m(3, 5) ≥ iw(3, 5) ∧
+        m(3, 6) ≥ iw(3, 6) ∧ m(3, 7) ≥ iw(3, 7) ∧ m(3, 8) ≥ iw(3, 8) ∧
+        m(3, 9) ≥ iw(3, 9) ∧ m(3, 10) ≥ iw(3, 10) ∧
+        m(3, 11) ≥ iw(3, 11) ∧ m(3, 12) ≥ iw(3, 12) ∧
+        m(3, 0) - iw(3, 0) + ow(3, 0) = m(0, 0) ∧
+        m(3, 1) - iw(3, 1) + ow(3, 1) = m(0, 1) ∧
+        m(3, 2) - iw(3, 2) + ow(3, 2) = m(0, 2) ∧
+        m(3, 3) - iw(3, 3) + ow(3, 3) = m(0, 3) ∧
+        m(3, 4) - iw(3, 4) + ow(3, 4) = m(0, 4) ∧
+        m(3, 5) - iw(3, 5) + ow(3, 5) = m(0, 5) ∧
+        m(3, 6) - iw(3, 6) + ow(3, 6) = m(0, 6) ∧
+        m(3, 7) - iw(3, 7) + ow(3, 7) = m(0, 7) ∧
+        m(3, 8) - iw(3, 8) + ow(3, 8) = m(0, 8) ∧
+        m(3, 9) - iw(3, 9) + ow(3, 9) = m(0, 9) ∧
+        m(3, 10) - iw(3, 10) + ow(3, 10) = m(0, 10) ∧
+        m(3, 11) - iw(3, 11) + ow(3, 11) = m(0, 11) ∧
+        m(3, 12) - iw(3, 12) + ow(3, 12) = m(0, 12)
+    )
+}
+
+// =============================================================================
+// ENABLING: exactly one transition enabled at each marking
+// =============================================================================
+
+// Helper: "enabled" = all input places have enough tokens
+// Checked as ground arithmetic on each marking.
+
+example "ENABLE-M0: only exit_or_fault (t=0) is enabled" {
+    assert(
+        // t=0 enabled
+        (m(0, 0) ≥ iw(0, 0) ∧ m(0, 1) ≥ iw(0, 1) ∧ m(0, 2) ≥ iw(0, 2) ∧
+         m(0, 3) ≥ iw(0, 3) ∧ m(0, 4) ≥ iw(0, 4) ∧ m(0, 5) ≥ iw(0, 5) ∧
+         m(0, 6) ≥ iw(0, 6) ∧ m(0, 7) ≥ iw(0, 7) ∧ m(0, 8) ≥ iw(0, 8) ∧
+         m(0, 9) ≥ iw(0, 9) ∧ m(0, 10) ≥ iw(0, 10) ∧
+         m(0, 11) ≥ iw(0, 11) ∧ m(0, 12) ≥ iw(0, 12))
+        ∧
+        // t=1 NOT enabled (Zombie = 0 < 1)
+        m(0, 1) < iw(1, 1)
+        ∧
+        // t=2 NOT enabled (Collected = 0 < 1)
+        m(0, 2) < iw(2, 2)
+        ∧
+        // t=3 NOT enabled (Free = 0 < 1)
+        m(0, 3) < iw(3, 3)
+    )
+}
+
+example "ENABLE-M1: only wait_collect (t=1) is enabled" {
+    assert(
+        // t=1 enabled
+        (m(1, 0) ≥ iw(1, 0) ∧ m(1, 1) ≥ iw(1, 1) ∧ m(1, 2) ≥ iw(1, 2) ∧
+         m(1, 3) ≥ iw(1, 3) ∧ m(1, 4) ≥ iw(1, 4) ∧ m(1, 5) ≥ iw(1, 5) ∧
+         m(1, 6) ≥ iw(1, 6) ∧ m(1, 7) ≥ iw(1, 7) ∧ m(1, 8) ≥ iw(1, 8) ∧
+         m(1, 9) ≥ iw(1, 9) ∧ m(1, 10) ≥ iw(1, 10) ∧
+         m(1, 11) ≥ iw(1, 11) ∧ m(1, 12) ≥ iw(1, 12))
+        ∧
+        // t=0 NOT enabled (Running = 0 < 1)
+        m(1, 0) < iw(0, 0)
+        ∧
+        // t=2 NOT enabled (Collected = 0 < 1)
+        m(1, 2) < iw(2, 2)
+        ∧
+        // t=3 NOT enabled (Free = 0 < 1)
+        m(1, 3) < iw(3, 3)
+    )
+}
+
+example "ENABLE-M2: only reclaim (t=2) is enabled" {
+    assert(
+        // t=2 enabled
+        (m(2, 0) ≥ iw(2, 0) ∧ m(2, 1) ≥ iw(2, 1) ∧ m(2, 2) ≥ iw(2, 2) ∧
+         m(2, 3) ≥ iw(2, 3) ∧ m(2, 4) ≥ iw(2, 4) ∧ m(2, 5) ≥ iw(2, 5) ∧
+         m(2, 6) ≥ iw(2, 6) ∧ m(2, 7) ≥ iw(2, 7) ∧ m(2, 8) ≥ iw(2, 8) ∧
+         m(2, 9) ≥ iw(2, 9) ∧ m(2, 10) ≥ iw(2, 10) ∧
+         m(2, 11) ≥ iw(2, 11) ∧ m(2, 12) ≥ iw(2, 12))
+        ∧
+        // t=0 NOT enabled (Running = 0 < 1)
+        m(2, 0) < iw(0, 0)
+        ∧
+        // t=1 NOT enabled (Zombie = 0 < 1)
+        m(2, 1) < iw(1, 1)
+        ∧
+        // t=3 NOT enabled (Free = 0 < 1)
+        m(2, 3) < iw(3, 3)
+    )
+}
+
+example "ENABLE-M3: only spawn_into_free (t=3) is enabled" {
+    assert(
+        // t=3 enabled
+        (m(3, 0) ≥ iw(3, 0) ∧ m(3, 1) ≥ iw(3, 1) ∧ m(3, 2) ≥ iw(3, 2) ∧
+         m(3, 3) ≥ iw(3, 3) ∧ m(3, 4) ≥ iw(3, 4) ∧ m(3, 5) ≥ iw(3, 5) ∧
+         m(3, 6) ≥ iw(3, 6) ∧ m(3, 7) ≥ iw(3, 7) ∧ m(3, 8) ≥ iw(3, 8) ∧
+         m(3, 9) ≥ iw(3, 9) ∧ m(3, 10) ≥ iw(3, 10) ∧
+         m(3, 11) ≥ iw(3, 11) ∧ m(3, 12) ≥ iw(3, 12))
+        ∧
+        // t=0 NOT enabled (Running = 0 < 1)
+        m(3, 0) < iw(0, 0)
+        ∧
+        // t=1 NOT enabled (Zombie = 0 < 1)
+        m(3, 1) < iw(1, 1)
+        ∧
+        // t=2 NOT enabled (Collected = 0 < 1)
+        m(3, 2) < iw(2, 2)
+    )
+}
+
+// =============================================================================
+// SAFETY: Lifecycle mutual exclusion
+// =============================================================================
+
+example "SAFE-1: Running and Zombie never coexist" {
+    assert(
+        ¬(m(0, 0) ≥ 1 ∧ m(0, 1) ≥ 1) ∧
+        ¬(m(1, 0) ≥ 1 ∧ m(1, 1) ≥ 1) ∧
+        ¬(m(2, 0) ≥ 1 ∧ m(2, 1) ≥ 1) ∧
+        ¬(m(3, 0) ≥ 1 ∧ m(3, 1) ≥ 1)
+    )
+}
+
+example "SAFE-2: Running and Collected never coexist" {
+    assert(
+        ¬(m(0, 0) ≥ 1 ∧ m(0, 2) ≥ 1) ∧
+        ¬(m(1, 0) ≥ 1 ∧ m(1, 2) ≥ 1) ∧
+        ¬(m(2, 0) ≥ 1 ∧ m(2, 2) ≥ 1) ∧
+        ¬(m(3, 0) ≥ 1 ∧ m(3, 2) ≥ 1)
+    )
+}
+
+example "SAFE-3: Running and Free never coexist" {
+    assert(
+        ¬(m(0, 0) ≥ 1 ∧ m(0, 3) ≥ 1) ∧
+        ¬(m(1, 0) ≥ 1 ∧ m(1, 3) ≥ 1) ∧
+        ¬(m(2, 0) ≥ 1 ∧ m(2, 3) ≥ 1) ∧
+        ¬(m(3, 0) ≥ 1 ∧ m(3, 3) ≥ 1)
+    )
+}
+
+example "SAFE-4: Zombie and Free never coexist" {
+    assert(
+        ¬(m(0, 1) ≥ 1 ∧ m(0, 3) ≥ 1) ∧
+        ¬(m(1, 1) ≥ 1 ∧ m(1, 3) ≥ 1) ∧
+        ¬(m(2, 1) ≥ 1 ∧ m(2, 3) ≥ 1) ∧
+        ¬(m(3, 1) ≥ 1 ∧ m(3, 3) ≥ 1)
+    )
+}
+
+// =============================================================================
+// INVARIANT: Exactly one lifecycle place has a token at every marking
+// =============================================================================
+
+example "LIFECYCLE-1: exactly one lifecycle token" {
+    assert(
+        m(0, 0) + m(0, 1) + m(0, 2) + m(0, 3) = 1 ∧
+        m(1, 0) + m(1, 1) + m(1, 2) + m(1, 3) = 1 ∧
+        m(2, 0) + m(2, 1) + m(2, 2) + m(2, 3) = 1 ∧
+        m(3, 0) + m(3, 1) + m(3, 2) + m(3, 3) = 1
+    )
+}
+
+// =============================================================================
+// RESOURCE: Running implies resources; Free implies clean
+// =============================================================================
+
+example "RESOURCE-1: Running implies all resources present" {
+    assert(
+        // M0: Running=1 → resources present
+        (m(0, 4) ≥ 1 ∧ m(0, 5) ≥ 1 ∧ m(0, 6) ≥ 1
+       ∧ m(0, 7) ≥ 1 ∧ m(0, 8) ≥ 1)
+    )
+}
+
+example "RESOURCE-2: Free implies no resources" {
+    assert(
+        // M3: Free=1 → no resources
+        (m(3, 4) = 0 ∧ m(3, 5) = 0 ∧ m(3, 6) = 0
+       ∧ m(3, 7) = 0 ∧ m(3, 8) = 0)
+    )
+}
+
+example "RESOURCE-3: Zombie still has resources" {
+    assert(
+        m(1, 4) ≥ 1 ∧ m(1, 5) ≥ 1 ∧ m(1, 6) ≥ 1
+      ∧ m(1, 7) ≥ 1 ∧ m(1, 8) ≥ 1
+    )
+}
+
+example "RESOURCE-4: Collected still has resources (not yet reclaimed)" {
+    assert(
+        m(2, 4) ≥ 1 ∧ m(2, 5) ≥ 1 ∧ m(2, 6) ≥ 1
+      ∧ m(2, 7) ≥ 1 ∧ m(2, 8) ≥ 1
+    )
+}
+
+// =============================================================================
+// EXTENT CONSERVATION (P-invariant)
+// =============================================================================
+
+example "EXTENT-1: StackExtent + FreeStackExtent = 1 at every marking" {
+    assert(
+        m(0, 7) + m(0, 11) = 1 ∧
+        m(1, 7) + m(1, 11) = 1 ∧
+        m(2, 7) + m(2, 11) = 1 ∧
+        m(3, 7) + m(3, 11) = 1
+    )
+}
+
+example "EXTENT-2: TrapExtent + FreeTrapExtent = 1 at every marking" {
+    assert(
+        m(0, 8) + m(0, 12) = 1 ∧
+        m(1, 8) + m(1, 12) = 1 ∧
+        m(2, 8) + m(2, 12) = 1 ∧
+        m(3, 8) + m(3, 12) = 1
+    )
+}
+
+// =============================================================================
+// AUTHORITY: consumed at collection, produced at spawn
+// =============================================================================
+
+example "AUTH-1: LifecycleAuth present at M0 and M1, consumed at M2" {
+    assert(m(0, 9) = 1 ∧ m(1, 9) = 1 ∧ m(2, 9) = 0 ∧ m(3, 9) = 0)
+}
+
+example "AUTH-2: ParentLink present at M0 and M1, consumed at M2" {
+    assert(m(0, 10) = 1 ∧ m(1, 10) = 1 ∧ m(2, 10) = 0 ∧ m(3, 10) = 0)
+}
+
+// =============================================================================
+// TOKEN COUNTING
+// =============================================================================
+// Total tokens are NOT a P-invariant for this net.
+// wait_collect consumes Auth + ParentLink (-2); reclaim destroys
+// Domain + Stack + Trap (-3); spawn re-creates all (+5).
+// Per-marking totals: M0=8, M1=8, M2=6, M3=3.
+// The correct conservation laws are the three P-invariants above
+// (LIFECYCLE-1, EXTENT-1, EXTENT-2) plus cycle closure (FIRE-3).
+
+example "TOKEN-COUNT: per-marking totals are 8, 8, 6, 3" {
+    assert(
+        m(0, 0) + m(0, 1) + m(0, 2) + m(0, 3) + m(0, 4) + m(0, 5) + m(0, 6)
+      + m(0, 7) + m(0, 8) + m(0, 9) + m(0, 10) + m(0, 11) + m(0, 12) = 8
+        ∧
+        m(1, 0) + m(1, 1) + m(1, 2) + m(1, 3) + m(1, 4) + m(1, 5) + m(1, 6)
+      + m(1, 7) + m(1, 8) + m(1, 9) + m(1, 10) + m(1, 11) + m(1, 12) = 8
+        ∧
+        m(2, 0) + m(2, 1) + m(2, 2) + m(2, 3) + m(2, 4) + m(2, 5) + m(2, 6)
+      + m(2, 7) + m(2, 8) + m(2, 9) + m(2, 10) + m(2, 11) + m(2, 12) = 6
+        ∧
+        m(3, 0) + m(3, 1) + m(3, 2) + m(3, 3) + m(3, 4) + m(3, 5) + m(3, 6)
+      + m(3, 7) + m(3, 8) + m(3, 9) + m(3, 10) + m(3, 11) + m(3, 12) = 3
+    )
+}
+
+// =============================================================================
+// ORDERING: reclaim requires collection (not zombie, not running)
+// =============================================================================
+
+example "ORDER-1: reclaim needs Collected (iw = 1), not Zombie or Running" {
+    assert(iw(2, 2) = 1 ∧ iw(2, 1) = 0 ∧ iw(2, 0) = 0)
+}
+
+// =============================================================================
+// ISOLATION: transitions don't touch unrelated places
+// =============================================================================
+
+example "ISOL-1: exit_or_fault does not consume resources" {
+    assert(iw(0, 4) = 0 ∧ iw(0, 5) = 0 ∧ iw(0, 6) = 0
+         ∧ iw(0, 7) = 0 ∧ iw(0, 8) = 0)
+}
+
+example "ISOL-2: exit_or_fault does not consume authority" {
+    assert(iw(0, 9) = 0 ∧ iw(0, 10) = 0)
+}
+
+example "ISOL-3: reclaim does not consume authority" {
+    assert(iw(2, 9) = 0 ∧ iw(2, 10) = 0)
+}
+
+// =============================================================================
+// LEAK FREEDOM
+// =============================================================================
+// Proved by: FIRE-3 (cycle closes: spawn(M3) = M0) plus the three
+// P-invariants (LIFECYCLE-1, EXTENT-1, EXTENT-2).
+// After any number of full cycles, the marking is M0.
+// No resources accumulate; no extents leak.
+
+// Falsifiability witness: M0 total = 9 should fail
+example "LEAK-FALSE: M0 total ≠ 9 (falsifiability witness)" {
+    assert(
+        m(0, 0) + m(0, 1) + m(0, 2) + m(0, 3) + m(0, 4) + m(0, 5) + m(0, 6)
+      + m(0, 7) + m(0, 8) + m(0, 9) + m(0, 10) + m(0, 11) + m(0, 12) = 9
+    )
+}

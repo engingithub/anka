@@ -153,6 +153,23 @@ impl Fabric {
         self.domains.remove(&id);
     }
 
+    /// Destroy an object: remove from objects table and placement map.
+    /// Does NOT zero physical memory — caller must scrub separately.
+    pub fn destroy_object(&mut self, id: ObjectId) {
+        self.objects.remove(&id);
+        self.placement.remove(&id);
+    }
+
+    /// Zero physical memory in the range [base..base+size).
+    /// Must be called before recycled extents are granted to new domains.
+    pub fn zero_physical(&mut self, base: u64, size: u64) {
+        let start = base as usize;
+        let end = (base + size) as usize;
+        if end <= self.memory.len() {
+            self.memory[start..end].fill(0);
+        }
+    }
+
     pub fn register_agent(&mut self, id: AgentId, kind: AgentKind, domain: DomainId) {
         self.agents.insert(id, AgentState { id, kind, domain });
     }
