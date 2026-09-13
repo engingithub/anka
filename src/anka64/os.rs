@@ -40,10 +40,14 @@ pub struct Process {
     pub waiting_on: Option<u64>,
     /// PID of the parent process (None for init).
     pub parent: Option<u64>,
+    /// Generation counter for lifecycle authority.
+    pub generation: u32,
+    /// Structured result: Exited(code) or fault.
+    pub result: Option<ProcessResult>,
 }
 
 /// Process lifecycle result — distinguishes normal exit from fault.
-/// program returned 7 != program died with ExecuteDenied.
+/// "program returned 7" != "program died with ExecuteDenied".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessResult {
     /// Process exited normally with exit code.
@@ -52,6 +56,39 @@ pub enum ProcessResult {
     SupervisorFault,
     /// Process died due to an architectural protection fault.
     ProtectionFault,
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Lifecycle authority
+//
+// A process handle is (pid, generation).  A name is not a capability
+// (Rule 9).  Knowing a PID does not authorize observing a process.
+// The generation prevents stale handles from resolving after
+// process-slot reuse.
+// ───────────────────────────────────────────────────────────────────
+
+/// Opaque handle representing authority to observe a process lifecycle.
+/// Returned by SYS_SPAWN, consumed by SYS_WAIT.
+///
+/// Encoded as a single u64 for register passing:
+///   bits [63:32] = generation
+///   bits [31:0]  = pid
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessHandle(u64);
+
+impl ProcessHandle {
+    fn new(pid: u64, generation: u32) -> Self {
+        Self((generation as u64) << 32 | (pid & 0xFFFF_FFFF))
+    }
+
+    fn pid(&self) -> u64 { self.0 & 0xFFFF_FFFF }
+    fn generation(&self) -> u32 { (self.0 >> 32) as u32 }
+
+    /// Encode as a single u64 for register passing.
+    pub fn as_u64(&self) -> u64 { self.0 }
+
+    /// Decode from a u64 received from user space.
+    pub fn from_u64(v: u64) -> Self { Self(v) }
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -347,9 +384,21 @@ impl Kernel {
             exit_code: 0,
             waiting_on: None,
             parent: None,
+            generation: 0,
+            result: None,
         });
         self.mailboxes.push(Vec::new());
         pid
+    }
+
+    /// Validate a process handle and return the process index if valid.
+    fn validate_handle(&self, handle: ProcessHandle) -> Option<usize> {
+        let pid = handle.pid();
+        let handle_gen = handle.generation();
+        if pid as usize >= self.processes.len() { return None; }
+        let idx = pid as usize;
+        if self.processes[idx].generation != handle_gen { return None; }
+        Some(idx)
     }
 
     // ─── Boot contract ─────────────────────────────────────────
@@ -589,10 +638,12 @@ impl Kernel {
                                 self.processes[idx].pid, core.pc, core.trap_vector);
                             self.processes[idx].exited = true;
                             self.processes[idx].exit_code = 0xDEAD;
+                            self.processes[idx].result = Some(ProcessResult::SupervisorFault);
                         }
                         HaltDisposition::UserExit(code) => {
                             self.processes[idx].exit_code = code;
                             self.processes[idx].exited = true;
+                            self.processes[idx].result = Some(ProcessResult::Exited(code));
                         }
                     }
                     return;
@@ -604,6 +655,7 @@ impl Kernel {
                         self.processes[idx].core.pc);
                     self.processes[idx].exited = true;
                     self.processes[idx].exit_code = 0xDEAD;
+                    self.processes[idx].result = Some(ProcessResult::ProtectionFault);
                     return;
                 }
             }
