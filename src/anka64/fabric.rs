@@ -137,6 +137,62 @@ impl Fabric {
         }
     }
 
+    /// Total physical memory size of this Fabric.
+    pub fn mem_size(&self) -> usize {
+        self.memory.len()
+    }
+
+    /// Page-aligned end of the highest physically placed object.
+    ///
+    /// Returns `Some(0)` if no Active/Sealed objects are placed.
+    /// Returns `None` on arithmetic overflow (base + size or alignment).
+    pub fn physical_high_watermark(&self) -> Option<u64> {
+        let mut hwm: u64 = 0;
+        for (&id, &base) in &self.placement {
+            if let Some(obj) = self.objects.get(&id) {
+                if !matches!(obj.state, ObjectState::Active | ObjectState::Sealed) {
+                    continue;
+                }
+                let end = base.checked_add(obj.size)?;
+                let aligned = end.checked_add(0xFFF)? & !0xFFF;
+                if aligned > hwm {
+                    hwm = aligned;
+                }
+            }
+        }
+        Some(hwm)
+    }
+
+    /// Zero the entire physical extent of a placed Active object.
+    ///
+    /// This guarantees declarative payload semantics: the loader
+    /// can zero-fill before initializing contents, ensuring
+    /// `initial bytes = contents || 0^(size - |contents|)`
+    /// regardless of prior Fabric memory contents.
+    ///
+    /// Returns false if the object is not Active, not placed, or
+    /// the complete [base, base + size) range does not fit in
+    /// Fabric memory.
+    pub fn zero_object_extent(&mut self, id: ObjectId) -> bool {
+        let obj = match self.objects.get(&id) {
+            Some(o) if o.state == ObjectState::Active => o,
+            _ => return false,
+        };
+        let size = obj.size as usize;
+        let phys_base = match self.placement.get(&id) {
+            Some(&b) => b as usize,
+            None => return false,
+        };
+        let end = match phys_base.checked_add(size) {
+            Some(e) if e <= self.memory.len() => e,
+            _ => return false,
+        };
+        for i in phys_base..end {
+            self.memory[i] = 0;
+        }
+        true
+    }
+
     // ───────────────── Domain management ─────────────────────────
 
     pub fn create_domain(&mut self) -> DomainId {

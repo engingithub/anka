@@ -29,3 +29,5 @@ pub mod guest_compiler;
 #[cfg(test)]
 mod bootstrap_tests;
 pub mod multicore;
+pub mod ankad;
+pub mod system_image;
