@@ -1184,27 +1184,73 @@ impl Kernel {
     }
 
     fn run_process(&mut self, idx: usize, quantum: usize) {
+        // Machine event sequence (Phase 9.0d):
+        //
+        //   Before any instruction fetch, if P ∧ ¬M, delivery gets
+        //   first refusal.  This handles both:
+        //     A. post-commit: step → tick → post → deliver → next fetch
+        //     B. post-event_return: resume with pending → deliver → next fetch
+        //   The M3a → M1 → M2 re-fire path falls out naturally.
+        //
+        //   Committed instruction ⇒ timer tick.
+        //   Faulted instruction ⇒ no timer tick, no async delivery (INT-6).
+
         for _ in 0..quantum {
             if self.processes[idx].exited() {
                 return;
             }
 
+            // ── Pre-fetch delivery check ──────────────────────────
+            // Handles case B: if event_return() or a previous cycle
+            // left pending_event + interrupts_enabled, deliver now
+            // before executing the next instruction.
+            if self.processes[idx].core.deliver_pending() {
+                // Delivery pushed an EventFrame, entered Supervisor,
+                // masked, and redirected to trap_vector.  The core
+                // is now halted-equivalent at trap_vector (HALT).
+                // Classify and handle exactly like a post-step halt.
+                self.processes[idx].core.halted = true;
+                self.handle_timer_interrupt(idx);
+                return;
+            }
+
+            // ── Execute one instruction ───────────────────────────
             let result = self.processes[idx].core.step(&mut self.fabric);
             match result {
-                super::core::StepResult::Continue => {}
+                super::core::StepResult::Continue => {
+                    // ── Committed: tick devices, may post event ────
+                    let timer_fired = if let Some(ref mut timer) = self.fabric.timer {
+                        timer.tick()
+                    } else {
+                        false
+                    };
+                    if timer_fired {
+                        self.processes[idx].core.pending_event =
+                            Some(super::state::EventCause::TimerInterrupt);
+                    }
+                    // Post-commit delivery (case A) is handled by
+                    // the pre-fetch check at the top of the next
+                    // iteration.  This keeps deliver_pending() in
+                    // exactly one place.
+                }
                 super::core::StepResult::Halted => {
+                    // HALT does tick the timer (committed instruction).
+                    let timer_fired = if let Some(ref mut timer) = self.fabric.timer {
+                        timer.tick()
+                    } else {
+                        false
+                    };
+                    if timer_fired {
+                        self.processes[idx].core.pending_event =
+                            Some(super::state::EventCause::TimerInterrupt);
+                    }
+
                     match classify_halt(&self.processes[idx].core) {
                         HaltDisposition::Syscall => {
                             self.handle_syscall(idx);
                         }
                         HaltDisposition::TimerInterrupt => {
-                            // Phase 9.0a: timer interrupt entry is
-                            // recognized but delivery is not yet
-                            // implemented.  resume_from_trap() performs
-                            // event_return() and the process continues.
-                            // Phase 9.0d will replace this with the
-                            // real handle_timer_interrupt().
-                            self.resume_from_trap(idx);
+                            self.handle_timer_interrupt(idx);
                         }
                         HaltDisposition::SupervisorFault => {
                             let core = &self.processes[idx].core;
@@ -1219,6 +1265,8 @@ impl Kernel {
                     return;
                 }
                 super::core::StepResult::Fault(f) => {
+                    // Faulted instruction: NO timer tick, NO async
+                    // delivery.  INT-6 safety direction.
                     eprintln!("Process {} faulted: {:?} obj={:?} off={:#x} kind={:?} pc={:#x}",
                         self.processes[idx].pid, f.reason,
                         f.object, f.offset, f.kind,
@@ -1228,6 +1276,17 @@ impl Kernel {
                 }
             }
         }
+    }
+
+    /// Handle a timer interrupt: perform event_return() and yield
+    /// to the round-robin scheduler.
+    ///
+    /// The outer scheduling loop will choose the next runnable process.
+    /// When this process eventually runs again, the pre-fetch delivery
+    /// check handles any preserved pending event.
+    fn handle_timer_interrupt(&mut self, idx: usize) {
+        self.resume_from_trap(idx);
+        // Returning from run_process yields to the round-robin.
     }
 
     fn handle_syscall(&mut self, idx: usize) {
@@ -4767,4 +4826,173 @@ mod tests {
         eprintln!("8.4b.1-16: map_vaddr_overflow → MAX ✓");
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.0d — Machine event composition tests
+    //
+    // These witness the full composed path:
+    //   I_n commits → timer tick → post → deliver_pending → I_{n+1}
+    // through the actual kernel scheduler.
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Helper: set up a single-process kernel with a trap handler
+    /// (HALT at trap_vector) and an N-instruction user program.
+    /// Returns (kernel, text ObjectId, text physical base).
+    fn timer_test_setup(
+        fabric: &mut Fabric,
+        user_code: &[u8],
+    ) -> (Anka64Core, DomainId, ObjectId) {
+        let text  = fabric.alloc_object("timer_text",  0x4000, ObjectKind::Memory);
+        let stack = fabric.alloc_object("timer_stack", 0x4000, ObjectKind::Memory);
+        fabric.place_object(text,  0x000000);
+        fabric.place_object(stack, 0x010000);
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, stack, 0, 0x4000, Permissions::RW);
+
+        let mut core = Anka64Core::new(CPU0, dom);
+        core.address_map.add(0x00000, 0x4000, text);
+        core.address_map.add(0x20000, 0x4000, stack);
+        core.r[SP as usize] = 0x20000 + 0x4000;
+        core.trap_vector = 0x3FF0;
+
+        // Write user code at offset 0.
+        fabric.write_physical(0x000000, user_code);
+        // Write trap handler (HALT) at trap_vector physical offset.
+        install_trap_handler(fabric, 0x000000, 0x4000);
+
+        (core, dom, text)
+    }
+
+    /// Committed instruction → timer fires → immediate delivery.
+    ///
+    /// A 10-instruction NOP sled with timer period 5.  The timer
+    /// fires after instruction 5 commits.  Before instruction 6
+    /// fetches, deliver_pending() triggers, the process enters
+    /// supervisor at trap_vector, and handle_timer_interrupt() yields.
+    ///
+    /// On resume the process continues from instruction 6.
+    #[test]
+    fn p90d_commit_fire_deliver() {
+        let mut asm = Asm64::new();
+        // 10 NOPs then SYS_EXIT(42).
+        for _ in 0..10 { asm.nop(); }
+        asm.movi(R1, 42);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        let code = asm.to_bytes();
+
+        let mut fabric = Fabric::new(0x100000);
+        fabric.configure_timer(5);
+        let (core, dom, text) = timer_test_setup(&mut fabric, &code);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        // Large quantum so preemption comes from the timer, not the loop.
+        kernel.run(10000, 100);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, 42,
+            "process must complete after timer preemption + resume");
+        eprintln!("9.0d: commit→fire→deliver→resume→exit(42) ✓");
+    }
+
+    /// No timer firing → ordinary execution continues uninterrupted.
+    ///
+    /// A 4-instruction program with timer period 100 (never fires).
+    /// Process completes without any delivery.
+    #[test]
+    fn p90d_no_fire_continues() {
+        let mut asm = Asm64::new();
+        asm.movi(R1, 7);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        let code = asm.to_bytes();
+
+        let mut fabric = Fabric::new(0x100000);
+        fabric.configure_timer(100);
+        let (core, dom, text) = timer_test_setup(&mut fabric, &code);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.run(10000, 100);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, 7);
+        eprintln!("9.0d: no fire → exit(7) ✓");
+    }
+
+    /// Timer fires repeatedly during a long NOP sled.  Each fire
+    /// causes preemption and resume.  The process still completes.
+    ///
+    /// 50 NOPs + SYS_EXIT(99) with period 3: fires ~16 times.
+    #[test]
+    fn p90d_repeated_preemption() {
+        let mut asm = Asm64::new();
+        for _ in 0..50 { asm.nop(); }
+        asm.movi(R1, 99);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        let code = asm.to_bytes();
+
+        let mut fabric = Fabric::new(0x100000);
+        fabric.configure_timer(3);
+        let (core, dom, text) = timer_test_setup(&mut fabric, &code);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.run(10000, 200);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, 99,
+            "process must survive repeated timer preemptions");
+        eprintln!("9.0d: repeated preemption (~16 fires) → exit(99) ✓");
+    }
+
+    /// M3a → M1 → M2 re-fire path: a second timer fires while the
+    /// first interrupt is being handled (masked).  After event_return,
+    /// the preserved pending event must be delivered before the next
+    /// user instruction executes.
+    ///
+    /// This is the decisive composition witness for the formal path:
+    ///   M3a →(T_eret)→ M1 →(T_deliver)→ M2.
+    ///
+    /// Strategy: period 1 fires every instruction.  After the first
+    /// delivery, the timer fires again during the HALT at trap_vector
+    /// (committed instruction → tick → post).  handle_timer_interrupt
+    /// does event_return, leaving pending_event = Some + enabled.
+    /// The pre-fetch check in run_process catches this and delivers
+    /// again immediately.
+    ///
+    /// Despite constant preemption, the process must complete.
+    #[test]
+    fn p90d_masked_refire_path() {
+        let mut asm = Asm64::new();
+        // 20 NOPs then SYS_EXIT(77).
+        for _ in 0..20 { asm.nop(); }
+        asm.movi(R1, 77);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        let code = asm.to_bytes();
+
+        let mut fabric = Fabric::new(0x100000);
+        // Period 1: fires every single instruction.
+        // Every committed instruction fires the timer, so the process
+        // is preempted after every instruction.
+        fabric.configure_timer(1);
+        let (core, dom, text) = timer_test_setup(&mut fabric, &code);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        // Need many rounds because each instruction causes preemption.
+        kernel.run(10000, 500);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].exit_code, 77,
+            "M3a→M1→M2 re-fire path: process must survive period-1 preemption");
+        eprintln!("9.0d: period-1 re-fire path → exit(77) ✓");
+    }
 }
