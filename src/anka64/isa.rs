@@ -112,6 +112,24 @@ impl DecodedInsn {
 }
 
 // ───────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────
+// I-format immediate range — the single definition of representability
+// used by both the assembler and the compiler.
+//
+// Signed 18-bit: [-2^17, 2^17 - 1] = [-131072, 131071].
+// No code-generation layer may pre-mask or truncate a value to
+// make it fit.  Either the source literal is exactly representable,
+// or it must be rejected.
+// ───────────────────────────────────────────────────────────────────
+
+pub const IMM18_MIN: i32 = -(1 << 17);   // -131072
+pub const IMM18_MAX: i32 =  (1 << 17) - 1; // 131071
+
+pub fn fits_imm18(v: i64) -> bool {
+    v >= IMM18_MIN as i64 && v <= IMM18_MAX as i64
+}
+
+// ───────────────────────────────────────────────────────────────────
 // Encoding helpers (format-level, shared by assembler and tests)
 // ───────────────────────────────────────────────────────────────────
 
@@ -238,6 +256,11 @@ impl Asm64 {
     }
 
     fn emit_i_named(&mut self, name: &str, rd: u8, rs1: u8, imm: i32) {
+        assert!(
+            fits_imm18(imm as i64),
+            "I-format immediate out of signed 18-bit range: {imm} \
+             (valid: {IMM18_MIN}..={IMM18_MAX})",
+        );
         let d = desc::by_name(name)
             .unwrap_or_else(|| panic!("unknown I-format instruction: {}", name));
         debug_assert_eq!(d.format, Format::I, "{} is not I-format", name);
@@ -459,5 +482,51 @@ mod tests {
         assert!(listing.contains("add"));
         assert!(listing.contains("halt"));
         eprintln!("Listing:\n{}", listing);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // I-format immediate range — boundary and rejection tests
+    //
+    // The assembler must never silently alias an out-of-range
+    // immediate.  These tests close the full round trip:
+    //   source literal → encode → decode → same literal
+    // and verify that out-of-range values are rejected.
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Boundary acceptance: -131072 and 131071 encode and decode
+    /// to exactly the same signed value.
+    #[test]
+    fn imm18_boundary_accepted() {
+        let mut asm = Asm64::new();
+        asm.movi(R0, IMM18_MIN);
+        asm.movi(R1, IMM18_MAX);
+        let bytes = asm.to_bytes();
+
+        let word0 = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let word1 = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        let d0 = decode(word0);
+        let d1 = decode(word1);
+
+        assert_eq!(d0.imm, IMM18_MIN as i64,
+            "decode(-131072) must equal -131072");
+        assert_eq!(d1.imm, IMM18_MAX as i64,
+            "decode(131071) must equal 131071");
+        eprintln!("imm18 boundary: -131072 ✓, 131071 ✓");
+    }
+
+    /// Boundary rejection: -131073 must panic.
+    #[test]
+    #[should_panic(expected = "I-format immediate out of signed 18-bit range")]
+    fn imm18_reject_negative_overflow() {
+        let mut asm = Asm64::new();
+        asm.movi(R0, IMM18_MIN - 1); // -131073
+    }
+
+    /// Boundary rejection: 131072 must panic.
+    #[test]
+    #[should_panic(expected = "I-format immediate out of signed 18-bit range")]
+    fn imm18_reject_positive_overflow() {
+        let mut asm = Asm64::new();
+        asm.movi(R0, IMM18_MAX + 1); // 131072
     }
 }

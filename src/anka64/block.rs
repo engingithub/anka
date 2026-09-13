@@ -439,6 +439,11 @@ impl BlockController {
         self.slot_generations[slot as usize]
     }
 
+    /// Immutable access to the backing storage.
+    pub fn storage_ref(&self) -> &BlockStorage {
+        &self.storage
+    }
+
     /// Mutable access to the backing storage (for test setup).
     pub fn storage_mut(&mut self) -> &mut BlockStorage {
         &mut self.storage

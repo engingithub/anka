@@ -370,15 +370,11 @@ impl Compiler {
         match expr {
             Expr::IntLit(val) => {
                 let v = *val;
-                if v >= -131072 && v <= 131071 {
+                if super::isa::fits_imm18(v) {
                     self.asm.movi(dest, v as i32);
                 } else {
-                    // Multi-instruction materialization for large constants
-                    self.asm.movi(dest, (v & 0x3FFFF) as i32);
-                    if v >> 18 != 0 && v >> 18 != -1i64 as u64 as i64 >> 18 {
-                        // Need upper bits — for now, panic on huge constants
-                        panic!("constant {} too large for v0.1 compiler", v);
-                    }
+                    panic!("constant {v} does not fit signed 18-bit immediate \
+                            (valid: {}..={})", super::isa::IMM18_MIN, super::isa::IMM18_MAX);
                 }
             }
             Expr::Var(id) => {
@@ -895,5 +891,41 @@ mod tests {
         };
         let _asm = compile(&prog);
         eprintln!("definitely_returns: Void function → no check ✓");
+    }
+
+    /// Compiler rejects positive overflow: 131072 does not fit imm18.
+    #[test]
+    #[should_panic(expected = "does not fit signed 18-bit immediate")]
+    fn cc_reject_positive_overflow() {
+        let prog = Program {
+            functions: vec![Function {
+                name: "main".into(),
+                params: vec![],
+                ret_type: Type::Int,
+                locals: vec![],
+                body: vec![
+                    Stmt::Return(Expr::IntLit(131072)),
+                ],
+            }],
+        };
+        let _asm = compile(&prog);
+    }
+
+    /// Compiler rejects negative overflow: -131073 does not fit imm18.
+    #[test]
+    #[should_panic(expected = "does not fit signed 18-bit immediate")]
+    fn cc_reject_negative_overflow() {
+        let prog = Program {
+            functions: vec![Function {
+                name: "main".into(),
+                params: vec![],
+                ret_type: Type::Int,
+                locals: vec![],
+                body: vec![
+                    Stmt::Return(Expr::IntLit(-131073)),
+                ],
+            }],
+        };
+        let _asm = compile(&prog);
     }
 }
