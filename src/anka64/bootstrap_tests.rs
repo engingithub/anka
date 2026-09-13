@@ -9771,23 +9771,7 @@ mod tests {
         let image = codec_test_image();
         let bytes = image.encode().unwrap();
         let decoded = SystemImage::decode(&bytes).unwrap();
-
-        assert_eq!(decoded.version, image.version);
-        assert_eq!(decoded.objects.len(), image.objects.len());
-        for (a, b) in decoded.objects.iter().zip(image.objects.iter()) {
-            assert_eq!(a.name, b.name);
-            assert_eq!(a.kind, b.kind);
-            assert_eq!(a.size, b.size);
-            assert_eq!(a.contents, b.contents);
-            assert_eq!(a.seal_after_load, b.seal_after_load);
-        }
-        assert_eq!(decoded.boot.image.obj, image.boot.image.obj);
-        assert_eq!(decoded.boot.grants.len(), image.boot.grants.len());
-        assert_eq!(decoded.boot.maps.len(), image.boot.maps.len());
-        assert_eq!(decoded.boot.code_vaddr, image.boot.code_vaddr);
-        assert_eq!(decoded.boot.stack_vaddr, image.boot.stack_vaddr);
-        assert_eq!(decoded.boot.stack_size, image.boot.stack_size);
-        assert_eq!(decoded.boot.trap_vaddr, image.boot.trap_vaddr);
+        assert_eq!(decoded, image);
     }
 
     #[test]

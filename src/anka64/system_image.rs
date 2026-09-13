@@ -78,7 +78,7 @@ impl fmt::Display for ImageObjectRef {
 /// Payload semantics: initial object bytes = contents || 0^(size - |contents|).
 /// The loader enforces this via explicit zero-fill regardless of
 /// prior Fabric memory contents.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ImageObject {
     pub name: String,
     pub kind: ObjectKind,
@@ -92,7 +92,7 @@ pub struct ImageObject {
 // ───────────────────────────────────────────────────────────────────
 
 /// Boot image descriptor — identifies the initial process's code object.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ImageBootImage {
     pub obj: ImageObjectRef,
     pub code_offset: u64,
@@ -105,7 +105,7 @@ pub struct ImageBootImage {
 ///
 /// An object may appear in multiple grants with different ranges/
 /// permissions.  Duplicate references are allowed.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ImageBootGrant {
     pub obj: ImageObjectRef,
     pub offset: u64,
@@ -117,7 +117,7 @@ pub struct ImageBootGrant {
 ///
 /// An object may appear in multiple maps at different virtual
 /// addresses.  Duplicate references are allowed.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ImageBootMap {
     pub vaddr: u64,
     pub size: u64,
@@ -126,7 +126,7 @@ pub struct ImageBootMap {
 }
 
 /// Complete boot manifest for the initial process.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ImageBootInfo {
     pub image: ImageBootImage,
     pub grants: Vec<ImageBootGrant>,
@@ -146,7 +146,7 @@ pub struct ImageBootInfo {
 /// Contains the logical object graph and boot manifest.  Contains
 /// no physical addresses, no runtime ObjectIds, no process slots,
 /// no domains, and no generations.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct SystemImage {
     pub version: u32,
     pub objects: Vec<ImageObject>,
@@ -334,7 +334,8 @@ impl SystemImage {
         };
 
         // next_phys = max(end of image load, high watermark of pre-existing placements)
-        let hwm = fabric.physical_high_watermark();
+        let hwm = fabric.physical_high_watermark()
+            .ok_or(ImageError::Overflow)?;
         let mut kernel = Kernel::new(fabric);
         kernel.next_phys = std::cmp::max(current_phys, hwm);
 
@@ -360,6 +361,9 @@ impl SystemImage {
     /// reference validity.  Does not validate boot semantics —
     /// that belongs to kernel.boot().
     fn validate_model(&self) -> Result<(), ImageError> {
+        if self.version != IMAGE_VERSION {
+            return Err(ImageError::UnsupportedVersion(self.version));
+        }
         if self.objects.len() > MAX_IMAGE_OBJECTS as usize {
             return Err(ImageError::TooManyObjects(self.objects.len()));
         }
@@ -518,7 +522,7 @@ impl SystemImage {
 
         // ── Header (32 bytes) ──
         out.extend_from_slice(IMAGE_MAGIC);                                     // 8
-        out.extend_from_slice(&IMAGE_VERSION.to_le_bytes());                    // 4
+        out.extend_from_slice(&self.version.to_le_bytes());                     // 4
         out.extend_from_slice(&(self.objects.len() as u32).to_le_bytes());      // 4
         out.extend_from_slice(&(self.boot.grants.len() as u32).to_le_bytes());  // 4
         out.extend_from_slice(&(self.boot.maps.len() as u32).to_le_bytes());    // 4

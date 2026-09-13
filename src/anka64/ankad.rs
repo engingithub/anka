@@ -31,6 +31,14 @@ pub const SUPERVISOR_COMPILER_VADDR: u64 = 0x30000;
 ///   child's virtual space. 0 for CC_A, 0x30000 for CC_B.
 ///   Only affects SpawnLayout.code_vaddr.
 pub fn build_ankad_code(compiler_len: usize, child_code_vaddr: u64) -> Vec<u8> {
+    assert!(compiler_len <= 0x1FFFF,
+        "compiler_len {compiler_len:#x} exceeds MOVI range (max 0x1FFFF)");
+    assert!(child_code_vaddr % 2 == 0,
+        "child_code_vaddr {child_code_vaddr:#x} must be even (halved for MOVI)");
+    assert!((child_code_vaddr / 2) <= 0x1FFFF,
+        "child_code_vaddr/2 {:#x} exceeds MOVI range (max 0x1FFFF)",
+        child_code_vaddr / 2);
+
     let mut asm = Asm64::new();
 
     // ── Phase 1: base addresses ──

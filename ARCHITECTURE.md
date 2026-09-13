@@ -1451,7 +1451,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions, 63,808 bytes |
 | Canonical source | ~17 KB |
-| Tests | 458 |
+| Tests | 468 |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -1472,6 +1472,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | Orphan termination | Depth-first recursive on parent death |
 | Slot reuse | Free slots reused with advanced generation, fresh PID |
 | Supervision | ankad: native Anka64 supervisor (boot → spawn → wait → restart → all compiler paths) |
+| System image | Declarative boot manifest: encode → decode → load_into(Fabric, phys_base) → kernel.boot() |
 | Steady-state conservation | 100-cycle resource fixed point verified |
 | Formal lifecycle model | Kleis Petri net: 3 P-invariants, cycle closure, 26 properties |
 | Linux x86_64 binary | Built and tested via Podman (440/440, stripped ELF, ~649 KiB) |
