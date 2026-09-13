@@ -31,8 +31,8 @@ pub enum AuthResult {
 ///
 /// Knows only how to advance its own state and report "I fired."
 /// Has no knowledge of cores, EventFrames, privilege, trap vectors,
-/// or scheduling.  Routing a firing to a core's pending_event is
-/// the caller's responsibility (Phase 9.0d).
+/// or scheduling.  Routing a firing to a core's pending set is
+/// the caller's responsibility (tick_devices, Phase 9.0d/9.1a).
 ///
 /// Preserves the Chapter 9 decomposition:
 ///   generation ≠ routing ≠ pending ≠ delivery.
@@ -1572,7 +1572,8 @@ mod tests {
         let snapshot_pc = core.pc;
         let snapshot_priv = core.privilege;
         let snapshot_enabled = core.interrupts_enabled;
-        let snapshot_pending = core.pending_event.clone();
+        let snapshot_pending_timer = core.pending.timer;
+        let snapshot_pending_device = core.pending.device;
         let snapshot_frames = core.event_frames.len();
 
         // Tick the timer through multiple firings.
@@ -1585,7 +1586,8 @@ mod tests {
         assert_eq!(core.pc, snapshot_pc);
         assert_eq!(core.privilege, snapshot_priv);
         assert_eq!(core.interrupts_enabled, snapshot_enabled);
-        assert_eq!(core.pending_event.is_some(), snapshot_pending.is_some());
+        assert_eq!(core.pending.timer, snapshot_pending_timer);
+        assert_eq!(core.pending.device, snapshot_pending_device);
         assert_eq!(core.event_frames.len(), snapshot_frames);
     }
 

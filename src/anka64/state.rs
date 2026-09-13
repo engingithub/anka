@@ -491,7 +491,12 @@ pub enum EventCause {
     Syscall,
     /// Asynchronous timer interrupt delivered at instruction boundary.
     TimerInterrupt,
-    // Future: DeviceInterrupt { source }, InterprocessorInterrupt,
+    /// Asynchronous device interrupt delivered at instruction boundary.
+    ///
+    /// Formal basis: anka_block_device.kleis IRQ-INDEP-1 through
+    /// IRQ-INDEP-3 prove P_timer and P_dev are independent.
+    DeviceInterrupt,
+    // Future: InterprocessorInterrupt,
     //         ProtectionFault, IllegalInstruction, ...
     // Synchronous exceptions vs asynchronous interrupts differ in
     // entry semantics but share the same return-integrity mechanism.

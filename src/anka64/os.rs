@@ -239,6 +239,9 @@ enum HaltDisposition {
     /// Supervisor HALT at the trap gate caused by a timer interrupt.
     /// EventFrame cause = TimerInterrupt.
     TimerInterrupt,
+    /// Supervisor HALT at the trap gate caused by a device interrupt.
+    /// EventFrame cause = DeviceInterrupt.
+    DeviceInterrupt,
     /// Supervisor HALT not at the trap gate: kernel halt/panic.
     SupervisorFault,
 }
@@ -246,10 +249,10 @@ enum HaltDisposition {
 fn classify_halt(core: &Anka64Core) -> HaltDisposition {
     use super::state::EventCause;
     if core.privilege == Privilege::Supervisor && core.pc == core.trap_vector {
-        // Peek at the top EventFrame to determine why we entered supervisor.
         match core.event_frames.last().map(|f| &f.cause) {
             Some(EventCause::Syscall) => HaltDisposition::Syscall,
             Some(EventCause::TimerInterrupt) => HaltDisposition::TimerInterrupt,
+            Some(EventCause::DeviceInterrupt) => HaltDisposition::DeviceInterrupt,
             None => HaltDisposition::SupervisorFault,
         }
     } else if core.privilege == Privilege::Supervisor {
@@ -1202,15 +1205,14 @@ impl Kernel {
 
             // ── Pre-fetch delivery check ──────────────────────────
             // Handles case B: if event_return() or a previous cycle
-            // left pending_event + interrupts_enabled, deliver now
+            // left pending bits + interrupts_enabled, deliver now
             // before executing the next instruction.
+            //
+            // The arbiter inside deliver_pending() selects at most
+            // one source per boundary (ARB-11).
             if self.processes[idx].core.deliver_pending() {
-                // Delivery pushed an EventFrame, entered Supervisor,
-                // masked, and redirected to trap_vector.  The core
-                // is now halted-equivalent at trap_vector (HALT).
-                // Classify and handle exactly like a post-step halt.
                 self.processes[idx].core.halted = true;
-                self.handle_timer_interrupt(idx);
+                self.handle_async_interrupt(idx);
                 return;
             }
 
@@ -1218,39 +1220,24 @@ impl Kernel {
             let result = self.processes[idx].core.step(&mut self.fabric);
             match result {
                 super::core::StepResult::Continue => {
-                    // ── Committed: tick devices, may post event ────
-                    let timer_fired = if let Some(ref mut timer) = self.fabric.timer {
-                        timer.tick()
-                    } else {
-                        false
-                    };
-                    if timer_fired {
-                        self.processes[idx].core.pending_event =
-                            Some(super::state::EventCause::TimerInterrupt);
-                    }
+                    // ── Committed: tick devices, route assertions ──
+                    self.tick_devices(idx);
                     // Post-commit delivery (case A) is handled by
                     // the pre-fetch check at the top of the next
                     // iteration.  This keeps deliver_pending() in
                     // exactly one place.
                 }
                 super::core::StepResult::Halted => {
-                    // HALT does tick the timer (committed instruction).
-                    let timer_fired = if let Some(ref mut timer) = self.fabric.timer {
-                        timer.tick()
-                    } else {
-                        false
-                    };
-                    if timer_fired {
-                        self.processes[idx].core.pending_event =
-                            Some(super::state::EventCause::TimerInterrupt);
-                    }
+                    // HALT is a committed instruction: tick devices.
+                    self.tick_devices(idx);
 
                     match classify_halt(&self.processes[idx].core) {
                         HaltDisposition::Syscall => {
                             self.handle_syscall(idx);
                         }
-                        HaltDisposition::TimerInterrupt => {
-                            self.handle_timer_interrupt(idx);
+                        HaltDisposition::TimerInterrupt
+                        | HaltDisposition::DeviceInterrupt => {
+                            self.handle_async_interrupt(idx);
                         }
                         HaltDisposition::SupervisorFault => {
                             let core = &self.processes[idx].core;
@@ -1281,10 +1268,33 @@ impl Kernel {
     /// Handle a timer interrupt: perform event_return() and yield
     /// to the round-robin scheduler.
     ///
+    /// Tick all devices and route source assertions to the core.
+    ///
+    /// Called once per committed instruction boundary.  This is the
+    /// machine-level operation:
+    ///   I_n commits → tick_devices() → route assertions → I_{n+1}
+    ///
+    /// Phase 9.1a: only the timer ticks.  Phase 9.1b/d will add the
+    /// block controller.  The structure ensures both sources can
+    /// become pending from the same machine boundary.
+    fn tick_devices(&mut self, idx: usize) {
+        let timer_fired = if let Some(ref mut timer) = self.fabric.timer {
+            timer.tick()
+        } else {
+            false
+        };
+        if timer_fired {
+            self.processes[idx].core.post_timer_interrupt();
+        }
+        // Future: block controller tick + device interrupt routing.
+    }
+
+    /// Handle an asynchronous interrupt (timer or device).
+    ///
     /// The outer scheduling loop will choose the next runnable process.
     /// When this process eventually runs again, the pre-fetch delivery
-    /// check handles any preserved pending event.
-    fn handle_timer_interrupt(&mut self, idx: usize) {
+    /// check handles any preserved pending bits.
+    fn handle_async_interrupt(&mut self, idx: usize) {
         self.resume_from_trap(idx);
         // Returning from run_process yields to the round-robin.
     }
@@ -4869,7 +4879,7 @@ mod tests {
     /// A 10-instruction NOP sled with timer period 5.  The timer
     /// fires after instruction 5 commits.  Before instruction 6
     /// fetches, deliver_pending() triggers, the process enters
-    /// supervisor at trap_vector, and handle_timer_interrupt() yields.
+    /// supervisor at trap_vector, and handle_async_interrupt() yields.
     ///
     /// On resume the process continues from instruction 6.
     #[test]
@@ -4962,8 +4972,8 @@ mod tests {
     ///
     /// Strategy: period 1 fires every instruction.  After the first
     /// delivery, the timer fires again during the HALT at trap_vector
-    /// (committed instruction → tick → post).  handle_timer_interrupt
-    /// does event_return, leaving pending_event = Some + enabled.
+    /// (committed instruction → tick → post).  handle_async_interrupt
+    /// does event_return, leaving P_timer + enabled.
     /// The pre-fetch check in run_process catches this and delivers
     /// again immediately.
     ///
@@ -5040,7 +5050,7 @@ mod tests {
     ///
     /// where A and B are iteration counts of two infinite loops,
     /// and the only cause of context switching is the FabricTimer
-    /// → pending_event → deliver_pending() → handle_timer_interrupt
+    /// → post_timer_interrupt → deliver_pending() → handle_async_interrupt
     /// → round-robin path.
     #[test]
     fn p90e_preemptive_multitasking() {
