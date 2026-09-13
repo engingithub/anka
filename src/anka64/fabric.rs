@@ -441,11 +441,11 @@ impl Fabric {
         };
 
         let required = request.kind.required_permission();
-        let width = request.width.bytes();
+        let length = request.length;
         let mut stale = false;
 
         for cap in &domain.capabilities {
-            if cap.covers(request.object, request.offset, width, required) {
+            if cap.covers(request.object, request.offset, length, required) {
                 if self.validate(cap) {
                     return AuthResult::Authorized(cap.generation());
                 }
@@ -479,6 +479,10 @@ impl Fabric {
     // ───────────────── Transaction lifecycle ─────────────────────
 
     /// Submit a request, returning its transaction index.
+    ///
+    /// Rejects zero-length spans and spans whose `offset + length`
+    /// overflows `u64`.  These produce an immediately-faulted
+    /// transaction with `InvalidSpan`.
     pub fn submit(
         &mut self,
         request: MemoryRequest,
@@ -486,17 +490,34 @@ impl Fabric {
     ) -> usize {
         let id = TransactionId(self.next_tx_id);
         self.next_tx_id += 1;
+
+        // Validate nonzero, representable span.
+        let invalid_span = request.length == 0
+            || request.offset.checked_add(request.length).is_none();
+
+        let initial_state = if invalid_span {
+            TxState::Requested  // will be faulted immediately below
+        } else {
+            TxState::Requested
+        };
+
         let tx = Transaction {
             id,
             request,
-            state: TxState::Requested,
+            state: initial_state,
             auth_generation: None,
             physical_address: None,
             write_data,
             fault: None,
         };
         self.transactions.push(tx);
-        self.transactions.len() - 1
+        let idx = self.transactions.len() - 1;
+
+        if invalid_span {
+            self.fault_transaction(idx, FaultReason::InvalidSpan);
+        }
+
+        idx
     }
 
     /// Advance a transaction to its next phase.
@@ -536,6 +557,17 @@ impl Fabric {
         }
     }
 
+    /// Commit phase — all-or-nothing DMA span semantics.
+    ///
+    /// The write pipeline:
+    ///   1. Validate nonzero/representable span (done at submit)
+    ///   2. Revalidate generation (I5)
+    ///   3. Verify data.len() == declared length (LengthMismatch)
+    ///   4. Verify physical bounds (offset + length within memory)
+    ///   5. Mutate bytes
+    ///
+    /// No write occurs before step 5.  Any failure in steps 1-4
+    /// produces a fault with zero memory mutation.
     fn phase_commit(&mut self, idx: usize) {
         let request = self.transactions[idx].request;
 
@@ -559,19 +591,33 @@ impl Fabric {
             }
         };
 
+        let length = request.length as usize;
+
+        // Verify physical span fits in memory (checked arithmetic).
+        let phys_end = match (phys as usize).checked_add(length) {
+            Some(end) if end <= self.memory.len() => end,
+            _ => {
+                self.fault_transaction(idx, FaultReason::InvalidSpan);
+                return;
+            }
+        };
+
         match request.kind {
             AccessKind::Write | AccessKind::Atomic => {
                 if let Some(ref data) = self.transactions[idx].write_data {
-                    let base = phys as usize;
-                    for (i, &byte) in data.iter().enumerate() {
-                        if base + i < self.memory.len() {
-                            self.memory[base + i] = byte;
-                        }
+                    // Length mismatch: declared span vs actual data.
+                    // Protection boundary: mismatch => zero memory mutation.
+                    if data.len() != length {
+                        self.fault_transaction(idx, FaultReason::LengthMismatch);
+                        return;
                     }
+                    // All validations passed — mutate bytes.
+                    let base = phys as usize;
+                    self.memory[base..phys_end].copy_from_slice(data);
                 }
             }
             AccessKind::Read | AccessKind::Fetch => {
-                // Read data from physical memory
+                // Read data from physical memory — no mutation.
             }
         }
 
@@ -590,6 +636,7 @@ impl Fabric {
             generation: tx.auth_generation,
             offset: tx.request.offset,
             width: tx.request.width,
+            length: tx.request.length,
             kind: tx.request.kind,
             pc: None,
             reason,
@@ -614,13 +661,14 @@ impl Fabric {
 
     /// Execute a complete read transaction, returning data or fault.
     ///
-    /// The full lifecycle runs: authorize → translate → commit.
+    /// The full lifecycle runs: submit → authorize → translate → commit.
     /// On success, data is read from the translated physical address.
+    /// Uses `request.length` (not `width`) for the byte span.
     pub fn execute_read(
         &mut self,
         request: MemoryRequest,
     ) -> Result<Vec<u8>, FaultRecord> {
-        let width = request.width.bytes() as usize;
+        let length = request.length as usize;
         let idx = self.submit(request, None);
         self.advance(idx); // authorize
         self.advance(idx); // translate
@@ -628,7 +676,7 @@ impl Fabric {
         match self.transactions[idx].state {
             TxState::Committed => {
                 let phys = self.transactions[idx].physical_address.unwrap() as usize;
-                Ok(self.memory[phys..phys + width].to_vec())
+                Ok(self.memory[phys..phys + length].to_vec())
             }
             TxState::Faulted => {
                 Err(self.transactions[idx].fault.clone().unwrap())
@@ -664,10 +712,10 @@ impl Fabric {
         request: MemoryRequest,
         new_value: Vec<u8>,
     ) -> Result<Vec<u8>, FaultRecord> {
-        let width = request.width.bytes() as usize;
+        let length = request.length as usize;
         let idx = self.submit(request, Some(new_value));
         self.advance(idx); // authorize
-        self.advance(idx); // translate → Prepared
+        self.advance(idx); // translate -> Prepared
 
         if self.transactions[idx].state == TxState::Faulted {
             return Err(self.transactions[idx].fault.clone().unwrap());
@@ -675,7 +723,7 @@ impl Fabric {
 
         // Capture old value while in Prepared state (before commit writes)
         let phys = self.transactions[idx].physical_address.unwrap() as usize;
-        let old_value = self.memory[phys..phys + width].to_vec();
+        let old_value = self.memory[phys..phys + length].to_vec();
 
         // Commit (writes new value, revalidates generation)
         self.advance(idx);
@@ -718,6 +766,7 @@ impl Fabric {
 // Helper: build a MemoryRequest
 // ───────────────────────────────────────────────────────────────────
 
+/// Build a CPU-style MemoryRequest where `length` is derived from `width`.
 pub fn request(
     agent: AgentId,
     domain: DomainId,
@@ -735,6 +784,33 @@ pub fn request(
         object,
         offset,
         width,
+        length: width.bytes(),
+        kind,
+    }
+}
+
+/// Build a DMA-span MemoryRequest with explicit byte length.
+///
+/// `width` is set to `Width::Byte` as an ISA placeholder — the Fabric
+/// uses `length`, not `width`, for authorization and commit.
+pub fn dma_request(
+    agent: AgentId,
+    domain: DomainId,
+    object: ObjectId,
+    offset: u64,
+    length: u64,
+    kind: AccessKind,
+) -> MemoryRequest {
+    MemoryRequest {
+        context: AccessContext {
+            agent,
+            domain,
+            privilege: Privilege::User,
+        },
+        object,
+        offset,
+        width: Width::Byte,
+        length,
         kind,
     }
 }
@@ -1498,5 +1574,263 @@ mod tests {
         assert!(!timer.tick()); // counter: 2
         assert!(!timer.tick()); // counter: 1
         assert!(timer.tick(),   "fires after re-enable completes remaining countdown");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.1-pre — DMA span transaction tests
+    //
+    // The block device demanded the Fabric express authority in bytes,
+    // not ISA widths.  These tests validate all-or-nothing commit
+    // semantics and the LengthMismatch protection boundary.
+    // ═══════════════════════════════════════════════════════════════
+
+    fn setup_dma_span() -> (Fabric, ObjectId, DomainId) {
+        let mut f = Fabric::new(0x100000);
+        let obj = f.alloc_object("dma_buffer", 0x1000, ObjectKind::Memory);
+        f.place_object(obj, 0x4000);
+        let dom = f.create_domain();
+        f.grant(dom, obj, 0, 0x1000, Permissions::RW);
+        // Fill entire object with sentinel pattern.
+        for i in 0..0x1000usize {
+            f.memory[0x4000 + i] = 0xAA;
+        }
+        (f, obj, dom)
+    }
+
+    /// 512-byte authorized DMA span succeeds and writes exactly 512 bytes.
+    #[test]
+    fn p91pre_dma_span_512_succeeds() {
+        let (mut f, obj, dom) = setup_dma_span();
+        let data: Vec<u8> = (0..512).map(|i| (i & 0xFF) as u8).collect();
+        let req = dma_request(DMA0, dom, obj, 0, 512, AccessKind::Write);
+        let result = f.execute_write(req, data.clone());
+        assert!(result.is_ok(), "512-byte DMA span should succeed");
+        assert_eq!(f.read_physical(0x4000, 512), &data[..]);
+        // Bytes beyond the span are unchanged.
+        assert_eq!(f.memory[0x4000 + 512], 0xAA,
+            "byte beyond DMA span should be sentinel");
+    }
+
+    /// Capability covers only 256 bytes; 512-byte DMA span is denied.
+    /// Zero memory mutation.
+    #[test]
+    fn p91pre_dma_span_exceeds_capability() {
+        let mut f = Fabric::new(0x100000);
+        let obj = f.alloc_object("narrow_buf", 0x1000, ObjectKind::Memory);
+        f.place_object(obj, 0x4000);
+        let dom = f.create_domain();
+        // Only 256 bytes of authority.
+        f.grant(dom, obj, 0, 256, Permissions::RW);
+        for i in 0..0x1000usize {
+            f.memory[0x4000 + i] = 0xBB;
+        }
+        let snapshot: Vec<u8> = f.memory[0x4000..0x4000 + 0x1000].to_vec();
+
+        let data = vec![0x42u8; 512];
+        let req = dma_request(DMA0, dom, obj, 0, 512, AccessKind::Write);
+        let result = f.execute_write(req, data);
+        assert!(result.is_err(), "512-byte span with 256-byte cap must fail");
+        // A valid cap exists on the object but does not cover the requested range.
+        assert_eq!(result.unwrap_err().reason, FaultReason::WrongPermission);
+        assert_eq!(&f.memory[0x4000..0x4000 + 0x1000], &snapshot[..],
+            "denied DMA span must leave zero memory mutation");
+    }
+
+    /// The exact bug the block device discovered: authorize 8 bytes
+    /// (Width::Double), hand 512 bytes of data.  Before 9.1-pre this
+    /// would have written all 512.  Now: LengthMismatch, zero mutation.
+    #[test]
+    fn p91pre_declared_8_data_512_length_mismatch() {
+        let (mut f, obj, dom) = setup_dma_span();
+        let snapshot: Vec<u8> = f.memory[0x4000..0x4000 + 0x1000].to_vec();
+
+        // CPU-style request: width = Double (8 bytes), length = 8.
+        let req = request(CPU0, dom, obj, 0, Width::Double, AccessKind::Write);
+        assert_eq!(req.length, 8, "CPU request should derive length from width");
+        let data = vec![0x42u8; 512]; // 512-byte payload with 8-byte declared span
+        let result = f.execute_write(req, data);
+        assert!(result.is_err(), "8-byte declared span with 512-byte payload must fail");
+        assert_eq!(result.unwrap_err().reason, FaultReason::LengthMismatch);
+        assert_eq!(&f.memory[0x4000..0x4000 + 0x1000], &snapshot[..],
+            "LengthMismatch must produce zero memory mutation");
+    }
+
+    /// Declared 512, data 511: too short.  LengthMismatch, zero mutation.
+    #[test]
+    fn p91pre_declared_512_data_511_mismatch() {
+        let (mut f, obj, dom) = setup_dma_span();
+        let snapshot: Vec<u8> = f.memory[0x4000..0x4000 + 0x1000].to_vec();
+
+        let req = dma_request(DMA0, dom, obj, 0, 512, AccessKind::Write);
+        let data = vec![0x42u8; 511];
+        let result = f.execute_write(req, data);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().reason, FaultReason::LengthMismatch);
+        assert_eq!(&f.memory[0x4000..0x4000 + 0x1000], &snapshot[..],
+            "short payload must produce zero memory mutation");
+    }
+
+    /// Declared 512, data 513: too long.  LengthMismatch, zero mutation.
+    #[test]
+    fn p91pre_declared_512_data_513_mismatch() {
+        let (mut f, obj, dom) = setup_dma_span();
+        let snapshot: Vec<u8> = f.memory[0x4000..0x4000 + 0x1000].to_vec();
+
+        let req = dma_request(DMA0, dom, obj, 0, 512, AccessKind::Write);
+        let data = vec![0x42u8; 513];
+        let result = f.execute_write(req, data);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().reason, FaultReason::LengthMismatch);
+        assert_eq!(&f.memory[0x4000..0x4000 + 0x1000], &snapshot[..],
+            "oversized payload must produce zero memory mutation");
+    }
+
+    /// Generation changes between authorize and commit: stale DMA
+    /// produces zero memory mutation.
+    #[test]
+    fn p91pre_dma_stale_generation_zero_mutation() {
+        let (mut f, obj, dom) = setup_dma_span();
+        let snapshot: Vec<u8> = f.memory[0x4000..0x4000 + 0x1000].to_vec();
+
+        let data = vec![0x42u8; 512];
+        let req = dma_request(DMA0, dom, obj, 0, 512, AccessKind::Write);
+        let idx = f.submit(req, Some(data));
+        f.advance(idx); // authorize at gen 0
+        assert_eq!(f.transaction(idx).state, TxState::Authorized);
+
+        f.revoke(obj); // gen -> 1
+
+        f.advance(idx); // translate
+        f.advance(idx); // commit -> faulted (stale generation)
+        assert_eq!(f.transaction(idx).state, TxState::Faulted);
+        assert_eq!(f.transaction(idx).fault.as_ref().unwrap().reason,
+            FaultReason::StaleGeneration);
+        assert_eq!(&f.memory[0x4000..0x4000 + 0x1000], &snapshot[..],
+            "stale DMA must produce zero memory mutation");
+    }
+
+    /// Physical-end overrun: physical_base + offset + length extends
+    /// beyond Fabric memory.  The object itself is large enough
+    /// (authorization succeeds) but the physical placement is near
+    /// the end of available RAM.
+    #[test]
+    fn p91pre_physical_overrun_zero_mutation() {
+        // Object is 0x1000 bytes, placed at phys 0x4800 in a 0x5000-byte
+        // Fabric.  phys end = 0x5800, but Fabric only has 0x5000.
+        // A 512-byte write at object offset 0 is authorized (cap covers it)
+        // but phys 0x4800 + 512 = 0x4A00 fits.  Writing at offset 0x900
+        // hits phys 0x5100 which overruns.
+        let mut f = Fabric::new(0x5000);
+        let obj = f.alloc_object("edge_buf", 0x1000, ObjectKind::Memory);
+        f.place_object(obj, 0x4800); // phys [0x4800..0x5800) but only 0x5000 avail
+        let dom = f.create_domain();
+        f.grant(dom, obj, 0, 0x1000, Permissions::RW);
+        for i in 0..0x5000usize { f.memory[i] = 0xCC; }
+        let snapshot: Vec<u8> = f.memory.clone();
+
+        // 512 bytes at offset 0x900: phys = 0x4800+0x900 = 0x5100.
+        // 0x5100 + 512 = 0x5300 > 0x5000 (phys memory size).
+        // Authorization passes (cap covers [0,0x1000) and 0x900+512 <= 0x1000).
+        // Physical bounds check in phase_commit catches the overrun.
+        let req = dma_request(DMA0, dom, obj, 0x900, 512, AccessKind::Write);
+        let data = vec![0x42u8; 512];
+        let result = f.execute_write(req, data);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().reason, FaultReason::InvalidSpan);
+        assert_eq!(f.memory, snapshot,
+            "physical overrun must produce zero memory mutation");
+    }
+
+    /// Arithmetic overflow span: offset + length wraps u64.
+    /// InvalidSpan at submit, zero mutation.
+    #[test]
+    fn p91pre_arithmetic_overflow_span() {
+        let (mut f, obj, dom) = setup_dma_span();
+        let snapshot: Vec<u8> = f.memory[0x4000..0x4000 + 0x1000].to_vec();
+
+        let req = dma_request(DMA0, dom, obj, u64::MAX - 10, 512, AccessKind::Write);
+        let data = vec![0x42u8; 512];
+        let result = f.execute_write(req, data);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().reason, FaultReason::InvalidSpan);
+        assert_eq!(&f.memory[0x4000..0x4000 + 0x1000], &snapshot[..],
+            "arithmetic overflow span must produce zero memory mutation");
+    }
+
+    /// Zero-length span is rejected.
+    #[test]
+    fn p91pre_zero_length_rejected() {
+        let (mut f, obj, dom) = setup_dma_span();
+        let req = dma_request(DMA0, dom, obj, 0, 0, AccessKind::Write);
+        let data = vec![];
+        let result = f.execute_write(req, data);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().reason, FaultReason::InvalidSpan);
+    }
+
+    /// Existing scalar CPU paths (1/2/4/8 bytes) remain behaviorally identical.
+    #[test]
+    fn p91pre_scalar_paths_unchanged() {
+        let (mut f, obj, dom) = setup_basic();
+
+        // 4-byte write via CPU-style request.
+        let req = request(CPU0, dom, obj, 0, Width::Word, AccessKind::Write);
+        assert_eq!(req.length, 4);
+        let result = f.execute_write(req, PAYLOAD_A.to_vec());
+        assert!(result.is_ok(), "4-byte CPU write should succeed");
+        assert_eq!(f.mem4(0x4000), PAYLOAD_A);
+
+        // 4-byte read via CPU-style request.
+        let req = request(CPU0, dom, obj, 0, Width::Word, AccessKind::Read);
+        assert_eq!(req.length, 4);
+        let data = f.execute_read(req).unwrap();
+        assert_eq!(data, PAYLOAD_A.to_vec());
+
+        // 8-byte (Double) write.
+        let req = request(CPU0, dom, obj, 8, Width::Double, AccessKind::Write);
+        assert_eq!(req.length, 8);
+        let double_data = vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let result = f.execute_write(req, double_data.clone());
+        assert!(result.is_ok(), "8-byte CPU write should succeed");
+        assert_eq!(f.read_physical(0x4008, 8), &double_data[..]);
+
+        // 1-byte write.
+        let req = request(CPU0, dom, obj, 16, Width::Byte, AccessKind::Write);
+        assert_eq!(req.length, 1);
+        let result = f.execute_write(req, vec![0xFF]);
+        assert!(result.is_ok(), "1-byte CPU write should succeed");
+        assert_eq!(f.memory[0x4010], 0xFF);
+
+        // 2-byte write.
+        let req = request(CPU0, dom, obj, 20, Width::Half, AccessKind::Write);
+        assert_eq!(req.length, 2);
+        let result = f.execute_write(req, vec![0xAB, 0xCD]);
+        assert!(result.is_ok(), "2-byte CPU write should succeed");
+        assert_eq!(f.read_physical(0x4014, 2), &[0xAB, 0xCD]);
+    }
+
+    /// DMA read of 512 bytes through the full span pipeline.
+    #[test]
+    fn p91pre_dma_read_512() {
+        let (mut f, obj, dom) = setup_dma_span();
+        // Write known pattern into the object.
+        let pattern: Vec<u8> = (0..512).map(|i| (i & 0xFF) as u8).collect();
+        for (i, &b) in pattern.iter().enumerate() {
+            f.memory[0x4000 + i] = b;
+        }
+
+        let req = dma_request(DMA0, dom, obj, 0, 512, AccessKind::Read);
+        let result = f.execute_read(req);
+        assert!(result.is_ok(), "512-byte DMA read should succeed");
+        assert_eq!(result.unwrap(), pattern);
+    }
+
+    /// The dma_request helper correctly sets Width::Byte and explicit length.
+    #[test]
+    fn p91pre_dma_request_helper() {
+        let req = dma_request(DMA0, DomainId(0), ObjectId(0), 100, 512, AccessKind::Write);
+        assert_eq!(req.width, Width::Byte, "DMA placeholder width should be Byte");
+        assert_eq!(req.length, 512, "DMA length should be explicit");
+        assert_eq!(req.offset, 100);
     }
 }

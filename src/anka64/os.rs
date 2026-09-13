@@ -1489,6 +1489,7 @@ impl Kernel {
                 object: obj,
                 offset: off,
                 width: Width::Byte,
+                length: Width::Byte.bytes(),
                 kind: AccessKind::Read,
             };
             match self.fabric.execute_read(req) {
