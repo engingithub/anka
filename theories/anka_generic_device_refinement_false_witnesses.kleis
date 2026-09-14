@@ -1,0 +1,57 @@
+// =============================================================================
+// Anka64 Phase 9.3c falsifiability probes.
+// Every example below is deliberately false and must be rejected.
+// =============================================================================
+
+import "anka_generic_device_refinement.kleis"
+
+example "FALSE-GENDEV-1: generic Block adapter may change block pair count" {
+    assert(
+        generic_pair_count(
+            GENERIC_DEVICE_BLOCK,
+            bvconst(1,3),
+            bvconst(0,3)
+        ) = bvconst(0,3)
+    )
+}
+
+example "FALSE-GENDEV-2: controller-local RequestHandle becomes globally sufficient again" {
+    assert(
+        device_request_key_equal(
+            bvconst(10,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),
+            bvconst(20,64),bvconst(0,64),bvconst(0,8),bvconst(0,64)
+        )
+    )
+}
+
+example "FALSE-GENDEV-3: interrupt recipient may receive another requester's completion" {
+    assert(
+        generic_completion_delivers(
+            bvconst(1,32),bvconst(7,64),
+            bvconst(3,32),bvconst(9,64),
+            bvconst(3,32),bvconst(9,64),
+            bvconst(10,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),
+            bvconst(10,64),bvconst(0,64),bvconst(0,8),bvconst(0,64)
+        )
+    )
+}
+
+example "FALSE-GENDEV-4: ambient rights may rescue a zero-rights presented device capability" {
+    assert(
+        generic_submit_allowed(
+            bvconst(10,64),bvconst(0,64),
+            bvconst(10,64),bvconst(0,64),
+            DEVICE_RIGHTS_NONE,bvconst(255,8),bvconst(1,8)
+        )
+    )
+}
+
+example "FALSE-GENDEV-5: generic PeerDied may ignore pair work on second Block controller" {
+    assert(
+        generic_peer_died_two(
+            bvconst(1,1),
+            GENERIC_DEVICE_BLOCK,bvconst(0,3),bvconst(0,3),
+            GENERIC_DEVICE_BLOCK,bvconst(1,3),bvconst(0,3)
+        )
+    )
+}
