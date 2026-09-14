@@ -1774,7 +1774,63 @@ The Kleis gate: 12/12 positive (`anka_device_capability_transfer.kleis`) and 0/5
 
 716/716 tests; 29 instructions.
 
-With device-capability transfer complete, device authority is no longer an exception to the capability-transfer architecture.  The same `SYS_SEND_CAP` that delegates memory regions now delegates device access.  This directly enables the next phase: multiple device instances with authority-scoped routing, moving toward the NIC and eventually `GET /alive → "Anka64 is alive."`
+### Stage 29: Multiple Device Instances and Routing (Phase 9.3b)
+
+The architecture now supports multiple simultaneously registered devices.  A
+`DeviceRegistry` replaces the singleton block controller, and every device
+operation routes through exact `DeviceBinding = (ObjectId, Generation)` match.
+
+The central discovery: `RequestHandle` is controller-local, not machine-global.
+Two controllers independently issue `(slot=0, gen=0)`.  Without qualification,
+this is a silent identity alias.  `DeviceRequestKey = (DeviceBinding,
+RequestHandle)` resolves the ambiguity at every layer: `IoWait`, async ledger,
+completion matching, and the guest ABI.
+
+The identity hierarchy:
+
+```text
+ProcessIdentity        = (slot, generation)
+DeviceIdentity         = (ObjectId, Generation)
+LocalRequestIdentity   = (slot, generation)
+MachineRequestIdentity = (DeviceIdentity, LocalRequestIdentity)
+```
+
+Key architectural properties:
+
+- **Exact routing**: the presented Device capability selects the controller.
+  `Present(H_A) ⇒ Controller_A` with `ΔController_B = 0`.
+- **Aggregate interrupt**: one tick pass covers all devices; one interrupt;
+  one handler drains all completions.
+- **Interrupt target ≠ completion owner**: completion delivery uses
+  `Completion.requester` and `DeviceRequestKey`, not the interrupted process.
+- **Registry-wide quiescence**: `Count_registry(C,D) = Σ Count_device(C,D)`.
+- **Request lifetime ≠ capability lifetime**: an accepted request outlives
+  possession of the device capability.
+
+The hostile suite (11 tests) deliberately constructs the collision
+`h_A = h_B = (0,0)` and proves `DeviceRequestKey_A ≠ DeviceRequestKey_B`:
+completion from B cannot wake IoWait on A, and both coexist in the async
+ledger with independent reaping.
+
+727/727 tests; 29 instructions.
+
+With the multi-device registry in place, the architecture can now support
+distinct device types without special-casing.  The NIC will be the next
+device to register, and it will inherit the same identity, routing,
+completion, and quiescence machinery.  The path forward:
+
+```text
+9.3c — Extract generic async device machinery
+9.3d — User-space device event delivery
+9.3e — First NIC model
+9.4  — Networking: Ethernet → ARP → ICMP → UDP → TCP → Socket → HTTP
+```
+
+The target remains:
+
+```text
+GET /alive HTTP/1.1 → "Anka64 is alive."
+```
 
 The project continues to evolve by the same rule that produced its strongest results:
 

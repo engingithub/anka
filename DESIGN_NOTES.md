@@ -2295,3 +2295,113 @@ authority survives.  DMA commits 512 bytes through the delegated authority
 chain.  No special kernel-to-driver provisioning path exists.
 
 716/716 tests; 29 instructions.  Phase 9.3a is complete.
+
+## DN-22: Multiple Device Instances and Routing (Phase 9.3b)
+
+Phase 9.3b generalizes the device architecture from a single block controller
+to a registry of multiple independently addressable devices.
+
+### Identity Hierarchy
+
+The identity hierarchy established by 9.3b is:
+
+```text
+ProcessIdentity        = (slot, generation)
+DeviceIdentity         = (ObjectId, Generation)     — DeviceBinding
+LocalRequestIdentity   = (slot, generation)         — RequestHandle
+MachineRequestIdentity = (DeviceIdentity, LocalRequestIdentity) — DeviceRequestKey
+```
+
+`DeviceBinding = (ObjectId, Generation)` is the generation-qualified device
+identity.  `RequestHandle` is controller-local: two controllers may
+independently issue `(slot=0, gen=0)`.  `DeviceRequestKey` resolves this
+ambiguity by qualifying the controller-local handle with the device identity.
+
+### Architecture
+
+**DeviceRegistry.**  `Vec<DeviceSlot>` replaces the singleton
+`block_controller` and `block_device_binding`.  Each slot holds a
+`DeviceBinding` and a `BlockController`.  The vector index is storage location
+only:
+
+```text
+RegistryIndex ≠ DeviceBinding ≠ Authority
+```
+
+**Routing.**  The presented Device capability selects the controller.
+`preflight_dev_submit` resolves `DeviceBinding` from the capability and looks
+up the registry by exact `(ObjectId, Generation)` match.  There is no way to
+use `H_A` to name controller B.
+
+**Aggregate interrupt.**  One machine tick calls `tick()` on every registered
+controller.  If any controller requires attention, one generic device interrupt
+is posted.  The handler drains all controllers:
+
+```text
+tick A; tick B; …
+if any attention: post generic device interrupt
+handle interrupt: drain A; drain B; …; reevaluate recv_waits
+```
+
+**Completion routing.**  `drain_block_completions` qualifies each controller-
+local completion as `DeviceRequestKey` before matching against process state.
+`InterruptTarget ≠ CompletionOwner`: the process that took the interrupt does
+not select whose I/O completed.
+
+**Registry-wide quiescence.**
+
+```text
+Count_registry(C,D) = Σ Count_device(C,D) over all registered devices
+```
+
+`PeerDied(C,D)` requires `Count_registry(C,D) = 0`.  Work on device B for the
+same pair blocks `PeerDied` even if device A is quiescent.  Work on device B
+for an unrelated pair `(X,D)` does not block `PeerDied(C,D)`.
+
+**Extended ABI.**
+
+```text
+SYS_DEV_SUBMIT_ASYNC success: R0=0, R1=slot, R2=gen, R3=device.object, R4=device.generation
+SYS_DEV_WAIT input:           R1=slot, R2=gen, R3=device.object, R4=device.generation
+```
+
+The `(R3, R4)` ticket is namespace qualification, not renewed authority.  An
+accepted request outlives possession of the device capability:
+
+```text
+Submit(H_A) → Drop(H_A) → DEV_WAIT(A, handle) = success
+```
+
+**Legacy compatibility.**  `SYS_BLOCK_READ` resolves through
+`legacy_block_device: Option<DeviceBinding>`, set once when the first block
+device is registered.  This is a compatibility routing alias, not device
+identity or authority.
+
+### Formal Basis
+
+```text
+anka_multi_device_routing.kleis              — 14/14 positive
+anka_multi_device_routing_false_witnesses.kleis — 0/5 false claims pass
+```
+
+### Hostile Suite (11 tests)
+
+| # | Test | Property |
+|---|------|----------|
+| 1 | exact_device_routing | Present(H_A) → 0xAA, ΔController_B = 0 |
+| 2 | transferred_cap_routes_same_device | child of H_A still routes A |
+| 3 | stale_binding_rejected | wrong generation → submission fails |
+| 4 | cross_completion_isolation | Completion(B,0,0) cannot wake IoWait(A,0,0) |
+| 5 | dual_ledger_coexistence | (A,0,0) + (B,0,0) coexist; reap A leaves B |
+| 6 | registry_pair_count | Count_A=1, Count_B=1 → Count_registry=2 |
+| 7 | cross_device_quiescence | B's same-pair work blocks PeerDied |
+| 8 | unrelated_device_autonomy | B's unrelated-pair work permits PeerDied |
+| 9 | aggregate_interrupt_three_process | Completion_A→P1, Completion_B→P2, ΔP3=0 |
+| 10 | capability_drop_lifetime | Submit→Drop→DEV_WAIT = success |
+| 11 | dev_wait_ticket_hardening | R1 overflow + unknown R3/R4 → error 1, Δ=0 |
+
+The decisive collision is tests 4–5: `h_A = h_B = (0,0)` but
+`DeviceRequestKey_A ≠ DeviceRequestKey_B`.  This is the identity alias that
+was safe with one controller but would silently corrupt two-device operation.
+
+727/727 tests; 29 instructions.  Phase 9.3b is complete.
