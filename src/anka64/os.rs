@@ -290,7 +290,7 @@ pub const MAX_ASYNC_REQUESTS: usize = 16;
 ///
 /// Lifecycle:
 ///   SYS_DEV_SUBMIT_ASYNC → push { handle, completion: None }
-///   drain_block_completions() → fill completion = Some(status)
+///   drain_completions() → fill completion = Some(status)
 ///   SYS_DEV_WAIT on completed → return status, remove entry
 ///   SYS_DEV_WAIT on pending → install IoWait, completion drain
 ///     will later wake + remove entry
@@ -707,10 +707,14 @@ impl DeviceController {
         }
     }
 
-    /// Pop the next ready completion.
-    pub fn consume_completion(&mut self) -> Option<BlockCompletion> {
+    /// Pop the next ready completion as a lossless generic envelope.
+    ///
+    /// The inner device-specific completion is preserved intact:
+    ///   Wrap_generic(Block) loses no block semantics.
+    pub fn consume_completion(&mut self) -> Option<DeviceCompletion> {
         match self {
-            DeviceController::Block(c) => c.consume_completion(),
+            DeviceController::Block(c) =>
+                c.consume_completion().map(DeviceCompletion::Block),
         }
     }
 
@@ -761,6 +765,45 @@ impl DeviceController {
     pub fn as_block_mut(&mut self) -> &mut BlockController {
         match self {
             DeviceController::Block(c) => c,
+        }
+    }
+}
+
+/// Lossless generic completion envelope (Phase 9.3c).
+///
+/// Wraps device-type-specific completions without projecting away
+/// any information.  Generic kernel machinery accesses only the
+/// common observations (handle, requester, status) through accessor
+/// methods; device-specific payload (block_number, delegation_id,
+/// future NIC fields, etc.) is preserved intact inside the envelope.
+///
+/// This satisfies the formal conservation law:
+///   Generic(Block) = Block — genericization changes the view of a
+///   completion, not the information retained by it.
+#[derive(Debug, Clone)]
+pub enum DeviceCompletion {
+    Block(BlockCompletion),
+}
+
+impl DeviceCompletion {
+    /// The controller-local request handle for this completion.
+    pub fn handle(&self) -> super::block::RequestHandle {
+        match self {
+            DeviceCompletion::Block(c) => c.handle,
+        }
+    }
+
+    /// The process incarnation that submitted this request.
+    pub fn requester(&self) -> RequesterKey {
+        match self {
+            DeviceCompletion::Block(c) => c.requester,
+        }
+    }
+
+    /// Success or fault status.
+    pub fn status(&self) -> super::block::CompletionStatus {
+        match self {
+            DeviceCompletion::Block(c) => c.status,
         }
     }
 }
@@ -1761,7 +1804,7 @@ impl Kernel {
             //   D=IoWait, request=Completed, ¬AutonomousIO
             // would be misclassified as Stop because Completed is
             // (correctly) excluded from has_autonomous_io().
-            self.drain_block_completions();
+            self.drain_completions();
             self.reevaluate_recv_waits();
             self.wake_waiters();
 
@@ -1828,7 +1871,7 @@ impl Kernel {
             slot.controller.tick(&mut self.fabric);
         }
         // Drain completions from all devices, then reevaluate.
-        self.drain_block_completions();
+        self.drain_completions();
         self.reevaluate_recv_waits();
     }
 
@@ -2082,7 +2125,7 @@ impl Kernel {
             .unwrap_or(false);
 
         if is_device {
-            self.drain_block_completions();
+            self.drain_completions();
             self.reevaluate_recv_waits();
         }
 
@@ -2129,7 +2172,8 @@ impl Kernel {
     ///     completion status for later SYS_DEV_WAIT.
     ///
     /// Formal basis: anka_multi_request_quiescence.kleis MULTI92F-*.
-    fn drain_block_completions(&mut self) {
+    /// Phase 9.3c: operates through generic DeviceCompletion accessors.
+    fn drain_completions(&mut self) {
         // Drain completions from ALL registered devices (Phase 9.3b).
         // Each completion is qualified with the device's binding to form
         // a DeviceRequestKey before matching against process state.
@@ -2137,6 +2181,10 @@ impl Kernel {
         // InterruptTarget != CompletionRequester: the process that took
         // the interrupt does NOT select whose I/O completed.  Delivery
         // uses exclusively (Completion.requester, DeviceBinding, RequestHandle).
+        //
+        // Phase 9.3c: the completion is a lossless DeviceCompletion
+        // envelope.  Only generic accessors (handle, requester, status)
+        // are used for routing; device-specific payload is preserved.
         for dev_idx in 0..self.device_registry.devices.len() {
             loop {
                 let ctrl = &mut self.device_registry.devices[dev_idx].controller;
@@ -2153,10 +2201,10 @@ impl Kernel {
                 // Qualify the controller-local handle with device identity.
                 let dev_key = DeviceRequestKey {
                     device: self.device_registry.devices[dev_idx].binding,
-                    request: completion.handle,
+                    request: completion.handle(),
                 };
 
-                let rk = &completion.requester;
+                let rk = completion.requester();
                 let slot = rk.slot as usize;
 
                 // Guard 1: slot in range and exact-incarnation match.
@@ -2185,7 +2233,7 @@ impl Kernel {
                     }
 
                     let proc = &mut self.processes[slot];
-                    proc.core.r[R0 as usize] = match completion.status {
+                    proc.core.r[R0 as usize] = match completion.status() {
                         super::block::CompletionStatus::Success => 0,
                         super::block::CompletionStatus::DmaFault(_) => u64::MAX,
                     };
@@ -2197,7 +2245,7 @@ impl Kernel {
                 } else if let Some(entry) = self.processes[slot].async_requests.iter_mut()
                     .find(|r| r.key == dev_key)
                 {
-                    entry.completion = Some(completion.status);
+                    entry.completion = Some(completion.status());
                 }
             }
         }
@@ -3289,7 +3337,7 @@ impl Kernel {
     /// On success: the process blocks with its syscall EventFrame
     /// outstanding.  The block controller is given a request with
     /// RequesterKey = (process_slot, process_generation).  When the
-    /// DMA completes, drain_block_completions() performs event_return()
+    /// DMA completes, drain_completions() performs event_return()
     /// and resumes the caller at user PC with R0 = 0.
     ///
     /// On failure (no block controller, invalid block, bad buffer,
@@ -7190,7 +7238,7 @@ mod tests {
     //
     // Tests the composition:
     //   tick_devices() → level-triggered L_dev → post_device_interrupt()
-    //   → deliver_pending() → handle_async_interrupt() → drain_block_completions()
+    //   → deliver_pending() → handle_async_interrupt() → drain_completions()
     //   → generation-qualified wake
     //
     // The block controller is attached to the kernel and ticked
@@ -7345,7 +7393,7 @@ mod tests {
     ///
     /// Manually submit a request with the process's RequesterKey,
     /// push a synthetic syscall EventFrame, set io_wait, complete
-    /// the request, then invoke drain_block_completions() and verify
+    /// the request, then invoke drain_completions() and verify
     /// the process is unblocked with R0 = 0 and EventFrame consumed.
     #[test]
     fn p91d_drain_wake_success() {
@@ -7400,7 +7448,7 @@ mod tests {
         assert!(kernel.device_registry.devices[0].controller.requires_attention());
 
         // Drain — should wake the process via event_return().
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         assert!(kernel.processes[0].io_wait.is_none(),
             "process must be unblocked after completion drain");
@@ -7425,7 +7473,7 @@ mod tests {
     ///
     /// Submit a request with generation 0, then recycle the process
     /// slot (increment generation), complete the request, and verify
-    /// that drain_block_completions() does NOT unblock the recycled slot.
+    /// that drain_completions() does NOT unblock the recycled slot.
     #[test]
     fn p91d_stale_requester_no_wake() {
         use super::super::block::{BlockRequest, SubmitResult, RequestHandle};
@@ -7472,7 +7520,7 @@ mod tests {
         }
 
         // Drain — should NOT wake because generation doesn't match.
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         assert!(kernel.processes[0].io_wait.is_some(),
             "stale RequesterKey must not wake a recycled process slot");
@@ -7518,7 +7566,7 @@ mod tests {
                 .tick(&mut kernel.fabric);
         }
 
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // R0 should be untouched — process was not waiting.
         assert_eq!(kernel.processes[0].core.r[R0 as usize], 0xDEAD,
@@ -7625,11 +7673,11 @@ mod tests {
         eprintln!("9.1d: no controller → harmless ✓");
     }
 
-    /// Empty completion queue: drain_block_completions is harmless.
+    /// Empty completion queue: drain_completions is harmless.
     #[test]
     fn p91d_drain_empty_harmless() {
         let (mut kernel, _buf, _dom) = block_kernel_setup(10, 42, 4);
-        kernel.drain_block_completions();
+        kernel.drain_completions();
         assert!(kernel.processes[0].io_wait.is_none());
         eprintln!("9.1d: drain empty → harmless ✓");
     }
@@ -7974,7 +8022,7 @@ mod tests {
 
         // Drain: the first completion (handle0) must NOT wake.
         // The second completion (handle1) MUST wake.
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         assert!(kernel.processes[0].io_wait.is_none(),
             "process must be woken by matching handle1");
@@ -11109,7 +11157,7 @@ mod tests {
         for _ in 0..20 {
             kernel.tick_devices(slot);
         }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // Process should have woken up with success
         assert!(kernel.processes[slot].io_wait.is_none());
@@ -11364,10 +11412,11 @@ mod tests {
             kernel.tick_devices(slot);
         }
 
-        // Peek at the completion before drain
+        // Peek at the completion before drain — unwrap the lossless envelope
         let comp = kernel.device_registry.devices[0].controller
             .consume_completion().unwrap();
-        assert_eq!(comp.delegation_id, Some(tid),
+        let DeviceCompletion::Block(block_comp) = &comp;
+        assert_eq!(block_comp.delegation_id, Some(tid),
             "delegation_id must propagate unchanged through controller");
 
         eprintln!("9.2c: delegation_id reaches completion ✓");
@@ -11516,8 +11565,9 @@ mod tests {
         }
         let comp = kernel.device_registry.devices[0].controller
             .consume_completion().unwrap();
-        assert_eq!(comp.status, super::super::block::CompletionStatus::Success);
-        assert!(comp.delegation_id.is_none(),
+        let DeviceCompletion::Block(block_comp) = &comp;
+        assert_eq!(block_comp.status, super::super::block::CompletionStatus::Success);
+        assert!(block_comp.delegation_id.is_none(),
             "legacy path must carry no delegation_id");
 
         eprintln!("9.2c: legacy SYS_BLOCK_READ path unchanged ✓");
@@ -14743,7 +14793,7 @@ mod tests {
         // ── Idle progress: advance until request becomes terminal ──
         // With latency 3: tick 1 = Waiting→DmaReady→DmaInFlight+advance(1),
         // tick 2 = advance(2), tick 3 = advance(3)→Committed→Completed.
-        // Then drain_block_completions() consumes the completion.
+        // Then drain_completions() consumes the completion.
         for tick in 0..20 {
             if !kernel.device_registry.devices[0].controller
                 .has_nonterminal_pair_request(&key_c, &key_d)
@@ -15732,7 +15782,7 @@ mod tests {
         // A needs DMA phases.  B needs 2 more latency ticks + DMA phases.
         // Tick one more for A's DMA:
         kernel.tick_devices(d);
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // Check: is A terminal and B still nonterminal?
         // A had a 2-tick head start.  If A is completed, its entry has
@@ -15750,7 +15800,7 @@ mod tests {
             .unwrap_or(false)
         {
             kernel.tick_devices(d);
-            kernel.drain_block_completions();
+            kernel.drain_completions();
             ticks += 1;
             assert!(ticks < 20, "A should complete within 20 ticks");
         }
@@ -15786,7 +15836,7 @@ mod tests {
         for _ in 0..20 {
             kernel.tick_devices(d);
         }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         assert!(kernel.processes[d].io_wait.is_none(),
             "B's completion must wake IoWait(B)");
@@ -15832,7 +15882,7 @@ mod tests {
         for _ in 0..10 {
             kernel.tick_devices(d);
         }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // A's completion is now in the ledger (no IoWait was installed)
         assert_eq!(kernel.processes[d].async_requests.len(), 1);
@@ -15894,7 +15944,7 @@ mod tests {
         let dev_gen = kernel.processes[d].core.r[R4 as usize];
 
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // Reap A
         let r0_reap = do_dev_wait(&mut kernel, d, h_a_slot, h_a_gen, dev_obj, dev_gen);
@@ -15945,7 +15995,7 @@ mod tests {
 
         // Tick to completion — completion drains into ledger
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
         assert!(kernel.processes[d].async_requests[0].completion.is_some(),
             "A must have completion in D_g's ledger");
 
@@ -16027,7 +16077,7 @@ mod tests {
 
         // Tick to complete A at the hardware level
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // Dead requester must not receive any software mutation
         assert_eq!(kernel.processes[d].core.r.to_vec(), regs_before,
@@ -16163,7 +16213,7 @@ mod tests {
 
             // Tick to completion
             for _ in 0..10 { kernel.tick_devices(d); }
-            kernel.drain_block_completions();
+            kernel.drain_completions();
         }
 
         // Verify ledger is full
@@ -16902,7 +16952,7 @@ mod tests {
 
         // Complete A
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // Verify A read 0xAA into the buffer
         let buf_data = kernel.fabric.read_physical(0x010000, 512);
@@ -16929,7 +16979,7 @@ mod tests {
 
         // Complete B
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         let buf_data2 = kernel.fabric.read_physical(0x010000, 512);
         assert!(buf_data2.iter().all(|&b| b == 0xBB),
@@ -17172,7 +17222,7 @@ mod tests {
         }
 
         // Drain — B's completion arrives, A is still nonterminal
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // DECISIVE ASSERTION: IoWait(A,0,0) must NOT be woken by
         // Completion(B,0,0) even though the local handles are identical.
@@ -17198,7 +17248,7 @@ mod tests {
         for _ in 0..10 {
             kernel.tick_devices(d);
         }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // NOW IoWait(A) must be woken by A's own completion
         assert!(kernel.processes[d].io_wait.is_none(),
@@ -17260,7 +17310,7 @@ mod tests {
 
         // Complete both
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // Both retained in ledger with completions
         assert_eq!(kernel.processes[d].async_requests.len(), 2);
@@ -17355,7 +17405,7 @@ mod tests {
 
         // Complete and reap A — A is now quiescent for (C,D)
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
         let r0_reap_a = do_dev_wait(
             &mut kernel, d, ha_slot, ha_gen, dev_a_obj, dev_a_gen,
         );
@@ -17720,7 +17770,7 @@ mod tests {
         eprintln!("9.3b.4-9: aggregate interrupt, three-process routing ✓");
         eprintln!("  tick_devices(P3) → pending.device = true");
         eprintln!("  deliver_pending(P3) → EventCause::DeviceInterrupt");
-        eprintln!("  handle_async_interrupt(P3) → drain_block_completions()");
+        eprintln!("  handle_async_interrupt(P3) → drain_completions()");
         eprintln!("  Completion_A → P1, Completion_B → P2, ΔP3 = 0");
         eprintln!("  InterruptTarget ≠ CompletionOwner ✓");
     }
@@ -17750,7 +17800,7 @@ mod tests {
 
         // Complete the request
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // DEV_WAIT must still work — namespace qualification, not authority
         let r0_wait = do_dev_wait(
@@ -17833,7 +17883,7 @@ mod tests {
 
         // ── Verify the real entry is still reapable ──
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
         let r0_valid = do_dev_wait(
             &mut kernel, d, ha_slot, ha_gen, dev_a_obj, dev_a_gen,
         );
