@@ -717,7 +717,12 @@ impl CapabilityTable {
         authority_id: AuthorityId,
     ) -> Option<CapabilityHandle> {
         for (i, slot) in self.slots.iter_mut().enumerate() {
-            if matches!(slot.state, CapabilitySlotState::Free) {
+            // Free AND allocatable: generation must not be terminal.
+            // A Free(u32::MAX) slot is retired — installing into it
+            // would create authority that can never be dropped.
+            if matches!(slot.state, CapabilitySlotState::Free)
+                && slot.handle_generation != u32::MAX
+            {
                 slot.state = CapabilitySlotState::Occupied {
                     object,
                     object_generation,
@@ -840,9 +845,22 @@ impl CapabilityTable {
     }
 
     /// Number of free slots.
+    /// Structural free count: all unoccupied slots, including
+    /// retired ones at terminal generation.  F_structural + O = N.
     pub fn free_count(&self) -> usize {
         self.slots.iter()
             .filter(|s| matches!(s.state, CapabilitySlotState::Free))
+            .count()
+    }
+
+    /// Allocatable free count: unoccupied AND generation < u32::MAX.
+    /// These are the slots that install() will actually use.
+    /// Used by install_capability() preflight to avoid burning
+    /// AuthorityIds on doomed installation attempts.
+    pub fn allocatable_count(&self) -> usize {
+        self.slots.iter()
+            .filter(|s| matches!(s.state, CapabilitySlotState::Free)
+                && s.handle_generation != u32::MAX)
             .count()
     }
 

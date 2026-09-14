@@ -813,9 +813,11 @@ impl Kernel {
         length: u64,
         perms: Permissions,
     ) -> Option<CapabilityHandle> {
-        // Preflight: table must have capacity.
+        // Preflight: table must have an allocatable slot (Free AND
+        // generation < u32::MAX).  Using allocatable_count() avoids
+        // burning AuthorityIds on retired terminal-generation slots.
         let ct = self.processes[slot].cap_table.as_ref()?;
-        if ct.free_count() == 0 {
+        if ct.allocatable_count() == 0 {
             return None;
         }
 
@@ -6871,5 +6873,77 @@ mod tests {
             "Fabric authority must survive non-recyclable drop failure");
 
         eprintln!("9.2a: SYS_CAP_DROP non-recyclable handle ✓");
+    }
+
+    /// Terminal-generation free slot is not reusable for install.
+    ///
+    /// Dropping a slot at generation MAX−1 succeeds and advances
+    /// it to Free(MAX).  That slot is structurally free but retired:
+    /// installing into it would create authority that can never be
+    /// dropped (preflight_drop rejects MAX).
+    ///
+    /// With that one slot retired and the other 15 filled, install
+    /// must fail atomically with no new Fabric authority.
+    #[test]
+    fn p92a_retired_slot_not_reusable() {
+        let (mut kernel, data, slot) = captab_kernel_setup();
+        let domain = kernel.processes[slot].core.domain;
+
+        // Install into slot 0, force its generation to MAX−1.
+        let h0 = kernel.install_capability(slot, data, 0, 0x4000, Permissions::READ)
+            .expect("install into slot 0");
+        assert_eq!(h0.slot, 0);
+        kernel.processes[slot].cap_table.as_mut().unwrap()
+            .slots_mut()[0].handle_generation = u32::MAX - 1;
+        let h0_penultimate = CapabilityHandle { slot: 0, generation: u32::MAX - 1 };
+
+        // Drop at MAX−1 → succeeds → slot becomes Free(MAX).
+        let aid = kernel.processes[slot].cap_table.as_mut().unwrap()
+            .drop_handle(h0_penultimate)
+            .expect("drop at MAX-1 must succeed");
+        kernel.fabric.remove_by_authority_id(domain, aid);
+
+        // Verify slot is Free(MAX).
+        let ct = kernel.processes[slot].cap_table.as_ref().unwrap();
+        let slot0 = &ct.slots()[0];
+        assert!(matches!(slot0.state, CapabilitySlotState::Free));
+        assert_eq!(slot0.handle_generation, u32::MAX,
+            "slot should be at terminal generation");
+
+        // Structural vs allocatable: slot 0 is free but not allocatable.
+        assert_eq!(ct.free_count(), CAP_TABLE_SIZE,
+            "all 16 slots structurally free");
+        assert_eq!(ct.allocatable_count(), CAP_TABLE_SIZE - 1,
+            "only 15 allocatable (slot 0 retired)");
+
+        // Fill the remaining 15 allocatable slots.
+        for _ in 0..CAP_TABLE_SIZE - 1 {
+            kernel.install_capability(slot, data, 0, 0x4000, Permissions::READ)
+                .expect("install into non-retired slot");
+        }
+
+        let cap_count_before = kernel.fabric.domains.get(&domain).unwrap()
+            .capabilities.len();
+
+        // Attempt one more — must fail (only Free(MAX) slot left).
+        assert!(kernel.install_capability(slot, data, 0, 0x4000, Permissions::READ).is_none(),
+            "install into retired slot must fail");
+
+        // No orphan authority created.
+        let cap_count_after = kernel.fabric.domains.get(&domain).unwrap()
+            .capabilities.len();
+        assert_eq!(cap_count_before, cap_count_after,
+            "failed install must not create Fabric authority");
+
+        // Old MAX−1 handle remains stale (was dropped).
+        assert!(kernel.resolve_capability(slot, h0_penultimate).is_none(),
+            "dropped handle at MAX-1 must remain stale");
+
+        // F_structural + O = N still holds.
+        let ct = kernel.processes[slot].cap_table.as_ref().unwrap();
+        assert_eq!(ct.free_count() + ct.occupied_count(), CAP_TABLE_SIZE,
+            "F_structural + O = N");
+
+        eprintln!("9.2a: retired slot not reusable ✓");
     }
 }
