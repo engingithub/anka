@@ -1,0 +1,256 @@
+// =============================================================================
+// Anka64 Multi-Request Pair Quiescence (Phase 9.2f-formal)
+// =============================================================================
+//
+// Refinement of anka_blocking_receive.kleis.
+//
+// Phase 9.2e already defined controller-wide pair quiescence over the complete
+// two-slot BlockController population. 9.2f does not add a new ontology or any
+// axioms. It puts explicit pressure on the case 9.2e deliberately exercised
+// only one request at a time: TWO simultaneously accepted requests carrying
+// the same (client ProcessKey, driver ProcessKey), possibly from distinct
+// transfer incarnations.
+//
+// The intended runtime correspondence is:
+//   PeerDied(C,D) may become observable iff every accepted request attributed
+//   to the exact pair (C,D) is terminal, independent of completion order.
+//
+// Expected gate: all positive examples pass. Deliberately false probes live in
+// anka_multi_request_quiescence_false_witnesses.kleis.
+// =============================================================================
+
+import "anka_blocking_receive.kleis"
+
+// =============================================================================
+// I. TWO-REQUEST SAME-PAIR PROJECTION
+// =============================================================================
+
+// Accepted controller states only: Waiting, DmaReady, DmaInFlight, Completed.
+define two_requests_accepted_92f(s1 : BitVec3, s2 : BitVec3) =
+    request_accepted_state(s1) ∧ request_accepted_state(s2)
+
+// For two requests known to belong to the same exact ProcessKey pair,
+// pair activity is the disjunction of each request's autonomous state.
+define same_pair_two_active_92f(s1 : BitVec3, s2 : BitVec3) =
+    request_autonomous_work(s1) ∨ request_autonomous_work(s2)
+
+// Under accepted-state well-formedness, quiescence means BOTH are Completed.
+define same_pair_two_quiescent_92f(s1 : BitVec3, s2 : BitVec3) =
+    request_terminal_state(s1) ∧ request_terminal_state(s2)
+
+// Existing 9.2e finite two-slot PeerDied rule specialized to two requests that
+// share the same exact pair but may have different DelegationId incarnations.
+define peer_died_same_pair_two_92f(
+    dead : Bool,
+    cs : BitVec32, cg : BitVec32,
+    ds : BitVec32, dg : BitVec32,
+    i1 : BitVec64, s1 : BitVec3,
+    i2 : BitVec64, s2 : BitVec3
+) = peer_died_allowed_pair2_92e(
+        dead,cs,cg,ds,dg,
+        cs,cg,ds,dg,i1,s1,
+        cs,cg,ds,dg,i2,s2
+    )
+
+example "MULTI92F-1 CENTRAL: for two accepted same-pair requests PeerDied iff peer dead and both requests terminal" {
+    assert(
+        ∀(dead : Bool).
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64).
+        ∀(s1 : BitVec3). ∀(s2 : BitVec3).
+            two_requests_accepted_92f(s1,s2)
+            ⇒ (
+                peer_died_same_pair_two_92f(dead,cs,cg,ds,dg,i1,s1,i2,s2)
+                = (dead ∧ same_pair_two_quiescent_92f(s1,s2))
+            )
+    )
+}
+
+example "MULTI92F-2: first terminal second nonterminal still blocks PeerDied" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64). ∀(dead : Bool).
+            dead ⇒ ¬peer_died_same_pair_two_92f(
+                dead,cs,cg,ds,dg,
+                i1,REQ_COMPLETED,
+                i2,REQ_DMA_INFLIGHT
+            )
+    )
+}
+
+example "MULTI92F-3: second terminal first nonterminal still blocks PeerDied" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64). ∀(dead : Bool).
+            dead ⇒ ¬peer_died_same_pair_two_92f(
+                dead,cs,cg,ds,dg,
+                i1,REQ_DMA_READY,
+                i2,REQ_COMPLETED
+            )
+    )
+}
+
+example "MULTI92F-4: both terminal permit PeerDied regardless of distinct transfer incarnations" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64). ∀(dead : Bool).
+            (dead ∧ ¬(i1=i2))
+            ⇒ peer_died_same_pair_two_92f(
+                dead,cs,cg,ds,dg,
+                i1,REQ_COMPLETED,
+                i2,REQ_COMPLETED
+            )
+    )
+}
+
+example "MULTI92F-5: pair activity is order independent across the two accepted requests" {
+    assert(
+        ∀(s1 : BitVec3). ∀(s2 : BitVec3).
+            two_requests_accepted_92f(s1,s2)
+            ⇒ (same_pair_two_active_92f(s1,s2)=same_pair_two_active_92f(s2,s1))
+    )
+}
+
+// =============================================================================
+// II. EXACT-INCARNATION ISOLATION UNDER SLOT RECYCLING
+// =============================================================================
+
+example "MULTI92F-6: recycled driver work cannot delay PeerDied for the old driver incarnation" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64). ∀(dead : Bool).
+            (dead ∧ recyclable_process_generation(dg))
+            ⇒ peer_died_allowed_pair2_92e(
+                dead,cs,cg,ds,dg,
+                cs,cg,ds,dg,i1,REQ_COMPLETED,
+                cs,cg,ds,next_process_generation(dg),i2,REQ_DMA_INFLIGHT
+            )
+    )
+}
+
+example "MULTI92F-7: recycled driver work remains active for the new driver incarnation" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64). ∀(dead : Bool).
+            (dead ∧ recyclable_process_generation(dg))
+            ⇒ ¬peer_died_allowed_pair2_92e(
+                dead,cs,cg,ds,next_process_generation(dg),
+                cs,cg,ds,dg,i1,REQ_COMPLETED,
+                cs,cg,ds,next_process_generation(dg),i2,REQ_DMA_INFLIGHT
+            )
+    )
+}
+
+// =============================================================================
+// III. COMPLETION ORDER + TWO-TARGET BARRIER
+// =============================================================================
+
+// Conservative per-request commit event. As in 9.2e, a transition from a
+// nonterminal accepted state to Completed MAY represent a client-visible DMA
+// commit; fault completions are conservatively included.
+define request_commit_transition_92f(before : BitVec3, after : BitVec3) =
+    request_nonterminal_state(before)
+    ∧ after=REQ_COMPLETED
+    ∧ controller_step_allowed_92e(before,after)
+
+// Each request owns a distinct client-visible target version in the decisive
+// 9.2f witness. A commit increments only that request's target version.
+define target_after_request_step_92f(
+    memory_before : ℤ,
+    before : BitVec3,
+    after : BitVec3
+) = if request_commit_transition_92f(before,after)
+    then memory_before+1
+    else memory_before
+
+example "MULTI92F-8 ORDER-A: request 1 terminal while request 2 commits; PeerDied is blocked before and allowed after" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64).
+        ∀(m1 : ℤ). ∀(m2 : ℤ). ∀(dead : Bool).
+            (
+                dead
+                ∧ controller_step_allowed_92e(REQ_COMPLETED,REQ_COMPLETED)
+                ∧ controller_step_allowed_92e(REQ_DMA_INFLIGHT,REQ_COMPLETED)
+            )
+            ⇒ (
+                ¬peer_died_same_pair_two_92f(
+                    dead,cs,cg,ds,dg,
+                    i1,REQ_COMPLETED,
+                    i2,REQ_DMA_INFLIGHT
+                )
+                ∧ peer_died_same_pair_two_92f(
+                    dead,cs,cg,ds,dg,
+                    i1,REQ_COMPLETED,
+                    i2,REQ_COMPLETED
+                )
+                ∧ target_after_request_step_92f(
+                    m1,REQ_COMPLETED,REQ_COMPLETED
+                )=m1
+                ∧ target_after_request_step_92f(
+                    m2,REQ_DMA_INFLIGHT,REQ_COMPLETED
+                )=m2+1
+            )
+    )
+}
+
+example "MULTI92F-9 ORDER-B: request 2 terminal while request 1 commits; PeerDied is blocked before and allowed after" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64).
+        ∀(m1 : ℤ). ∀(m2 : ℤ). ∀(dead : Bool).
+            (
+                dead
+                ∧ controller_step_allowed_92e(REQ_DMA_INFLIGHT,REQ_COMPLETED)
+                ∧ controller_step_allowed_92e(REQ_COMPLETED,REQ_COMPLETED)
+            )
+            ⇒ (
+                ¬peer_died_same_pair_two_92f(
+                    dead,cs,cg,ds,dg,
+                    i1,REQ_DMA_INFLIGHT,
+                    i2,REQ_COMPLETED
+                )
+                ∧ peer_died_same_pair_two_92f(
+                    dead,cs,cg,ds,dg,
+                    i1,REQ_COMPLETED,
+                    i2,REQ_COMPLETED
+                )
+                ∧ target_after_request_step_92f(
+                    m1,REQ_DMA_INFLIGHT,REQ_COMPLETED
+                )=m1+1
+                ∧ target_after_request_step_92f(
+                    m2,REQ_COMPLETED,REQ_COMPLETED
+                )=m2
+            )
+    )
+}
+
+example "MULTI92F-10 BARRIER: once both same-pair requests are terminal neither target can change on any allowed controller step" {
+    assert(
+        ∀(m1 : ℤ). ∀(m2 : ℤ).
+        ∀(a1 : BitVec3). ∀(a2 : BitVec3).
+            (
+                controller_step_allowed_92e(REQ_COMPLETED,a1)
+                ∧ controller_step_allowed_92e(REQ_COMPLETED,a2)
+            )
+            ⇒ (
+                target_after_request_step_92f(m1,REQ_COMPLETED,a1)=m1
+                ∧ target_after_request_step_92f(m2,REQ_COMPLETED,a2)=m2
+            )
+    )
+}
+
+example "MULTI92F-11: dead driver still cannot originate a third request while two accepted requests drain" {
+    assert(
+        ∀(alive : Bool). ∀(gate : Bool).
+            ¬alive ⇒ ¬new_submit_allowed_92e(alive,gate)
+    )
+}
