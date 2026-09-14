@@ -30,6 +30,12 @@ pub const SYS_SPAWN: u64 = 7;  // spawn(R1-R8: code, grants, maps, layout) → h
 pub const SYS_WAIT: u64 = 8;   // wait(handle) → result
 pub const SYS_BLOCK_READ: u64 = 9; // block_read(block_num, buf_vaddr) → async
 pub const SYS_CAP_DROP: u64 = 10;  // cap_drop(slot, generation) → 0 ok, 1 bad handle
+pub const SYS_SEND_CAP: u64 = 11;  // send_cap(dest_key, value, src_handle, child_subset) → 0 ok
+pub const SYS_SEND_KEY: u64 = 12;  // send_key(dest_slot, dest_gen, value) → 0 ok
+
+/// Maximum messages per mailbox.  Enforced by all producers:
+/// SYS_SEND, SYS_SEND_KEY, and SYS_SEND_CAP.
+pub const MAX_MAILBOX_SIZE: usize = 16;
 
 // ───────────────────────────────────────────────────────────────────
 // Process descriptor
@@ -165,14 +171,7 @@ pub enum ProcessState {
     Retired,
 }
 
-/// Kernel-internal identity of a specific process incarnation.
-/// Slot is the index into the processes Vec; generation distinguishes
-/// successive incarnations in the same slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProcessKey {
-    pub slot: usize,
-    pub generation: u32,
-}
+// ProcessKey is now in state.rs (Phase 9.2b) for cross-module use.
 
 /// User-facing lifecycle handle: (slot_generation:u32 | slot:u32).
 /// Returned by SYS_SPAWN, consumed by SYS_WAIT.
@@ -236,11 +235,16 @@ pub struct IoWait {
 // Message mailbox
 // ───────────────────────────────────────────────────────────────────
 
+/// IPC message — unified envelope for ordinary and cap-bearing messages.
+///
+/// `cap` is None for ordinary messages, Some for cap-bearing.
+/// The capability (if any) was installed in the receiver's cap table
+/// at send time; RECV merely reveals the handle.
 #[derive(Debug, Clone)]
 pub(crate) struct Message {
-    #[allow(dead_code)]
-    pub(crate) from_pid: u64,
+    pub(crate) from: ProcessKey,
     pub(crate) value: u64,
+    pub(crate) cap: Option<CapabilityHandle>,
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -533,6 +537,10 @@ pub struct Kernel {
     /// When present, tick_devices() advances it and routes
     /// level-triggered device interrupts.
     pub block_controller: Option<BlockController>,
+    /// Monotonic DelegationId incarnation counter (checked, never wraps).
+    /// Kernel owns this because DelegationId contains ProcessKeys,
+    /// which are kernel-layer concepts.
+    next_delegation_incarnation: u64,
 }
 
 impl Kernel {
@@ -551,6 +559,7 @@ impl Kernel {
             free_stack_extents: Vec::new(),
             free_trap_extents: Vec::new(),
             block_controller: None,
+            next_delegation_incarnation: 0,
         }
     }
 
@@ -831,7 +840,7 @@ impl Kernel {
         let obj_gen = self.fabric.objects.get(&object)?.generation;
 
         match self.processes[slot].cap_table.as_mut()
-            .and_then(|ct| ct.install(object, obj_gen, offset, length, perms, auth_id))
+            .and_then(|ct| ct.install(object, obj_gen, offset, length, perms, auth_id, None))
         {
             Some(handle) => Some(handle),
             None => {
@@ -931,6 +940,56 @@ impl Kernel {
         if p.generation != key.generation { return None; }
         if p.state == ProcessState::Free || p.state == ProcessState::Retired { return None; }
         Some(key.slot)
+    }
+
+    /// Validate a ProcessKey as a live message destination.
+    ///
+    /// Stricter than `validate_process_key()`: requires Running state.
+    /// A Zombie process is generation-current but not alive enough to
+    /// receive authority or messages.  SYS_WAIT deliberately uses
+    /// `validate_process_key()` (which accepts Zombies) because
+    /// observation of a dead child is the whole point of WAIT.
+    /// IPC delivery must not install authority into a dead process.
+    fn validate_message_destination(&self, key: &ProcessKey) -> Option<usize> {
+        let idx = self.validate_process_key(key)?;
+        if self.processes[idx].state == ProcessState::Running {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    // ─── DelegationId allocation (Phase 9.2b) ─────────────────
+
+    /// Read-only preflight: can a fresh DelegationId be allocated?
+    pub(crate) fn can_alloc_delegation_id(&self) -> bool {
+        self.next_delegation_incarnation.checked_add(1).is_some()
+    }
+
+    /// Allocate a fresh DelegationId.  Monotonic, never reused.
+    /// Returns None if the incarnation counter is exhausted.
+    pub(crate) fn alloc_delegation_id(
+        &mut self,
+        client: ProcessKey,
+        driver: ProcessKey,
+    ) -> Option<DelegationId> {
+        let inc = self.next_delegation_incarnation;
+        self.next_delegation_incarnation =
+            self.next_delegation_incarnation.checked_add(1)?;
+        Some(DelegationId { client, driver, incarnation: inc })
+    }
+
+    /// Force the delegation incarnation counter — test-only.
+    #[cfg(test)]
+    pub(crate) fn set_next_delegation_incarnation(&mut self, value: u64) {
+        self.next_delegation_incarnation = value;
+    }
+
+    /// Read the delegation incarnation counter — test-only.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn next_delegation_incarnation(&self) -> u64 {
+        self.next_delegation_incarnation
     }
 
     // ─── Process reclamation ───────────────────────────────────
@@ -1522,10 +1581,19 @@ impl Kernel {
             SYS_SEND => {
                 let dest_pid = self.processes[idx].core.r[R1 as usize];
                 let value = self.processes[idx].core.r[R2 as usize];
-                let from_pid = self.processes[idx].pid;
+                let from_key = ProcessKey {
+                    slot: idx,
+                    generation: self.processes[idx].generation,
+                };
                 if let Some(dest_slot) = self.resolve_pid(dest_pid) {
-                    self.mailboxes[dest_slot].push(Message { from_pid, value });
-                    self.processes[idx].core.r[R0 as usize] = 0;
+                    if self.mailboxes[dest_slot].len() >= MAX_MAILBOX_SIZE {
+                        self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    } else {
+                        self.mailboxes[dest_slot].push(Message {
+                            from: from_key, value, cap: None,
+                        });
+                        self.processes[idx].core.r[R0 as usize] = 0;
+                    }
                 } else {
                     self.processes[idx].core.r[R0 as usize] = u64::MAX;
                 }
@@ -1534,8 +1602,28 @@ impl Kernel {
             SYS_RECV => {
                 if let Some(msg) = self.mailboxes[idx].pop() {
                     self.processes[idx].core.r[R0 as usize] = msg.value;
+                    // R1 = tag: 1 = ordinary, 2 = cap-bearing
+                    self.processes[idx].core.r[R1 as usize] =
+                        if msg.cap.is_some() { 2 } else { 1 };
+                    // R2,R3 = cap handle (slot, generation) or sentinel
+                    if let Some(ch) = msg.cap {
+                        self.processes[idx].core.r[R2 as usize] = ch.slot as u64;
+                        self.processes[idx].core.r[R3 as usize] = ch.generation as u64;
+                    } else {
+                        self.processes[idx].core.r[R2 as usize] = u32::MAX as u64;
+                        self.processes[idx].core.r[R3 as usize] = 0;
+                    }
+                    // R4,R5 = sender ProcessKey (slot, generation)
+                    self.processes[idx].core.r[R4 as usize] = msg.from.slot as u64;
+                    self.processes[idx].core.r[R5 as usize] = msg.from.generation as u64;
                 } else {
+                    // Empty mailbox
                     self.processes[idx].core.r[R0 as usize] = 0;
+                    self.processes[idx].core.r[R1 as usize] = 0; // tag 0 = empty
+                    self.processes[idx].core.r[R2 as usize] = u32::MAX as u64;
+                    self.processes[idx].core.r[R3 as usize] = 0;
+                    self.processes[idx].core.r[R4 as usize] = 0;
+                    self.processes[idx].core.r[R5 as usize] = 0;
                 }
                 self.resume_from_trap(idx);
             }
@@ -1556,6 +1644,12 @@ impl Kernel {
             }
             SYS_CAP_DROP => {
                 self.handle_cap_drop(idx);
+            }
+            SYS_SEND_CAP => {
+                self.handle_send_cap(idx);
+            }
+            SYS_SEND_KEY => {
+                self.handle_send_key(idx);
             }
             _ => {
                 eprintln!("Unknown syscall {} from pid {}",
@@ -2672,6 +2766,261 @@ impl Kernel {
         debug_assert!(removed, "authority present — phase 2 passed");
 
         self.processes[idx].core.r[R0 as usize] = 0;
+        self.resume_from_trap(idx);
+    }
+
+    /// SYS_SEND_KEY (syscall 12): ProcessKey-addressed ordinary send.
+    ///
+    /// ABI:
+    ///   R1 = destination process slot (u32)
+    ///   R2 = destination process generation (u32)
+    ///   R3 = value
+    ///
+    /// Returns: R0 = 0 on success, R0 = error code on failure.
+    ///   1 = destination not live (malformed register, stale generation, Zombie, absent)
+    ///   2 = mailbox full
+    ///
+    /// Uses checked u32 decoding for all narrow fields.
+    fn handle_send_key(&mut self, idx: usize) {
+        let r1 = self.processes[idx].core.r[R1 as usize];
+        let r2 = self.processes[idx].core.r[R2 as usize];
+        let value = self.processes[idx].core.r[R3 as usize];
+
+        // Gate 0: checked ABI decode
+        let dest_slot = match usize::try_from(
+            match u32::try_from(r1) { Ok(v) => v, Err(_) => {
+                self.processes[idx].core.r[R0 as usize] = 1;
+                self.resume_from_trap(idx);
+                return;
+            }}
+        ) { Ok(v) => v, Err(_) => {
+            self.processes[idx].core.r[R0 as usize] = 1;
+            self.resume_from_trap(idx);
+            return;
+        }};
+        let dest_gen = match u32::try_from(r2) {
+            Ok(v) => v,
+            Err(_) => {
+                self.processes[idx].core.r[R0 as usize] = 1;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+
+        let dest_key = ProcessKey { slot: dest_slot, generation: dest_gen };
+
+        // Gate 1: destination is a live Running process
+        let dest_idx = match self.validate_message_destination(&dest_key) {
+            Some(i) => i,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = 1;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+
+        // Gate 2: mailbox capacity
+        if self.mailboxes[dest_idx].len() >= MAX_MAILBOX_SIZE {
+            self.processes[idx].core.r[R0 as usize] = 2;
+            self.resume_from_trap(idx);
+            return;
+        }
+
+        let from_key = ProcessKey {
+            slot: idx,
+            generation: self.processes[idx].generation,
+        };
+        self.mailboxes[dest_idx].push(Message {
+            from: from_key, value, cap: None,
+        });
+        self.processes[idx].core.r[R0 as usize] = 0;
+        self.resume_from_trap(idx);
+    }
+
+    /// SYS_SEND_CAP (syscall 11): Atomic capability transfer.
+    ///
+    /// ABI:
+    ///   R1 = destination process slot (u32)
+    ///   R2 = destination process generation (u32)
+    ///   R3 = source cap handle slot (u32)
+    ///   R4 = source cap handle generation (u32)
+    ///   R5 = child offset (u64, absolute object offset)
+    ///   R6 = child length (u64)
+    ///   R7 = child permissions (u64 → Permissions)
+    ///   R8 = value (u64, message payload)
+    ///
+    /// Returns: R0 = 0 on success, R0 = error code on failure.
+    ///   1 = ABI decode failure (malformed register, bad permission bits)
+    ///   2 = destination not live (not Running, or stale generation, or Zombie)
+    ///   3 = source handle does not resolve (three-condition failure)
+    ///   4 = subset/attenuation violation (non-Memory, amplification, bad range, zero length)
+    ///   5 = receiver has no allocatable cap slot
+    ///   6 = receiver mailbox full
+    ///   7 = identity space exhausted (AuthorityId or DelegationId)
+    ///   8 = internal error (unexpected commit failure; IDs consumed, no authority leaked)
+    fn handle_send_cap(&mut self, idx: usize) {
+        let r1 = self.processes[idx].core.r[R1 as usize];
+        let r2 = self.processes[idx].core.r[R2 as usize];
+        let r3 = self.processes[idx].core.r[R3 as usize];
+        let r4 = self.processes[idx].core.r[R4 as usize];
+        let child_offset = self.processes[idx].core.r[R5 as usize];
+        let child_length = self.processes[idx].core.r[R6 as usize];
+        let r7 = self.processes[idx].core.r[R7 as usize];
+        let value = self.processes[idx].core.r[R8 as usize];
+
+        // ── Gate 0: Checked ABI decode ──
+        let dest_slot_u32 = match u32::try_from(r1) {
+            Ok(v) => v, Err(_) => { self.fail_send_cap(idx, 1); return; }
+        };
+        let dest_slot = match usize::try_from(dest_slot_u32) {
+            Ok(v) => v, Err(_) => { self.fail_send_cap(idx, 1); return; }
+        };
+        let dest_gen = match u32::try_from(r2) {
+            Ok(v) => v, Err(_) => { self.fail_send_cap(idx, 1); return; }
+        };
+        let src_slot = match u32::try_from(r3) {
+            Ok(v) => v, Err(_) => { self.fail_send_cap(idx, 1); return; }
+        };
+        let src_gen = match u32::try_from(r4) {
+            Ok(v) => v, Err(_) => { self.fail_send_cap(idx, 1); return; }
+        };
+        let child_perms = match Permissions::from_bits_checked(r7) {
+            Some(p) => p, None => { self.fail_send_cap(idx, 1); return; }
+        };
+
+        // child_length > 0
+        if child_length == 0 { self.fail_send_cap(idx, 4); return; }
+
+        let dest_key = ProcessKey { slot: dest_slot, generation: dest_gen };
+        let src_handle = CapabilityHandle { slot: src_slot, generation: src_gen };
+
+        // ── Gate 1: Destination is a live Running process ──
+        let dest_idx = match self.validate_message_destination(&dest_key) {
+            Some(i) => i,
+            None => { self.fail_send_cap(idx, 2); return; }
+        };
+
+        // ── Gate 2: Source handle fully resolves (three-condition) ──
+        let resolved = match self.resolve_capability(idx, src_handle) {
+            Some(r) => r,
+            None => { self.fail_send_cap(idx, 3); return; }
+        };
+
+        // ── Gate 2b: Source is Memory only ──
+        let src_object = match self.fabric.objects.get(&resolved.object) {
+            Some(obj) => obj,
+            None => { self.fail_send_cap(idx, 3); return; }
+        };
+        if src_object.kind != ObjectKind::Memory {
+            self.fail_send_cap(idx, 4);
+            return;
+        }
+
+        // ── Gate 3: Subset relationship ──
+        if !child_perms.is_subset_of(resolved.perms) {
+            self.fail_send_cap(idx, 4); return;
+        }
+        if child_offset < resolved.offset {
+            self.fail_send_cap(idx, 4); return;
+        }
+        if child_length > resolved.length {
+            self.fail_send_cap(idx, 4); return;
+        }
+        // Overflow-safe: child_offset - resolved.offset <= resolved.length - child_length
+        if child_offset - resolved.offset > resolved.length - child_length {
+            self.fail_send_cap(idx, 4); return;
+        }
+
+        // ── Gate 4: Receiver has an allocatable cap slot ──
+        let dest_allocatable = self.processes[dest_idx].cap_table.as_ref()
+            .map_or(0, |ct| ct.allocatable_count());
+        if dest_allocatable == 0 {
+            self.fail_send_cap(idx, 5); return;
+        }
+
+        // ── Gate 5: Mailbox capacity ──
+        if self.mailboxes[dest_idx].len() >= MAX_MAILBOX_SIZE {
+            self.fail_send_cap(idx, 6); return;
+        }
+
+        // ── Gate 6: Fresh identity availability ──
+        if !self.fabric.can_alloc_authority_id() || !self.can_alloc_delegation_id() {
+            self.fail_send_cap(idx, 7); return;
+        }
+
+        // ─── All preflights passed — atomic commit ───
+        // After this point, ID allocation is guaranteed by preflight.
+
+        let sender_key = ProcessKey {
+            slot: idx,
+            generation: self.processes[idx].generation,
+        };
+
+        // Allocate identities (guaranteed by gate 6)
+        let new_aid = match self.fabric.alloc_authority_id() {
+            Some(a) => a,
+            None => { self.fail_send_cap(idx, 8); return; }
+        };
+        let new_tid = match self.alloc_delegation_id(sender_key, dest_key) {
+            Some(t) => t,
+            None => { self.fail_send_cap(idx, 8); return; }
+        };
+
+        // Cross-domain derivation from exact AuthorityId
+        let src_domain = self.processes[idx].core.domain;
+        let dst_domain = self.processes[dest_idx].core.domain;
+        let derived = self.fabric.derive_from_authority_id(
+            src_domain,
+            resolved.authority_id,
+            dst_domain,
+            child_offset,
+            child_length,
+            child_perms,
+            new_aid,
+        );
+        if derived.is_none() {
+            // Unexpected derivation failure — IDs consumed but no authority leaked
+            self.fail_send_cap(idx, 8);
+            return;
+        }
+        let derived_cap = derived.unwrap();
+
+        // Install in receiver's cap table
+        let obj_gen = Generation(derived_cap.generation().0);
+        let new_handle = self.processes[dest_idx].cap_table.as_mut()
+            .and_then(|ct| ct.install(
+                derived_cap.object(),
+                obj_gen,
+                child_offset,
+                child_length,
+                child_perms,
+                new_aid,
+                Some(new_tid),
+            ));
+        match new_handle {
+            Some(h) => {
+                // Enqueue message (capacity preflighted at gate 5)
+                self.mailboxes[dest_idx].push(Message {
+                    from: sender_key,
+                    value,
+                    cap: Some(h),
+                });
+                self.processes[idx].core.r[R0 as usize] = 0;
+            }
+            None => {
+                // Rollback: remove the derived authority from destination domain
+                self.fabric.remove_by_authority_id(dst_domain, new_aid);
+                // IDs remain consumed but no authority or handle leaked
+                self.fail_send_cap(idx, 8);
+                return;
+            }
+        }
+        self.resume_from_trap(idx);
+    }
+
+    /// Helper: fail a SYS_SEND_CAP with a specific error code.
+    fn fail_send_cap(&mut self, idx: usize, code: u64) {
+        self.processes[idx].core.r[R0 as usize] = code;
         self.resume_from_trap(idx);
     }
 
@@ -6945,5 +7294,1268 @@ mod tests {
             "F_structural + O = N");
 
         eprintln!("9.2a: retired slot not reusable ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.2b — User-Space Capability-Mediated Transfer
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Two-process kernel setup for 9.2b transfer tests.
+    /// Returns (kernel, sender_slot, receiver_slot, shared_data_object).
+    /// Both processes are spawned and have cap tables.
+    /// The shared data object is Memory, placed, and RW-granted to the sender.
+    fn send_cap_setup() -> (Kernel, usize, usize, ObjectId) {
+        let mut fabric = Fabric::new(0x400000);
+
+        // Sender process (slot 0)
+        let (core_a, dom_a, text_a, data_a, _stack_a) =
+            create_process(&mut fabric, CPU0, "sender",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+
+        let mut asm_a = Asm64::new();
+        for _ in 0..100 { asm_a.nop(); }
+        asm_a.movi(R1, 0);
+        asm_a.movi(R0, SYS_EXIT as i32);
+        asm_a.trap(0);
+        fabric.write_physical(0x000000, &asm_a.to_bytes());
+        seal_code_object(&mut fabric, text_a, dom_a);
+
+        // Receiver process (slot 1)
+        let (core_b, dom_b, text_b, _data_b, _stack_b) =
+            create_process(&mut fabric, AgentId(1), "receiver",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+
+        let mut asm_b = Asm64::new();
+        for _ in 0..100 { asm_b.nop(); }
+        asm_b.movi(R1, 0);
+        asm_b.movi(R0, SYS_EXIT as i32);
+        asm_b.trap(0);
+        fabric.write_physical(0x100000, &asm_b.to_bytes());
+        seal_code_object(&mut fabric, text_b, dom_b);
+
+        let mut kernel = Kernel::new(fabric);
+        let key_a = kernel.spawn(core_a);
+        let key_b = kernel.spawn(core_b);
+
+        (kernel, key_a.slot, key_b.slot, data_a)
+    }
+
+    // ─── End-to-end: SYS_SEND_CAP → SYS_RECV ───
+
+    #[test]
+    fn p92b_send_cap_end_to_end() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+
+        // Install a capability in sender's cap table
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("sender install");
+
+        let sender_key = ProcessKey {
+            slot: sender,
+            generation: kernel.processes[sender].generation,
+        };
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        // Before: receiver has 0 messages, 16 allocatable slots
+        assert_eq!(kernel.mailboxes[receiver].len(), 0);
+
+        let aid_before = kernel.fabric.next_authority_id();
+        let tid_before = kernel.next_delegation_incarnation();
+
+        // Execute SYS_SEND_CAP manually
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;      // child_offset
+        kernel.processes[sender].core.r[R6 as usize] = 0x2000;  // child_length (subset)
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64; // attenuated
+        kernel.processes[sender].core.r[R8 as usize] = 0xCAFE;  // value
+
+        kernel.handle_send_cap(sender);
+
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 0,
+            "SYS_SEND_CAP must succeed");
+
+        // Identity counters advanced exactly once each
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before + 1);
+        assert_eq!(kernel.next_delegation_incarnation(), tid_before + 1);
+
+        // Receiver mailbox has one message
+        assert_eq!(kernel.mailboxes[receiver].len(), 1);
+        let msg = &kernel.mailboxes[receiver][0];
+        assert_eq!(msg.from, sender_key);
+        assert_eq!(msg.value, 0xCAFE);
+        assert!(msg.cap.is_some());
+
+        let recv_handle = msg.cap.unwrap();
+
+        // Resolve the receiver's handle — should succeed
+        let resolved = kernel.resolve_capability(receiver, recv_handle)
+            .expect("receiver handle must resolve");
+
+        // Non-amplification: subset relationship
+        assert_eq!(resolved.offset, 0);
+        assert_eq!(resolved.length, 0x2000);
+        assert_eq!(resolved.perms, Permissions::READ);
+
+        // DelegationId is present and correct
+        assert!(resolved.delegation_id.is_some());
+        let tid = resolved.delegation_id.unwrap();
+        assert_eq!(tid.client, sender_key);
+        assert_eq!(tid.driver, receiver_key);
+        assert_eq!(tid.incarnation, tid_before);
+
+        eprintln!("9.2b: end-to-end send_cap → recv ✓");
+    }
+
+    // ─── Preflight failures: each gate produces no side effects ───
+
+    #[test]
+    fn p92b_gate0_malformed_dest_slot() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install");
+
+        let aid_before = kernel.fabric.next_authority_id();
+        let tid_before = kernel.next_delegation_incarnation();
+
+        // High-bit alias: 0x1_0000_0001 → would truncate to 1
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = 0x1_0000_0001u64; // bad
+        kernel.processes[sender].core.r[R2 as usize] = 0;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x1000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 42;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 1,
+            "malformed dest slot must fail with code 1");
+
+        // No side effects
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before);
+        assert_eq!(kernel.next_delegation_incarnation(), tid_before);
+        assert_eq!(kernel.mailboxes[receiver].len(), 0);
+
+        eprintln!("9.2b: gate 0 malformed dest slot ✓");
+    }
+
+    #[test]
+    fn p92b_gate0_malformed_src_handle() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let _src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install");
+
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        let aid_before = kernel.fabric.next_authority_id();
+
+        // High-bit alias on source cap handle slot
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = 0x1_0000_0000u64; // bad
+        kernel.processes[sender].core.r[R4 as usize] = 0;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x1000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 42;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 1,
+            "malformed src handle must fail with code 1");
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before);
+
+        eprintln!("9.2b: gate 0 malformed src handle ✓");
+    }
+
+    #[test]
+    fn p92b_gate0_bad_permissions() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install");
+
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        // Invalid permission bits
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x1000;
+        kernel.processes[sender].core.r[R7 as usize] = 0xFF; // invalid bits
+        kernel.processes[sender].core.r[R8 as usize] = 42;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 1,
+            "bad permission bits must fail");
+
+        eprintln!("9.2b: gate 0 bad permissions ✓");
+    }
+
+    #[test]
+    fn p92b_gate1_dest_not_current() {
+        let (mut kernel, sender, _receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install");
+
+        let aid_before = kernel.fabric.next_authority_id();
+
+        // Non-existent dest
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = 99; // no such slot
+        kernel.processes[sender].core.r[R2 as usize] = 0;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x1000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 42;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 2,
+            "non-existent dest must fail with code 2");
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before);
+
+        eprintln!("9.2b: gate 1 dest not current ✓");
+    }
+
+    #[test]
+    fn p92b_gate1_dest_stale_generation() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install");
+
+        let aid_before = kernel.fabric.next_authority_id();
+
+        // Stale generation
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver as u64;
+        kernel.processes[sender].core.r[R2 as usize] = 999; // wrong gen
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x1000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 42;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 2,
+            "stale dest generation must fail with code 2");
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before);
+
+        eprintln!("9.2b: gate 1 dest stale generation ✓");
+    }
+
+    #[test]
+    fn p92b_gate2_source_handle_not_resolved() {
+        let (mut kernel, sender, receiver, _data) = send_cap_setup();
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        let aid_before = kernel.fabric.next_authority_id();
+
+        // No capability installed — handle (0,0) is Free
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = 0;
+        kernel.processes[sender].core.r[R4 as usize] = 0;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x1000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 42;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 3,
+            "unresolvable source must fail with code 3");
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before);
+        assert_eq!(kernel.mailboxes[receiver].len(), 0);
+
+        eprintln!("9.2b: gate 2 source not resolved ✓");
+    }
+
+    #[test]
+    fn p92b_gate3_subset_amplification_rejected() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::READ)
+            .expect("install");
+
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        let aid_before = kernel.fabric.next_authority_id();
+
+        // Attempt to amplify READ → RW
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x4000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::RW.0 as u64; // amplify!
+        kernel.processes[sender].core.r[R8 as usize] = 42;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 4,
+            "permission amplification must fail with code 4");
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before);
+        assert_eq!(kernel.mailboxes[receiver].len(), 0);
+
+        eprintln!("9.2b: gate 3 subset amplification rejected ✓");
+    }
+
+    #[test]
+    fn p92b_gate3_range_exceeds_parent() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::READ)
+            .expect("install");
+
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        let aid_before = kernel.fabric.next_authority_id();
+
+        // Child extends past parent
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0x1000;  // offset 4096
+        kernel.processes[sender].core.r[R6 as usize] = 0x4000;  // length 16384 → past end
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 42;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 4,
+            "range exceeding parent must fail");
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before);
+
+        eprintln!("9.2b: gate 3 range exceeds parent ✓");
+    }
+
+    #[test]
+    fn p92b_gate3_zero_length_rejected() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::READ)
+            .expect("install");
+
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0; // zero length
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 42;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 4,
+            "zero length must fail");
+
+        eprintln!("9.2b: gate 3 zero length rejected ✓");
+    }
+
+    #[test]
+    fn p92b_gate4_receiver_cap_table_full() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install");
+
+        // Fill receiver's cap table
+        let recv_data = {
+            let dom = kernel.processes[receiver].core.domain;
+            let caps = &kernel.fabric.domains[&dom].capabilities;
+            let entry = caps.iter().find(|e| {
+                e.cap.permissions().contains(Permissions::WRITE)
+                    && !e.cap.permissions().contains(Permissions::EXECUTE)
+            }).unwrap();
+            entry.cap.object()
+        };
+        for _ in 0..CAP_TABLE_SIZE {
+            kernel.install_capability(receiver, recv_data, 0, 0x4000, Permissions::RW)
+                .expect("fill receiver cap table");
+        }
+
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+        let aid_before = kernel.fabric.next_authority_id();
+
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x1000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 42;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 5,
+            "full receiver cap table must fail with code 5");
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before);
+        assert_eq!(kernel.mailboxes[receiver].len(), 0);
+
+        eprintln!("9.2b: gate 4 receiver cap table full ✓");
+    }
+
+    #[test]
+    fn p92b_gate5_mailbox_full() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install");
+
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        // Fill the mailbox
+        let sender_key = ProcessKey {
+            slot: sender,
+            generation: kernel.processes[sender].generation,
+        };
+        for _ in 0..MAX_MAILBOX_SIZE {
+            kernel.mailboxes[receiver].push(Message {
+                from: sender_key, value: 0, cap: None,
+            });
+        }
+
+        let aid_before = kernel.fabric.next_authority_id();
+
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x1000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 42;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 6,
+            "full mailbox must fail with code 6");
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before);
+
+        eprintln!("9.2b: gate 5 mailbox full ✓");
+    }
+
+    #[test]
+    fn p92b_gate6_authority_id_exhausted() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install");
+
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        // Exhaust AuthorityId space
+        kernel.fabric.set_next_authority_id(u64::MAX);
+
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x1000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 42;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 7,
+            "AuthorityId exhaustion must fail with code 7");
+        assert_eq!(kernel.mailboxes[receiver].len(), 0);
+
+        eprintln!("9.2b: gate 6 authority ID exhausted ✓");
+    }
+
+    #[test]
+    fn p92b_gate6_delegation_id_exhausted() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install");
+
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        // Exhaust DelegationId incarnation space
+        kernel.set_next_delegation_incarnation(u64::MAX);
+
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x1000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 42;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 7,
+            "DelegationId exhaustion must fail with code 7");
+        assert_eq!(kernel.mailboxes[receiver].len(), 0);
+
+        eprintln!("9.2b: gate 6 delegation ID exhausted ✓");
+    }
+
+    // ─── Exact AuthorityId derivation with value-equal twins ───
+
+    #[test]
+    fn p92b_exact_authority_transfer_with_twins() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+
+        // Two value-equal caps, different AuthorityIds
+        let h1 = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install h1");
+        let h2 = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install h2");
+
+        let r1 = kernel.resolve_capability(sender, h1).unwrap();
+        let r2 = kernel.resolve_capability(sender, h2).unwrap();
+        assert_ne!(r1.authority_id, r2.authority_id,
+            "twin caps must have different AuthorityIds");
+
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        let src_domain = kernel.processes[sender].core.domain;
+        let dst_domain = kernel.processes[receiver].core.domain;
+        let sender_caps_before = kernel.fabric.domains[&src_domain].capabilities.len();
+        let receiver_caps_before = kernel.fabric.domains[&dst_domain].capabilities.len();
+
+        // Transfer h1 only
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = h1.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = h1.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x4000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::RW.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 0xDEAD;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 0);
+
+        // Sender domain unchanged (source authority not consumed)
+        let sender_caps_after = kernel.fabric.domains[&src_domain].capabilities.len();
+        assert_eq!(sender_caps_after, sender_caps_before);
+
+        // Receiver domain gained exactly one
+        let receiver_caps_after = kernel.fabric.domains[&dst_domain].capabilities.len();
+        assert_eq!(receiver_caps_after, receiver_caps_before + 1);
+
+        // h2 still resolves in sender — transfer of h1 did not destroy the twin
+        assert!(kernel.resolve_capability(sender, h2).is_some(),
+            "twin cap h2 must still resolve after h1 was transferred");
+
+        eprintln!("9.2b: exact authority with value-equal twins ✓");
+    }
+
+    // ─── Non-Memory source rejection ───
+
+    #[test]
+    fn p92b_gate2b_non_memory_rejected() {
+        let mut fabric = Fabric::new(0x400000);
+
+        // Sender with a Device object
+        let (core_a, dom_a, text_a, _data_a, _stack_a) =
+            create_process(&mut fabric, CPU0, "sender_dev",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+
+        let dev_obj = fabric.alloc_object("device0", 0x1000, ObjectKind::Device);
+        fabric.place_object(dev_obj, 0x030000);
+        fabric.grant(dom_a, dev_obj, 0, 0x1000, Permissions::RW);
+
+        let mut asm_a = Asm64::new();
+        for _ in 0..100 { asm_a.nop(); }
+        asm_a.movi(R1, 0);
+        asm_a.movi(R0, SYS_EXIT as i32);
+        asm_a.trap(0);
+        fabric.write_physical(0x000000, &asm_a.to_bytes());
+        seal_code_object(&mut fabric, text_a, dom_a);
+
+        // Receiver
+        let (core_b, dom_b, text_b, _data_b, _stack_b) =
+            create_process(&mut fabric, AgentId(1), "receiver_dev",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm_b = Asm64::new();
+        for _ in 0..100 { asm_b.nop(); }
+        asm_b.movi(R1, 0);
+        asm_b.movi(R0, SYS_EXIT as i32);
+        asm_b.trap(0);
+        fabric.write_physical(0x100000, &asm_b.to_bytes());
+        seal_code_object(&mut fabric, text_b, dom_b);
+
+        let mut kernel = Kernel::new(fabric);
+        let key_a = kernel.spawn(core_a);
+        let key_b = kernel.spawn(core_b);
+
+        let sender = key_a.slot;
+        let receiver = key_b.slot;
+
+        // Install Device cap in sender's table
+        let dev_handle = kernel.install_capability(sender, dev_obj, 0, 0x1000, Permissions::RW)
+            .expect("install device cap");
+
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        let aid_before = kernel.fabric.next_authority_id();
+
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = dev_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = dev_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x1000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 42;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 4,
+            "Device object transfer must be rejected");
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before);
+
+        eprintln!("9.2b: gate 2b non-Memory rejected ✓");
+    }
+
+    // ─── DelegationId: fresh per transfer, not inherited ───
+
+    #[test]
+    fn p92b_delegation_id_fresh_per_transfer() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install");
+
+        let sender_key = ProcessKey {
+            slot: sender,
+            generation: kernel.processes[sender].generation,
+        };
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        // Transfer #1
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x2000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 1;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 0);
+        let msg1 = kernel.mailboxes[receiver].last().unwrap().clone();
+        let h1 = msg1.cap.unwrap();
+        let r1 = kernel.resolve_capability(receiver, h1).unwrap();
+        let t1 = r1.delegation_id.unwrap();
+
+        // Transfer #2 (same source, different subset)
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0x1000;
+        kernel.processes[sender].core.r[R6 as usize] = 0x1000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 2;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 0);
+        let msg2 = kernel.mailboxes[receiver].last().unwrap().clone();
+        let h2 = msg2.cap.unwrap();
+        let r2 = kernel.resolve_capability(receiver, h2).unwrap();
+        let t2 = r2.delegation_id.unwrap();
+
+        // DelegationIds must be distinct
+        assert_ne!(t1.incarnation, t2.incarnation,
+            "each transfer must get a fresh DelegationId");
+        assert_eq!(t1.client, sender_key);
+        assert_eq!(t2.client, sender_key);
+        assert_eq!(t1.driver, receiver_key);
+        assert_eq!(t2.driver, receiver_key);
+
+        eprintln!("9.2b: delegation ID fresh per transfer ✓");
+    }
+
+    // ─── SYS_SEND_KEY: generation-qualified ordinary send ───
+
+    #[test]
+    fn p92b_send_key_success() {
+        let (mut kernel, sender, receiver, _data) = send_cap_setup();
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_KEY;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = 0xBEEF;
+
+        kernel.handle_send_key(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 0);
+        assert_eq!(kernel.mailboxes[receiver].len(), 1);
+        assert_eq!(kernel.mailboxes[receiver][0].value, 0xBEEF);
+        assert!(kernel.mailboxes[receiver][0].cap.is_none());
+
+        eprintln!("9.2b: send_key success ✓");
+    }
+
+    #[test]
+    fn p92b_send_key_stale_dest() {
+        let (mut kernel, sender, receiver, _data) = send_cap_setup();
+
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_KEY;
+        kernel.processes[sender].core.r[R1 as usize] = receiver as u64;
+        kernel.processes[sender].core.r[R2 as usize] = 999; // wrong gen
+        kernel.processes[sender].core.r[R3 as usize] = 0xBEEF;
+
+        kernel.handle_send_key(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 1);
+        assert_eq!(kernel.mailboxes[receiver].len(), 0);
+
+        eprintln!("9.2b: send_key stale dest ✓");
+    }
+
+    #[test]
+    fn p92b_send_key_mailbox_full() {
+        let (mut kernel, sender, receiver, _data) = send_cap_setup();
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+        let sender_key = ProcessKey {
+            slot: sender,
+            generation: kernel.processes[sender].generation,
+        };
+
+        for _ in 0..MAX_MAILBOX_SIZE {
+            kernel.mailboxes[receiver].push(Message {
+                from: sender_key, value: 0, cap: None,
+            });
+        }
+
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_KEY;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = 0xBEEF;
+
+        kernel.handle_send_key(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 2,
+            "SEND_KEY mailbox full must return code 2");
+        assert_eq!(kernel.mailboxes[receiver].len(), MAX_MAILBOX_SIZE);
+
+        eprintln!("9.2b: send_key mailbox full ✓");
+    }
+
+    #[test]
+    fn p92b_send_key_malformed_high_bits() {
+        let (mut kernel, sender, receiver, _data) = send_cap_setup();
+
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_KEY;
+        kernel.processes[sender].core.r[R1 as usize] = 0x1_0000_0001u64; // high bits
+        kernel.processes[sender].core.r[R2 as usize] = 0;
+        kernel.processes[sender].core.r[R3 as usize] = 0xBEEF;
+
+        kernel.handle_send_key(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 1);
+        assert_eq!(kernel.mailboxes[receiver].len(), 0);
+
+        eprintln!("9.2b: send_key malformed high bits ✓");
+    }
+
+    // ─── SYS_SEND mailbox bound ───
+
+    #[test]
+    fn p92b_legacy_send_mailbox_bound() {
+        let (mut kernel, sender, receiver, _data) = send_cap_setup();
+        let sender_key = ProcessKey {
+            slot: sender,
+            generation: kernel.processes[sender].generation,
+        };
+
+        for _ in 0..MAX_MAILBOX_SIZE {
+            kernel.mailboxes[receiver].push(Message {
+                from: sender_key, value: 0, cap: None,
+            });
+        }
+
+        // Legacy SYS_SEND now respects MAX_MAILBOX_SIZE
+        let dest_pid = kernel.processes[receiver].pid;
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND;
+        kernel.processes[sender].core.r[R1 as usize] = dest_pid;
+        kernel.processes[sender].core.r[R2 as usize] = 0xBEEF;
+        kernel.processes[sender].core.halted = true;
+        kernel.handle_syscall(sender);
+
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], u64::MAX,
+            "legacy SYS_SEND must respect mailbox bound");
+        assert_eq!(kernel.mailboxes[receiver].len(), MAX_MAILBOX_SIZE);
+
+        eprintln!("9.2b: legacy send mailbox bound ✓");
+    }
+
+    // ─── SYS_RECV extended ABI ───
+
+    #[test]
+    fn p92b_recv_ordinary_message() {
+        let (mut kernel, sender, receiver, _data) = send_cap_setup();
+        let sender_key = ProcessKey {
+            slot: sender,
+            generation: kernel.processes[sender].generation,
+        };
+
+        kernel.mailboxes[receiver].push(Message {
+            from: sender_key, value: 0xCAFE, cap: None,
+        });
+
+        // SYS_RECV
+        kernel.processes[receiver].core.r[R0 as usize] = SYS_RECV;
+        kernel.processes[receiver].core.halted = true;
+        kernel.handle_syscall(receiver);
+
+        assert_eq!(kernel.processes[receiver].core.r[R0 as usize], 0xCAFE);
+        assert_eq!(kernel.processes[receiver].core.r[R1 as usize], 1,
+            "ordinary message tag = 1");
+        assert_eq!(kernel.processes[receiver].core.r[R2 as usize], u32::MAX as u64,
+            "no cap → sentinel slot");
+        assert_eq!(kernel.processes[receiver].core.r[R3 as usize], 0);
+        assert_eq!(kernel.processes[receiver].core.r[R4 as usize], sender_key.slot as u64);
+        assert_eq!(kernel.processes[receiver].core.r[R5 as usize], sender_key.generation as u64);
+
+        eprintln!("9.2b: recv ordinary message ABI ✓");
+    }
+
+    #[test]
+    fn p92b_recv_cap_bearing_message() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let sender_key = ProcessKey {
+            slot: sender,
+            generation: kernel.processes[sender].generation,
+        };
+
+        let test_handle = CapabilityHandle { slot: 5, generation: 3 };
+        kernel.mailboxes[receiver].push(Message {
+            from: sender_key, value: 0xDEAD, cap: Some(test_handle),
+        });
+
+        kernel.processes[receiver].core.r[R0 as usize] = SYS_RECV;
+        kernel.processes[receiver].core.halted = true;
+        kernel.handle_syscall(receiver);
+
+        assert_eq!(kernel.processes[receiver].core.r[R0 as usize], 0xDEAD);
+        assert_eq!(kernel.processes[receiver].core.r[R1 as usize], 2,
+            "cap-bearing message tag = 2");
+        assert_eq!(kernel.processes[receiver].core.r[R2 as usize], 5,
+            "cap handle slot");
+        assert_eq!(kernel.processes[receiver].core.r[R3 as usize], 3,
+            "cap handle generation");
+        assert_eq!(kernel.processes[receiver].core.r[R4 as usize], sender_key.slot as u64);
+        assert_eq!(kernel.processes[receiver].core.r[R5 as usize], sender_key.generation as u64);
+
+        eprintln!("9.2b: recv cap-bearing message ABI ✓");
+    }
+
+    #[test]
+    fn p92b_recv_empty_mailbox() {
+        let (mut kernel, _sender, receiver, _data) = send_cap_setup();
+
+        kernel.processes[receiver].core.r[R0 as usize] = SYS_RECV;
+        kernel.processes[receiver].core.halted = true;
+        kernel.handle_syscall(receiver);
+
+        assert_eq!(kernel.processes[receiver].core.r[R0 as usize], 0);
+        assert_eq!(kernel.processes[receiver].core.r[R1 as usize], 0,
+            "empty mailbox tag = 0");
+        assert_eq!(kernel.processes[receiver].core.r[R2 as usize], u32::MAX as u64);
+        assert_eq!(kernel.processes[receiver].core.r[R3 as usize], 0);
+        assert_eq!(kernel.processes[receiver].core.r[R4 as usize], 0);
+        assert_eq!(kernel.processes[receiver].core.r[R5 as usize], 0);
+
+        eprintln!("9.2b: recv empty mailbox ABI ✓");
+    }
+
+    // ─── All-or-nothing: preflight rejection consumes no identity ───
+
+    #[test]
+    fn p92b_all_or_nothing_identity_counters() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install");
+
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        let aid_before = kernel.fabric.next_authority_id();
+        let tid_before = kernel.next_delegation_incarnation();
+        let recv_occ_before = kernel.processes[receiver].cap_table.as_ref()
+            .unwrap().occupied_count();
+
+        // Fail at gate 3: amplification
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x4000;
+        kernel.processes[sender].core.r[R7 as usize] = (Permissions::RW.0 | Permissions::EXECUTE.0) as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 99;
+
+        kernel.handle_send_cap(sender);
+        assert_ne!(kernel.processes[sender].core.r[R0 as usize], 0);
+
+        // All counters unchanged
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before,
+            "AuthorityId must not advance on preflight rejection");
+        assert_eq!(kernel.next_delegation_incarnation(), tid_before,
+            "DelegationId must not advance on preflight rejection");
+        assert_eq!(kernel.mailboxes[receiver].len(), 0);
+        assert_eq!(kernel.processes[receiver].cap_table.as_ref().unwrap().occupied_count(),
+            recv_occ_before);
+
+        eprintln!("9.2b: all-or-nothing identity counters ✓");
+    }
+
+    // ─── Stale-while-queued ───
+
+    #[test]
+    fn p92b_stale_while_queued() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install");
+
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        // Successful transfer
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x2000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 0xF00D;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 0);
+
+        let msg = kernel.mailboxes[receiver].last().unwrap().clone();
+        let recv_handle = msg.cap.unwrap();
+
+        // At this instant, the handle resolves
+        assert!(kernel.resolve_capability(receiver, recv_handle).is_some());
+
+        // Now revoke the underlying object — advance its generation
+        kernel.fabric.revoke(data);
+
+        // Handle no longer resolves — stale while queued
+        assert!(kernel.resolve_capability(receiver, recv_handle).is_none(),
+            "handle must become stale after object revocation");
+
+        // But the message is still in the mailbox with the handle
+        assert_eq!(kernel.mailboxes[receiver].len(), 1);
+        assert!(kernel.mailboxes[receiver][0].cap.is_some());
+
+        eprintln!("9.2b: stale-while-queued ✓");
+    }
+
+    // ─── Boot-installed caps have no DelegationId ───
+
+    #[test]
+    fn p92b_boot_cap_has_no_delegation_id() {
+        let (mut kernel, sender, _receiver, data) = send_cap_setup();
+        let h = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install");
+
+        let resolved = kernel.resolve_capability(sender, h).unwrap();
+        assert!(resolved.delegation_id.is_none(),
+            "boot/spawn-installed cap must have no DelegationId");
+
+        eprintln!("9.2b: boot cap no delegation ID ✓");
+    }
+
+    // ─── Zombie destination rejection ───
+
+    #[test]
+    fn p92b_send_key_rejects_zombie_dest() {
+        let (mut kernel, sender, receiver, _data) = send_cap_setup();
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        // Force receiver to Zombie
+        kernel.processes[receiver].state = ProcessState::Zombie;
+
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_KEY;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = 0xBEEF;
+
+        kernel.handle_send_key(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 1,
+            "SEND_KEY to Zombie must fail");
+        assert_eq!(kernel.mailboxes[receiver].len(), 0,
+            "no message delivered to Zombie");
+
+        eprintln!("9.2b: send_key rejects zombie dest ✓");
+    }
+
+    #[test]
+    fn p92b_send_cap_rejects_zombie_dest() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install");
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        // Force receiver to Zombie
+        kernel.processes[receiver].state = ProcessState::Zombie;
+
+        let aid_before = kernel.fabric.next_authority_id();
+        let tid_before = kernel.next_delegation_incarnation();
+        let recv_occ_before = kernel.processes[receiver].cap_table.as_ref()
+            .unwrap().occupied_count();
+        let dst_domain = kernel.processes[receiver].core.domain;
+        let dst_caps_before = kernel.fabric.domains[&dst_domain].capabilities.len();
+
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x2000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 42;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 2,
+            "SEND_CAP to Zombie must fail with code 2");
+
+        // No side effects whatsoever
+        assert_eq!(kernel.mailboxes[receiver].len(), 0,
+            "no message delivered to Zombie");
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before,
+            "AuthorityId counter unchanged");
+        assert_eq!(kernel.next_delegation_incarnation(), tid_before,
+            "DelegationId counter unchanged");
+        assert_eq!(kernel.processes[receiver].cap_table.as_ref().unwrap().occupied_count(),
+            recv_occ_before, "receiver cap table unchanged");
+        assert_eq!(kernel.fabric.domains[&dst_domain].capabilities.len(),
+            dst_caps_before, "receiver domain unchanged");
+
+        eprintln!("9.2b: send_cap rejects zombie dest ✓");
+    }
+
+    // ─── True end-to-end: SEND_CAP → SYS_RECV ABI → resolve(H) ───
+
+    #[test]
+    fn p92b_send_cap_recv_resolve_end_to_end() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install");
+
+        let sender_key = ProcessKey {
+            slot: sender,
+            generation: kernel.processes[sender].generation,
+        };
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        // Step 1: SEND_CAP
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x2000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 0xCAFE;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 0,
+            "SEND_CAP must succeed");
+
+        // Step 2: SYS_RECV through the actual syscall ABI
+        kernel.processes[receiver].core.r[R0 as usize] = SYS_RECV;
+        kernel.processes[receiver].core.halted = true;
+        kernel.handle_syscall(receiver);
+
+        // Step 3: Reconstruct message from registers
+        let recv_value = kernel.processes[receiver].core.r[R0 as usize];
+        let recv_tag = kernel.processes[receiver].core.r[R1 as usize];
+        let recv_cap_slot = kernel.processes[receiver].core.r[R2 as usize];
+        let recv_cap_gen = kernel.processes[receiver].core.r[R3 as usize];
+        let recv_sender_slot = kernel.processes[receiver].core.r[R4 as usize];
+        let recv_sender_gen = kernel.processes[receiver].core.r[R5 as usize];
+
+        assert_eq!(recv_value, 0xCAFE);
+        assert_eq!(recv_tag, 2, "cap-bearing message tag");
+        assert_ne!(recv_cap_slot, u32::MAX as u64, "cap slot must not be sentinel");
+
+        // Verify sender identity from ABI registers
+        assert_eq!(recv_sender_slot, sender_key.slot as u64);
+        assert_eq!(recv_sender_gen, sender_key.generation as u64);
+
+        // Step 4: Reconstruct handle from R2/R3 and resolve it
+        let reconstructed_handle = CapabilityHandle {
+            slot: recv_cap_slot as u32,
+            generation: recv_cap_gen as u32,
+        };
+        let resolved = kernel.resolve_capability(receiver, reconstructed_handle)
+            .expect("handle from RECV ABI must resolve");
+
+        // Verify non-amplification through the full path
+        assert_eq!(resolved.offset, 0);
+        assert_eq!(resolved.length, 0x2000);
+        assert_eq!(resolved.perms, Permissions::READ);
+
+        // Verify DelegationId is present
+        let tid = resolved.delegation_id
+            .expect("transferred cap must carry DelegationId");
+        assert_eq!(tid.client, sender_key);
+        assert_eq!(tid.driver, receiver_key);
+
+        eprintln!("9.2b: SEND_CAP → RECV ABI → resolve(H) end-to-end ✓");
+    }
+
+    // ─── Sender domain destruction does not destroy receiver authority ───
+
+    #[test]
+    fn p92b_sender_domain_death_preserves_receiver() {
+        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let src_handle = kernel.install_capability(sender, data, 0, 0x4000, Permissions::RW)
+            .expect("install");
+
+        let sender_key = ProcessKey {
+            slot: sender,
+            generation: kernel.processes[sender].generation,
+        };
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+
+        // Verify object generation before transfer
+        let obj_gen_before = kernel.fabric.objects.get(&data)
+            .expect("data object").generation;
+
+        // Transfer capability
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_key.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_key.generation as u64;
+        kernel.processes[sender].core.r[R3 as usize] = src_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = src_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = 0;
+        kernel.processes[sender].core.r[R6 as usize] = 0x2000;
+        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R8 as usize] = 0xDEAD;
+
+        kernel.handle_send_cap(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 0);
+
+        // Capture the receiver handle from the mailbox
+        let recv_handle = kernel.mailboxes[receiver].last().unwrap().cap.unwrap();
+
+        // Verify it resolves before sender death
+        let resolved_before = kernel.resolve_capability(receiver, recv_handle)
+            .expect("handle must resolve before sender death");
+        let tid = resolved_before.delegation_id
+            .expect("must have DelegationId");
+
+        // Destroy the sender's domain — simulates sender process death
+        let sender_domain = kernel.processes[sender].core.domain;
+        kernel.fabric.destroy_domain(sender_domain);
+
+        // Verify object generation is unchanged (object is NOT owned by sender domain)
+        let obj_gen_after = kernel.fabric.objects.get(&data)
+            .expect("data object still exists").generation;
+        assert_eq!(obj_gen_before, obj_gen_after,
+            "object generation must be unchanged — object was not revoked");
+
+        // The receiver's derived authority survives sender domain destruction
+        let resolved_after = kernel.resolve_capability(receiver, recv_handle)
+            .expect("receiver handle must still resolve after sender domain death");
+        assert_eq!(resolved_after.offset, 0);
+        assert_eq!(resolved_after.length, 0x2000);
+        assert_eq!(resolved_after.perms, Permissions::READ);
+        assert_eq!(resolved_after.authority_id, resolved_before.authority_id);
+
+        // DelegationId survives — it is part of the receiver's cap-table entry
+        let tid_after = resolved_after.delegation_id
+            .expect("DelegationId must survive sender death");
+        assert_eq!(tid_after, tid);
+        assert_eq!(tid_after.client, sender_key,
+            "provenance still records the now-dead sender");
+
+        eprintln!("9.2b: sender domain death preserves receiver authority ✓");
     }
 }

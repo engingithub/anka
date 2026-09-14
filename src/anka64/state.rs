@@ -580,6 +580,58 @@ pub struct RequesterKey {
 }
 
 // ───────────────────────────────────────────────────────────────────
+// Generation-qualified process identity (Phase 9.2b)
+// ───────────────────────────────────────────────────────────────────
+
+/// Neutral generation-qualified process identity.
+///
+/// Lives in state.rs rather than os.rs because it is needed by
+/// DelegationId (state.rs), will travel into block-request metadata
+/// (block.rs), and appears in the extended Message envelope.
+/// RequesterKey is the device-layer analogue; ProcessKey is the
+/// inter-process analogue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProcessKey {
+    pub slot: usize,
+    pub generation: u32,
+}
+
+impl fmt::Display for ProcessKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ProcessKey(slot={}, gen={})", self.slot, self.generation)
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Delegation provenance (Phase 9.2b)
+// ───────────────────────────────────────────────────────────────────
+
+/// Structured provenance of a capability transfer event.
+///
+/// Created by SYS_SEND_CAP on successful atomic transfer.
+/// The incarnation is monotonic (never reused).  The ProcessKeys
+/// identify the exact transfer participants so 9.2e can query
+/// `T.client` directly for DMA quiescence without a global lookup.
+///
+/// A fresh DelegationId is the identity of the immediate transfer
+/// event: if A→B produces T1 and B→C produces T2, C carries T2.
+///
+/// Formal basis: anka_userspace_driver.kleis PROV-1..3, PERSIST-1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DelegationId {
+    pub client: ProcessKey,
+    pub driver: ProcessKey,
+    pub incarnation: u64,
+}
+
+impl fmt::Display for DelegationId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DelegationId(client={}, driver={}, inc={})",
+            self.client, self.driver, self.incarnation)
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────
 // Capability handle architecture (Phase 9.2a)
 //
 // Three distinct lifetimes, proved orthogonal in
@@ -651,6 +703,11 @@ pub enum CapabilitySlotState {
         length: u64,
         perms: Permissions,
         authority_id: AuthorityId,
+        /// Transfer provenance.  None for boot/spawn-installed caps;
+        /// Some for caps installed by SYS_SEND_CAP.  A fresh transfer
+        /// always stamps a new DelegationId (not inherited from prior
+        /// transfers in a chain).
+        delegation_id: Option<DelegationId>,
     },
 }
 
@@ -680,6 +737,7 @@ pub struct ResolvedCapability {
     pub length: u64,
     pub perms: Permissions,
     pub authority_id: AuthorityId,
+    pub delegation_id: Option<DelegationId>,
 }
 
 impl CapabilityTable {
@@ -715,6 +773,7 @@ impl CapabilityTable {
         length: u64,
         perms: Permissions,
         authority_id: AuthorityId,
+        delegation_id: Option<DelegationId>,
     ) -> Option<CapabilityHandle> {
         for (i, slot) in self.slots.iter_mut().enumerate() {
             // Free AND allocatable: generation must not be terminal.
@@ -730,6 +789,7 @@ impl CapabilityTable {
                     length,
                     perms,
                     authority_id,
+                    delegation_id,
                 };
                 return Some(CapabilityHandle {
                     slot: i as u32,
@@ -764,7 +824,8 @@ impl CapabilityTable {
         // Condition 2: slot is occupied (AuthorityId exists)
         let occ = match &slot.state {
             CapabilitySlotState::Occupied {
-                object, object_generation, offset, length, perms, authority_id
+                object, object_generation, offset, length, perms,
+                authority_id, delegation_id,
             } => ResolvedCapability {
                 object: *object,
                 object_generation: *object_generation,
@@ -772,6 +833,7 @@ impl CapabilityTable {
                 length: *length,
                 perms: *perms,
                 authority_id: *authority_id,
+                delegation_id: *delegation_id,
             },
             CapabilitySlotState::Free => return None,
         };
@@ -911,7 +973,7 @@ mod cap_table_tests {
         assert_eq!(ct.free_count(), CAP_TABLE_SIZE);
         assert_eq!(ct.occupied_count(), 0);
 
-        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0))
+        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0), None)
             .expect("install should succeed");
         assert_eq!(ct.free_count() + ct.occupied_count(), CAP_TABLE_SIZE);
         assert_eq!(ct.occupied_count(), 1);
@@ -929,19 +991,19 @@ mod cap_table_tests {
         let mut ct = CapabilityTable::new();
         let mut handles = Vec::new();
         for i in 0..CAP_TABLE_SIZE {
-            let h = ct.install(obj(i as u64), g(0), 0, 4096, Permissions::READ, aid(i as u64))
+            let h = ct.install(obj(i as u64), g(0), 0, 4096, Permissions::READ, aid(i as u64), None)
                 .expect("install should succeed");
             handles.push(h);
         }
         assert_eq!(ct.free_count(), 0);
 
         // 17th install must fail
-        assert!(ct.install(obj(99), g(0), 0, 4096, Permissions::READ, aid(99)).is_none());
+        assert!(ct.install(obj(99), g(0), 0, 4096, Permissions::READ, aid(99), None).is_none());
 
         // Drop one, try again
         ct.drop_handle(handles[0]).expect("drop should succeed");
         assert_eq!(ct.free_count(), 1);
-        assert!(ct.install(obj(99), g(0), 0, 4096, Permissions::READ, aid(99)).is_some());
+        assert!(ct.install(obj(99), g(0), 0, 4096, Permissions::READ, aid(99), None).is_some());
     }
 
     // ─── RESOLVE-1: handle generation mismatch fails ───
@@ -951,7 +1013,7 @@ mod cap_table_tests {
         let mut ct = CapabilityTable::new();
         let gens = [(obj(1), g(0))];
 
-        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0))
+        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0), None)
             .expect("install should succeed");
 
         // Valid resolution
@@ -959,7 +1021,7 @@ mod cap_table_tests {
 
         // Drop and reinstall — old handle must fail
         ct.drop_handle(h).expect("drop should succeed");
-        let h2 = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(1))
+        let h2 = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(1), None)
             .expect("reinstall should succeed");
 
         // Old handle: stale generation
@@ -978,7 +1040,7 @@ mod cap_table_tests {
     #[test]
     fn resolve_object_generation_revoked() {
         let mut ct = CapabilityTable::new();
-        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0))
+        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0), None)
             .expect("install should succeed");
 
         // Object at g(0) → resolves
@@ -996,7 +1058,7 @@ mod cap_table_tests {
     #[test]
     fn resolve_object_not_found() {
         let mut ct = CapabilityTable::new();
-        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0))
+        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0), None)
             .expect("install should succeed");
 
         // Object doesn't exist in lookup
@@ -1010,7 +1072,7 @@ mod cap_table_tests {
     #[test]
     fn drop_invalidates_permanently() {
         let mut ct = CapabilityTable::new();
-        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0))
+        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0), None)
             .expect("install should succeed");
 
         ct.drop_handle(h).expect("drop should succeed");
@@ -1031,9 +1093,9 @@ mod cap_table_tests {
         let mut ct = CapabilityTable::new();
 
         // Two handles to the same object/range/perms but different AuthorityIds
-        let h1 = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(100))
+        let h1 = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(100), None)
             .expect("install h1");
-        let h2 = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(200))
+        let h2 = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(200), None)
             .expect("install h2");
 
         // Drop h1: returns aid(100), NOT aid(200)
@@ -1054,14 +1116,14 @@ mod cap_table_tests {
         let mut ct = CapabilityTable::new();
 
         // Fill all slots, then drop slot 0, install a new one
-        let h0 = ct.install(obj(0), g(0), 0, 4096, Permissions::READ, aid(0))
+        let h0 = ct.install(obj(0), g(0), 0, 4096, Permissions::READ, aid(0), None)
             .expect("install");
         assert_eq!(h0.slot, 0);
         assert_eq!(h0.generation, 0);
 
         ct.drop_handle(h0).expect("drop");
 
-        let h0_next = ct.install(obj(0), g(0), 0, 4096, Permissions::READ, aid(1))
+        let h0_next = ct.install(obj(0), g(0), 0, 4096, Permissions::READ, aid(1), None)
             .expect("reinstall");
         assert_eq!(h0_next.slot, 0);
         assert_eq!(h0_next.generation, 1,
@@ -1078,7 +1140,7 @@ mod cap_table_tests {
         // Install 8 caps
         for i in 0..8u64 {
             handles.push(
-                ct.install(obj(i), g(0), 0, 4096, Permissions::READ, aid(i))
+                ct.install(obj(i), g(0), 0, 4096, Permissions::READ, aid(i), None)
                     .expect("install")
             );
         }
@@ -1093,7 +1155,7 @@ mod cap_table_tests {
 
         // Reinstall in freed slots
         for i in (0..8).step_by(2) {
-            ct.install(obj(100 + i as u64), g(0), 0, 4096, Permissions::RW, aid(100 + i as u64))
+            ct.install(obj(100 + i as u64), g(0), 0, 4096, Permissions::RW, aid(100 + i as u64), None)
                 .expect("reinstall");
         }
         assert_eq!(ct.free_count() + ct.occupied_count(), CAP_TABLE_SIZE);

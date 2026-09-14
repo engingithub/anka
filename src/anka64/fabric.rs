@@ -123,6 +123,11 @@ impl Fabric {
         Some(id)
     }
 
+    /// Read-only preflight: can a fresh AuthorityId be allocated?
+    pub fn can_alloc_authority_id(&self) -> bool {
+        self.next_authority_id.checked_add(1).is_some()
+    }
+
     /// Force the AuthorityId counter — test-only boundary forcing.
     #[cfg(test)]
     pub fn set_next_authority_id(&mut self, value: u64) {
@@ -446,6 +451,60 @@ impl Fabric {
             Some(d) => d.capabilities.iter().any(|e| e.authority_id == Some(target)),
             None => false,
         }
+    }
+
+    /// Cross-domain derivation from an exact AuthorityId.
+    ///
+    /// Locates the parent capability by AuthorityId in `src_domain`,
+    /// validates the subset relationship, and installs a new entry
+    /// in `dst_domain` with `new_authority_id`.
+    ///
+    /// Returns the new Capability64 on success.  Fails if:
+    /// - source AuthorityId not found
+    /// - subset relationship violated
+    /// - destination domain does not exist
+    ///
+    /// Used by SYS_SEND_CAP for exact-authority derivation.
+    pub fn derive_from_authority_id(
+        &mut self,
+        src_domain: DomainId,
+        source_authority_id: AuthorityId,
+        dst_domain: DomainId,
+        child_offset: u64,
+        child_length: u64,
+        child_perms: Permissions,
+        new_authority_id: AuthorityId,
+    ) -> Option<Capability64> {
+        // Find the exact parent by AuthorityId
+        let parent = {
+            let dom = self.domains.get(&src_domain)?;
+            let entry = dom.capabilities.iter()
+                .find(|e| e.authority_id == Some(source_authority_id))?;
+            entry.cap.clone()
+        };
+
+        // Validate subset relationship
+        if !self.validate(&parent) { return None; }
+        if !child_perms.is_subset_of(parent.permissions()) { return None; }
+        if child_length == 0 { return None; }
+        if child_offset < parent.offset() { return None; }
+        if child_length > parent.length() { return None; }
+        if child_offset - parent.offset() > parent.length() - child_length {
+            return None;
+        }
+
+        let cap = Capability64::new(
+            parent.object(),
+            parent.generation(),
+            child_offset,
+            child_length,
+            child_perms,
+        );
+        self.domains.get_mut(&dst_domain)?.capabilities.push(CapabilityEntry {
+            cap: cap.clone(),
+            authority_id: Some(new_authority_id),
+        });
+        Some(cap)
     }
 
     /// Derive a child capability from a parent — cannot amplify (I7).

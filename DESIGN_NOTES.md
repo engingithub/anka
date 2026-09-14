@@ -1203,3 +1203,327 @@ own address space; the host independently verifies the underlying physical buffe
 - Toolchain immediate correctness (assembler/compiler range invariant)
 
 557/557 tests; 29 instructions.  Phase 9.1 is complete.
+
+
+## DN-15: Capability-Table Architecture and Protected Naming
+
+**Phase**: 9.2a (Chapter 9: Anka64 as an Independent Architecture)
+
+**Problem**: The Fabric tracks authority as structural equality over
+`Capability64` values: `(object, generation, offset, length, permissions)`.
+Two independently granted capabilities with identical fields are
+indistinguishable.  Dropping one removes an arbitrary matching entry.
+This breaks a fundamental requirement of the user-space driver model:
+a driver holds delegated authority that must be revocable by exact
+identity, not by structural coincidence.
+
+The question that Phase 9.2a answered:
+
+> How does user space name a specific authority entry without
+> being able to forge, guess, or confuse it with a structurally
+> equal twin?
+
+**Decision -- three-condition resolution**:
+
+A `CapabilityHandle` resolves to authority iff all three conditions
+hold simultaneously:
+
+1. `g_handle = g_slot` -- the handle's generation matches the slot's
+   current generation (name currency).
+2. `AuthorityIdExists(domain, aid)` -- the backing AuthorityId still
+   exists in the Fabric domain (authority currency).
+3. `g_object = g_current` -- the object's generation has not been
+   advanced by revocation (object currency).
+
+Each condition is independent.  Revoking an object invalidates
+condition 3 without touching conditions 1 or 2.  Dropping a handle
+invalidates conditions 1 and 2 without touching condition 3.
+Removing an AuthorityId behind the scenes invalidates condition 2
+even if both generations match.
+
+**Decision -- AuthorityId as exact identity**:
+
+`AuthorityId(u64)` is a monotonic, never-reused identifier stamped
+on each authority entry at installation time.  Two capabilities with
+identical `(object, offset, length, perms)` have different
+AuthorityIds if they were installed separately.  This is why
+AuthorityId exists:
+
+  A1 = A2 by value  =/=>  drop(H1) removes A2.
+
+The `remove_by_authority_id()` operation removes exactly one entry
+by identity, not by structural match.
+
+**Decision -- generation wrap prevention**:
+
+Slot handle generations use `checked_add(1)`, not `wrapping_add(1)`.
+If a slot's generation reaches `u32::MAX`, the slot enters a
+retired state (`Free(u32::MAX)`) and is never reused.  This
+prevents an ancient stale handle from becoming current through
+generation wraparound.
+
+AuthorityId allocation uses the same pattern: `checked_add(1)` on
+a `u64` counter, returning `None` on exhaustion.  Exhaustion is a
+normal resource-failure error, not undefined behavior.
+
+**Decision -- atomic install and drop**:
+
+`install_capability()` preflights that the cap table has an
+allocatable slot *before* allocating an AuthorityId or granting
+into the Fabric domain.  If the install unexpectedly fails after
+granting, the newly created authority is rolled back.  Ordinary
+rejection consumes no identities.
+
+`SYS_CAP_DROP` preflights three conditions: valid handle,
+AuthorityId exists in the Fabric, and the slot is recyclable
+(generation < `u32::MAX`).  Both the cap-table slot and the Fabric
+authority entry are removed only after all conditions pass.  The
+drop path never calls `.expect()` based on a weaker preflight.
+
+The precise 9.2a invariant:
+
+  AuthorityId-backed cap-table authority <=> valid protected cap-table name.
+
+Legacy untagged Fabric grants (from `grant()`/`derive()`) are
+explicitly outside this bijection.
+
+**Decision -- retired slots and allocatable capacity**:
+
+A `Free(u32::MAX)` slot is structurally free but not allocatable.
+`free_count()` counts structural free slots; `allocatable_count()`
+counts free slots whose generation is not terminal.  The install
+preflight uses `allocatable_count()` so a retired slot does not
+cause an AuthorityId to be allocated and then rolled back.
+
+  F_structural + O = N (always)
+  F_allocatable <= F_structural
+
+**Formal methodology note**:
+
+All 9.2a "formal-correspondence holes" were discovered by comparing
+the Rust implementation against the Kleis specification theorem,
+not against the test suite.  The tests all passed (577, 580, 582,
+583 at successive discovery points), but the model revealed states
+the tests had not tried: non-atomic install, missing three-condition
+check, generation wraparound, non-recyclable drop, and retired-slot
+reuse.  Each was fixed and converted into a hostile witness test.
+
+584/584 tests; 29 instructions.  Phase 9.2a is complete.
+
+---
+
+## DN-16: User-Space Capability Transfer -- Atomic Runtime Delegation
+
+**Phase**: 9.2b (Chapter 9: Anka64 as an Independent Architecture)
+
+**Problem**: Phase 9.2a established the naming and resolution of
+capabilities within a single process.  Phase 9.2b moves authority
+between live processes atomically without amplifying it.
+
+The formal target:
+
+  successful SEND_CAP =>
+    exists unique (A_new, H_new, T_new, M_new)
+    such that C_new is a subset of C_source,
+    H_new names A_new,
+    T_new = (client_key, driver_key, incarnation),
+    and the message M_new carries H_new.
+
+Every ordinary rejection satisfies:
+
+  delta(A) = delta(H) = delta(M) = delta(T) = delta(identity_counters) = 0.
+
+**Decision -- DelegationId as structured provenance**:
+
+`DelegationId { client: ProcessKey, driver: ProcessKey, incarnation: u64 }`
+is a structured type, not a bare `u64`.  This is driven directly by the
+formal model: Phase 9.2e needs `T.client` for DMA quiescence queries
+without maintaining a separate global lookup table.  A plain `u64`
+would tell you *which* transfer but not *who* transferred, requiring
+extra state to reconstruct the answer.
+
+A fresh DelegationId is the identity of the immediate transfer event.
+If A transfers to B (producing T1) and B later transfers to C
+(producing T2), C carries T2, not T1.  Inherited provenance chains
+are a future concern, not something to smuggle into 9.2b.
+
+**Decision -- Kernel owns DelegationId, Fabric owns AuthorityId**:
+
+`AuthorityId` is a Fabric concept (it identifies a domain capability
+entry).  `DelegationId` contains `ProcessKey` fields, which are
+kernel-layer concepts.  Making Fabric manufacture DelegationIds would
+invert the layering.  Therefore:
+
+- Fabric: `can_alloc_authority_id()`, `alloc_authority_id()`
+- Kernel: `can_alloc_delegation_id()`, `alloc_delegation_id(client, driver)`
+
+Gate 6 of the transfer preflight checks both read-only.  After the
+gate passes, both allocations are guaranteed by single-threaded
+exclusion between preflight and commit.
+
+**Decision -- ProcessKey moved to state.rs**:
+
+`ProcessKey` was originally defined in `os.rs` (the kernel module).
+Because `DelegationId` in `state.rs` needs it, and it will eventually
+travel into block-request metadata (`block.rs`), ProcessKey was moved
+to `state.rs` as a neutral generation-qualified identity type.
+`RequesterKey` was already there for the same layering reason.  Now
+`os.rs`, `block.rs`, and provenance structures all refer to ProcessKey
+without circular module dependencies.
+
+**Decision -- extend SYS_RECV, not SYS_RECV_CAP**:
+
+The formal object is one message:
+
+  Message { from: ProcessKey, value: u64, cap: Option<CapabilityHandle> }
+
+not two kinds of queues or receive operations.  A separate SYS_RECV_CAP
+creates ugly semantics: if the queue is [ordinary, cap-bearing, ordinary],
+does SYS_RECV_CAP skip messages?  Block on a non-cap head?  Use separate
+queues?  Each option breaks FIFO ordering or changes the IPC model.
+
+The clean abstraction: receive returns a message; capability transfer is
+message metadata.  The extended SYS_RECV ABI uses six registers:
+
+  R0 = value           (preserves old behavior)
+  R1 = tag             (0=empty, 1=ordinary, 2=cap-bearing)
+  R2 = cap handle slot (u32::MAX if none)
+  R3 = cap handle generation (0 if none)
+  R4 = sender process slot
+  R5 = sender process generation
+
+Existing clients that only inspect R0 continue working.
+
+**Decision -- SYS_SEND_KEY for generation-qualified ordinary send**:
+
+Phase 9.2 committed to ProcessKey-addressed inter-process edges.
+Legacy SYS_SEND uses PID addressing, which reintroduces slot-recycling
+ambiguity.  SYS_SEND_KEY (syscall 12) provides ProcessKey-addressed
+ordinary send: R1=dest_slot (u32), R2=dest_generation (u32), R3=value.
+Legacy SYS_SEND (syscall 3) is preserved only for old tests.  The 9.2
+protocol is fully generation-qualified:
+
+  SEND_CAP, SEND_KEY, RECV -- all expose ProcessKey semantics.
+
+SYS_SEND_KEY error codes:
+
+  0 = success
+  1 = destination not live (malformed register, stale generation, Zombie, absent)
+  2 = mailbox full
+
+**Decision -- checked ABI decode as security boundary**:
+
+R1-R4 are 64-bit registers naming architecturally 32-bit fields.
+The ABI decoder uses `u32::try_from()` for every narrow field and
+`Permissions::from_bits_checked()` for permission encoding.  A
+malformed register like `0x1_0000_0001` is rejected rather than
+silently aliased to 1 via `as u32`.  This prevents a malicious
+guest from aliasing a forged ProcessKey or CapabilityHandle onto
+a real one through high-bit smuggling.
+
+**Decision -- Memory-only scope for 9.2b**:
+
+`SYS_SEND_CAP` accepts only `ObjectKind::Memory` source capabilities.
+`ObjectKind::Device` exists but its rights representation is
+deliberately postponed to 9.2c.  Accepting device capabilities now
+risks interpreting device objects through memory `Permissions`.  This
+is a scope guard, not a permanent architectural restriction.
+
+**Decision -- MAX_MAILBOX_SIZE bounded**:
+
+`MAX_MAILBOX_SIZE = 16` is enforced by all three producers: SYS_SEND,
+SYS_SEND_KEY, and SYS_SEND_CAP.  Without a universal bound, the
+mailbox is not actually bounded, and the SYS_SEND_CAP preflight
+cannot guarantee capacity.
+
+**Decision -- preflight-then-commit transaction shape**:
+
+The SYS_SEND_CAP handler is structured as:
+
+  Gates 0-6: read-only checks (decode, dest current, source resolves,
+             Memory-only, subset valid, receiver slot available,
+             mailbox capacity, identity availability)
+
+  then: allocate AuthorityId + DelegationId
+
+  then: derive into destination domain (from exact source AuthorityId)
+
+  then: install in receiver cap table (with DelegationId)
+
+  then: enqueue message (capacity already preflighted)
+
+The key transaction rule: preflight rejection consumes nothing.
+Unexpected commit failure (implementation-correspondence error)
+may burn monotonic identities but must not leak authority, handles,
+or messages.  Structural state is rolled back; monotonic identities
+are never rolled back.  No kernel panic is required to maintain
+an invariant.
+
+**Decision -- SYS_SEND_CAP error-code ABI**:
+
+  0 = success
+  1 = ABI decode failure (malformed register, bad permission bits)
+  2 = destination not live (not Running, stale generation, or Zombie)
+  3 = source handle does not resolve (three-condition failure)
+  4 = subset/attenuation violation (non-Memory, amplification, bad range, zero length)
+  5 = receiver has no allocatable cap slot
+  6 = receiver mailbox full
+  7 = identity space exhausted (AuthorityId or DelegationId)
+  8 = internal error (unexpected commit failure; IDs consumed, no authority leaked)
+
+Code 4 deliberately groups non-Memory rejection with subset violations:
+both are "the requested capability transfer is not a valid attenuation
+of the source."  A guest that needs to distinguish non-Memory from
+bad-range can inspect its own capability before calling SEND_CAP.
+
+**Decision -- exact-AuthorityId cross-domain derivation**:
+
+`derive_from_authority_id()` locates the source capability by its
+exact AuthorityId rather than by structural equality.  This preserves
+the identity discipline established in 9.2a: if two value-equal
+capabilities exist with different AuthorityIds, transferring one does
+not consume or reference the other.
+
+**Decision -- Zombie processes are not valid IPC destinations**:
+
+`validate_process_key()` accepts Zombie processes because SYS_WAIT
+deliberately needs to resolve a zombie child (observation of a dead
+child is the purpose of WAIT).  But "generation-current" and "alive
+enough to receive authority" are different predicates.
+
+`validate_message_destination()` requires `Running` state.  A Zombie
+is generation-current but dead -- delivering authority, cap-table
+entries, and messages into a dead process violates the preflight
+theorem's premise that the destination is live.
+
+Both SYS_SEND_KEY and SYS_SEND_CAP use `validate_message_destination()`.
+
+**Decision -- stale-while-queued is defined behavior**:
+
+Installation occurs at send time.  SYS_RECV reveals a committed
+handle but makes no promise that it remains valid.  If the underlying
+object is revoked between send and receive, the handle resolves at
+send commit but fails resolution at use time.  This is the intended
+capability semantics: possession of a name does not override
+subsequent object revocation.  Any actual use (SYS_DEV_SUBMIT,
+memory access) re-resolves via the three-condition check.
+
+**Rejected alternative -- SYS_RECV_CAP**:
+
+A separate receive syscall for cap-bearing messages was rejected for
+the reasons stated above.  The unified message envelope with an
+optional capability handle is simpler and preserves FIFO semantics.
+
+**Rejected alternative -- DelegationId as u64**:
+
+A globally unique u64 tells you *which* transfer but not T.client,
+which 9.2e explicitly needs for quiescence queries.  Unless a
+persistent global lookup table is added (needless extra state), the
+ProcessKeys belong in the provenance token itself.
+
+**Rejected alternative -- Fabric owns DelegationId allocation**:
+
+Rejected because it inverts the layering.  ProcessKey is a kernel
+concept; Fabric should not know about processes.
+
+616/616 tests; 29 instructions.  Phase 9.2b is complete.

@@ -99,7 +99,8 @@ Canonical Anka source (~17 KB, 46 functions)
     └─────┬─────┘
           ▼
   Secure OS (SYS_EXIT, SYS_WRITE, SYS_SEAL, SYS_EXEC,
-             SYS_SPAWN, SYS_WAIT, SYS_SEND, SYS_RECV)
+             SYS_SPAWN, SYS_WAIT, SYS_SEND, SYS_RECV,
+             SYS_BLOCK_READ, SYS_CAP_DROP, SYS_SEND_CAP, SYS_SEND_KEY)
           │
           ▼
   ankad (native Anka64 supervisor — boot, spawn, wait, restart)
@@ -1300,7 +1301,7 @@ Design questions, with current status.
 3. **Capability representation** — How are capabilities made unforgeable in hardware?  Tagged memory, capability registers, object handles plus protected metadata, or hybrid approaches?
 6. **Interrupt and exception model** — **Resolved in Phase 9.0.**  Event entry (TRAP, timer interrupt) pushes a protected `EventFrame` containing `return_pc`, `return_privilege`, `interrupts_were_enabled`, and `cause`.  A single `event_return()` primitive consumes the frame, used by both `ERET` (ISA instruction) and `resume_from_trap()` (host-mediated).  Asynchronous delivery: `deliver_pending()` fires at instruction boundaries when `pending_event.is_some() && interrupts_enabled`.  `FabricTimer` is a machine-global instruction-step timer on `Fabric`.  Generation ≠ routing ≠ pending ≠ delivery.  Formally verified: `anka_interrupts.kleis` (7-place Petri net, 6 reachable markings, 4 conservation invariants, 10 safety proofs, 2 falsifiability witnesses).
 7. **Device model** — **Partially resolved in Phase 9.1.**  A block device demonstrates capability-mediated asynchronous I/O.  Device capabilities are delegated as narrow, request-local DMA domains derived at submission time from the submitter's authority.  Command slots are bounded (F + O\_wait + O\_dma + C = N\_slots) with generation-qualified handles.  Completion queues are the source of truth; interrupts are level-triggered notifications (L\_dev := C > 0).  User-space drivers are not yet implemented but the authority model (DMA-DELEGATION: request authority ⊆ explicitly delegated authority) is designed to support them.  Remaining open: user-space driver isolation, device register capabilities, multi-device routing.
-9. **Capability transfer through IPC** — How does the kernel prove that transferred authority was possessed by the sender?
+9. **Capability transfer through IPC** — **Resolved in Phase 9.2b.**  `SYS_SEND_CAP` resolves the sender's handle via the three-condition check (9.2a), derives a child capability from the exact `AuthorityId` into the receiver's domain using `derive_from_authority_id()`, installs it in the receiver's cap table with a fresh `DelegationId`, and enqueues a cap-bearing message -- all atomically after a complete read-only preflight.  The receiver observes the transferred handle via the extended `SYS_RECV` ABI.  Non-amplification: `C_child ⊆ C_source`.  Memory-only scope in 9.2b; device capabilities deferred to 9.2c.
 
 ### New (post-self-hosting)
 
@@ -1451,7 +1452,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions, 63,808 bytes |
 | Canonical source | ~17 KB |
-| Tests | 557 |
+| Tests | 616 |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -1461,6 +1462,10 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | Block I/O | Async capability-mediated: 2-slot controller, completion queue, level-triggered |
 | SYS\_BLOCK\_READ | Suspended syscall continuation via EventFrame + IoWait |
 | I-format immediates | fits\_imm18() — assembler and compiler share single range predicate |
+| Capability table | Per-process 16-slot, generation-qualified handles, AuthorityId-backed |
+| Capability transfer | SYS\_SEND\_CAP: atomic preflight-then-commit, Memory-only, DelegationId provenance |
+| IPC | SYS\_SEND (legacy PID), SYS\_SEND\_KEY (ProcessKey), SYS\_RECV (extended: tag + cap + sender) |
+| Mailbox bound | MAX\_MAILBOX\_SIZE = 16, enforced by all producers |
 | Host trust boundary | Still present (honest-host assumption) |
 | UTF-8 text literals | Implemented (RFC 3629 compile-time validation) |
 | SYS_WRITE | Buffer-based, capability-checked, output-atomic |
@@ -1577,7 +1582,72 @@ A secondary discovery: the block-device test pushed guest buffer addresses beyon
 
 One known limitation was explicitly recorded: the device clock advances only on committed instruction boundaries, so all-processes-blocked-on-I/O produces deadlock.  This is a named architectural pressure point, not a bug to be silently worked around.
 
-Through self-hosting, capabilities, multicore, W⊕X, protected calls/returns, process lifecycle, formal Petri nets, reclamation, a genuine supervisor, an explicitly delegated initial-environment ABI, a compiler managed by Anka rather than merely running inside it, zero host-fabricated compiler processes, a declarative system image, architectural interrupts with preemptive multitasking, and now asynchronous capability-mediated block I/O with suspended syscall continuations, the ISA still has not demanded instruction 30.  Twenty-nine instructions.  557/557 tests.  The software keeps asking for better abstractions rather than instruction proliferation.
+### Stage 22 -- Capability-table architecture and protected naming (Phase 9.2a)
+
+Phase 9.2a established the per-process capability table, the naming relationship between user-space handles and Fabric authority, and the resolution and drop semantics that make capabilities a protected interface rather than a raw data structure.
+
+The central architectural contribution is three-condition resolution.  A `CapabilityHandle` resolves to authority iff:
+
+1. The handle's generation matches the slot's current generation (name currency).
+2. The backing `AuthorityId` still exists in the Fabric domain (authority currency).
+3. The object's generation has not been advanced by revocation (object currency).
+
+These three conditions are independent.  Each tracks a different lifetime.  Together they realize the relationship:
+
+```text
+AuthorityId-backed cap-table authority  <=>  valid protected cap-table name
+```
+
+`AuthorityId(u64)` is a monotonic, never-reused identifier that distinguishes independently installed capabilities even when they are structurally equal (same object, offset, length, permissions).  This is the decisive design property: `drop(H1)` removes exactly the authority named by H1, not a structurally equal twin.
+
+Handle generation advancement uses `checked_add(1)`, not `wrapping_add(1)`.  When a slot's generation reaches `u32::MAX`, the slot is retired and never reused.  AuthorityId allocation uses the same checked pattern on its `u64` counter.  Neither counter can wrap.  A stale handle can never become current through wraparound resurrection.
+
+`SYS_CAP_DROP` uses a complete preflight: handle valid, AuthorityId exists in Fabric, and slot is recyclable (generation < `u32::MAX`).  Both the cap-table slot and the Fabric authority entry are removed only after all conditions pass.
+
+The entire phase was driven by formal-first methodology: all "correspondence holes" (non-atomic install, missing three-condition check, generation wraparound, non-recyclable drop, retired-slot reuse) were discovered by comparing the Rust implementation against the Kleis specification, not against the test suite.  Every hole became a hostile witness test.
+
+584/584 tests; 29 instructions.
+
+### Stage 23 -- User-space capability-mediated transfer (Phase 9.2b)
+
+Phase 9.2b implemented atomic runtime capability transfer between live processes.  This is the architectural answer to research question 9 ("How does the kernel prove that transferred authority was possessed by the sender?").
+
+Three new syscalls:
+
+- `SYS_SEND_CAP` (11): Atomic capability transfer with checked ABI decode, preflight-then-commit transaction shape, and Memory-only scope restriction.
+- `SYS_SEND_KEY` (12): ProcessKey-addressed ordinary send, replacing PID-addressed SYS_SEND for the 9.2 protocol.
+- `SYS_RECV` (4): Extended return ABI (R0=value, R1=tag, R2-R5=cap handle and sender ProcessKey).
+
+The transfer transaction has a strict preflight-then-commit structure.  The preflight is a sequence of read-only gates:
+
+```text
+gate 0:  decode ABI exactly (u32::try_from, Permissions::from_bits_checked)
+gate 1:  destination ProcessKey is current
+gate 2:  source handle fully resolves (three-condition)
+gate 2b: source is ObjectKind::Memory only
+gate 3:  child is a valid attenuation of source
+gate 4:  receiver has an allocatable cap slot
+gate 5:  mailbox has capacity (MAX_MAILBOX_SIZE = 16)
+gate 6:  both AuthorityId and DelegationId spaces have room
+```
+
+Only after all gates pass does the commit phase execute: allocate identities, derive into destination domain from the exact source AuthorityId, install in receiver cap table with DelegationId, and enqueue the message.  Preflight rejection consumes no identities.  Unexpected commit failure may burn monotonic identities but cannot leak authority, handles, or messages.
+
+`DelegationId { client: ProcessKey, driver: ProcessKey, incarnation: u64 }` is structured provenance stamped on each transfer.  The Kernel owns DelegationId allocation (because it contains ProcessKeys); the Fabric owns AuthorityId allocation (because it identifies domain entries).  A fresh DelegationId is the identity of the immediate transfer event, not inherited provenance.
+
+`ProcessKey` was moved from `os.rs` to `state.rs` as a neutral generation-qualified identity type, enabling `DelegationId`, `Message`, and future block-request metadata to reference it without circular dependencies.
+
+Cross-domain derivation uses `derive_from_authority_id()`, which locates the source capability by exact AuthorityId rather than structural equality.  This preserves the identity discipline from Phase 9.2a: value-equal twins are never confused during transfer.
+
+The extended `SYS_RECV` returns a unified message envelope.  There is no SYS_RECV_CAP -- capability transfer is message metadata, not a separate IPC channel.  Installation occurs at send time; receive merely reveals the committed handle.  A handle may become stale between send and receive if the underlying object is revoked; this is defined behavior (capabilities do not pin objects).
+
+The ABI treats syscall registers as untrusted input.  Every narrow field uses `u32::try_from()` to reject high-bit aliasing (`0x1_0000_0001` cannot silently become 1).
+
+The entire 9.2 protocol is generation-qualified: SYS_SEND_CAP, SYS_SEND_KEY, and SYS_RECV all use ProcessKey semantics.  Legacy SYS_SEND (PID-addressed) is preserved only for old tests.
+
+616/616 tests; 29 instructions.
+
+Through self-hosting, capabilities, multicore, W⊕X, protected calls/returns, process lifecycle, formal Petri nets, reclamation, a genuine supervisor, an explicitly delegated initial-environment ABI, a compiler managed by Anka rather than merely running inside it, zero host-fabricated compiler processes, a declarative system image, architectural interrupts with preemptive multitasking, asynchronous capability-mediated block I/O with suspended syscall continuations, and now atomic inter-process capability transfer with structured provenance, the ISA still has not demanded instruction 30.  Twenty-nine instructions.  616/616 tests.  The software keeps asking for better abstractions rather than instruction proliferation.
 
 The project continues to evolve by the same rule that produced its strongest results:
 
