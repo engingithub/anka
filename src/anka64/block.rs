@@ -246,6 +246,7 @@ impl SlotState {
 ///   GEN-1..GEN-4:    generation-qualified handles
 ///   DMA-1..DMA-4:    narrow delegation, commit-time revalidation
 ///   LEVEL-1:         L_dev ≡ (C > 0), derived
+#[derive(Debug)]
 pub struct BlockController {
     slots: [SlotState; NUM_SLOTS],
     slot_generations: [u64; NUM_SLOTS],
