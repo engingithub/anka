@@ -1,0 +1,1058 @@
+// =============================================================================
+// Anka64 User-Space Capability-Mediated Block Driver (Phase 9.2-formal)
+// =============================================================================
+//
+// Formal-first specification for moving block-I/O authority across two
+// user-space trust boundaries without amplification:
+//
+//   Client --checked IPC derivation--> Driver --device+buffer gate--> Device
+//
+// The kernel mediates implementation but user processes hold authority.
+// This theory deliberately separates:
+//
+//   authority              what operations are permitted
+//   CapabilityHandle       a user-visible, generation-qualified name
+//   AuthorityId            identity of a live authority entry
+//   DelegationId           durable provenance of transferred authority
+//   ProcessKey             generation-qualified peer identity
+//   object generation      incarnation of the protected object
+//   accepted request       controller-owned asynchronous work
+//
+// Eight subsystems are modeled:
+//   I.    bounded CapabilityHandle table lifecycle
+//   II.   three-condition resolution + exact CAP_DROP
+//   III.  atomic runtime transfer + non-amplification + ProcessKey addressing
+//   IV.   sender-death persistence and DelegationId provenance
+//   V.    kind-sensitive two-capability device submission
+//   VI.   accepted-request ownership and stale requester safety
+//   VII.  exact-peer failure + two-request DMA quiescence
+//   VIII. machine-time deadlock exposure / idle-progress necessity
+//
+// Six examples at the end are deliberately false falsifiability witnesses.
+// A successful Phase 9.2-formal run therefore has every intended example pass
+// and exactly FALSE-1..FALSE-6 fail.
+// =============================================================================
+
+// =============================================================================
+// I. BOUNDED CAPABILITY TABLE PETRI NET
+// =============================================================================
+//
+// Aggregate model of a two-slot capability table.
+// Places:
+//   0 = F  free capability slot
+//   1 = O  occupied capability slot (name + AuthorityId pair)
+// Transitions:
+//   0 = install   F -> O
+//   1 = drop      O -> F
+//
+// Structural invariant: F + O = 2.
+// The Rust implementation may use a larger fixed table (e.g. 16 slots); two
+// slots are sufficient to prove bounded allocation/drop behavior.
+// =============================================================================
+
+operation cap_iw : ℤ × ℤ → ℤ
+operation cap_ow : ℤ × ℤ → ℤ
+
+structure CapTableNet {
+    // install: F -> O
+    axiom i0_f: cap_iw(0,0) = 1
+    axiom i0_o: cap_iw(0,1) = 0
+    axiom o0_f: cap_ow(0,0) = 0
+    axiom o0_o: cap_ow(0,1) = 1
+
+    // drop: O -> F
+    axiom i1_f: cap_iw(1,0) = 0
+    axiom i1_o: cap_iw(1,1) = 1
+    axiom o1_f: cap_ow(1,0) = 1
+    axiom o1_o: cap_ow(1,1) = 0
+}
+
+operation cap_m : ℤ × ℤ → ℤ
+
+structure CapTableMarkings {
+    // M0 = two free
+    axiom m0: cap_m(0,0)=2 ∧ cap_m(0,1)=0
+    // M1 = one free, one occupied
+    axiom m1: cap_m(1,0)=1 ∧ cap_m(1,1)=1
+    // M2 = full
+    axiom m2: cap_m(2,0)=0 ∧ cap_m(2,1)=2
+}
+
+define cap_enabled(t : ℤ, k : ℤ) =
+    cap_m(k,0) ≥ cap_iw(t,0) ∧ cap_m(k,1) ≥ cap_iw(t,1)
+
+example "CAPTAB-1: install M0 -> M1" {
+    assert(
+        cap_enabled(0,0) ∧
+        cap_m(0,0)-cap_iw(0,0)+cap_ow(0,0)=cap_m(1,0) ∧
+        cap_m(0,1)-cap_iw(0,1)+cap_ow(0,1)=cap_m(1,1)
+    )
+}
+
+example "CAPTAB-2: second install M1 -> M2" {
+    assert(
+        cap_enabled(0,1) ∧
+        cap_m(1,0)-cap_iw(0,0)+cap_ow(0,0)=cap_m(2,0) ∧
+        cap_m(1,1)-cap_iw(0,1)+cap_ow(0,1)=cap_m(2,1)
+    )
+}
+
+example "CAPTAB-3: install disabled when table full" {
+    assert(¬cap_enabled(0,2))
+}
+
+example "CAPTAB-4: drop M2 -> M1" {
+    assert(
+        cap_enabled(1,2) ∧
+        cap_m(2,0)-cap_iw(1,0)+cap_ow(1,0)=cap_m(1,0) ∧
+        cap_m(2,1)-cap_iw(1,1)+cap_ow(1,1)=cap_m(1,1)
+    )
+}
+
+example "CAPTAB-5: table markings conserve exactly two slots" {
+    assert(
+        cap_m(0,0)+cap_m(0,1)=2 ∧
+        cap_m(1,0)+cap_m(1,1)=2 ∧
+        cap_m(2,0)+cap_m(2,1)=2
+    )
+}
+
+example "CAPTAB-6: install and drop structurally conserve table slots" {
+    assert(
+        cap_ow(0,0)+cap_ow(0,1)-cap_iw(0,0)-cap_iw(0,1)=0 ∧
+        cap_ow(1,0)+cap_ow(1,1)-cap_iw(1,0)-cap_iw(1,1)=0
+    )
+}
+
+// =============================================================================
+// II. THREE-CONDITION HANDLE RESOLUTION + EXACT CAP_DROP
+// =============================================================================
+
+// Handle slot incarnation is u32. Object incarnation is u64.
+define handle_generation_matches(h : BitVec32, slot : BitVec32) = h = slot
+
+define object_generation_current(saved : BitVec64, current : BitVec64) = saved = current
+
+define cap_resolves(
+    handle_gen : BitVec32,
+    slot_gen : BitVec32,
+    authority_exists : Bool,
+    saved_object_gen : BitVec64,
+    current_object_gen : BitVec64
+) =
+    handle_generation_matches(handle_gen,slot_gen)
+    ∧ authority_exists
+    ∧ object_generation_current(saved_object_gen,current_object_gen)
+
+define HANDLE_GEN_MAX = bvconst(4294967295,32)
+define recyclable_handle_generation(g : BitVec32) = ¬(g = HANDLE_GEN_MAX)
+define next_handle_generation(g : BitVec32) = bvadd(g,bvconst(1,32))
+
+// AuthorityId exactness: dropping target removes only the targeted live entry.
+define authority_alive_after_drop(
+    entry_id : BitVec64,
+    target_id : BitVec64,
+    alive_before : Bool
+) =
+    alive_before ∧ ¬(entry_id = target_id)
+
+
+example "RESOLVE-1: exact handle + AuthorityId + current object generation resolves" {
+    assert(
+        ∀(hg : BitVec32). ∀(og : BitVec64). ∀(ae : Bool).
+            ae ⇒ cap_resolves(hg,hg,ae,og,og)
+    )
+}
+
+
+example "RESOLVE-2: stale handle generation does not resolve" {
+    assert(
+        ∀(hg : BitVec32). ∀(sg : BitVec32).
+        ∀(og : BitVec64). ∀(ae : Bool).
+            (ae ∧ ¬(hg=sg)) ⇒ ¬cap_resolves(hg,sg,ae,og,og)
+    )
+}
+
+
+example "RESOLVE-3: missing AuthorityId entry does not resolve" {
+    assert(
+        ∀(hg : BitVec32). ∀(og : BitVec64). ∀(ae : Bool).
+            ¬ae ⇒ ¬cap_resolves(hg,hg,ae,og,og)
+    )
+}
+
+
+example "RESOLVE-4: stale object generation does not resolve" {
+    assert(
+        ∀(hg : BitVec32). ∀(saved : BitVec64). ∀(current : BitVec64). ∀(ae : Bool).
+            (ae ∧ ¬(saved=current)) ⇒ ¬cap_resolves(hg,hg,ae,saved,current)
+    )
+}
+
+example "RESOLVE-5: the three resolution conditions are jointly necessary" {
+    assert(
+        ∀(hg : BitVec32). ∀(sg : BitVec32).
+        ∀(ae : Bool). ∀(saved : BitVec64). ∀(current : BitVec64).
+            cap_resolves(hg,sg,ae,saved,current)
+            ⇒ (hg=sg ∧ ae ∧ saved=current)
+    )
+}
+
+
+example "DROP-1: CAP_DROP makes the old handle stale and removes its authority" {
+    assert(
+        ∀(g : BitVec32). ∀(og : BitVec64). ∀(ae : Bool).
+            (recyclable_handle_generation(g) ∧ ¬ae)
+            ⇒ ¬cap_resolves(g,next_handle_generation(g),ae,og,og)
+    )
+}
+
+
+example "DROP-2: CAP_DROP removes the exact targeted AuthorityId" {
+    assert(
+        ∀(target : BitVec64). ∀(alive : Bool).
+            alive ⇒ ¬authority_alive_after_drop(target,target,alive)
+    )
+}
+
+
+example "DROP-3: CAP_DROP preserves a different AuthorityId" {
+    assert(
+        ∀(entry : BitVec64). ∀(target : BitVec64). ∀(alive : Bool).
+            (alive ∧ ¬(entry=target))
+            ⇒ authority_alive_after_drop(entry,target,alive)
+    )
+}
+
+
+example "DROP-4: object revocation is independent of handle-slot recycling" {
+    assert(
+        ∀(hg : BitVec32). ∀(og1 : BitVec64). ∀(og2 : BitVec64). ∀(ae : Bool).
+            (ae ∧ ¬(og1=og2))
+            ⇒ ¬cap_resolves(hg,hg,ae,og1,og2)
+    )
+}
+
+// =============================================================================
+// III. ATOMIC RUNTIME DERIVATION + NON-AMPLIFICATION + PROCESSKEY ADDRESSING
+// =============================================================================
+
+// Generation-qualified process identity.
+define process_key_matches(
+    expected_slot : BitVec32, expected_gen : BitVec32,
+    current_slot : BitVec32, current_gen : BitVec32
+) =
+    expected_slot=current_slot ∧ expected_gen=current_gen
+
+define destination_valid(
+    expected_slot : BitVec32, expected_gen : BitVec32,
+    current_slot : BitVec32, current_gen : BitVec32,
+    living : Bool
+) =
+    living ∧ process_key_matches(expected_slot,expected_gen,current_slot,current_gen)
+
+// Generation-qualified ordinary messaging uses the same ProcessKey gate.
+define ordinary_send_allowed(
+    expected_slot : BitVec32, expected_gen : BitVec32,
+    current_slot : BitVec32, current_gen : BitVec32,
+    living : Bool
+) =
+    destination_valid(expected_slot,expected_gen,current_slot,current_gen,living)
+
+// Object-relative memory authority. Rights are an abstract 4-bit set.
+define rights_subset(child : BitVec4, parent : BitVec4) =
+    bvand(parent,child)=child
+
+define span_within(
+    inner_off : ℤ, inner_len : ℤ,
+    outer_off : ℤ, outer_len : ℤ
+) =
+    inner_len > 0 ∧ outer_len > 0
+    ∧ inner_off ≥ outer_off
+    ∧ inner_off + inner_len ≤ outer_off + outer_len
+
+define derive_memory_authority(
+    parent_off : ℤ, parent_len : ℤ, parent_rights : BitVec4,
+    child_off : ℤ, child_len : ℤ, child_rights : BitVec4
+) =
+    span_within(child_off,child_len,parent_off,parent_len)
+    ∧ rights_subset(child_rights,parent_rights)
+
+// A use of transferred authority must itself remain inside the derived cap.
+define memory_request_allowed(
+    cap_off : ℤ, cap_len : ℤ, cap_rights : BitVec4,
+    req_off : ℤ, req_len : ℤ, req_rights : BitVec4
+) =
+    span_within(req_off,req_len,cap_off,cap_len)
+    ∧ rights_subset(req_rights,cap_rights)
+
+// Five preflight conditions of SYS_SEND_CAP.
+define transfer_preflight(
+    destination_live_and_current : Bool,
+    source_resolves : Bool,
+    subset_valid : Bool,
+    receiver_slot_free : Bool,
+    receiver_queue_has_capacity : Bool
+) =
+    destination_live_and_current
+    ∧ source_resolves
+    ∧ subset_valid
+    ∧ receiver_slot_free
+    ∧ receiver_queue_has_capacity
+
+// Atomic effects: authority entry, CapabilityHandle, and message are all-or-none.
+define transfer_authority_effect(
+    d : Bool, s : Bool, sub : Bool, slot : Bool, queue : Bool
+) = transfer_preflight(d,s,sub,slot,queue)
+
+define transfer_handle_effect(
+    d : Bool, s : Bool, sub : Bool, slot : Bool, queue : Bool
+) = transfer_preflight(d,s,sub,slot,queue)
+
+define transfer_message_effect(
+    d : Bool, s : Bool, sub : Bool, slot : Bool, queue : Bool
+) = transfer_preflight(d,s,sub,slot,queue)
+
+define transfer_delegation_stamp(
+    d : Bool, s : Bool, sub : Bool, slot : Bool, queue : Bool
+) = transfer_preflight(d,s,sub,slot,queue)
+
+
+example "XFER-1: successful transfer installs authority, handle, message, and provenance together" {
+    assert(
+        ∀(d : Bool). ∀(s : Bool). ∀(sub : Bool). ∀(slot : Bool). ∀(queue : Bool).
+            (d ∧ s ∧ sub ∧ slot ∧ queue)
+            ⇒ (
+                transfer_authority_effect(d,s,sub,slot,queue)
+                ∧ transfer_handle_effect(d,s,sub,slot,queue)
+                ∧ transfer_message_effect(d,s,sub,slot,queue)
+                ∧ transfer_delegation_stamp(d,s,sub,slot,queue)
+            )
+    )
+}
+
+example "XFER-2: atomic delivery -- message carries handle iff installed authority+handle exist" {
+    assert(
+        ∀(d : Bool). ∀(s : Bool). ∀(sub : Bool). ∀(slot : Bool). ∀(queue : Bool).
+            (transfer_message_effect(d,s,sub,slot,queue)
+             ⟺ (transfer_authority_effect(d,s,sub,slot,queue)
+                 ∧ transfer_handle_effect(d,s,sub,slot,queue)))
+    )
+}
+
+
+example "XFER-3: failed source resolution leaves no partial receiver state" {
+    assert(
+        ∀(d : Bool). ∀(s : Bool). ∀(sub : Bool). ∀(slot : Bool). ∀(queue : Bool).
+            ¬s
+            ⇒ (
+                ¬transfer_authority_effect(d,s,sub,slot,queue)
+                ∧ ¬transfer_handle_effect(d,s,sub,slot,queue)
+                ∧ ¬transfer_message_effect(d,s,sub,slot,queue)
+            )
+    )
+}
+
+
+example "XFER-4: receiver table exhaustion leaves no hidden authority" {
+    assert(
+        ∀(d : Bool). ∀(s : Bool). ∀(sub : Bool). ∀(slot : Bool). ∀(queue : Bool).
+            ¬slot
+            ⇒ (
+                ¬transfer_authority_effect(d,s,sub,slot,queue)
+                ∧ ¬transfer_handle_effect(d,s,sub,slot,queue)
+                ∧ ¬transfer_message_effect(d,s,sub,slot,queue)
+            )
+    )
+}
+
+
+example "XFER-5: full receiver message queue leaves no installed authority" {
+    assert(
+        ∀(d : Bool). ∀(s : Bool). ∀(sub : Bool). ∀(slot : Bool). ∀(queue : Bool).
+            ¬queue
+            ⇒ (
+                ¬transfer_authority_effect(d,s,sub,slot,queue)
+                ∧ ¬transfer_handle_effect(d,s,sub,slot,queue)
+                ∧ ¬transfer_message_effect(d,s,sub,slot,queue)
+            )
+    )
+}
+
+
+
+example "XFER-6: stale destination ProcessKey gives no message and no authority" {
+    assert(
+        ∀(es : BitVec32). ∀(eg : BitVec32).
+        ∀(cs : BitVec32). ∀(cg : BitVec32). ∀(living : Bool).
+        ∀(s : Bool). ∀(sub : Bool). ∀(slot : Bool). ∀(queue : Bool).
+            (living ∧ ¬process_key_matches(es,eg,cs,cg) ∧ s ∧ sub ∧ slot ∧ queue)
+            ⇒ (
+                ¬transfer_authority_effect(destination_valid(es,eg,cs,cg,living),s,sub,slot,queue)
+                ∧ ¬transfer_message_effect(destination_valid(es,eg,cs,cg,living),s,sub,slot,queue)
+            )
+    )
+}
+
+example "XFER-7: exact destination ProcessKey can satisfy addressing precondition" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32).
+            process_key_matches(s,g,s,g)
+    )
+}
+
+example "XFER-8 NON-AMPLIFICATION: authority usable through child was usable through parent" {
+    assert(
+        ∀(po : ℤ). ∀(pl : ℤ). ∀(pr : BitVec4).
+        ∀(co : ℤ). ∀(cl : ℤ). ∀(cr : BitVec4).
+        ∀(ro : ℤ). ∀(rl : ℤ). ∀(rr : BitVec4).
+            (
+                derive_memory_authority(po,pl,pr,co,cl,cr)
+                ∧ memory_request_allowed(co,cl,cr,ro,rl,rr)
+            )
+            ⇒ memory_request_allowed(po,pl,pr,ro,rl,rr)
+    )
+}
+
+example "XFER-9: wider-than-parent span cannot be derived" {
+    assert(¬derive_memory_authority(0,512,bvconst(15,4),0,1024,bvconst(1,4)))
+}
+
+example "XFER-10: rights absent from parent cannot appear in child" {
+    assert(¬derive_memory_authority(0,512,bvconst(1,4),0,512,bvconst(2,4)))
+}
+
+example "XFER-11: capability-bearing message implies installed handle resolves" {
+    assert(
+        ∀(d : Bool). ∀(s : Bool). ∀(sub : Bool). ∀(slot : Bool). ∀(queue : Bool).
+        ∀(hg : BitVec32). ∀(og : BitVec64).
+            transfer_message_effect(d,s,sub,slot,queue)
+            ⇒ cap_resolves(
+                hg,hg,
+                transfer_authority_effect(d,s,sub,slot,queue),
+                og,og
+            )
+    )
+}
+
+example "MSG-1: exact ProcessKey permits ordinary 9.2 reply addressing" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32). ∀(living : Bool).
+            living ⇒ ordinary_send_allowed(s,g,s,g,living)
+    )
+}
+
+example "MSG-2: stale ProcessKey rejects ordinary 9.2 reply addressing" {
+    assert(
+        ∀(es : BitVec32). ∀(eg : BitVec32).
+        ∀(cs : BitVec32). ∀(cg : BitVec32). ∀(living : Bool).
+            (living ∧ ¬process_key_matches(es,eg,cs,cg))
+            ⇒ ¬ordinary_send_allowed(es,eg,cs,cg,living)
+    )
+}
+
+// =============================================================================
+// IV. TRANSFER PERSISTENCE + DELEGATIONID PROVENANCE
+// =============================================================================
+
+// A DelegationId is modeled by client ProcessKey, driver ProcessKey, and a u64
+// transfer incarnation. It is durable provenance, not live authority storage.
+define delegation_matches(
+    c_slot1 : BitVec32, c_gen1 : BitVec32,
+    d_slot1 : BitVec32, d_gen1 : BitVec32,
+    inc1 : BitVec64,
+    c_slot2 : BitVec32, c_gen2 : BitVec32,
+    d_slot2 : BitVec32, d_gen2 : BitVec32,
+    inc2 : BitVec64
+) =
+    c_slot1=c_slot2 ∧ c_gen1=c_gen2
+    ∧ d_slot1=d_slot2 ∧ d_gen1=d_gen2
+    ∧ inc1=inc2
+
+// Resolution intentionally does not depend on sender liveness. Once derived,
+// receiver authority is independently held unless dropped/revoked.
+define transferred_cap_still_resolves(
+    receiver_handle_gen : BitVec32,
+    receiver_slot_gen : BitVec32,
+    receiver_authority_exists : Bool,
+    saved_object_gen : BitVec64,
+    current_object_gen : BitVec64,
+    sender_alive : Bool
+) =
+    cap_resolves(
+        receiver_handle_gen,
+        receiver_slot_gen,
+        receiver_authority_exists,
+        saved_object_gen,
+        current_object_gen
+    )
+
+// Accepted requests copy DelegationId. Their provenance survives destruction of
+// the driver's live AuthorityId because provenance is stored in request metadata.
+define request_has_provenance(
+    accepted : Bool,
+    delegation_equal : Bool
+) = accepted ∧ delegation_equal
+
+example "PROV-1: exact DelegationId matches itself" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32). ∀(i : BitVec64).
+            delegation_matches(cs,cg,ds,dg,i,cs,cg,ds,dg,i)
+    )
+}
+
+example "PROV-2: different transfer incarnation is different provenance" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64).
+            ¬(i1=i2)
+            ⇒ ¬delegation_matches(cs,cg,ds,dg,i1,cs,cg,ds,dg,i2)
+    )
+}
+
+
+example "PERSIST-1: sender death alone does not revoke copied receiver authority" {
+    assert(
+        ∀(hg : BitVec32). ∀(og : BitVec64).
+        ∀(ae : Bool). ∀(sender_alive : Bool).
+            (ae ∧ ¬sender_alive)
+            ⇒ transferred_cap_still_resolves(hg,hg,ae,og,og,sender_alive)
+    )
+}
+
+
+example "PERSIST-2: object generation revocation invalidates copied receiver authority" {
+    assert(
+        ∀(hg : BitVec32). ∀(saved : BitVec64). ∀(current : BitVec64).
+        ∀(ae : Bool). ∀(sender_alive : Bool).
+            (ae ∧ ¬sender_alive ∧ ¬(saved=current))
+            ⇒ ¬transferred_cap_still_resolves(hg,hg,ae,saved,current,sender_alive)
+    )
+}
+
+
+example "PROV-3: accepted request retains DelegationId even after live authority is destroyed" {
+    assert(
+        ∀(accepted : Bool). ∀(same_delegation : Bool). ∀(authority_exists : Bool).
+            (accepted ∧ same_delegation ∧ ¬authority_exists)
+            ⇒ request_has_provenance(accepted,same_delegation)
+    )
+}
+
+
+example "PROV-4: unaccepted work has no accepted-request provenance obligation" {
+    assert(
+        ∀(accepted : Bool). ∀(same_delegation : Bool).
+            ¬accepted ⇒ ¬request_has_provenance(accepted,same_delegation)
+    )
+}
+
+// =============================================================================
+// V. KIND-SENSITIVE TWO-CAPABILITY DEVICE SUBMISSION GATE
+// =============================================================================
+
+// Abstract object kinds for the proof. Concrete Rust rights representation is
+// deliberately left open; the Kleis contract is kind-sensitive behavior.
+define KIND_MEMORY = bvconst(0,2)
+define KIND_DEVICE = bvconst(1,2)
+
+define device_submit_eligible(
+    device_handle_resolves : Bool,
+    device_kind : BitVec2,
+    has_submit_read : Bool,
+    buffer_handle_resolves : Bool,
+    buffer_kind : BitVec2,
+    buffer_write : Bool,
+    buffer_len_ok : Bool
+) =
+    device_handle_resolves
+    ∧ device_kind=KIND_DEVICE
+    ∧ has_submit_read
+    ∧ buffer_handle_resolves
+    ∧ buffer_kind=KIND_MEMORY
+    ∧ buffer_write
+    ∧ buffer_len_ok
+
+
+example "DEV-1: device+buffer authorities jointly permit submit" {
+    assert(
+        ∀(dr : Bool). ∀(sr : Bool). ∀(br : Bool). ∀(bw : Bool). ∀(bl : Bool).
+        ∀(dk : BitVec2). ∀(bk : BitVec2).
+            (dr ∧ sr ∧ br ∧ bw ∧ bl ∧ dk=bvconst(1,2) ∧ bk=bvconst(0,2))
+            ⇒ device_submit_eligible(dr,dk,sr,br,bk,bw,bl)
+    )
+}
+
+
+example "DEV-2: missing device capability rejects submit" {
+    assert(
+        ∀(dr : Bool). ∀(sr : Bool). ∀(br : Bool). ∀(bw : Bool). ∀(bl : Bool).
+        ∀(dk : BitVec2). ∀(bk : BitVec2).
+            (¬dr ∧ sr ∧ br ∧ bw ∧ bl ∧ dk=bvconst(1,2) ∧ bk=bvconst(0,2))
+            ⇒ ¬device_submit_eligible(dr,dk,sr,br,bk,bw,bl)
+    )
+}
+
+
+example "DEV-3: missing buffer capability rejects submit" {
+    assert(
+        ∀(dr : Bool). ∀(sr : Bool). ∀(br : Bool). ∀(bw : Bool). ∀(bl : Bool).
+        ∀(dk : BitVec2). ∀(bk : BitVec2).
+            (dr ∧ sr ∧ ¬br ∧ bw ∧ bl ∧ dk=bvconst(1,2) ∧ bk=bvconst(0,2))
+            ⇒ ¬device_submit_eligible(dr,dk,sr,br,bk,bw,bl)
+    )
+}
+
+
+example "DEV-4: wrong device right rejects submit" {
+    assert(
+        ∀(dr : Bool). ∀(sr : Bool). ∀(br : Bool). ∀(bw : Bool). ∀(bl : Bool).
+        ∀(dk : BitVec2). ∀(bk : BitVec2).
+            (dr ∧ ¬sr ∧ br ∧ bw ∧ bl ∧ dk=bvconst(1,2) ∧ bk=bvconst(0,2))
+            ⇒ ¬device_submit_eligible(dr,dk,sr,br,bk,bw,bl)
+    )
+}
+
+
+example "DEV-5: memory capability cannot masquerade as device capability" {
+    assert(
+        ∀(dr : Bool). ∀(sr : Bool). ∀(br : Bool). ∀(bw : Bool). ∀(bl : Bool).
+        ∀(dk : BitVec2). ∀(bk : BitVec2).
+            (dr ∧ sr ∧ br ∧ bw ∧ bl ∧ dk=bvconst(0,2) ∧ bk=bvconst(0,2))
+            ⇒ ¬device_submit_eligible(dr,dk,sr,br,bk,bw,bl)
+    )
+}
+
+
+example "DEV-6: device capability cannot masquerade as memory buffer capability" {
+    assert(
+        ∀(dr : Bool). ∀(sr : Bool). ∀(br : Bool). ∀(bw : Bool). ∀(bl : Bool).
+        ∀(dk : BitVec2). ∀(bk : BitVec2).
+            (dr ∧ sr ∧ br ∧ bw ∧ bl ∧ dk=bvconst(1,2) ∧ bk=bvconst(1,2))
+            ⇒ ¬device_submit_eligible(dr,dk,sr,br,bk,bw,bl)
+    )
+}
+
+
+example "DEV-7: non-writable buffer rejects READ DMA target" {
+    assert(
+        ∀(dr : Bool). ∀(sr : Bool). ∀(br : Bool). ∀(bw : Bool). ∀(bl : Bool).
+        ∀(dk : BitVec2). ∀(bk : BitVec2).
+            (dr ∧ sr ∧ br ∧ ¬bw ∧ bl ∧ dk=bvconst(1,2) ∧ bk=bvconst(0,2))
+            ⇒ ¬device_submit_eligible(dr,dk,sr,br,bk,bw,bl)
+    )
+}
+
+
+example "DEV-8: undersized buffer rejects block READ" {
+    assert(
+        ∀(dr : Bool). ∀(sr : Bool). ∀(br : Bool). ∀(bw : Bool). ∀(bl : Bool).
+        ∀(dk : BitVec2). ∀(bk : BitVec2).
+            (dr ∧ sr ∧ br ∧ bw ∧ ¬bl ∧ dk=bvconst(1,2) ∧ bk=bvconst(0,2))
+            ⇒ ¬device_submit_eligible(dr,dk,sr,br,bk,bw,bl)
+    )
+}
+
+example "DEV-9: successful submit implies both handles resolved" {
+    assert(
+        ∀(dr : Bool). ∀(dk : BitVec2). ∀(sr : Bool).
+        ∀(br : Bool). ∀(bk : BitVec2). ∀(bw : Bool). ∀(bl : Bool).
+            device_submit_eligible(dr,dk,sr,br,bk,bw,bl)
+            ⇒ (dr ∧ br)
+    )
+}
+
+// =============================================================================
+// VI. ACCEPTED-REQUEST OWNERSHIP + STALE REQUESTER SAFETY
+// =============================================================================
+
+// Once accepted, request-local DMA belongs to the controller until terminal.
+// Driver death or CAP_DROP no longer cancels it.
+define accepted_request_active(
+    accepted : Bool,
+    terminal : Bool,
+    driver_alive : Bool,
+    source_cap_live : Bool
+) = accepted ∧ ¬terminal
+
+
+example "REQ-1: accepted request continues after driver death" {
+    assert(
+        ∀(accepted : Bool). ∀(terminal : Bool). ∀(driver_alive : Bool). ∀(cap_live : Bool).
+            (accepted ∧ ¬terminal ∧ ¬driver_alive)
+            ⇒ accepted_request_active(accepted,terminal,driver_alive,cap_live)
+    )
+}
+
+
+example "REQ-2: accepted request continues after source CAP_DROP" {
+    assert(
+        ∀(accepted : Bool). ∀(terminal : Bool). ∀(driver_alive : Bool). ∀(cap_live : Bool).
+            (accepted ∧ ¬terminal ∧ ¬cap_live)
+            ⇒ accepted_request_active(accepted,terminal,driver_alive,cap_live)
+    )
+}
+
+
+example "REQ-3: accepted request continues after both driver death and CAP_DROP" {
+    assert(
+        ∀(accepted : Bool). ∀(terminal : Bool). ∀(driver_alive : Bool). ∀(cap_live : Bool).
+            (accepted ∧ ¬terminal ∧ ¬driver_alive ∧ ¬cap_live)
+            ⇒ accepted_request_active(accepted,terminal,driver_alive,cap_live)
+    )
+}
+
+
+example "REQ-4: terminal request is no longer active" {
+    assert(
+        ∀(accepted : Bool). ∀(terminal : Bool). ∀(driver_alive : Bool). ∀(cap_live : Bool).
+            terminal ⇒ ¬accepted_request_active(accepted,terminal,driver_alive,cap_live)
+    )
+}
+
+
+example "REQ-5: unaccepted request never becomes controller-owned work" {
+    assert(
+        ∀(accepted : Bool). ∀(terminal : Bool). ∀(driver_alive : Bool). ∀(cap_live : Bool).
+            ¬accepted ⇒ ¬accepted_request_active(accepted,terminal,driver_alive,cap_live)
+    )
+}
+
+// Completion wake is exact-generation ProcessKey matching.
+define completion_wake_allowed(
+    saved_slot : BitVec32, saved_gen : BitVec32,
+    current_slot : BitVec32, current_gen : BitVec32
+) = process_key_matches(saved_slot,saved_gen,current_slot,current_gen)
+
+define PROC_GEN_MAX = bvconst(4294967295,32)
+define recyclable_process_generation(g : BitVec32) = ¬(g=PROC_GEN_MAX)
+define next_process_generation(g : BitVec32) = bvadd(g,bvconst(1,32))
+
+example "REQ-6: exact driver incarnation may be woken" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32).
+            completion_wake_allowed(s,g,s,g)
+    )
+}
+
+example "REQ-7: dead driver's stale completion cannot wake recycled slot" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32).
+            recyclable_process_generation(g)
+            ⇒ ¬completion_wake_allowed(s,g,s,next_process_generation(g))
+    )
+}
+
+// =============================================================================
+// VII. EXACT-PEER FAILURE + TWO-REQUEST DMA QUIESCENCE
+// =============================================================================
+
+// Up to two accepted requests from a DelegationId are modeled explicitly.
+// A request is relevant iff its stored DelegationId equals the waiter's T.
+define all_relevant_terminal2(
+    r1_relevant : Bool, r1_terminal : Bool,
+    r2_relevant : Bool, r2_terminal : Bool
+) =
+    (¬r1_relevant ∨ r1_terminal)
+    ∧ (¬r2_relevant ∨ r2_terminal)
+
+define peer_died_return_allowed(
+    peer_dead : Bool,
+    r1_relevant : Bool, r1_terminal : Bool,
+    r2_relevant : Bool, r2_terminal : Bool
+) =
+    peer_dead ∧ all_relevant_terminal2(r1_relevant,r1_terminal,r2_relevant,r2_terminal)
+
+define later_dma_mutation_possible(relevant : Bool, terminal : Bool) =
+    relevant ∧ ¬terminal
+
+
+example "QUIESCE-1: both relevant requests terminal permits PeerDied" {
+    assert(
+        ∀(dead : Bool). ∀(r1rel : Bool). ∀(r1term : Bool). ∀(r2rel : Bool). ∀(r2term : Bool).
+            (dead ∧ r1rel ∧ r1term ∧ r2rel ∧ r2term)
+            ⇒ peer_died_return_allowed(dead,r1rel,r1term,r2rel,r2term)
+    )
+}
+
+
+example "QUIESCE-2: R1 terminal but relevant R2 in flight defers PeerDied" {
+    assert(
+        ∀(dead : Bool). ∀(r1rel : Bool). ∀(r1term : Bool). ∀(r2rel : Bool). ∀(r2term : Bool).
+            (dead ∧ r1rel ∧ r1term ∧ r2rel ∧ ¬r2term)
+            ⇒ ¬peer_died_return_allowed(dead,r1rel,r1term,r2rel,r2term)
+    )
+}
+
+
+example "QUIESCE-3: R2 terminal but relevant R1 in flight defers PeerDied" {
+    assert(
+        ∀(dead : Bool). ∀(r1rel : Bool). ∀(r1term : Bool). ∀(r2rel : Bool). ∀(r2term : Bool).
+            (dead ∧ r1rel ∧ ¬r1term ∧ r2rel ∧ r2term)
+            ⇒ ¬peer_died_return_allowed(dead,r1rel,r1term,r2rel,r2term)
+    )
+}
+
+
+example "QUIESCE-4: dead peer alone is insufficient while relevant DMA remains" {
+    assert(
+        ∀(dead : Bool). ∀(r1rel : Bool). ∀(r1term : Bool). ∀(r2rel : Bool). ∀(r2term : Bool).
+            (dead ∧ r1rel ∧ ¬r1term ∧ ¬r2rel)
+            ⇒ ¬peer_died_return_allowed(dead,r1rel,r1term,r2rel,r2term)
+    )
+}
+
+
+example "QUIESCE-5: unrelated in-flight request does not block this DelegationId" {
+    assert(
+        ∀(dead : Bool). ∀(r1rel : Bool). ∀(r1term : Bool). ∀(r2rel : Bool). ∀(r2term : Bool).
+            (dead ∧ r1rel ∧ r1term ∧ ¬r2rel ∧ ¬r2term)
+            ⇒ peer_died_return_allowed(dead,r1rel,r1term,r2rel,r2term)
+    )
+}
+
+example "QUIESCE-6 NO-POST-NOTIFICATION-DMA: PeerDied implies no relevant later mutation" {
+    assert(
+        ∀(dead : Bool).
+        ∀(r1rel : Bool). ∀(r1term : Bool).
+        ∀(r2rel : Bool). ∀(r2term : Bool).
+            peer_died_return_allowed(dead,r1rel,r1term,r2rel,r2term)
+            ⇒ (
+                ¬later_dma_mutation_possible(r1rel,r1term)
+                ∧ ¬later_dma_mutation_possible(r2rel,r2term)
+            )
+    )
+}
+
+example "QUIESCE-7: PeerDied implies every relevant modeled request is terminal" {
+    assert(
+        ∀(dead : Bool).
+        ∀(r1rel : Bool). ∀(r1term : Bool).
+        ∀(r2rel : Bool). ∀(r2term : Bool).
+            peer_died_return_allowed(dead,r1rel,r1term,r2rel,r2term)
+            ⇒ ((r1rel⇒r1term) ∧ (r2rel⇒r2term))
+    )
+}
+
+
+example "QUIESCE-8: live peer never produces PeerDied" {
+    assert(
+        ∀(dead : Bool). ∀(r1rel : Bool). ∀(r1term : Bool). ∀(r2rel : Bool). ∀(r2term : Bool).
+            ¬dead ⇒ ¬peer_died_return_allowed(dead,r1rel,r1term,r2rel,r2term)
+    )
+}
+
+// =============================================================================
+// VIII. MACHINE-TIME DEADLOCK EXPOSURE + IDLE-PROGRESS NECESSITY
+// =============================================================================
+
+// Current Phase 9.1 rule: devices advance only when some process commits an
+// instruction. If Client is RecvWait and Driver is IoWait and there is no other
+// runnable process, there is no machine boundary to tick the DMA.
+define runnable_exists(
+    client_recv_wait : Bool,
+    driver_io_wait : Bool,
+    other_runnable : Bool
+) =
+    ¬client_recv_wait ∨ ¬driver_io_wait ∨ other_runnable
+
+define current_device_progress_possible(
+    client_recv_wait : Bool,
+    driver_io_wait : Bool,
+    other_runnable : Bool
+) = runnable_exists(client_recv_wait,driver_io_wait,other_runnable)
+
+define device_progress_with_idle_rule(
+    client_recv_wait : Bool,
+    driver_io_wait : Bool,
+    other_runnable : Bool,
+    idle_progress : Bool
+) =
+    runnable_exists(client_recv_wait,driver_io_wait,other_runnable)
+    ∨ idle_progress
+
+
+example "TIME-1: two-process blocking state is dead for device progress under current rule" {
+    assert(
+        ∀(cw : Bool). ∀(dw : Bool). ∀(other : Bool).
+            (cw ∧ dw ∧ ¬other)
+            ⇒ ¬current_device_progress_possible(cw,dw,other)
+    )
+}
+
+
+example "TIME-2: polling client leaves a runnable process and permits device progress" {
+    assert(
+        ∀(cw : Bool). ∀(dw : Bool). ∀(other : Bool).
+            (¬cw ∧ dw ∧ ¬other)
+            ⇒ current_device_progress_possible(cw,dw,other)
+    )
+}
+
+
+example "TIME-3: a third runnable process permits device progress but does not solve architecture" {
+    assert(
+        ∀(cw : Bool). ∀(dw : Bool). ∀(other : Bool).
+            (cw ∧ dw ∧ other)
+            ⇒ current_device_progress_possible(cw,dw,other)
+    )
+}
+
+
+example "TIME-4: idle-progress rule permits progress in the exact all-blocked state" {
+    assert(
+        ∀(cw : Bool). ∀(dw : Bool). ∀(other : Bool). ∀(idle : Bool).
+            (cw ∧ dw ∧ ¬other ∧ idle)
+            ⇒ device_progress_with_idle_rule(cw,dw,other,idle)
+    )
+}
+
+
+example "TIME-5: if two-process blocking must progress, idle-progress is necessary" {
+    assert(
+        ∀(cw : Bool). ∀(dw : Bool). ∀(other : Bool). ∀(idle : Bool).
+            (cw ∧ dw ∧ ¬other ∧ device_progress_with_idle_rule(cw,dw,other,idle))
+            ⇒ idle
+    )
+}
+
+
+example "TIME-6: without idle-progress the two-process blocking state remains dead" {
+    assert(
+        ∀(cw : Bool). ∀(dw : Bool). ∀(other : Bool). ∀(idle : Bool).
+            (cw ∧ dw ∧ ¬other ∧ ¬idle)
+            ⇒ ¬device_progress_with_idle_rule(cw,dw,other,idle)
+    )
+}
+
+// =============================================================================
+// IX. CROSS-LAYER COMPOSITION OBLIGATIONS
+// =============================================================================
+
+// Successful capability-bearing IPC has no partial effect.
+
+example "COMPOSE-1: successful transfer gives receiver both usable naming and authority" {
+    assert(
+        ∀(d : Bool). ∀(s : Bool). ∀(sub : Bool). ∀(slot : Bool). ∀(queue : Bool).
+            (d ∧ s ∧ sub ∧ slot ∧ queue)
+            ⇒ (
+                transfer_handle_effect(d,s,sub,slot,queue)
+                ∧ transfer_authority_effect(d,s,sub,slot,queue)
+                ∧ transfer_message_effect(d,s,sub,slot,queue)
+            )
+    )
+}
+
+
+example "COMPOSE-2: device submit eligibility contains no mapping precondition" {
+    assert(
+        ∀(dr : Bool). ∀(sr : Bool). ∀(br : Bool). ∀(bw : Bool). ∀(bl : Bool).
+        ∀(dk : BitVec2). ∀(bk : BitVec2).
+            (dr ∧ sr ∧ br ∧ bw ∧ bl ∧ dk=bvconst(1,2) ∧ bk=bvconst(0,2))
+            ⇒ device_submit_eligible(dr,dk,sr,br,bk,bw,bl)
+    )
+}
+
+
+example "COMPOSE-3: dropping transferred handle after submit does not cancel accepted request" {
+    assert(
+        ∀(accepted : Bool). ∀(terminal : Bool). ∀(driver_alive : Bool). ∀(cap_live : Bool).
+            (accepted ∧ ¬terminal ∧ ¬cap_live)
+            ⇒ accepted_request_active(accepted,terminal,driver_alive,cap_live)
+    )
+}
+
+
+example "COMPOSE-4: provenance needed for quiescence survives dead driver authority" {
+    assert(
+        ∀(accepted : Bool). ∀(same_delegation : Bool).
+            (accepted ∧ same_delegation)
+            ⇒ request_has_provenance(accepted,same_delegation)
+    )
+}
+
+
+example "COMPOSE-5: PeerDied only after both requests from same delegation quiesce" {
+    assert(
+        ∀(dead : Bool). ∀(r1rel : Bool). ∀(r1term : Bool). ∀(r2rel : Bool). ∀(r2term : Bool).
+            (dead ∧ r1rel ∧ r1term ∧ r2rel)
+            ⇒ (
+                (¬r2term ⇒ ¬peer_died_return_allowed(dead,r1rel,r1term,r2rel,r2term))
+                ∧ (r2term ⇒ peer_died_return_allowed(dead,r1rel,r1term,r2rel,r2term))
+            )
+    )
+}
+
+
+example "COMPOSE-6: blocking client+driver cannot complete DMA under current time rule" {
+    assert(
+        ∀(cw : Bool). ∀(dw : Bool). ∀(other : Bool).
+            (cw ∧ dw ∧ ¬other)
+            ⇒ ¬current_device_progress_possible(cw,dw,other)
+    )
+}
+
+// =============================================================================
+// X. FALSIFIABILITY WITNESSES — DELIBERATELY FALSE
+// =============================================================================
+
+// FALSE-1: copied/derived receiver authority is independent of sender domain
+// lifetime when the object generation remains current.
+
+example "FALSE-1: sender death destroys receiver copied authority" {
+    assert(
+        ∀(hg : BitVec32). ∀(og : BitVec64).
+        ∀(ae : Bool). ∀(sender_alive : Bool).
+            (ae ∧ ¬sender_alive)
+            ⇒ ¬transferred_cap_still_resolves(hg,hg,ae,og,og,sender_alive)
+    )
+}
+
+
+
+example "FALSE-2: stale ProcessKey can receive message or installed authority" {
+    assert(
+        ∀(es : BitVec32). ∀(eg : BitVec32).
+        ∀(cs : BitVec32). ∀(cg : BitVec32). ∀(living : Bool).
+        ∀(s : Bool). ∀(sub : Bool). ∀(slot : Bool). ∀(queue : Bool).
+            (living ∧ ¬process_key_matches(es,eg,cs,cg) ∧ s ∧ sub ∧ slot ∧ queue)
+            ⇒ (
+                transfer_message_effect(destination_valid(es,eg,cs,cg,living),s,sub,slot,queue)
+                ∨ transfer_authority_effect(destination_valid(es,eg,cs,cg,living),s,sub,slot,queue)
+            )
+    )
+}
+
+example "FALSE-3: CAP_DROP leaves target AuthorityId usable" {
+    assert(
+        ∀(target : BitVec64). ∀(alive : Bool).
+            alive ⇒ authority_alive_after_drop(target,target,alive)
+    )
+}
+
+
+example "FALSE-4: device submit succeeds with only device capability" {
+    assert(
+        ∀(dr : Bool). ∀(sr : Bool). ∀(br : Bool). ∀(bw : Bool). ∀(bl : Bool).
+        ∀(dk : BitVec2). ∀(bk : BitVec2).
+            (dr ∧ sr ∧ ¬br ∧ bw ∧ bl ∧ dk=bvconst(1,2) ∧ bk=bvconst(0,2))
+            ⇒ device_submit_eligible(dr,dk,sr,br,bk,bw,bl)
+    )
+}
+
+example "FALSE-5: delegated span can be amplified beyond sender authority" {
+    assert(derive_memory_authority(0,512,bvconst(15,4),0,1024,bvconst(1,4)))
+}
+
+// FALSE-6: partial quiescence is insufficient; R2 is still relevant/in-flight.
+
+example "FALSE-6: PeerDied may return after only one of two relevant DMAs is terminal" {
+    assert(
+        ∀(dead : Bool). ∀(r1rel : Bool). ∀(r1term : Bool). ∀(r2rel : Bool). ∀(r2term : Bool).
+            (dead ∧ r1rel ∧ r1term ∧ r2rel ∧ ¬r2term)
+            ⇒ peer_died_return_allowed(dead,r1rel,r1term,r2rel,r2term)
+    )
+}
+
