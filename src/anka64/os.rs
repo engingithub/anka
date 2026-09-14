@@ -9238,9 +9238,57 @@ mod tests {
 
     #[test]
     fn p93a_3_submit_read_to_none_succeeds_but_useless() {
-        let (mut kernel, sender, receiver, dev_obj, dev_handle) = dev_transfer_setup();
-        let recv_gen = kernel.processes[receiver].generation;
+        use super::super::block::{BlockStorage, BlockController};
 
+        // Full setup with block device so we can attempt a real operation.
+        let mut fabric = Fabric::new(0x800000);
+
+        let (core_a, dom_a, text_a, _data_a, _stack_a) =
+            create_process(&mut fabric, CPU0, "sender",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm_a = Asm64::new();
+        for _ in 0..100 { asm_a.nop(); }
+        asm_a.movi(R1, 0); asm_a.movi(R0, SYS_EXIT as i32); asm_a.trap(0);
+        fabric.write_physical(0x000000, &asm_a.to_bytes());
+        seal_code_object(&mut fabric, text_a, dom_a);
+
+        let (core_b, dom_b, text_b, _data_b, _stack_b) =
+            create_process(&mut fabric, AgentId(1), "receiver",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm_b = Asm64::new();
+        for _ in 0..100 { asm_b.nop(); }
+        asm_b.movi(R1, 0); asm_b.movi(R0, SYS_EXIT as i32); asm_b.trap(0);
+        fabric.write_physical(0x100000, &asm_b.to_bytes());
+        seal_code_object(&mut fabric, text_b, dom_b);
+
+        // DMA buffer for the receiver
+        let buf_obj = fabric.alloc_object("buf", 512, ObjectKind::Memory);
+        fabric.place_object(buf_obj, 0x300000);
+        fabric.write_physical(0x300000, &[0x00; 512]);
+
+        // Block storage
+        let mut storage = BlockStorage::new(4, 512);
+        storage.write_block(0, &[0xCC; 512]);
+        let controller = BlockController::new(storage, 3, AgentId(100));
+
+        let mut kernel = Kernel::new(fabric);
+        let key_a = kernel.spawn(core_a);
+        let key_b = kernel.spawn(core_b);
+        let sender = key_a.slot;
+        let receiver = key_b.slot;
+
+        let dev_obj = kernel.install_block_device(controller)
+            .expect("install block device");
+
+        // Sender gets SUBMIT_READ device cap
+        let dev_handle = kernel.install_device_capability(
+            sender, dev_obj, DeviceRights::SUBMIT_READ,
+        ).expect("sender device cap");
+
+        // Transfer SUBMIT_READ → NONE to receiver
+        let recv_gen = kernel.processes[receiver].generation;
         let r0 = do_dev_send_cap(
             &mut kernel, sender, receiver, recv_gen, &dev_handle,
             0, 0, DeviceRights::NONE.0 as u64, 0,
@@ -9248,13 +9296,58 @@ mod tests {
         assert_eq!(r0, 0, "SUBMIT_READ→NONE must succeed (valid attenuation)");
 
         let msg = kernel.mailboxes[receiver].pop().unwrap();
-        let child_handle = msg.cap.unwrap();
-        let resolved = kernel.resolve_capability(receiver, child_handle)
+        let none_handle = msg.cap.unwrap();
+        let resolved = kernel.resolve_capability(receiver, none_handle)
             .expect("NONE device cap must resolve");
         assert!(resolved.is_device());
         assert_eq!(resolved.as_device_rights(), DeviceRights::NONE);
 
-        eprintln!("9.3a.3.3: SUBMIT_READ → NONE succeeds, child authorizes no operation ✓");
+        // Give receiver a valid WRITE buffer cap so the only failure
+        // path is the device-authority gate, not buffer resolution.
+        let recv_dom = kernel.processes[receiver].core.domain;
+        let buf_aid = kernel.fabric.alloc_authority_id().unwrap();
+        kernel.fabric.grant_with_authority_id(
+            recv_dom, buf_obj, 0, 512, Permissions::WRITE, buf_aid,
+        ).expect("grant receiver buffer");
+        let buf_gen = kernel.fabric.objects.get(&buf_obj).unwrap().generation;
+        let buf_handle = kernel.processes[receiver].cap_table.as_mut().unwrap()
+            .install_memory(buf_obj, buf_gen, 0, 512, Permissions::WRITE, buf_aid, None)
+            .expect("install receiver buffer cap");
+
+        // Attempt blocking SYS_DEV_SUBMIT (13) with the NONE device cap.
+        // This must fail at the device-authority gate with error 4.
+        let return_pc = kernel.processes[receiver].core.pc + 4;
+        kernel.processes[receiver].core.event_frames.push(EventFrame {
+            return_pc,
+            return_privilege: Privilege::User,
+            interrupts_were_enabled: true,
+            cause: EventCause::Syscall,
+        });
+        kernel.processes[receiver].core.r[R0 as usize] = SYS_DEV_SUBMIT;
+        kernel.processes[receiver].core.r[R1 as usize] = none_handle.slot as u64;
+        kernel.processes[receiver].core.r[R2 as usize] = none_handle.generation as u64;
+        kernel.processes[receiver].core.r[R3 as usize] = 0; // block 0
+        kernel.processes[receiver].core.r[R4 as usize] = buf_handle.slot as u64;
+        kernel.processes[receiver].core.r[R5 as usize] = buf_handle.generation as u64;
+        kernel.processes[receiver].core.halted = true;
+        kernel.handle_syscall(receiver);
+
+        assert_eq!(kernel.processes[receiver].core.r[R0 as usize], 4,
+            "SYS_DEV_SUBMIT with DeviceRights::NONE must fail at authority gate (error 4)");
+        assert!(kernel.processes[receiver].io_wait.is_none(),
+            "no IoWait installed on rejected submission");
+
+        // Buffer must be unchanged — no DMA occurred
+        let buf_data = kernel.fabric.read_physical(0x300000, 512);
+        assert!(buf_data.iter().all(|&b| b == 0x00),
+            "buffer must remain at baseline — no DMA domain created");
+
+        // Controller must have no in-flight requests
+        assert!(kernel.block_controller.as_ref().unwrap()
+            .in_flight_requests().is_empty(),
+            "controller must not have accepted a request");
+
+        eprintln!("9.3a.3.3: SUBMIT_READ → NONE succeeds; NONE child → SYS_DEV_SUBMIT error 4 ✓");
     }
 
     // ─── 9.3a.3.4: R5 != 0 rejects (error 4) ───
