@@ -299,6 +299,7 @@ impl Fabric {
         self.domains.insert(id, DomainState {
             id,
             capabilities: Vec::new(),
+            device_authorities: Vec::new(),
         });
         id
     }
@@ -336,6 +337,7 @@ impl Fabric {
     /// Grant a new capability covering a range within an object.
     ///
     /// W⊕X: refuses WRITE or ATOMIC on Sealed objects.
+    /// Kind boundary: requires ObjectKind::Memory (not merely "not Device").
     pub fn grant(
         &mut self,
         domain: DomainId,
@@ -345,6 +347,7 @@ impl Fabric {
         perms: Permissions,
     ) -> Option<Capability64> {
         let obj = self.objects.get(&object)?;
+        if obj.kind != ObjectKind::Memory { return None; }
         match obj.state {
             ObjectState::Active => {
                 if perms.contains(Permissions::EXECUTE) {
@@ -380,6 +383,10 @@ impl Fabric {
     /// Same validation as `grant`, but the resulting domain entry is
     /// tagged with the provided AuthorityId so it can be removed
     /// precisely by `remove_by_authority_id`.
+    ///
+    /// Kind boundary: requires ObjectKind::Memory.
+    /// AuthorityId uniqueness: rejects an ID already present in the domain
+    /// across either memory or device authority collections.
     pub fn grant_with_authority_id(
         &mut self,
         domain: DomainId,
@@ -390,6 +397,9 @@ impl Fabric {
         authority_id: AuthorityId,
     ) -> Option<Capability64> {
         let obj = self.objects.get(&object)?;
+        if obj.kind != ObjectKind::Memory { return None; }
+        // AuthorityId cross-kind uniqueness
+        if self.has_authority_id(domain, authority_id) { return None; }
         match obj.state {
             ObjectState::Active => {
                 if perms.contains(Permissions::EXECUTE) {
@@ -420,6 +430,7 @@ impl Fabric {
     /// Remove the exact authority entry identified by AuthorityId
     /// from a domain.  Returns true if found and removed.
     ///
+    /// Searches both memory and device authority collections.
     /// Only removes one entry even if multiple entries have the
     /// same capability value — AuthorityId is unique identity.
     ///
@@ -436,6 +447,9 @@ impl Fabric {
         if let Some(pos) = dom.capabilities.iter().position(|e| e.authority_id == Some(target)) {
             dom.capabilities.remove(pos);
             true
+        } else if let Some(pos) = dom.device_authorities.iter().position(|e| e.authority_id == target) {
+            dom.device_authorities.remove(pos);
+            true
         } else {
             false
         }
@@ -443,12 +457,18 @@ impl Fabric {
 
     /// Check whether a specific AuthorityId still exists in a domain.
     ///
+    /// Searches both memory (`capabilities`) and device (`device_authorities`)
+    /// collections.  AuthorityId is globally unique across kinds.
+    ///
     /// Used by resolve_capability() for the full architectural
     /// three-condition check: the cap-table slot says the authority
     /// exists, but the Fabric domain is the ground truth.
     pub fn has_authority_id(&self, domain: DomainId, target: AuthorityId) -> bool {
         match self.domains.get(&domain) {
-            Some(d) => d.capabilities.iter().any(|e| e.authority_id == Some(target)),
+            Some(d) => {
+                d.capabilities.iter().any(|e| e.authority_id == Some(target))
+                || d.device_authorities.iter().any(|e| e.authority_id == target)
+            }
             None => false,
         }
     }
@@ -483,6 +503,10 @@ impl Fabric {
             entry.cap.clone()
         };
 
+        // Kind boundary: require Memory
+        let obj = self.objects.get(&parent.object())?;
+        if obj.kind != ObjectKind::Memory { return None; }
+
         // Validate subset relationship
         if !self.validate(&parent) { return None; }
         if !child_perms.is_subset_of(parent.permissions()) { return None; }
@@ -508,6 +532,8 @@ impl Fabric {
     }
 
     /// Derive a child capability from a parent — cannot amplify (I7).
+    ///
+    /// Kind boundary: parent must name an ObjectKind::Memory object.
     pub fn derive(
         &mut self,
         domain: DomainId,
@@ -516,6 +542,9 @@ impl Fabric {
         child_length: u64,
         child_perms: Permissions,
     ) -> Option<Capability64> {
+        // Kind boundary: require Memory
+        let obj = self.objects.get(&parent.object())?;
+        if obj.kind != ObjectKind::Memory { return None; }
         if !self.validate(parent) { return None; }
         if !child_perms.is_subset_of(parent.permissions()) { return None; }
         if child_offset < parent.offset() { return None; }
@@ -551,6 +580,7 @@ impl Fabric {
     ///   A_dma ⊆ A_explicitly_delegated.
     ///
     /// Formal basis: anka_block_device.kleis DMA-1..DMA-4.
+    /// Kind boundary: requires ObjectKind::Memory.
     pub fn delegate_dma_span(
         &mut self,
         source_domain: DomainId,
@@ -559,9 +589,147 @@ impl Fabric {
         length: u64,
         perms: Permissions,
     ) -> Option<DomainId> {
+        // Kind boundary: require Memory
+        let obj = self.objects.get(&object)?;
+        if obj.kind != ObjectKind::Memory { return None; }
         let parent = self.find_authorizing_cap(
             source_domain, object, offset, length, perms,
         )?.clone();
+        let dma_domain = self.create_domain();
+        let result = self.derive(dma_domain, &parent, offset, length, perms);
+        if result.is_none() {
+            self.destroy_domain(dma_domain);
+            return None;
+        }
+        Some(dma_domain)
+    }
+
+    // ───────────────── Device authority (Phase 9.2c) ──────────────
+
+    /// Grant device authority to a domain with a specific AuthorityId.
+    ///
+    /// Kind boundary: requires ObjectKind::Device.
+    /// AuthorityId uniqueness: rejects an ID already present in the domain
+    /// across either memory or device authority collections.
+    pub fn grant_device_with_authority_id(
+        &mut self,
+        domain: DomainId,
+        object: ObjectId,
+        rights: DeviceRights,
+        authority_id: AuthorityId,
+    ) -> Option<()> {
+        let obj = self.objects.get(&object)?;
+        if obj.kind != ObjectKind::Device { return None; }
+        if !matches!(obj.state, ObjectState::Active) { return None; }
+        // AuthorityId cross-kind uniqueness
+        if self.has_authority_id(domain, authority_id) { return None; }
+
+        let obj_gen = obj.generation;
+        self.domains.get_mut(&domain)?.device_authorities.push(DeviceAuthorityEntry {
+            object,
+            generation: obj_gen,
+            rights,
+            authority_id,
+        });
+        Some(())
+    }
+
+    /// Validate that a device authority entry in a domain matches
+    /// the expected parameters exactly.
+    ///
+    /// Two distinct rights predicates:
+    ///   1. A_fabric.rights == exact_slot_rights  (backing matches cap-table)
+    ///   2. exact_slot_rights.contains(required_rights)  (sufficient for operation)
+    ///
+    /// Also verifies: AuthorityId, object, generation, object generation
+    /// currency, and ObjectKind::Device.
+    pub fn validate_device_authority(
+        &self,
+        domain: DomainId,
+        authority_id: AuthorityId,
+        expected_object: ObjectId,
+        expected_generation: Generation,
+        exact_slot_rights: DeviceRights,
+        required_rights: DeviceRights,
+    ) -> bool {
+        let dom = match self.domains.get(&domain) {
+            Some(d) => d,
+            None => return false,
+        };
+        let entry = match dom.device_authorities.iter()
+            .find(|e| e.authority_id == authority_id) {
+            Some(e) => e,
+            None => return false,
+        };
+
+        // Object and generation must match the cap-table slot
+        if entry.object != expected_object { return false; }
+        if entry.generation != expected_generation { return false; }
+
+        // Rights predicate 1: backing entry rights == slot rights
+        if entry.rights != exact_slot_rights { return false; }
+
+        // Rights predicate 2: slot rights contain the required operation right
+        if !exact_slot_rights.contains(required_rights) { return false; }
+
+        // Object generation currency
+        let obj = match self.objects.get(&expected_object) {
+            Some(o) => o,
+            None => return false,
+        };
+        if obj.kind != ObjectKind::Device { return false; }
+        if obj.generation != expected_generation { return false; }
+
+        true
+    }
+
+    /// Delegate a narrow DMA span from an exact authority entry
+    /// (identified by AuthorityId) into a fresh DMA domain.
+    ///
+    /// Unlike `delegate_dma_span()` which searches the ambient domain,
+    /// this primitive locates a specific memory authority by its
+    /// AuthorityId and validates that it covers the requested span.
+    ///
+    /// Independently re-verifies the entry's object/generation and
+    /// the underlying object's current generation before creating the
+    /// DMA domain — makes the primitive independently safe rather
+    /// than relying on its caller's earlier resolve.
+    ///
+    /// Kind boundary: the located authority must name an ObjectKind::Memory object.
+    pub fn delegate_dma_span_from_authority_id(
+        &mut self,
+        source_domain: DomainId,
+        source_authority_id: AuthorityId,
+        object: ObjectId,
+        offset: u64,
+        length: u64,
+        perms: Permissions,
+    ) -> Option<DomainId> {
+        // Find the exact authority entry
+        let parent = {
+            let dom = self.domains.get(&source_domain)?;
+            let entry = dom.capabilities.iter()
+                .find(|e| e.authority_id == Some(source_authority_id))?;
+            entry.cap.clone()
+        };
+
+        // Independent re-verification: entry names expected object
+        if parent.object() != object { return None; }
+
+        // Kind boundary: require Memory
+        let obj = self.objects.get(&object)?;
+        if obj.kind != ObjectKind::Memory { return None; }
+
+        // Independent re-verification: object generation is current
+        if parent.generation() != obj.generation { return None; }
+
+        // Validate the parent capability is still valid
+        if !self.validate(&parent) { return None; }
+
+        // Validate the requested span is within the parent
+        if !parent.covers(object, offset, length, perms) { return None; }
+
+        // Create narrow DMA domain with exactly the requested span
         let dma_domain = self.create_domain();
         let result = self.derive(dma_domain, &parent, offset, length, perms);
         if result.is_none() {

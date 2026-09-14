@@ -1527,3 +1527,270 @@ Rejected because it inverts the layering.  ProcessKey is a kernel
 concept; Fabric should not know about processes.
 
 616/616 tests; 29 instructions.  Phase 9.2b is complete.
+
+---
+
+## DN-17: Device Capability and Kind-Sensitive Authority
+
+**Phase**: 9.2c (Chapter 9: Anka64 as an Independent Architecture)
+
+**Problem**: Phase 9.2b moved memory authority between live processes.
+Phase 9.2c asks: how does a user-space driver prove to the kernel
+that it may invoke a specific device using a specific buffer — and
+how does the kernel ensure no ambient authority can rescue a
+deficient presented handle?
+
+The formal target:
+
+  Accepted(R) =>
+    A_d = exact(H_d) and SubmitRead in A_d
+    and A_b = exact(H_b) and WRITE in A_b
+    and A_DMA is a subset of A_b
+    and T_R = T(H_b).
+
+No ambient authority may repair either presented handle.
+
+**Decision -- kind-sensitive capability slot state**:
+
+Memory and device capabilities carry fundamentally different rights.
+`Permissions` (R/W/X/S) is meaningful for memory; `DeviceRights`
+(SubmitRead, future SubmitWrite) is meaningful for devices.  Allowing
+both in the same representation creates nonsensical states such as
+executable devices or SubmitRead memory.
+
+`CapabilitySlotState` is now a sum type:
+
+  Free { handle_generation }
+  Memory { object, object_generation, offset, length, perms, authority_id, delegation_id }
+  Device { object, object_generation, rights, authority_id, delegation_id }
+
+`ResolvedCapability` is similarly restructured as `Memory { ... } | Device { ... }`
+with accessor methods for common fields (`authority_id()`, `object()`,
+`object_generation()`, `delegation_id()`).
+
+Illegal combinations are structurally impossible.  Pattern matching
+enforces kind-sensitivity at every consumer:
+
+  Memory authority carries Permissions.
+  Device authority carries DeviceRights.
+
+`DeviceRights` is a bitfield type with `contains()` for compositional
+right checking.  Currently only `SUBMIT_READ` is defined.
+
+**Decision -- separate Fabric device-authority collection**:
+
+Memory authority uses the existing `Vec<CapabilityEntry>` in each
+`DomainState`.  Device authority uses a new `Vec<DeviceAuthorityEntry>`.
+The two collections are separate because their protected fields differ:
+memory entries carry (object, generation, offset, length, permissions);
+device entries carry (object, generation, rights).
+
+Operations that generalize across kinds:
+
+- `has_authority_id()` -- searches both collections.
+- `remove_by_authority_id()` -- searches both collections.
+
+Operations that are kind-specific:
+
+- `grant_with_authority_id()` -- requires `ObjectKind::Memory`.
+- `grant_device_with_authority_id()` -- requires `ObjectKind::Device`.
+- `validate_device_authority()` -- searches device-authority collection.
+- `delegate_dma_span()` and `delegate_dma_span_from_authority_id()` --
+  memory-only.
+
+Every tagged insertion boundary enforces:
+
+  AuthorityId may occur at most once in a domain -- across both kinds.
+
+The global monotonic allocator makes collisions impossible through
+normal operation, but the grant functions accept AuthorityId as an
+argument and refuse an already-present ID rather than trusting
+callers blindly.
+
+**Decision -- positive kind boundary enforcement**:
+
+Memory-authority paths require `object.kind == ObjectKind::Memory`,
+not merely "not Device."  Device-authority paths require
+`object.kind == ObjectKind::Device`.  This prevents a future object
+kind (e.g., `ObjectKind::Ipc`) from accidentally receiving memory
+or device semantics:
+
+  Memory authority => ObjectKind::Memory.
+  Device authority => ObjectKind::Device.
+
+The hardened paths include: `grant()`, `grant_with_authority_id()`,
+`derive()`, `derive_from_authority_id()`, `delegate_dma_span()`,
+`delegate_dma_span_from_authority_id()`, `grant_device_with_authority_id()`,
+`install_capability()`, and `install_device_capability()`.
+
+**Decision -- device object lifecycle without physical placement**:
+
+A Device object is allocated via `alloc_object(ObjectKind::Device)`
+and placed via `place_object()` with a zero-size span.  This
+transitions the object to Active without consuming physical memory.
+The object table supplies identity, generation, kind, and lifecycle
+-- not a physical address.  A device object's "placement" is its
+binding to the kernel's block controller, not a physical memory
+region.
+
+  object identity != memory placement.
+
+**Decision -- generation-qualified one-shot device binding**:
+
+`install_block_device()` allocates a `Device` object, binds it to the
+existing `BlockController`, and records the binding in
+`Kernel.block_device_binding: Option<DeviceBinding>`.  The binding
+stores both `ObjectId` and the object's `Generation` at bind time.
+
+The operation is one-shot: a second call returns `None`.  This
+prevents rebinding a device to a different object or controller.
+
+**Decision -- two-predicate device authority validation**:
+
+`validate_device_authority()` takes both `exact_slot_rights` and
+`required_rights`:
+
+  A_Fabric.rights = H_device.rights  (exact match: slot matches backing)
+  and H_device.rights >= SubmitRead  (capability has the needed right)
+
+These predicates are distinct.  The exact-match predicate prevents
+a backing entry from being silently widened.  The required-rights
+predicate ensures the capability actually authorizes the operation.
+When device rights become compositional (SubmitRead + SubmitWrite),
+an equality check against SubmitRead alone would incorrectly reject
+a broader capability.
+
+**Decision -- exact-authority DMA delegation**:
+
+`SYS_DEV_SUBMIT` does not use ambient-domain delegation.  It uses
+`delegate_dma_span_from_authority_id()`, which locates the exact
+authority entry named by the buffer handle's AuthorityId and derives
+the DMA span only from that entry.
+
+The primitive independently re-validates: the found entry still names
+the expected object and generation, and the underlying object generation
+is current.  This makes the primitive safe regardless of its caller's
+earlier checks.
+
+The causal chain:
+
+  H_b -> A_b^exact -> A_DMA.
+
+Not:
+
+  H_b -> ambient domain search -> A_DMA.
+
+This is proved by the centerpiece test: a driver holds a READ-only
+buffer handle alongside an unrelated ambient WRITE capability over
+the same object span.  SYS_DEV_SUBMIT fails.  The ambient authority
+cannot rescue the deficient presented handle.
+
+**Decision -- DelegationId propagation, not creation**:
+
+SYS_DEV_SUBMIT does not allocate a DelegationId.  It copies the
+buffer handle's `delegation_id` (which may be `None` for directly
+provisioned authority) into the `BlockRequest` and ultimately into
+the `BlockCompletion`.  This implements:
+
+  9.2c propagates T;  9.2c never creates T.
+
+**Decision -- request-metadata consistency invariant**:
+
+  source_authority_id = None => delegation_id = None.
+
+The legacy ambient-domain path may not carry asserted provenance.
+This prevents an internally constructed request from using ambient
+authority while attaching an arbitrary DelegationId.  The converse
+need not hold: `source_authority_id = Some(A), delegation_id = None`
+is valid for directly provisioned buffer capability.
+
+This gives a clean representation invariant:
+
+  T != None => the request used exact-authority delegation.
+
+**Decision -- SYS_DEV_SUBMIT ABI and preflight**:
+
+Syscall 13.  Register encoding:
+
+  R1 = device handle slot (u32)
+  R2 = device handle generation (u32)
+  R3 = block number (u64)
+  R4 = buffer handle slot (u32)
+  R5 = buffer handle generation (u32)
+
+R1/R2/R4/R5 use `u32::try_from()` for checked decode.
+
+Preflight gates:
+
+  0. ABI fields decode exactly
+  1. caller is not already in IoWait
+  2. H_d resolves as Device
+  3. H_d has SubmitRead in Fabric and cap table
+  4. H_d.object is bound to the installed BlockController
+  5. H_b resolves as Memory
+  6. H_b.perms >= WRITE
+  7. T.driver = current ProcessKey (if T exists)
+
+On success, the process enters IoWait with the EventFrame outstanding.
+On completion, the existing timer/device interrupt → `drain_block_completions()`
+→ `event_return()` path resumes the driver.
+
+SYS_DEV_SUBMIT error codes:
+
+  0 = success (driver enters IoWait)
+  1 = ABI decode failure
+  2 = caller already in IoWait
+  3 = device handle resolution failure (not Device, missing SubmitRead,
+      wrong binding, or backing authority mismatch)
+  4 = buffer handle resolution failure (not Memory, missing WRITE)
+  5 = provenance violation (T.driver != current ProcessKey)
+  6 = controller rejected submission (bad block, busy slot, DMA failure)
+
+**Decision -- legacy SYS_BLOCK_READ unchanged**:
+
+The existing `SYS_BLOCK_READ` path uses ambient-domain delegation
+with `source_authority_id: None` and `delegation_id: None`.  It
+remains the kernel-mediated read path for old tests and does not
+require a device capability.  SYS_DEV_SUBMIT is the new
+authority-checked path.
+
+**Phase boundary -- explicitly excluded from 9.2c**:
+
+- No user-space interrupt delivery.
+- No Device-cap transfer over SYS_SEND_CAP.
+- No blocking SYS_RECV_WAIT.
+- No PeerDied notification.
+- No driver-death handling.
+- No idle-progress change.
+- No multi-device routing.
+- No full client+driver guest program.
+
+These belong to 9.2d–f.
+
+**Hostile correspondence tests (19 witnesses)**:
+
+The decisive tests prove both layers of the exact-authority chain:
+
+  H_b(READ) + A_ambient(WRITE)  =>  syscall rejects
+  (centerpiece: `read_handle_fails_despite_ambient_write`)
+
+  Memory handle as Device  =>  kind gate rejects
+  Device handle as buffer  =>  kind gate rejects
+  High-bit handle fields   =>  ABI decode rejects
+
+Together these establish:
+
+  H_d -> A_d^exact -> SubmitRead checked
+  H_b -> A_b^exact -> A_DMA
+
+rather than merely proving two independent permission checks.
+
+**Formal methodology note**:
+
+Like 9.2a and 9.2b, the 9.2c plan was developed by comparing the
+intended implementation against the Kleis specification and the
+architectural thesis statement before writing any Rust code.  The
+centerpiece test was designed before implementation, not discovered
+afterward.
+
+635/635 tests; 29 instructions.  Phase 9.2c is complete.

@@ -100,7 +100,8 @@ Canonical Anka source (~17 KB, 46 functions)
           ▼
   Secure OS (SYS_EXIT, SYS_WRITE, SYS_SEAL, SYS_EXEC,
              SYS_SPAWN, SYS_WAIT, SYS_SEND, SYS_RECV,
-             SYS_BLOCK_READ, SYS_CAP_DROP, SYS_SEND_CAP, SYS_SEND_KEY)
+             SYS_BLOCK_READ, SYS_CAP_DROP, SYS_SEND_CAP,
+             SYS_SEND_KEY, SYS_DEV_SUBMIT)
           │
           ▼
   ankad (native Anka64 supervisor — boot, spawn, wait, restart)
@@ -1300,7 +1301,7 @@ Design questions, with current status.
 2. **Physical translation** — How should `(ObjectId, offset)` map to physical memory?  Is a TLB needed?  Can translation caching remain independent of authority?
 3. **Capability representation** — How are capabilities made unforgeable in hardware?  Tagged memory, capability registers, object handles plus protected metadata, or hybrid approaches?
 6. **Interrupt and exception model** — **Resolved in Phase 9.0.**  Event entry (TRAP, timer interrupt) pushes a protected `EventFrame` containing `return_pc`, `return_privilege`, `interrupts_were_enabled`, and `cause`.  A single `event_return()` primitive consumes the frame, used by both `ERET` (ISA instruction) and `resume_from_trap()` (host-mediated).  Asynchronous delivery: `deliver_pending()` fires at instruction boundaries when `pending_event.is_some() && interrupts_enabled`.  `FabricTimer` is a machine-global instruction-step timer on `Fabric`.  Generation ≠ routing ≠ pending ≠ delivery.  Formally verified: `anka_interrupts.kleis` (7-place Petri net, 6 reachable markings, 4 conservation invariants, 10 safety proofs, 2 falsifiability witnesses).
-7. **Device model** — **Partially resolved in Phase 9.1.**  A block device demonstrates capability-mediated asynchronous I/O.  Device capabilities are delegated as narrow, request-local DMA domains derived at submission time from the submitter's authority.  Command slots are bounded (F + O\_wait + O\_dma + C = N\_slots) with generation-qualified handles.  Completion queues are the source of truth; interrupts are level-triggered notifications (L\_dev := C > 0).  User-space drivers are not yet implemented but the authority model (DMA-DELEGATION: request authority ⊆ explicitly delegated authority) is designed to support them.  Remaining open: user-space driver isolation, device register capabilities, multi-device routing.
+7. **Device model** — **Substantially resolved through Phase 9.2c.**  A block device demonstrates capability-mediated asynchronous I/O (9.1).  Device capabilities are delegated as narrow, request-local DMA domains derived at submission time from the submitter's authority.  Command slots are bounded (F + O\_wait + O\_dma + C = N\_slots) with generation-qualified handles.  Completion queues are the source of truth; interrupts are level-triggered notifications (L\_dev := C > 0).  Phase 9.2c introduced kind-sensitive device authority (`DeviceRights`, `CapabilitySlotState` as `Free`/`Memory`/`Device` sum type), `SYS_DEV_SUBMIT` with seven-gate preflight, and exact-AuthorityId DMA delegation — the driver presents two handles (device + buffer) and the kernel derives DMA authority from the exact buffer handle's AuthorityId, not from ambient domain privilege.  Remaining open: user-space interrupt delivery, multi-device routing, device-capability transfer over SYS\_SEND\_CAP.
 9. **Capability transfer through IPC** — **Resolved in Phase 9.2b.**  `SYS_SEND_CAP` resolves the sender's handle via the three-condition check (9.2a), derives a child capability from the exact `AuthorityId` into the receiver's domain using `derive_from_authority_id()`, installs it in the receiver's cap table with a fresh `DelegationId`, and enqueues a cap-bearing message -- all atomically after a complete read-only preflight.  The receiver observes the transferred handle via the extended `SYS_RECV` ABI.  Non-amplification: `C_child ⊆ C_source`.  Memory-only scope in 9.2b; device capabilities deferred to 9.2c.
 
 ### New (post-self-hosting)
@@ -1452,7 +1453,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions, 63,808 bytes |
 | Canonical source | ~17 KB |
-| Tests | 616 |
+| Tests | 635 |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -1464,6 +1465,8 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | I-format immediates | fits\_imm18() — assembler and compiler share single range predicate |
 | Capability table | Per-process 16-slot, generation-qualified handles, AuthorityId-backed |
 | Capability transfer | SYS\_SEND\_CAP: atomic preflight-then-commit, Memory-only, DelegationId provenance |
+| Device authority | Kind-sensitive cap slots (Memory/Device sum type), DeviceRights, per-domain device-authority collection |
+| SYS\_DEV\_SUBMIT | Exact-handle device syscall: seven-gate preflight, exact-AuthorityId DMA delegation, DelegationId propagation |
 | IPC | SYS\_SEND (legacy PID), SYS\_SEND\_KEY (ProcessKey), SYS\_RECV (extended: tag + cap + sender) |
 | Mailbox bound | MAX\_MAILBOX\_SIZE = 16, enforced by all producers |
 | Host trust boundary | Still present (honest-host assumption) |
@@ -1647,7 +1650,27 @@ The entire 9.2 protocol is generation-qualified: SYS_SEND_CAP, SYS_SEND_KEY, and
 
 616/616 tests; 29 instructions.
 
-Through self-hosting, capabilities, multicore, W⊕X, protected calls/returns, process lifecycle, formal Petri nets, reclamation, a genuine supervisor, an explicitly delegated initial-environment ABI, a compiler managed by Anka rather than merely running inside it, zero host-fabricated compiler processes, a declarative system image, architectural interrupts with preemptive multitasking, asynchronous capability-mediated block I/O with suspended syscall continuations, and now atomic inter-process capability transfer with structured provenance, the ISA still has not demanded instruction 30.  Twenty-nine instructions.  616/616 tests.  The software keeps asking for better abstractions rather than instruction proliferation.
+### Stage 24 -- Device capability and kind-sensitive authority (Phase 9.2c)
+
+Phase 9.2c introduced kind-sensitive device authority and `SYS_DEV_SUBMIT` — the first user-space-mediated device syscall.  The architectural thesis: the exact two handles presented by the driver are the only authorities that can justify the accepted request.  No ambient authority may rescue a deficient handle.
+
+The central design decision is kind-sensitive capability representation.  `CapabilitySlotState` is now a sum type: `Free`, `Memory`, or `Device`.  Memory authority carries `Permissions` (R/W/X/S); device authority carries `DeviceRights` (SubmitRead, future SubmitWrite).  Illegal combinations such as executable devices or SubmitRead memory are structurally impossible.  `ResolvedCapability` is similarly restructured.
+
+Device authority has its own Fabric collection (`Vec<DeviceAuthorityEntry>` per domain), separate from memory capabilities because their protected fields differ.  `AuthorityId` uniqueness is enforced across both collections within each domain.  Kind boundaries are enforced positively: memory paths require `ObjectKind::Memory`, device paths require `ObjectKind::Device`.
+
+`SYS_DEV_SUBMIT` (syscall 13) takes two handles: a device handle (`H_d`) with SubmitRead rights, and a buffer handle (`H_b`) with Memory WRITE permission.  The preflight is a seven-gate sequence including checked ABI decode, IoWait exclusion, device binding validation, kind-correct resolution of both handles, and provenance verification.  DMA delegation uses `delegate_dma_span_from_authority_id()`, which derives the DMA span from the exact authority entry named by the buffer handle's AuthorityId — not from ambient domain search.
+
+`DelegationId` propagation: the syscall copies the buffer handle's `delegation_id` into `BlockRequest` and `BlockCompletion`.  9.2c propagates provenance; it never creates it.  A request-metadata consistency invariant ensures `source_authority_id = None => delegation_id = None`, preventing the ambient path from carrying asserted provenance.
+
+Device objects have identity without physical placement: Active with a zero-size span, consuming no physical memory.  The device-to-controller binding is one-shot and generation-qualified.
+
+The centerpiece test proves the exact-authority chain: a driver holds a READ-only buffer handle alongside an ambient WRITE capability over the same span.  `SYS_DEV_SUBMIT` fails.  This demonstrates `H_b → A_b^exact → A_DMA`, not `H_b → ambient domain → A_DMA`.
+
+Legacy `SYS_BLOCK_READ` remains unchanged: kernel-mediated, ambient-domain delegation, no device capability required.
+
+635/635 tests; 29 instructions.
+
+Through self-hosting, capabilities, multicore, W⊕X, protected calls/returns, process lifecycle, formal Petri nets, reclamation, a genuine supervisor, an explicitly delegated initial-environment ABI, a compiler managed by Anka rather than merely running inside it, zero host-fabricated compiler processes, a declarative system image, architectural interrupts with preemptive multitasking, asynchronous capability-mediated block I/O with suspended syscall continuations, atomic inter-process capability transfer with structured provenance, and now kind-sensitive device authority with exact-handle DMA delegation, the ISA still has not demanded instruction 30.  Twenty-nine instructions.  635/635 tests.  The software keeps asking for better abstractions rather than instruction proliferation.
 
 The project continues to evolve by the same rule that produced its strongest results:
 

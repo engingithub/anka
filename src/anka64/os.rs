@@ -32,6 +32,7 @@ pub const SYS_BLOCK_READ: u64 = 9; // block_read(block_num, buf_vaddr) → async
 pub const SYS_CAP_DROP: u64 = 10;  // cap_drop(slot, generation) → 0 ok, 1 bad handle
 pub const SYS_SEND_CAP: u64 = 11;  // send_cap(dest_key, value, src_handle, child_subset) → 0 ok
 pub const SYS_SEND_KEY: u64 = 12;  // send_key(dest_slot, dest_gen, value) → 0 ok
+pub const SYS_DEV_SUBMIT: u64 = 13; // dev_submit(device_handle, block_num, buffer_handle) → 0 ok
 
 /// Maximum messages per mailbox.  Enforced by all producers:
 /// SYS_SEND, SYS_SEND_KEY, and SYS_SEND_CAP.
@@ -537,6 +538,11 @@ pub struct Kernel {
     /// When present, tick_devices() advances it and routes
     /// level-triggered device interrupts.
     pub block_controller: Option<BlockController>,
+    /// Generation-qualified device binding (Phase 9.2c).
+    /// One-shot: install_block_device() sets this once.
+    /// SYS_DEV_SUBMIT gate 4 verifies the device handle's object
+    /// and generation match this binding.
+    block_device_binding: Option<DeviceBinding>,
     /// Monotonic DelegationId incarnation counter (checked, never wraps).
     /// Kernel owns this because DelegationId contains ProcessKeys,
     /// which are kernel-layer concepts.
@@ -559,6 +565,7 @@ impl Kernel {
             free_stack_extents: Vec::new(),
             free_trap_extents: Vec::new(),
             block_controller: None,
+            block_device_binding: None,
             next_delegation_incarnation: 0,
         }
     }
@@ -814,6 +821,9 @@ impl Kernel {
     ///
     /// Used by boot/spawn to seed initial handles and by tests.
     /// Runtime transfer belongs to 9.2b.
+    /// Install a memory capability for a process.
+    ///
+    /// Kind boundary: requires ObjectKind::Memory.
     pub fn install_capability(
         &mut self,
         slot: usize,
@@ -822,6 +832,10 @@ impl Kernel {
         length: u64,
         perms: Permissions,
     ) -> Option<CapabilityHandle> {
+        // Kind boundary: require Memory
+        let obj = self.fabric.objects.get(&object)?;
+        if obj.kind != ObjectKind::Memory { return None; }
+
         // Preflight: table must have an allocatable slot (Free AND
         // generation < u32::MAX).  Using allocatable_count() avoids
         // burning AuthorityIds on retired terminal-generation slots.
@@ -840,7 +854,81 @@ impl Kernel {
         let obj_gen = self.fabric.objects.get(&object)?.generation;
 
         match self.processes[slot].cap_table.as_mut()
-            .and_then(|ct| ct.install(object, obj_gen, offset, length, perms, auth_id, None))
+            .and_then(|ct| ct.install_memory(object, obj_gen, offset, length, perms, auth_id, None))
+        {
+            Some(handle) => Some(handle),
+            None => {
+                // Rollback: remove the Fabric authority we just created.
+                self.fabric.remove_by_authority_id(domain, auth_id);
+                None
+            }
+        }
+    }
+
+    /// Install a block device controller and create a Device object for it.
+    ///
+    /// One-shot: returns None if a block device is already bound.
+    /// Allocates an ObjectKind::Device object (size 0, no physical placement).
+    /// The returned ObjectId identifies this controller for SYS_DEV_SUBMIT
+    /// gate 4 (binding check).
+    pub fn install_block_device(&mut self, controller: BlockController) -> Option<ObjectId> {
+        if self.block_device_binding.is_some() {
+            return None; // one-shot: silently replacing would leave old Device objects alive
+        }
+
+        let dev_obj = self.fabric.alloc_object("block_device", 0, ObjectKind::Device);
+        let dev_gen = self.fabric.objects.get(&dev_obj)?.generation;
+
+        // Verify the object is Active without needing place_object()
+        debug_assert_eq!(
+            self.fabric.objects.get(&dev_obj).unwrap().state,
+            ObjectState::Active,
+            "Device objects must be Active immediately after alloc_object"
+        );
+
+        self.block_controller = Some(controller);
+        self.block_device_binding = Some(DeviceBinding {
+            object: dev_obj,
+            generation: dev_gen,
+        });
+
+        Some(dev_obj)
+    }
+
+    /// Install a device capability for a process.
+    ///
+    /// Kind boundary: requires ObjectKind::Device.
+    /// Same atomic discipline as install_capability: preflight
+    /// allocatable count and object kind/lifecycle before consuming
+    /// an AuthorityId.
+    pub fn install_device_capability(
+        &mut self,
+        slot: usize,
+        device_object: ObjectId,
+        rights: DeviceRights,
+    ) -> Option<CapabilityHandle> {
+        // Kind boundary: require Device
+        let obj = self.fabric.objects.get(&device_object)?;
+        if obj.kind != ObjectKind::Device { return None; }
+        if obj.state != ObjectState::Active { return None; }
+
+        // Preflight: table must have an allocatable slot
+        let ct = self.processes[slot].cap_table.as_ref()?;
+        if ct.allocatable_count() == 0 {
+            return None;
+        }
+
+        let domain = self.processes[slot].core.domain;
+        let auth_id = self.fabric.alloc_authority_id()?;
+
+        self.fabric.grant_device_with_authority_id(
+            domain, device_object, rights, auth_id,
+        )?;
+
+        let obj_gen = self.fabric.objects.get(&device_object)?.generation;
+
+        match self.processes[slot].cap_table.as_mut()
+            .and_then(|ct| ct.install_device(device_object, obj_gen, rights, auth_id, None))
         {
             Some(handle) => Some(handle),
             None => {
@@ -878,7 +966,7 @@ impl Kernel {
 
         // Condition 2 ground truth: AuthorityId must exist in Fabric domain.
         let domain = self.processes[slot].core.domain;
-        if !self.fabric.has_authority_id(domain, resolved.authority_id) {
+        if !self.fabric.has_authority_id(domain, resolved.authority_id()) {
             return None;
         }
 
@@ -1650,6 +1738,9 @@ impl Kernel {
             }
             SYS_SEND_KEY => {
                 self.handle_send_key(idx);
+            }
+            SYS_DEV_SUBMIT => {
+                self.handle_dev_submit(idx);
             }
             _ => {
                 eprintln!("Unknown syscall {} from pid {}",
@@ -2690,6 +2781,8 @@ impl Kernel {
             target_object,
             target_offset,
             source_domain,
+            source_authority_id: None,
+            delegation_id: None,
         };
 
         let result = self.block_controller.as_mut().unwrap()
@@ -2906,28 +2999,26 @@ impl Kernel {
             None => { self.fail_send_cap(idx, 3); return; }
         };
 
-        // ── Gate 2b: Source is Memory only ──
-        let src_object = match self.fabric.objects.get(&resolved.object) {
-            Some(obj) => obj,
-            None => { self.fail_send_cap(idx, 3); return; }
+        // ── Gate 2b: Source must be Memory (kind-sensitive pattern match) ──
+        let (parent_offset, parent_length, parent_perms) = match &resolved {
+            ResolvedCapability::Memory { offset, length, perms, .. } => (*offset, *length, *perms),
+            ResolvedCapability::Device { .. } => {
+                self.fail_send_cap(idx, 4); return;
+            }
         };
-        if src_object.kind != ObjectKind::Memory {
-            self.fail_send_cap(idx, 4);
-            return;
-        }
 
         // ── Gate 3: Subset relationship ──
-        if !child_perms.is_subset_of(resolved.perms) {
+        if !child_perms.is_subset_of(parent_perms) {
             self.fail_send_cap(idx, 4); return;
         }
-        if child_offset < resolved.offset {
+        if child_offset < parent_offset {
             self.fail_send_cap(idx, 4); return;
         }
-        if child_length > resolved.length {
+        if child_length > parent_length {
             self.fail_send_cap(idx, 4); return;
         }
-        // Overflow-safe: child_offset - resolved.offset <= resolved.length - child_length
-        if child_offset - resolved.offset > resolved.length - child_length {
+        // Overflow-safe: child_offset - parent_offset <= parent_length - child_length
+        if child_offset - parent_offset > parent_length - child_length {
             self.fail_send_cap(idx, 4); return;
         }
 
@@ -2971,7 +3062,7 @@ impl Kernel {
         let dst_domain = self.processes[dest_idx].core.domain;
         let derived = self.fabric.derive_from_authority_id(
             src_domain,
-            resolved.authority_id,
+            resolved.authority_id(),
             dst_domain,
             child_offset,
             child_length,
@@ -2988,7 +3079,7 @@ impl Kernel {
         // Install in receiver's cap table
         let obj_gen = Generation(derived_cap.generation().0);
         let new_handle = self.processes[dest_idx].cap_table.as_mut()
-            .and_then(|ct| ct.install(
+            .and_then(|ct| ct.install_memory(
                 derived_cap.object(),
                 obj_gen,
                 child_offset,
@@ -3019,6 +3110,180 @@ impl Kernel {
     }
 
     /// Helper: fail a SYS_SEND_CAP with a specific error code.
+    /// SYS_DEV_SUBMIT (syscall 13): submit a device I/O request.
+    ///
+    /// ABI:
+    ///   R1 = device handle slot (u32)
+    ///   R2 = device handle generation (u32)
+    ///   R3 = block number
+    ///   R4 = buffer handle slot (u32)
+    ///   R5 = buffer handle generation (u32)
+    ///
+    /// Returns: R0 = 0 on success (caller blocked in IoWait),
+    ///   1 = ABI decode failure
+    ///   2 = already in IoWait
+    ///   3 = device handle invalid (not Device, not resolved)
+    ///   4 = device authority invalid (missing SubmitRead, wrong binding)
+    ///   5 = no block controller bound
+    ///   6 = buffer handle invalid (not Memory, not resolved)
+    ///   7 = buffer rights insufficient (missing WRITE)
+    ///   8 = provenance violation (delegation_id.driver ≠ current)
+    ///   9 = controller submission failed (busy, invalid block)
+    ///
+    /// Preflight gates:
+    ///   0. ABI fields decode exactly
+    ///   1. Caller is not already in IoWait
+    ///   2. H_d resolves as Device
+    ///   3. H_d has SubmitRead in Fabric and cap table, bound to controller
+    ///   4. Block controller exists
+    ///   5. H_b resolves as Memory
+    ///   6. H_b.perms ⊇ WRITE
+    ///   7. T.driver == current ProcessKey, if T exists
+    fn handle_dev_submit(&mut self, idx: usize) {
+        use super::block::{BlockRequest, SubmitResult};
+
+        let r1 = self.processes[idx].core.r[R1 as usize];
+        let r2 = self.processes[idx].core.r[R2 as usize];
+        let block_number = self.processes[idx].core.r[R3 as usize];
+        let r4 = self.processes[idx].core.r[R4 as usize];
+        let r5 = self.processes[idx].core.r[R5 as usize];
+
+        // ── Gate 0: Checked ABI decode ──
+        let dev_slot = match u32::try_from(r1) {
+            Ok(v) => v, Err(_) => { self.fail_dev_submit(idx, 1); return; }
+        };
+        let dev_gen = match u32::try_from(r2) {
+            Ok(v) => v, Err(_) => { self.fail_dev_submit(idx, 1); return; }
+        };
+        let buf_slot = match u32::try_from(r4) {
+            Ok(v) => v, Err(_) => { self.fail_dev_submit(idx, 1); return; }
+        };
+        let buf_gen = match u32::try_from(r5) {
+            Ok(v) => v, Err(_) => { self.fail_dev_submit(idx, 1); return; }
+        };
+
+        let dev_handle = CapabilityHandle { slot: dev_slot, generation: dev_gen };
+        let buf_handle = CapabilityHandle { slot: buf_slot, generation: buf_gen };
+
+        // ── Gate 1: Not already in IoWait ──
+        if self.processes[idx].io_wait.is_some() {
+            self.fail_dev_submit(idx, 2);
+            return;
+        }
+
+        // ── Gate 2: Device handle resolves as Device ──
+        let dev_resolved = match self.resolve_capability(idx, dev_handle) {
+            Some(r) => r,
+            None => { self.fail_dev_submit(idx, 3); return; }
+        };
+        let (dev_object, dev_gen_resolved, dev_rights, dev_authority_id) = match &dev_resolved {
+            ResolvedCapability::Device {
+                object, object_generation, rights, authority_id, ..
+            } => (*object, *object_generation, *rights, *authority_id),
+            ResolvedCapability::Memory { .. } => {
+                self.fail_dev_submit(idx, 3); return;
+            }
+        };
+
+        // ── Gate 3: Device authority valid (SubmitRead, binding) ──
+        let domain = self.processes[idx].core.domain;
+        if !self.fabric.validate_device_authority(
+            domain,
+            dev_authority_id,
+            dev_object,
+            dev_gen_resolved,
+            dev_rights,
+            DeviceRights::SUBMIT_READ,
+        ) {
+            self.fail_dev_submit(idx, 4);
+            return;
+        }
+
+        // ── Gate 3b: Device object is bound to the block controller ──
+        let binding = match &self.block_device_binding {
+            Some(b) => b.clone(),
+            None => { self.fail_dev_submit(idx, 5); return; }
+        };
+        if binding.object != dev_object || binding.generation != dev_gen_resolved {
+            self.fail_dev_submit(idx, 4);
+            return;
+        }
+
+        // ── Gate 4: Block controller exists ──
+        if self.block_controller.is_none() {
+            self.fail_dev_submit(idx, 5);
+            return;
+        }
+
+        // ── Gate 5: Buffer handle resolves as Memory ──
+        let buf_resolved = match self.resolve_capability(idx, buf_handle) {
+            Some(r) => r,
+            None => { self.fail_dev_submit(idx, 6); return; }
+        };
+        let (buf_object, buf_offset, buf_perms, buf_authority_id, buf_delegation_id) =
+            match &buf_resolved {
+                ResolvedCapability::Memory {
+                    object, offset, perms, authority_id, delegation_id, ..
+                } => (*object, *offset, *perms, *authority_id, *delegation_id),
+                ResolvedCapability::Device { .. } => {
+                    self.fail_dev_submit(idx, 6); return;
+                }
+            };
+
+        // ── Gate 6: Buffer handle has WRITE ──
+        if !buf_perms.contains(Permissions::WRITE) {
+            self.fail_dev_submit(idx, 7);
+            return;
+        }
+
+        // ── Gate 7: Provenance check (mandatory when T exists) ──
+        if let Some(tid) = buf_delegation_id {
+            let current_key = ProcessKey {
+                slot: idx,
+                generation: self.processes[idx].generation,
+            };
+            if tid.driver != current_key {
+                self.fail_dev_submit(idx, 8);
+                return;
+            }
+        }
+
+        // ── All preflight gates passed — construct and submit request ──
+        let rk = RequesterKey {
+            slot: idx as u32,
+            generation: self.processes[idx].generation,
+        };
+        let source_domain = self.processes[idx].core.domain;
+
+        let req = BlockRequest {
+            block_number,
+            requester: rk,
+            target_object: buf_object,
+            target_offset: buf_offset,
+            source_domain,
+            source_authority_id: Some(buf_authority_id),
+            delegation_id: buf_delegation_id,
+        };
+
+        let result = self.block_controller.as_mut().unwrap()
+            .submit(req, &mut self.fabric);
+
+        match result {
+            SubmitResult::Accepted(handle) => {
+                self.processes[idx].io_wait = Some(IoWait { request: handle });
+                // Leave EventFrame outstanding — completion path will event_return()
+            }
+            _ => {
+                self.fail_dev_submit(idx, 9);
+            }
+        }
+    }
+
+    fn fail_dev_submit(&mut self, idx: usize, code: u64) {
+        self.processes[idx].core.r[R0 as usize] = code;
+        self.resume_from_trap(idx);
+    }
+
     fn fail_send_cap(&mut self, idx: usize, code: u64) {
         self.processes[idx].core.r[R0 as usize] = code;
         self.resume_from_trap(idx);
@@ -5901,6 +6166,8 @@ mod tests {
             target_object: buf,
             target_offset: 0,
             source_domain: dom,
+            source_authority_id: None,
+            delegation_id: None,
         };
 
         let result = kernel.block_controller.as_mut().unwrap()
@@ -5944,6 +6211,8 @@ mod tests {
                 target_object: buf,
                 target_offset: blk * 512,
                 source_domain: dom,
+            source_authority_id: None,
+            delegation_id: None,
             };
             let result = kernel.block_controller.as_mut().unwrap()
                 .submit(req, &mut kernel.fabric);
@@ -6001,6 +6270,8 @@ mod tests {
             target_object: buf,
             target_offset: 0,
             source_domain: dom,
+            source_authority_id: None,
+            delegation_id: None,
         };
 
         let result = kernel.block_controller.as_mut().unwrap()
@@ -6076,6 +6347,8 @@ mod tests {
             target_object: buf,
             target_offset: 0,
             source_domain: dom,
+            source_authority_id: None,
+            delegation_id: None,
         };
 
         let result = kernel.block_controller.as_mut().unwrap()
@@ -6127,6 +6400,8 @@ mod tests {
             target_object: buf,
             target_offset: 0,
             source_domain: dom,
+            source_authority_id: None,
+            delegation_id: None,
         };
 
         kernel.block_controller.as_mut().unwrap()
@@ -6197,6 +6472,8 @@ mod tests {
             target_object: buf,
             target_offset: 0,
             source_domain: dom,
+            source_authority_id: None,
+            delegation_id: None,
         };
         kernel.block_controller.as_mut().unwrap()
             .submit(req, &mut kernel.fabric);
@@ -6543,6 +6820,8 @@ mod tests {
             target_object: buf,
             target_offset: 0,
             source_domain: dom,
+            source_authority_id: None,
+            delegation_id: None,
         };
         let handle0 = match kernel.block_controller.as_mut().unwrap()
             .submit(req0, &mut kernel.fabric)
@@ -6558,6 +6837,8 @@ mod tests {
             target_object: buf,
             target_offset: 512,
             source_domain: dom,
+            source_authority_id: None,
+            delegation_id: None,
         };
         let handle1 = match kernel.block_controller.as_mut().unwrap()
             .submit(req1, &mut kernel.fabric)
@@ -6695,10 +6976,11 @@ mod tests {
 
         let resolved = kernel.resolve_capability(slot, h)
             .expect("resolve should succeed");
-        assert_eq!(resolved.object, data);
-        assert_eq!(resolved.offset, 0);
-        assert_eq!(resolved.length, 4096);
-        assert_eq!(resolved.perms, Permissions::READ);
+        assert_eq!(resolved.object(), data);
+        let (offset, length, perms) = resolved.as_memory();
+        assert_eq!(offset, 0);
+        assert_eq!(length, 4096);
+        assert_eq!(perms, Permissions::READ);
 
         eprintln!("9.2a: install + resolve ✓");
     }
@@ -6989,7 +7271,7 @@ mod tests {
         let resolved = kernel.processes[slot].cap_table.as_ref().unwrap()
             .resolve(h, |oid| kernel.fabric.objects.get(&oid).map(|o| o.generation))
             .expect("table-level resolve should succeed");
-        let removed = kernel.fabric.remove_by_authority_id(domain, resolved.authority_id);
+        let removed = kernel.fabric.remove_by_authority_id(domain, resolved.authority_id());
         assert!(removed, "authority should exist");
 
         // Now: slot is Occupied, object gen is current, but AuthorityId
@@ -7026,7 +7308,7 @@ mod tests {
         let resolved = kernel.processes[slot].cap_table.as_ref().unwrap()
             .resolve(h, |oid| kernel.fabric.objects.get(&oid).map(|o| o.generation))
             .expect("table-level resolve");
-        kernel.fabric.remove_by_authority_id(dom, resolved.authority_id);
+        kernel.fabric.remove_by_authority_id(dom, resolved.authority_id());
 
         // Guest code: CAP_DROP(slot, gen), save result, EXIT
         let mut asm = Asm64::new();
@@ -7401,13 +7683,14 @@ mod tests {
             .expect("receiver handle must resolve");
 
         // Non-amplification: subset relationship
-        assert_eq!(resolved.offset, 0);
-        assert_eq!(resolved.length, 0x2000);
-        assert_eq!(resolved.perms, Permissions::READ);
+        let (offset, length, perms) = resolved.as_memory();
+        assert_eq!(offset, 0);
+        assert_eq!(length, 0x2000);
+        assert_eq!(perms, Permissions::READ);
 
         // DelegationId is present and correct
-        assert!(resolved.delegation_id.is_some());
-        let tid = resolved.delegation_id.unwrap();
+        assert!(resolved.delegation_id().is_some());
+        let tid = resolved.delegation_id().unwrap();
         assert_eq!(tid.client, sender_key);
         assert_eq!(tid.driver, receiver_key);
         assert_eq!(tid.incarnation, tid_before);
@@ -7853,7 +8136,7 @@ mod tests {
 
         let r1 = kernel.resolve_capability(sender, h1).unwrap();
         let r2 = kernel.resolve_capability(sender, h2).unwrap();
-        assert_ne!(r1.authority_id, r2.authority_id,
+        assert_ne!(r1.authority_id(), r2.authority_id(),
             "twin caps must have different AuthorityIds");
 
         let receiver_key = ProcessKey {
@@ -7907,9 +8190,7 @@ mod tests {
                 0x000000, 0x010000, 0x020000);
         install_trap_handler(&mut fabric, 0x000000, 0x4000);
 
-        let dev_obj = fabric.alloc_object("device0", 0x1000, ObjectKind::Device);
-        fabric.place_object(dev_obj, 0x030000);
-        fabric.grant(dom_a, dev_obj, 0, 0x1000, Permissions::RW);
+        let dev_obj = fabric.alloc_object("device0", 0, ObjectKind::Device);
 
         let mut asm_a = Asm64::new();
         for _ in 0..100 { asm_a.nop(); }
@@ -7939,9 +8220,17 @@ mod tests {
         let sender = key_a.slot;
         let receiver = key_b.slot;
 
-        // Install Device cap in sender's table
-        let dev_handle = kernel.install_capability(sender, dev_obj, 0, 0x1000, Permissions::RW)
-            .expect("install device cap");
+        // Install Device cap in sender's table directly (install_capability
+        // now correctly rejects Device objects via kind boundary).
+        let dev_auth_id = kernel.fabric.alloc_authority_id().expect("alloc auth id");
+        kernel.fabric.grant_device_with_authority_id(
+            kernel.processes[sender].core.domain, dev_obj,
+            DeviceRights::SUBMIT_READ, dev_auth_id,
+        ).expect("grant device authority");
+        let dev_gen = kernel.fabric.objects.get(&dev_obj).unwrap().generation;
+        let dev_handle = kernel.processes[sender].cap_table.as_mut().unwrap()
+            .install_device(dev_obj, dev_gen, DeviceRights::SUBMIT_READ, dev_auth_id, None)
+            .expect("install device cap in table");
 
         let receiver_key = ProcessKey {
             slot: receiver,
@@ -8001,7 +8290,7 @@ mod tests {
         let msg1 = kernel.mailboxes[receiver].last().unwrap().clone();
         let h1 = msg1.cap.unwrap();
         let r1 = kernel.resolve_capability(receiver, h1).unwrap();
-        let t1 = r1.delegation_id.unwrap();
+        let t1 = r1.delegation_id().unwrap();
 
         // Transfer #2 (same source, different subset)
         kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
@@ -8019,7 +8308,7 @@ mod tests {
         let msg2 = kernel.mailboxes[receiver].last().unwrap().clone();
         let h2 = msg2.cap.unwrap();
         let r2 = kernel.resolve_capability(receiver, h2).unwrap();
-        let t2 = r2.delegation_id.unwrap();
+        let t2 = r2.delegation_id().unwrap();
 
         // DelegationIds must be distinct
         assert_ne!(t1.incarnation, t2.incarnation,
@@ -8330,7 +8619,7 @@ mod tests {
             .expect("install");
 
         let resolved = kernel.resolve_capability(sender, h).unwrap();
-        assert!(resolved.delegation_id.is_none(),
+        assert!(resolved.delegation_id().is_none(),
             "boot/spawn-installed cap must have no DelegationId");
 
         eprintln!("9.2b: boot cap no delegation ID ✓");
@@ -8474,12 +8763,13 @@ mod tests {
             .expect("handle from RECV ABI must resolve");
 
         // Verify non-amplification through the full path
-        assert_eq!(resolved.offset, 0);
-        assert_eq!(resolved.length, 0x2000);
-        assert_eq!(resolved.perms, Permissions::READ);
+        let (offset, length, perms) = resolved.as_memory();
+        assert_eq!(offset, 0);
+        assert_eq!(length, 0x2000);
+        assert_eq!(perms, Permissions::READ);
 
         // Verify DelegationId is present
-        let tid = resolved.delegation_id
+        let tid = resolved.delegation_id()
             .expect("transferred cap must carry DelegationId");
         assert_eq!(tid.client, sender_key);
         assert_eq!(tid.driver, receiver_key);
@@ -8528,7 +8818,7 @@ mod tests {
         // Verify it resolves before sender death
         let resolved_before = kernel.resolve_capability(receiver, recv_handle)
             .expect("handle must resolve before sender death");
-        let tid = resolved_before.delegation_id
+        let tid = resolved_before.delegation_id()
             .expect("must have DelegationId");
 
         // Destroy the sender's domain — simulates sender process death
@@ -8544,18 +8834,663 @@ mod tests {
         // The receiver's derived authority survives sender domain destruction
         let resolved_after = kernel.resolve_capability(receiver, recv_handle)
             .expect("receiver handle must still resolve after sender domain death");
-        assert_eq!(resolved_after.offset, 0);
-        assert_eq!(resolved_after.length, 0x2000);
-        assert_eq!(resolved_after.perms, Permissions::READ);
-        assert_eq!(resolved_after.authority_id, resolved_before.authority_id);
+        let (offset, length, perms) = resolved_after.as_memory();
+        assert_eq!(offset, 0);
+        assert_eq!(length, 0x2000);
+        assert_eq!(perms, Permissions::READ);
+        assert_eq!(resolved_after.authority_id(), resolved_before.authority_id());
 
         // DelegationId survives — it is part of the receiver's cap-table entry
-        let tid_after = resolved_after.delegation_id
+        let tid_after = resolved_after.delegation_id()
             .expect("DelegationId must survive sender death");
         assert_eq!(tid_after, tid);
         assert_eq!(tid_after.client, sender_key,
             "provenance still records the now-dead sender");
 
         eprintln!("9.2b: sender domain death preserves receiver authority ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.2c — Device Capability + SYS_DEV_SUBMIT tests
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Set up a kernel with a block device, a driver process with both
+    /// device and buffer capabilities, for 9.2c testing.
+    fn dev_submit_setup() -> (Kernel, usize, ObjectId, ObjectId) {
+        let mut fabric = Fabric::new(0x400000);
+
+        // Create driver process
+        let (core, dom, text, data, _stack) =
+            create_process(&mut fabric, CPU0, "driver",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+
+        let mut asm = Asm64::new();
+        for _ in 0..100 { asm.nop(); }
+        asm.movi(R1, 0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        // Block storage: 4 blocks × 512 bytes
+        let mut storage = super::super::block::BlockStorage::new(4, 512);
+        let b0: Vec<u8> = (0..512).map(|i| (i % 256) as u8).collect();
+        storage.write_block(0, &b0);
+        storage.write_block(1, &vec![0xAA; 512]);
+
+        let controller = super::super::block::BlockController::new(
+            storage, 1, AgentId(100),
+        );
+
+        let mut kernel = Kernel::new(fabric);
+        let pk = kernel.spawn(core);
+        let slot = pk.slot;
+
+        // Install block device (one-shot)
+        let dev_obj = kernel.install_block_device(controller)
+            .expect("install_block_device");
+
+        // Install device capability for the driver
+        let _dev_handle = kernel.install_device_capability(slot, dev_obj, DeviceRights::SUBMIT_READ)
+            .expect("install device cap");
+
+        (kernel, slot, dev_obj, data)
+    }
+
+    // ─── 9.2c: install_block_device one-shot ───
+
+    #[test]
+    fn p92c_install_block_device_one_shot() {
+        let (mut kernel, _slot, _dev, _data) = dev_submit_setup();
+
+        // Second install must fail (one-shot)
+        let storage2 = super::super::block::BlockStorage::new(2, 512);
+        let ctrl2 = super::super::block::BlockController::new(
+            storage2, 1, AgentId(200),
+        );
+        assert!(kernel.install_block_device(ctrl2).is_none(),
+            "install_block_device must be one-shot");
+
+        eprintln!("9.2c: install_block_device one-shot ✓");
+    }
+
+    // ─── 9.2c: Device object is Active without placement ───
+
+    #[test]
+    fn p92c_device_object_active_no_placement() {
+        let (kernel, _slot, dev_obj, _data) = dev_submit_setup();
+        let obj = kernel.fabric.objects.get(&dev_obj).unwrap();
+        assert_eq!(obj.state, ObjectState::Active);
+        assert_eq!(obj.kind, ObjectKind::Device);
+        assert_eq!(obj.size, 0, "Device object needs no physical extent");
+        assert!(kernel.fabric.translate(dev_obj, 0).is_none(),
+            "Device object must not have physical placement");
+
+        eprintln!("9.2c: Device object active without placement ✓");
+    }
+
+    // ─── 9.2c: install_capability rejects Device objects ───
+
+    #[test]
+    fn p92c_install_capability_rejects_device() {
+        let (mut kernel, slot, dev_obj, _data) = dev_submit_setup();
+        let result = kernel.install_capability(slot, dev_obj, 0, 0, Permissions::READ);
+        assert!(result.is_none(),
+            "install_capability must reject Device objects");
+
+        eprintln!("9.2c: install_capability rejects Device ✓");
+    }
+
+    // ─── 9.2c: install_device_capability rejects Memory objects ───
+
+    #[test]
+    fn p92c_install_device_capability_rejects_memory() {
+        let (mut kernel, slot, _dev_obj, data) = dev_submit_setup();
+        let result = kernel.install_device_capability(slot, data, DeviceRights::SUBMIT_READ);
+        assert!(result.is_none(),
+            "install_device_capability must reject Memory objects");
+
+        eprintln!("9.2c: install_device_capability rejects Memory ✓");
+    }
+
+    // ─── 9.2c: valid SYS_DEV_SUBMIT succeeds ───
+
+    #[test]
+    fn p92c_dev_submit_success() {
+        let (mut kernel, slot, dev_obj, data) = dev_submit_setup();
+
+        // Install a WRITE buffer cap for the driver
+        let buf_handle = kernel.install_capability(slot, data, 0, 512, Permissions::WRITE)
+            .expect("install buffer cap");
+
+        // Get device handle (slot 0 was installed by setup)
+        let dev_handle = CapabilityHandle { slot: 0, generation: 0 };
+
+        // Push an EventFrame to simulate the TRAP instruction's effect.
+        // In real execution, TRAP pushes this before the kernel intercepts.
+        let return_pc = kernel.processes[slot].core.pc + 4;
+        kernel.processes[slot].core.event_frames.push(EventFrame {
+            return_pc,
+            return_privilege: Privilege::User,
+            interrupts_were_enabled: true,
+            cause: EventCause::Syscall,
+        });
+
+        // SYS_DEV_SUBMIT
+        kernel.processes[slot].core.r[R0 as usize] = SYS_DEV_SUBMIT;
+        kernel.processes[slot].core.r[R1 as usize] = dev_handle.slot as u64;
+        kernel.processes[slot].core.r[R2 as usize] = dev_handle.generation as u64;
+        kernel.processes[slot].core.r[R3 as usize] = 0; // block 0
+        kernel.processes[slot].core.r[R4 as usize] = buf_handle.slot as u64;
+        kernel.processes[slot].core.r[R5 as usize] = buf_handle.generation as u64;
+
+        kernel.processes[slot].core.halted = true;
+        kernel.handle_syscall(slot);
+
+        // Should be blocked in IoWait (EventFrame outstanding)
+        assert!(kernel.processes[slot].io_wait.is_some(),
+            "driver should be in IoWait after DEV_SUBMIT");
+        assert_eq!(kernel.processes[slot].core.event_frames.len(), 1,
+            "EventFrame must remain outstanding for completion path");
+
+        // Tick until completion
+        for _ in 0..20 {
+            kernel.tick_devices(slot);
+        }
+        kernel.drain_block_completions();
+
+        // Process should have woken up with success
+        assert!(kernel.processes[slot].io_wait.is_none());
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 0,
+            "DEV_SUBMIT completion should report success");
+
+        // Data should be in the buffer
+        let phys = kernel.fabric.translate(data, 0).unwrap();
+        let buf_data = kernel.fabric.read_physical(phys, 512);
+        let expected: Vec<u8> = (0..512).map(|i| (i % 256) as u8).collect();
+        assert_eq!(buf_data, &expected[..], "block 0 data should be in buffer");
+
+        eprintln!("9.2c: DEV_SUBMIT success ✓");
+    }
+
+    // ─── 9.2c CENTERPIECE: READ-only handle fails despite ambient WRITE ───
+
+    #[test]
+    fn p92c_read_handle_fails_despite_ambient_write() {
+        let (mut kernel, slot, _dev_obj, data) = dev_submit_setup();
+
+        // Install a READ-only buffer handle (insufficient for DMA WRITE)
+        let read_handle = kernel.install_capability(slot, data, 0, 512, Permissions::READ)
+            .expect("install read-only buffer cap");
+
+        // Also grant ambient WRITE authority over the same object/span
+        let domain = kernel.processes[slot].core.domain;
+        kernel.fabric.grant(domain, data, 0, 512, Permissions::WRITE);
+
+        let dev_handle = CapabilityHandle { slot: 0, generation: 0 };
+
+        // SYS_DEV_SUBMIT with the READ-only handle
+        kernel.processes[slot].core.r[R0 as usize] = SYS_DEV_SUBMIT;
+        kernel.processes[slot].core.r[R1 as usize] = dev_handle.slot as u64;
+        kernel.processes[slot].core.r[R2 as usize] = dev_handle.generation as u64;
+        kernel.processes[slot].core.r[R3 as usize] = 0;
+        kernel.processes[slot].core.r[R4 as usize] = read_handle.slot as u64;
+        kernel.processes[slot].core.r[R5 as usize] = read_handle.generation as u64;
+
+        kernel.processes[slot].core.halted = true;
+        kernel.handle_syscall(slot);
+
+        // Must be rejected (gate 6: WRITE check on the presented handle)
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 7,
+            "READ-only handle must be rejected even with ambient WRITE");
+        assert!(kernel.processes[slot].io_wait.is_none(),
+            "rejected DEV_SUBMIT must not enter IoWait");
+
+        eprintln!("9.2c CENTERPIECE: ¬WRITE(H_b) + ambient WRITE → rejected ✓");
+    }
+
+    // ─── 9.2c: memory handle as device handle fails ───
+
+    #[test]
+    fn p92c_memory_handle_as_device_fails() {
+        let (mut kernel, slot, _dev_obj, data) = dev_submit_setup();
+
+        let mem_handle = kernel.install_capability(slot, data, 0, 512, Permissions::RW)
+            .expect("install memory cap");
+
+        // Use memory handle in device position
+        kernel.processes[slot].core.r[R0 as usize] = SYS_DEV_SUBMIT;
+        kernel.processes[slot].core.r[R1 as usize] = mem_handle.slot as u64;
+        kernel.processes[slot].core.r[R2 as usize] = mem_handle.generation as u64;
+        kernel.processes[slot].core.r[R3 as usize] = 0;
+        kernel.processes[slot].core.r[R4 as usize] = mem_handle.slot as u64;
+        kernel.processes[slot].core.r[R5 as usize] = mem_handle.generation as u64;
+
+        kernel.processes[slot].core.halted = true;
+        kernel.handle_syscall(slot);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 3,
+            "Memory handle in device position must fail");
+
+        eprintln!("9.2c: Memory handle as device → rejected ✓");
+    }
+
+    // ─── 9.2c: device handle as buffer fails ───
+
+    #[test]
+    fn p92c_device_handle_as_buffer_fails() {
+        let (mut kernel, slot, dev_obj, _data) = dev_submit_setup();
+
+        // Install a second device cap for use as buffer
+        let dev2_handle = kernel.install_device_capability(
+            slot, dev_obj, DeviceRights::SUBMIT_READ,
+        ).expect("install second device cap");
+
+        let dev_handle = CapabilityHandle { slot: 0, generation: 0 };
+
+        kernel.processes[slot].core.r[R0 as usize] = SYS_DEV_SUBMIT;
+        kernel.processes[slot].core.r[R1 as usize] = dev_handle.slot as u64;
+        kernel.processes[slot].core.r[R2 as usize] = dev_handle.generation as u64;
+        kernel.processes[slot].core.r[R3 as usize] = 0;
+        kernel.processes[slot].core.r[R4 as usize] = dev2_handle.slot as u64;
+        kernel.processes[slot].core.r[R5 as usize] = dev2_handle.generation as u64;
+
+        kernel.processes[slot].core.halted = true;
+        kernel.handle_syscall(slot);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 6,
+            "Device handle in buffer position must fail");
+
+        eprintln!("9.2c: Device handle as buffer → rejected ✓");
+    }
+
+    // ─── 9.2c: high-bit handle fields rejected ───
+
+    #[test]
+    fn p92c_high_bit_handle_fields_rejected() {
+        let (mut kernel, slot, _dev_obj, _data) = dev_submit_setup();
+
+        // R1 = 0x1_0000_0001 → u32 overflow
+        kernel.processes[slot].core.r[R0 as usize] = SYS_DEV_SUBMIT;
+        kernel.processes[slot].core.r[R1 as usize] = 0x1_0000_0001;
+        kernel.processes[slot].core.r[R2 as usize] = 0;
+        kernel.processes[slot].core.r[R3 as usize] = 0;
+        kernel.processes[slot].core.r[R4 as usize] = 0;
+        kernel.processes[slot].core.r[R5 as usize] = 0;
+
+        kernel.processes[slot].core.halted = true;
+        kernel.handle_syscall(slot);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 1,
+            "high-bit device slot must be rejected");
+
+        eprintln!("9.2c: high-bit handle rejected ✓");
+    }
+
+    // ─── 9.2c: provenance violation rejected ───
+
+    #[test]
+    fn p92c_provenance_violation_rejected() {
+        // Set up a transferred buffer with delegation_id naming a different driver
+        let (mut kernel, slot, _dev_obj, data) = dev_submit_setup();
+
+        // Manually install a cap with a delegation_id naming a different driver
+        let other_driver_key = ProcessKey { slot: 99, generation: 0 };
+        let current_key = ProcessKey {
+            slot,
+            generation: kernel.processes[slot].generation,
+        };
+        let fake_tid = DelegationId {
+            client: ProcessKey { slot: 42, generation: 0 },
+            driver: other_driver_key, // NOT the current process
+            incarnation: 0,
+        };
+
+        let domain = kernel.processes[slot].core.domain;
+        let auth_id = kernel.fabric.alloc_authority_id().expect("alloc");
+        kernel.fabric.grant_with_authority_id(
+            domain, data, 0, 512, Permissions::WRITE, auth_id,
+        ).expect("grant");
+        let obj_gen = kernel.fabric.objects.get(&data).unwrap().generation;
+        let bad_handle = kernel.processes[slot].cap_table.as_mut().unwrap()
+            .install_memory(data, obj_gen, 0, 512, Permissions::WRITE, auth_id, Some(fake_tid))
+            .expect("install");
+
+        let dev_handle = CapabilityHandle { slot: 0, generation: 0 };
+
+        kernel.processes[slot].core.r[R0 as usize] = SYS_DEV_SUBMIT;
+        kernel.processes[slot].core.r[R1 as usize] = dev_handle.slot as u64;
+        kernel.processes[slot].core.r[R2 as usize] = dev_handle.generation as u64;
+        kernel.processes[slot].core.r[R3 as usize] = 0;
+        kernel.processes[slot].core.r[R4 as usize] = bad_handle.slot as u64;
+        kernel.processes[slot].core.r[R5 as usize] = bad_handle.generation as u64;
+
+        kernel.processes[slot].core.halted = true;
+        kernel.handle_syscall(slot);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 8,
+            "provenance violation (T.driver ≠ current) must be rejected");
+        assert!(kernel.processes[slot].io_wait.is_none());
+
+        eprintln!("9.2c: provenance violation → rejected ✓");
+    }
+
+    // ─── 9.2c: no delegation_id (boot cap) succeeds ───
+
+    #[test]
+    fn p92c_boot_cap_no_delegation_succeeds() {
+        let (mut kernel, slot, _dev_obj, data) = dev_submit_setup();
+
+        let buf_handle = kernel.install_capability(slot, data, 0, 512, Permissions::WRITE)
+            .expect("install buffer cap");
+
+        // Verify delegation_id is None
+        let resolved = kernel.resolve_capability(slot, buf_handle).unwrap();
+        assert!(resolved.delegation_id().is_none());
+
+        let dev_handle = CapabilityHandle { slot: 0, generation: 0 };
+
+        kernel.processes[slot].core.r[R0 as usize] = SYS_DEV_SUBMIT;
+        kernel.processes[slot].core.r[R1 as usize] = dev_handle.slot as u64;
+        kernel.processes[slot].core.r[R2 as usize] = dev_handle.generation as u64;
+        kernel.processes[slot].core.r[R3 as usize] = 1; // block 1
+        kernel.processes[slot].core.r[R4 as usize] = buf_handle.slot as u64;
+        kernel.processes[slot].core.r[R5 as usize] = buf_handle.generation as u64;
+
+        kernel.processes[slot].core.halted = true;
+        kernel.handle_syscall(slot);
+
+        assert!(kernel.processes[slot].io_wait.is_some(),
+            "boot cap with None delegation should be accepted");
+
+        eprintln!("9.2c: boot cap (no delegation) accepted ✓");
+    }
+
+    // ─── 9.2c: transferred delegation_id reaches completion ───
+
+    #[test]
+    fn p92c_delegation_id_reaches_completion() {
+        let (mut kernel, slot, _dev_obj, data) = dev_submit_setup();
+
+        // Install a buffer cap with a valid delegation_id
+        let current_key = ProcessKey {
+            slot,
+            generation: kernel.processes[slot].generation,
+        };
+        let client_key = ProcessKey { slot: 42, generation: 0 };
+        let tid = DelegationId {
+            client: client_key,
+            driver: current_key,
+            incarnation: 777,
+        };
+
+        let domain = kernel.processes[slot].core.domain;
+        let auth_id = kernel.fabric.alloc_authority_id().expect("alloc");
+        kernel.fabric.grant_with_authority_id(
+            domain, data, 0, 512, Permissions::WRITE, auth_id,
+        ).expect("grant");
+        let obj_gen = kernel.fabric.objects.get(&data).unwrap().generation;
+        let buf_handle = kernel.processes[slot].cap_table.as_mut().unwrap()
+            .install_memory(data, obj_gen, 0, 512, Permissions::WRITE, auth_id, Some(tid))
+            .expect("install");
+
+        let dev_handle = CapabilityHandle { slot: 0, generation: 0 };
+
+        kernel.processes[slot].core.r[R0 as usize] = SYS_DEV_SUBMIT;
+        kernel.processes[slot].core.r[R1 as usize] = dev_handle.slot as u64;
+        kernel.processes[slot].core.r[R2 as usize] = dev_handle.generation as u64;
+        kernel.processes[slot].core.r[R3 as usize] = 0;
+        kernel.processes[slot].core.r[R4 as usize] = buf_handle.slot as u64;
+        kernel.processes[slot].core.r[R5 as usize] = buf_handle.generation as u64;
+
+        kernel.processes[slot].core.halted = true;
+        kernel.handle_syscall(slot);
+        assert!(kernel.processes[slot].io_wait.is_some());
+
+        // Tick to completion and check delegation_id propagated
+        for _ in 0..20 {
+            kernel.tick_devices(slot);
+        }
+
+        // Peek at the completion before drain
+        let comp = kernel.block_controller.as_mut().unwrap()
+            .consume_completion().unwrap();
+        assert_eq!(comp.delegation_id, Some(tid),
+            "delegation_id must propagate unchanged through controller");
+
+        eprintln!("9.2c: delegation_id reaches completion ✓");
+    }
+
+    // ─── 9.2c: AuthorityId cross-kind uniqueness ───
+
+    #[test]
+    fn p92c_authority_id_cross_kind_uniqueness() {
+        let mut fabric = Fabric::new(0x10000);
+        let dom = fabric.create_domain();
+
+        let mem_obj = fabric.alloc_object("buf", 512, ObjectKind::Memory);
+        fabric.place_object(mem_obj, 0x2000);
+        let dev_obj = fabric.alloc_object("dev", 0, ObjectKind::Device);
+
+        // Grant memory authority with AuthorityId A
+        let aid = fabric.alloc_authority_id().unwrap();
+        fabric.grant_with_authority_id(dom, mem_obj, 0, 512, Permissions::RW, aid)
+            .expect("memory grant");
+
+        // Attempt device grant with the SAME AuthorityId → must fail
+        let result = fabric.grant_device_with_authority_id(
+            dom, dev_obj, DeviceRights::SUBMIT_READ, aid,
+        );
+        assert!(result.is_none(),
+            "AuthorityId must be unique across memory and device");
+
+        // Neither entry disturbed
+        assert!(fabric.has_authority_id(dom, aid));
+
+        // Reverse: device first, then memory
+        let dom2 = fabric.create_domain();
+        let aid2 = fabric.alloc_authority_id().unwrap();
+        fabric.grant_device_with_authority_id(
+            dom2, dev_obj, DeviceRights::SUBMIT_READ, aid2,
+        ).expect("device grant");
+
+        let result2 = fabric.grant_with_authority_id(
+            dom2, mem_obj, 0, 512, Permissions::RW, aid2,
+        );
+        assert!(result2.is_none(),
+            "AuthorityId must be unique across device and memory");
+        assert!(fabric.has_authority_id(dom2, aid2));
+
+        eprintln!("9.2c: AuthorityId cross-kind uniqueness ✓");
+    }
+
+    // ─── 9.2c: request-metadata consistency invariant ───
+
+    #[test]
+    fn p92c_request_metadata_consistency() {
+        use super::super::block::*;
+
+        let mut fabric = Fabric::new(0x10000);
+        let obj = fabric.alloc_object("buf", 512, ObjectKind::Memory);
+        fabric.place_object(obj, 0x2000);
+        let dom = fabric.create_domain();
+        fabric.grant(dom, obj, 0, 512, Permissions::WRITE);
+
+        let storage = BlockStorage::new(4, 512);
+        let mut ctrl = BlockController::new(storage, 1, AgentId(100));
+
+        // source_authority_id=None, delegation_id=Some → must fail
+        let fake_tid = DelegationId {
+            client: ProcessKey { slot: 0, generation: 0 },
+            driver: ProcessKey { slot: 1, generation: 0 },
+            incarnation: 0,
+        };
+        let req = BlockRequest {
+            block_number: 0,
+            requester: RequesterKey { slot: 0, generation: 0 },
+            target_object: obj,
+            target_offset: 0,
+            source_domain: dom,
+            source_authority_id: None,
+            delegation_id: Some(fake_tid),
+        };
+        let result = ctrl.submit(req, &mut fabric);
+        assert!(matches!(result, SubmitResult::DelegationFailed),
+            "source_authority_id=None + delegation_id=Some must be rejected");
+        assert_eq!(ctrl.free_slot_count(), 2, "no slot consumed");
+
+        eprintln!("9.2c: request-metadata consistency invariant ✓");
+    }
+
+    // ─── 9.2c: grant() rejects Device, grant_device rejects Memory ───
+
+    #[test]
+    fn p92c_kind_boundary_hardening() {
+        let mut fabric = Fabric::new(0x10000);
+        let dom = fabric.create_domain();
+
+        let mem_obj = fabric.alloc_object("mem", 512, ObjectKind::Memory);
+        fabric.place_object(mem_obj, 0x2000);
+        let dev_obj = fabric.alloc_object("dev", 0, ObjectKind::Device);
+
+        // grant() rejects Device
+        assert!(fabric.grant(dom, dev_obj, 0, 0, Permissions::RW).is_none(),
+            "grant must reject Device objects");
+
+        // grant_with_authority_id() rejects Device
+        let aid = fabric.alloc_authority_id().unwrap();
+        assert!(fabric.grant_with_authority_id(dom, dev_obj, 0, 0, Permissions::RW, aid).is_none(),
+            "grant_with_authority_id must reject Device objects");
+
+        // grant_device_with_authority_id() rejects Memory
+        let aid2 = fabric.alloc_authority_id().unwrap();
+        assert!(fabric.grant_device_with_authority_id(dom, mem_obj, DeviceRights::SUBMIT_READ, aid2).is_none(),
+            "grant_device must reject Memory objects");
+
+        eprintln!("9.2c: kind boundary hardening ✓");
+    }
+
+    // ─── 9.2c: legacy SYS_BLOCK_READ remains unchanged ───
+
+    #[test]
+    fn p92c_legacy_block_read_unchanged() {
+        let (mut kernel, slot, _dev_obj, data) = dev_submit_setup();
+
+        // Use legacy SYS_BLOCK_READ path (no device cap needed)
+        // Grant direct WRITE to the buffer in the process domain
+        let domain = kernel.processes[slot].core.domain;
+        kernel.fabric.grant(domain, data, 0, 512, Permissions::WRITE);
+
+        let rk = RequesterKey {
+            slot: slot as u32,
+            generation: kernel.processes[slot].generation,
+        };
+        let req = super::super::block::BlockRequest {
+            block_number: 1,
+            requester: rk,
+            target_object: data,
+            target_offset: 0,
+            source_domain: domain,
+            source_authority_id: None,
+            delegation_id: None,
+        };
+
+        let result = kernel.block_controller.as_mut().unwrap()
+            .submit(req, &mut kernel.fabric);
+        assert!(matches!(result, super::super::block::SubmitResult::Accepted(_)));
+
+        for _ in 0..20 {
+            kernel.block_controller.as_mut().unwrap().tick(&mut kernel.fabric);
+        }
+        let comp = kernel.block_controller.as_mut().unwrap()
+            .consume_completion().unwrap();
+        assert_eq!(comp.status, super::super::block::CompletionStatus::Success);
+        assert!(comp.delegation_id.is_none(),
+            "legacy path must carry no delegation_id");
+
+        eprintln!("9.2c: legacy SYS_BLOCK_READ path unchanged ✓");
+    }
+
+    // ─── 9.2c: already in IoWait rejected ───
+
+    #[test]
+    fn p92c_already_io_wait_rejected() {
+        let (mut kernel, slot, _dev_obj, data) = dev_submit_setup();
+
+        let buf_handle = kernel.install_capability(slot, data, 0, 512, Permissions::WRITE)
+            .expect("install buffer");
+        let dev_handle = CapabilityHandle { slot: 0, generation: 0 };
+
+        // First DEV_SUBMIT — should succeed
+        kernel.processes[slot].core.r[R0 as usize] = SYS_DEV_SUBMIT;
+        kernel.processes[slot].core.r[R1 as usize] = dev_handle.slot as u64;
+        kernel.processes[slot].core.r[R2 as usize] = dev_handle.generation as u64;
+        kernel.processes[slot].core.r[R3 as usize] = 0;
+        kernel.processes[slot].core.r[R4 as usize] = buf_handle.slot as u64;
+        kernel.processes[slot].core.r[R5 as usize] = buf_handle.generation as u64;
+
+        kernel.processes[slot].core.halted = true;
+        kernel.handle_syscall(slot);
+        assert!(kernel.processes[slot].io_wait.is_some());
+
+        // Second DEV_SUBMIT while still in IoWait — must fail
+        kernel.processes[slot].core.r[R0 as usize] = SYS_DEV_SUBMIT;
+        kernel.processes[slot].core.halted = true;
+        kernel.handle_syscall(slot);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 2,
+            "already-in-IoWait must be rejected");
+
+        eprintln!("9.2c: already in IoWait → rejected ✓");
+    }
+
+    // ─── 9.2c: remove_by_authority_id works across kinds ───
+
+    #[test]
+    fn p92c_remove_by_authority_id_cross_kind() {
+        let mut fabric = Fabric::new(0x10000);
+        let dom = fabric.create_domain();
+        let dev_obj = fabric.alloc_object("dev", 0, ObjectKind::Device);
+
+        let aid = fabric.alloc_authority_id().unwrap();
+        fabric.grant_device_with_authority_id(dom, dev_obj, DeviceRights::SUBMIT_READ, aid)
+            .expect("grant device");
+
+        assert!(fabric.has_authority_id(dom, aid));
+        assert!(fabric.remove_by_authority_id(dom, aid));
+        assert!(!fabric.has_authority_id(dom, aid));
+
+        eprintln!("9.2c: remove_by_authority_id works for device ✓");
+    }
+
+    // ─── 9.2c: CAP_DROP works for device caps ───
+
+    #[test]
+    fn p92c_cap_drop_device_cap() {
+        let (mut kernel, slot, dev_obj, _data) = dev_submit_setup();
+
+        // Install another device cap so we have one to drop
+        let dev_handle2 = kernel.install_device_capability(
+            slot, dev_obj, DeviceRights::SUBMIT_READ,
+        ).expect("install second device cap");
+
+        let resolved = kernel.resolve_capability(slot, dev_handle2).unwrap();
+        assert!(resolved.is_device());
+
+        // Drop via SYS_CAP_DROP
+        kernel.processes[slot].core.r[R0 as usize] = SYS_CAP_DROP;
+        kernel.processes[slot].core.r[R1 as usize] = dev_handle2.slot as u64;
+        kernel.processes[slot].core.r[R2 as usize] = dev_handle2.generation as u64;
+
+        kernel.processes[slot].core.halted = true;
+        kernel.handle_syscall(slot);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 0,
+            "CAP_DROP on device cap must succeed");
+        assert!(kernel.resolve_capability(slot, dev_handle2).is_none(),
+            "dropped device handle must not resolve");
+
+        eprintln!("9.2c: CAP_DROP device cap ✓");
     }
 }

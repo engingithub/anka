@@ -28,6 +28,7 @@ use std::collections::VecDeque;
 use super::state::{
     RequesterKey, DomainId, ObjectId, AccessKind,
     Permissions, FaultReason, AgentId, TxState,
+    AuthorityId, DelegationId,
 };
 use super::fabric::Fabric;
 
@@ -108,6 +109,15 @@ pub struct RequestHandle {
 /// The `target_object`, `target_offset`, and `source_domain` fields
 /// identify the guest buffer and the authority to delegate from.
 /// The controller delegates a narrow WRITE-only span at submission.
+///
+/// `source_authority_id`: when `Some`, the controller uses
+/// `delegate_dma_span_from_authority_id()` (exact-authority delegation
+/// from SYS_DEV_SUBMIT).  When `None`, uses ambient-domain
+/// `delegate_dma_span()` (legacy SYS_BLOCK_READ path).
+///
+/// Request-metadata consistency invariant:
+///   source_authority_id=None => delegation_id=None
+/// The legacy ambient path may not carry asserted provenance.
 #[derive(Debug, Clone)]
 pub struct BlockRequest {
     pub block_number: u64,
@@ -119,6 +129,12 @@ pub struct BlockRequest {
     /// Domain with WRITE authority over the target span.
     /// The controller derives a narrow DMA domain from this.
     pub source_domain: DomainId,
+    /// When Some, the exact AuthorityId to delegate from (9.2c path).
+    /// When None, ambient domain search (legacy path).
+    pub source_authority_id: Option<AuthorityId>,
+    /// Transfer provenance from the buffer handle.
+    /// Propagated into the completion record for 9.2e quiescence.
+    pub delegation_id: Option<DelegationId>,
 }
 
 /// Outcome of a completed block operation.
@@ -140,12 +156,16 @@ pub enum CompletionStatus {
 ///
 /// `status` replaces the old `data: Vec<u8>` — the 512 bytes
 /// belong in the guest buffer, not the completion record.
+///
+/// `delegation_id` propagates provenance from the accepted request
+/// into the completion for 9.2e quiescence tracking.
 #[derive(Debug, Clone)]
 pub struct BlockCompletion {
     pub handle: RequestHandle,
     pub requester: RequesterKey,
     pub block_number: u64,
     pub status: CompletionStatus,
+    pub delegation_id: Option<DelegationId>,
 }
 
 /// Result of attempting to submit a request.
@@ -267,6 +287,12 @@ impl BlockController {
         request: BlockRequest,
         fabric: &mut Fabric,
     ) -> SubmitResult {
+        // Request-metadata consistency invariant:
+        // source_authority_id=None => delegation_id=None
+        if request.source_authority_id.is_none() && request.delegation_id.is_some() {
+            return SubmitResult::DelegationFailed;
+        }
+
         if request.block_number >= self.storage.num_blocks() {
             return SubmitResult::InvalidBlock;
         }
@@ -280,15 +306,36 @@ impl BlockController {
         };
 
         let block_size = self.storage.block_size();
-        let dma_domain = match fabric.delegate_dma_span(
-            request.source_domain,
-            request.target_object,
-            request.target_offset,
-            block_size,
-            Permissions::WRITE,
-        ) {
-            Some(d) => d,
-            None => return SubmitResult::DelegationFailed,
+
+        // Branch: exact-authority vs ambient delegation
+        let dma_domain = match request.source_authority_id {
+            Some(aid) => {
+                // 9.2c path: exact-authority delegation
+                match fabric.delegate_dma_span_from_authority_id(
+                    request.source_domain,
+                    aid,
+                    request.target_object,
+                    request.target_offset,
+                    block_size,
+                    Permissions::WRITE,
+                ) {
+                    Some(d) => d,
+                    None => return SubmitResult::DelegationFailed,
+                }
+            }
+            None => {
+                // Legacy path: ambient domain search
+                match fabric.delegate_dma_span(
+                    request.source_domain,
+                    request.target_object,
+                    request.target_offset,
+                    block_size,
+                    Permissions::WRITE,
+                ) {
+                    Some(d) => d,
+                    None => return SubmitResult::DelegationFailed,
+                }
+            }
         };
 
         let handle = RequestHandle {
@@ -382,6 +429,7 @@ impl BlockController {
                             requester: request.requester,
                             block_number: request.block_number,
                             status,
+                            delegation_id: request.delegation_id,
                         };
                         self.slots[i] = SlotState::Completed { completion };
                         self.completion_order.push_back(i as u8);
@@ -533,6 +581,8 @@ mod tests {
             target_object: obj,
             target_offset: 0,
             source_domain: dom,
+            source_authority_id: None,
+            delegation_id: None,
         }
     }
 
@@ -787,6 +837,8 @@ mod tests {
             target_object: big_obj,
             target_offset: 1024,
             source_domain: big_dom,
+            source_authority_id: None,
+            delegation_id: None,
         };
         ctrl.submit(req, &mut f);
         for _ in 0..10 { ctrl.tick(&mut f); }
@@ -963,6 +1015,8 @@ mod tests {
             target_object: obj,
             target_offset: 0,
             source_domain: empty_dom,
+            source_authority_id: None,
+            delegation_id: None,
         }, &mut f);
         assert!(matches!(r, SubmitResult::DelegationFailed));
         assert_eq!(ctrl.free_slot_count(), 2, "no slot consumed");
@@ -990,6 +1044,8 @@ mod tests {
             target_object: obj,
             target_offset: 0,
             source_domain: dom,
+            source_authority_id: None,
+            delegation_id: None,
         }, &mut f);
         for _ in 0..10 { ctrl.tick(&mut f); }
         let comp = ctrl.consume_completion().unwrap();

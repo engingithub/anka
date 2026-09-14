@@ -274,9 +274,12 @@ pub struct CapabilityEntry {
 ///   authorize(D, R) ⟺ ∃ C ∈ D : valid(C) ∧ C ⊢ R
 ///
 /// Set semantics.  No ordering.  No hidden "current global domain."
+/// Memory and device authorities are stored separately because they
+/// carry structurally different rights (Permissions vs DeviceRights).
 pub struct DomainState {
     pub id: DomainId,
     pub capabilities: Vec<CapabilityEntry>,
+    pub device_authorities: Vec<DeviceAuthorityEntry>,
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -632,6 +635,84 @@ impl fmt::Display for DelegationId {
 }
 
 // ───────────────────────────────────────────────────────────────────
+// Device rights (Phase 9.2c)
+//
+// Structurally separate from Permissions.  Memory authority carries
+// Permissions; device authority carries DeviceRights.  Illegal
+// combinations (e.g. executable device, SubmitRead memory) are
+// impossible by construction, not by runtime check.
+// ───────────────────────────────────────────────────────────────────
+
+/// Permission bitfield for device objects.
+///
+/// Separate from `Permissions` so that Memory authority and Device
+/// authority carry disjoint right types — no SubmitRead on memory,
+/// no R/W/X on devices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DeviceRights(pub u8);
+
+impl DeviceRights {
+    pub const NONE: Self = Self(0);
+    pub const SUBMIT_READ: Self = Self(0x01);
+
+    /// Mask of all defined device right bits.
+    pub const ALL_BITS: u64 = 0x01;
+
+    /// Checked decoder — rejects undefined bits.
+    pub fn from_bits_checked(bits: u64) -> Option<Self> {
+        if bits & !Self::ALL_BITS != 0 {
+            return None;
+        }
+        Some(Self(bits as u8))
+    }
+
+    pub fn contains(self, required: Self) -> bool {
+        self.0 & required.0 == required.0
+    }
+
+    pub fn is_subset_of(self, superset: Self) -> bool {
+        superset.contains(self)
+    }
+}
+
+impl fmt::Display for DeviceRights {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DeviceRights(0x{:02X})", self.0)
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Generation-qualified device binding (Phase 9.2c)
+// ───────────────────────────────────────────────────────────────────
+
+/// Generation-qualified device binding.
+///
+/// Prevents a revoked+recycled ObjectId from appearing bound to
+/// the old controller.  The device equivalent of ProcessKey.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceBinding {
+    pub object: ObjectId,
+    pub generation: Generation,
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Device authority entry (Phase 9.2c)
+// ───────────────────────────────────────────────────────────────────
+
+/// A tagged device authority entry in a Fabric domain.
+///
+/// Analogous to `CapabilityEntry` for memory, but carries
+/// `DeviceRights` instead of `Permissions` and has no offset/length
+/// (device objects have identity without spatial extent).
+#[derive(Debug, Clone)]
+pub struct DeviceAuthorityEntry {
+    pub object: ObjectId,
+    pub generation: Generation,
+    pub rights: DeviceRights,
+    pub authority_id: AuthorityId,
+}
+
+// ───────────────────────────────────────────────────────────────────
 // Capability handle architecture (Phase 9.2a)
 //
 // Three distinct lifetimes, proved orthogonal in
@@ -684,7 +765,10 @@ impl fmt::Display for CapabilityHandle {
 /// One slot in a per-process capability table.
 ///
 /// `handle_generation` tracks slot reuse (like ProcessKey.generation).
-/// `object_generation` tracks the underlying Fabric object incarnation.
+/// Kind-sensitive sum type: Memory and Device slots carry different
+/// right representations, making illegal combinations structurally
+/// impossible (no SubmitRead on memory, no R/W/X on devices).
+///
 /// `authority_id` links to the exact entry in the Fabric domain — so
 /// dropping one handle removes only its backing authority, even if
 /// another handle names an equal-looking capability.
@@ -695,8 +779,8 @@ pub enum CapabilitySlotState {
     /// Slot is free for reuse.  `handle_generation` still records the
     /// last incarnation so stale handles are permanently rejected.
     Free,
-    /// Slot holds live authority.
-    Occupied {
+    /// Slot holds live memory authority.
+    Memory {
         object: ObjectId,
         object_generation: Generation,
         offset: u64,
@@ -707,6 +791,14 @@ pub enum CapabilitySlotState {
         /// Some for caps installed by SYS_SEND_CAP.  A fresh transfer
         /// always stamps a new DelegationId (not inherited from prior
         /// transfers in a chain).
+        delegation_id: Option<DelegationId>,
+    },
+    /// Slot holds live device authority.
+    Device {
+        object: ObjectId,
+        object_generation: Generation,
+        rights: DeviceRights,
+        authority_id: AuthorityId,
         delegation_id: Option<DelegationId>,
     },
 }
@@ -729,15 +821,87 @@ pub struct CapabilityTable {
 }
 
 /// Result of resolving a CapabilityHandle.
+///
+/// Kind-sensitive: Memory and Device carry different authority
+/// representations.  All callers must pattern-match.
 #[derive(Debug, Clone)]
-pub struct ResolvedCapability {
-    pub object: ObjectId,
-    pub object_generation: Generation,
-    pub offset: u64,
-    pub length: u64,
-    pub perms: Permissions,
-    pub authority_id: AuthorityId,
-    pub delegation_id: Option<DelegationId>,
+pub enum ResolvedCapability {
+    Memory {
+        object: ObjectId,
+        object_generation: Generation,
+        offset: u64,
+        length: u64,
+        perms: Permissions,
+        authority_id: AuthorityId,
+        delegation_id: Option<DelegationId>,
+    },
+    Device {
+        object: ObjectId,
+        object_generation: Generation,
+        rights: DeviceRights,
+        authority_id: AuthorityId,
+        delegation_id: Option<DelegationId>,
+    },
+}
+
+impl ResolvedCapability {
+    /// Extract the authority_id regardless of kind.
+    pub fn authority_id(&self) -> AuthorityId {
+        match self {
+            ResolvedCapability::Memory { authority_id, .. } => *authority_id,
+            ResolvedCapability::Device { authority_id, .. } => *authority_id,
+        }
+    }
+
+    /// Extract the object regardless of kind.
+    pub fn object(&self) -> ObjectId {
+        match self {
+            ResolvedCapability::Memory { object, .. } => *object,
+            ResolvedCapability::Device { object, .. } => *object,
+        }
+    }
+
+    /// Extract the object generation regardless of kind.
+    pub fn object_generation(&self) -> Generation {
+        match self {
+            ResolvedCapability::Memory { object_generation, .. } => *object_generation,
+            ResolvedCapability::Device { object_generation, .. } => *object_generation,
+        }
+    }
+
+    /// Extract the delegation_id regardless of kind.
+    pub fn delegation_id(&self) -> Option<DelegationId> {
+        match self {
+            ResolvedCapability::Memory { delegation_id, .. } => *delegation_id,
+            ResolvedCapability::Device { delegation_id, .. } => *delegation_id,
+        }
+    }
+
+    /// True if this is a Memory capability.
+    pub fn is_memory(&self) -> bool {
+        matches!(self, ResolvedCapability::Memory { .. })
+    }
+
+    /// True if this is a Device capability.
+    pub fn is_device(&self) -> bool {
+        matches!(self, ResolvedCapability::Device { .. })
+    }
+
+    /// Extract memory-specific fields.  Panics if Device.
+    pub fn as_memory(&self) -> (u64, u64, Permissions) {
+        match self {
+            ResolvedCapability::Memory { offset, length, perms, .. } => (*offset, *length, *perms),
+            ResolvedCapability::Device { .. } => panic!("as_memory called on Device capability"),
+        }
+    }
+
+    /// Extract device-specific rights.  Panics if Memory.
+    pub fn as_device_rights(&self) -> DeviceRights {
+        match self {
+            ResolvedCapability::Device { rights, .. } => *rights,
+            ResolvedCapability::Memory { .. } => panic!("as_device_rights called on Memory capability"),
+        }
+    }
 }
 
 impl CapabilityTable {
@@ -763,9 +927,9 @@ impl CapabilityTable {
         &mut self.slots
     }
 
-    /// Install a new capability.  Returns the handle on success,
+    /// Install a new memory capability.  Returns the handle on success,
     /// or None if the table is full.
-    pub fn install(
+    pub fn install_memory(
         &mut self,
         object: ObjectId,
         object_generation: Generation,
@@ -776,13 +940,10 @@ impl CapabilityTable {
         delegation_id: Option<DelegationId>,
     ) -> Option<CapabilityHandle> {
         for (i, slot) in self.slots.iter_mut().enumerate() {
-            // Free AND allocatable: generation must not be terminal.
-            // A Free(u32::MAX) slot is retired — installing into it
-            // would create authority that can never be dropped.
             if matches!(slot.state, CapabilitySlotState::Free)
                 && slot.handle_generation != u32::MAX
             {
-                slot.state = CapabilitySlotState::Occupied {
+                slot.state = CapabilitySlotState::Memory {
                     object,
                     object_generation,
                     offset,
@@ -800,15 +961,45 @@ impl CapabilityTable {
         None
     }
 
+    /// Install a new device capability.  Returns the handle on success,
+    /// or None if the table is full.
+    pub fn install_device(
+        &mut self,
+        object: ObjectId,
+        object_generation: Generation,
+        rights: DeviceRights,
+        authority_id: AuthorityId,
+        delegation_id: Option<DelegationId>,
+    ) -> Option<CapabilityHandle> {
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if matches!(slot.state, CapabilitySlotState::Free)
+                && slot.handle_generation != u32::MAX
+            {
+                slot.state = CapabilitySlotState::Device {
+                    object,
+                    object_generation,
+                    rights,
+                    authority_id,
+                    delegation_id,
+                };
+                return Some(CapabilityHandle {
+                    slot: i as u32,
+                    generation: slot.handle_generation,
+                });
+            }
+        }
+        None
+    }
+
     /// Three-condition resolution.
     ///
     /// Succeeds iff:
     ///   1. handle_generation matches slot
-    ///   2. AuthorityId entry exists (slot is Occupied)
+    ///   2. Slot is occupied (Memory or Device — not Free)
     ///   3. object_generation matches current Fabric generation
     ///
     /// The caller must supply the current Fabric object generation
-    /// for condition 3.
+    /// for condition 3.  Returns a kind-sensitive ResolvedCapability.
     pub fn resolve(
         &self,
         handle: CapabilityHandle,
@@ -821,12 +1012,12 @@ impl CapabilityTable {
             return None;
         }
 
-        // Condition 2: slot is occupied (AuthorityId exists)
-        let occ = match &slot.state {
-            CapabilitySlotState::Occupied {
+        // Condition 2: slot is occupied (Memory or Device)
+        let resolved = match &slot.state {
+            CapabilitySlotState::Memory {
                 object, object_generation, offset, length, perms,
                 authority_id, delegation_id,
-            } => ResolvedCapability {
+            } => ResolvedCapability::Memory {
                 object: *object,
                 object_generation: *object_generation,
                 offset: *offset,
@@ -835,16 +1026,28 @@ impl CapabilityTable {
                 authority_id: *authority_id,
                 delegation_id: *delegation_id,
             },
+            CapabilitySlotState::Device {
+                object, object_generation, rights,
+                authority_id, delegation_id,
+            } => ResolvedCapability::Device {
+                object: *object,
+                object_generation: *object_generation,
+                rights: *rights,
+                authority_id: *authority_id,
+                delegation_id: *delegation_id,
+            },
             CapabilitySlotState::Free => return None,
         };
 
         // Condition 3: object generation is current
-        let current_gen = current_object_gen(occ.object)?;
-        if occ.object_generation != current_gen {
+        let obj_id = resolved.object();
+        let stored_gen = resolved.object_generation();
+        let current_gen = current_object_gen(obj_id)?;
+        if stored_gen != current_gen {
             return None;
         }
 
-        Some(occ)
+        Some(resolved)
     }
 
     /// Drop a capability handle: invalidate the naming, remove
@@ -864,7 +1067,8 @@ impl CapabilityTable {
         }
 
         let auth_id = match &slot.state {
-            CapabilitySlotState::Occupied { authority_id, .. } => *authority_id,
+            CapabilitySlotState::Memory { authority_id, .. } => *authority_id,
+            CapabilitySlotState::Device { authority_id, .. } => *authority_id,
             CapabilitySlotState::Free => return None,
         };
 
@@ -896,7 +1100,8 @@ impl CapabilityTable {
         }
 
         let auth_id = match &slot.state {
-            CapabilitySlotState::Occupied { authority_id, .. } => *authority_id,
+            CapabilitySlotState::Memory { authority_id, .. } => *authority_id,
+            CapabilitySlotState::Device { authority_id, .. } => *authority_id,
             CapabilitySlotState::Free => return None,
         };
 
@@ -973,7 +1178,7 @@ mod cap_table_tests {
         assert_eq!(ct.free_count(), CAP_TABLE_SIZE);
         assert_eq!(ct.occupied_count(), 0);
 
-        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0), None)
+        let h = ct.install_memory(obj(1), g(0), 0, 4096, Permissions::READ, aid(0), None)
             .expect("install should succeed");
         assert_eq!(ct.free_count() + ct.occupied_count(), CAP_TABLE_SIZE);
         assert_eq!(ct.occupied_count(), 1);
@@ -991,19 +1196,19 @@ mod cap_table_tests {
         let mut ct = CapabilityTable::new();
         let mut handles = Vec::new();
         for i in 0..CAP_TABLE_SIZE {
-            let h = ct.install(obj(i as u64), g(0), 0, 4096, Permissions::READ, aid(i as u64), None)
+            let h = ct.install_memory(obj(i as u64), g(0), 0, 4096, Permissions::READ, aid(i as u64), None)
                 .expect("install should succeed");
             handles.push(h);
         }
         assert_eq!(ct.free_count(), 0);
 
         // 17th install must fail
-        assert!(ct.install(obj(99), g(0), 0, 4096, Permissions::READ, aid(99), None).is_none());
+        assert!(ct.install_memory(obj(99), g(0), 0, 4096, Permissions::READ, aid(99), None).is_none());
 
         // Drop one, try again
         ct.drop_handle(handles[0]).expect("drop should succeed");
         assert_eq!(ct.free_count(), 1);
-        assert!(ct.install(obj(99), g(0), 0, 4096, Permissions::READ, aid(99), None).is_some());
+        assert!(ct.install_memory(obj(99), g(0), 0, 4096, Permissions::READ, aid(99), None).is_some());
     }
 
     // ─── RESOLVE-1: handle generation mismatch fails ───
@@ -1013,7 +1218,7 @@ mod cap_table_tests {
         let mut ct = CapabilityTable::new();
         let gens = [(obj(1), g(0))];
 
-        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0), None)
+        let h = ct.install_memory(obj(1), g(0), 0, 4096, Permissions::READ, aid(0), None)
             .expect("install should succeed");
 
         // Valid resolution
@@ -1021,7 +1226,7 @@ mod cap_table_tests {
 
         // Drop and reinstall — old handle must fail
         ct.drop_handle(h).expect("drop should succeed");
-        let h2 = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(1), None)
+        let h2 = ct.install_memory(obj(1), g(0), 0, 4096, Permissions::READ, aid(1), None)
             .expect("reinstall should succeed");
 
         // Old handle: stale generation
@@ -1040,7 +1245,7 @@ mod cap_table_tests {
     #[test]
     fn resolve_object_generation_revoked() {
         let mut ct = CapabilityTable::new();
-        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0), None)
+        let h = ct.install_memory(obj(1), g(0), 0, 4096, Permissions::READ, aid(0), None)
             .expect("install should succeed");
 
         // Object at g(0) → resolves
@@ -1058,7 +1263,7 @@ mod cap_table_tests {
     #[test]
     fn resolve_object_not_found() {
         let mut ct = CapabilityTable::new();
-        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0), None)
+        let h = ct.install_memory(obj(1), g(0), 0, 4096, Permissions::READ, aid(0), None)
             .expect("install should succeed");
 
         // Object doesn't exist in lookup
@@ -1072,7 +1277,7 @@ mod cap_table_tests {
     #[test]
     fn drop_invalidates_permanently() {
         let mut ct = CapabilityTable::new();
-        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0), None)
+        let h = ct.install_memory(obj(1), g(0), 0, 4096, Permissions::READ, aid(0), None)
             .expect("install should succeed");
 
         ct.drop_handle(h).expect("drop should succeed");
@@ -1093,9 +1298,9 @@ mod cap_table_tests {
         let mut ct = CapabilityTable::new();
 
         // Two handles to the same object/range/perms but different AuthorityIds
-        let h1 = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(100), None)
+        let h1 = ct.install_memory(obj(1), g(0), 0, 4096, Permissions::READ, aid(100), None)
             .expect("install h1");
-        let h2 = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(200), None)
+        let h2 = ct.install_memory(obj(1), g(0), 0, 4096, Permissions::READ, aid(200), None)
             .expect("install h2");
 
         // Drop h1: returns aid(100), NOT aid(200)
@@ -1116,14 +1321,14 @@ mod cap_table_tests {
         let mut ct = CapabilityTable::new();
 
         // Fill all slots, then drop slot 0, install a new one
-        let h0 = ct.install(obj(0), g(0), 0, 4096, Permissions::READ, aid(0), None)
+        let h0 = ct.install_memory(obj(0), g(0), 0, 4096, Permissions::READ, aid(0), None)
             .expect("install");
         assert_eq!(h0.slot, 0);
         assert_eq!(h0.generation, 0);
 
         ct.drop_handle(h0).expect("drop");
 
-        let h0_next = ct.install(obj(0), g(0), 0, 4096, Permissions::READ, aid(1), None)
+        let h0_next = ct.install_memory(obj(0), g(0), 0, 4096, Permissions::READ, aid(1), None)
             .expect("reinstall");
         assert_eq!(h0_next.slot, 0);
         assert_eq!(h0_next.generation, 1,
@@ -1140,7 +1345,7 @@ mod cap_table_tests {
         // Install 8 caps
         for i in 0..8u64 {
             handles.push(
-                ct.install(obj(i), g(0), 0, 4096, Permissions::READ, aid(i), None)
+                ct.install_memory(obj(i), g(0), 0, 4096, Permissions::READ, aid(i), None)
                     .expect("install")
             );
         }
@@ -1155,7 +1360,7 @@ mod cap_table_tests {
 
         // Reinstall in freed slots
         for i in (0..8).step_by(2) {
-            ct.install(obj(100 + i as u64), g(0), 0, 4096, Permissions::RW, aid(100 + i as u64), None)
+            ct.install_memory(obj(100 + i as u64), g(0), 0, 4096, Permissions::RW, aid(100 + i as u64), None)
                 .expect("reinstall");
         }
         assert_eq!(ct.free_count() + ct.occupied_count(), CAP_TABLE_SIZE);
