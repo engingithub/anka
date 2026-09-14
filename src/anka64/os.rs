@@ -795,10 +795,13 @@ impl Kernel {
 
     /// Install a capability into a process's cap table.
     ///
-    /// Allocates a fresh AuthorityId, grants the capability in the
-    /// process's Fabric domain with that AuthorityId, and installs
-    /// a cap-table slot linking to it.  Returns the CapabilityHandle
-    /// on success, or None if the Fabric grant fails or the table is full.
+    /// Atomic with respect to the invariant:
+    ///   installed authority ⟺ installed handle.
+    ///
+    /// Preflight: refuses early if the cap table has no free slot,
+    /// before any Fabric authority is created.  If installation
+    /// unexpectedly fails after grant, the Fabric authority is
+    /// rolled back so no orphan authority can exist.
     ///
     /// Used by boot/spawn to seed initial handles and by tests.
     /// Runtime transfer belongs to 9.2b.
@@ -810,6 +813,12 @@ impl Kernel {
         length: u64,
         perms: Permissions,
     ) -> Option<CapabilityHandle> {
+        // Preflight: table must have capacity.
+        let ct = self.processes[slot].cap_table.as_ref()?;
+        if ct.free_count() == 0 {
+            return None;
+        }
+
         let domain = self.processes[slot].core.domain;
         let auth_id = self.fabric.alloc_authority_id();
 
@@ -819,28 +828,50 @@ impl Kernel {
 
         let obj_gen = self.fabric.objects.get(&object)?.generation;
 
-        self.processes[slot].cap_table.as_mut()?
-            .install(object, obj_gen, offset, length, perms, auth_id)
+        match self.processes[slot].cap_table.as_mut()
+            .and_then(|ct| ct.install(object, obj_gen, offset, length, perms, auth_id))
+        {
+            Some(handle) => Some(handle),
+            None => {
+                // Rollback: remove the Fabric authority we just created.
+                self.fabric.remove_by_authority_id(domain, auth_id);
+                None
+            }
+        }
     }
 
     /// Resolve a capability handle for a process.
     ///
-    /// Three-condition check:
-    ///   1. handle_generation = slot.handle_generation
-    ///   2. slot is Occupied (AuthorityId exists)
-    ///   3. object_generation = current Fabric object generation
+    /// Full architectural three-condition check:
+    ///   1. g_h = g_slot  (handle generation matches cap-table slot)
+    ///   2. AuthorityId exists in Fabric domain  (not merely slot occupied)
+    ///   3. g_o = g_current  (object generation is current)
     ///
-    /// This is the kernel-side wrapper that supplies the Fabric
-    /// generation lookup closure.
+    /// CapabilityTable::resolve() checks conditions 1 and 3 (naming
+    /// structure + object generation).  This kernel wrapper adds the
+    /// ground-truth Fabric verification for condition 2: the
+    /// AuthorityId recorded in the slot must actually exist in the
+    /// process's domain.
+    ///
+    /// Without this check, removing an AuthorityId behind an occupied
+    /// slot would leave a ghost handle that resolves incorrectly.
     pub fn resolve_capability(
         &self,
         slot: usize,
         handle: CapabilityHandle,
     ) -> Option<ResolvedCapability> {
         let ct = self.processes[slot].cap_table.as_ref()?;
-        ct.resolve(handle, |oid| {
+        let resolved = ct.resolve(handle, |oid| {
             self.fabric.objects.get(&oid).map(|o| o.generation)
-        })
+        })?;
+
+        // Condition 2 ground truth: AuthorityId must exist in Fabric domain.
+        let domain = self.processes[slot].core.domain;
+        if !self.fabric.has_authority_id(domain, resolved.authority_id) {
+            return None;
+        }
+
+        Some(resolved)
     }
 
     /// Install a lifecycle entry in a parent's table.
@@ -2586,9 +2617,10 @@ impl Kernel {
     /// R1 = slot index, R2 = handle generation.
     /// Returns: R0 = 0 on success, R0 = 1 on invalid handle.
     ///
-    /// On success: the cap-table slot is freed (generation incremented),
-    /// and the exact backing authority entry (identified by AuthorityId)
-    /// is removed from the process's Fabric domain.
+    /// Both-or-neither semantics: succeeds only if both the cap-table
+    /// handle AND the backing Fabric authority are removed.  Preflight
+    /// verifies the AuthorityId exists in the domain before mutating
+    /// either structure.
     ///
     /// Formal basis: anka_userspace_driver.kleis DROP-1..4.
     fn handle_cap_drop(&mut self, idx: usize) {
@@ -2596,23 +2628,58 @@ impl Kernel {
         let hgen = self.processes[idx].core.r[R2 as usize] as u32;
 
         let handle = CapabilityHandle { slot, generation: hgen };
-
         let domain = self.processes[idx].core.domain;
 
-        let auth_id = match self.processes[idx].cap_table.as_mut() {
-            Some(ct) => ct.drop_handle(handle),
-            None => None,
-        };
-
-        match auth_id {
-            Some(aid) => {
-                self.fabric.remove_by_authority_id(domain, aid);
-                self.processes[idx].core.r[R0 as usize] = 0;
+        // Phase 1: read the AuthorityId from the slot without mutating.
+        let auth_id = match self.processes[idx].cap_table.as_ref() {
+            Some(ct) => {
+                let s = match ct.slots().get(handle.slot as usize) {
+                    Some(s) => s,
+                    None => {
+                        self.processes[idx].core.r[R0 as usize] = 1;
+                        self.resume_from_trap(idx);
+                        return;
+                    }
+                };
+                if s.handle_generation != handle.generation {
+                    self.processes[idx].core.r[R0 as usize] = 1;
+                    self.resume_from_trap(idx);
+                    return;
+                }
+                match &s.state {
+                    CapabilitySlotState::Occupied { authority_id, .. } => *authority_id,
+                    CapabilitySlotState::Free => {
+                        self.processes[idx].core.r[R0 as usize] = 1;
+                        self.resume_from_trap(idx);
+                        return;
+                    }
+                }
             }
             None => {
                 self.processes[idx].core.r[R0 as usize] = 1;
+                self.resume_from_trap(idx);
+                return;
             }
+        };
+
+        // Phase 2: preflight — backing authority must exist in domain.
+        if !self.fabric.has_authority_id(domain, auth_id) {
+            self.processes[idx].core.r[R0 as usize] = 1;
+            self.resume_from_trap(idx);
+            return;
         }
+
+        // Phase 3: atomic removal of both name and authority.
+        let removed_aid = self.processes[idx].cap_table.as_mut()
+            .expect("cap_table verified in phase 1")
+            .drop_handle(handle)
+            .expect("handle verified in phase 1");
+        debug_assert_eq!(removed_aid, auth_id);
+
+        let removed = self.fabric.remove_by_authority_id(domain, removed_aid);
+        debug_assert!(removed, "authority verified in phase 2");
+
+        self.processes[idx].core.r[R0 as usize] = 0;
         self.resume_from_trap(idx);
     }
 
@@ -6513,5 +6580,133 @@ mod tests {
             "slot reuse must increment generation");
 
         eprintln!("9.2a: drop+reinstall handle staleness ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.2a hardening — formal correspondence witnesses
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Full-table installation failure must leave no orphan Fabric authority.
+    ///
+    /// Before the fix, install_capability() would:
+    ///   alloc AuthorityId → grant in Fabric → fail table install
+    /// leaving the Fabric authority with no naming handle.
+    ///
+    /// Now the preflight rejects before granting, and the rollback
+    /// catches any unexpected post-grant failure.
+    #[test]
+    fn p92a_full_table_no_orphan_authority() {
+        let (mut kernel, data, slot) = captab_kernel_setup();
+        let domain = kernel.processes[slot].core.domain;
+
+        let cap_count_before = kernel.fabric.domains.get(&domain).unwrap()
+            .capabilities.len();
+
+        // Fill all 16 slots.
+        for _ in 0..CAP_TABLE_SIZE {
+            kernel.install_capability(slot, data, 0, 0x4000, Permissions::READ)
+                .expect("install should succeed");
+        }
+
+        let cap_count_full = kernel.fabric.domains.get(&domain).unwrap()
+            .capabilities.len();
+        assert_eq!(cap_count_full, cap_count_before + CAP_TABLE_SIZE);
+
+        // 17th install must fail.
+        assert!(kernel.install_capability(slot, data, 0, 0x4000, Permissions::READ).is_none(),
+            "install beyond table capacity must fail");
+
+        // Crucial: Fabric authority count unchanged — no orphan.
+        let cap_count_after = kernel.fabric.domains.get(&domain).unwrap()
+            .capabilities.len();
+        assert_eq!(cap_count_after, cap_count_full,
+            "failed install must not leave orphan Fabric authority");
+
+        eprintln!("9.2a: full-table no-orphan-authority ✓");
+    }
+
+    /// Removing an AuthorityId behind an occupied slot makes
+    /// resolve_capability() fail — even though the slot is still
+    /// Occupied and the object generation is still current.
+    ///
+    /// This witnesses the full architectural condition 2:
+    ///   AuthorityIdExists means "exists in Fabric domain",
+    ///   not merely "slot is Occupied".
+    #[test]
+    fn p92a_ghost_authority_resolve_fails() {
+        let (mut kernel, data, slot) = captab_kernel_setup();
+        let domain = kernel.processes[slot].core.domain;
+
+        let h = kernel.install_capability(slot, data, 0, 0x4000, Permissions::READ)
+            .expect("install should succeed");
+
+        // Resolve succeeds with authority present.
+        assert!(kernel.resolve_capability(slot, h).is_some());
+
+        // Surgically remove the backing authority from the Fabric,
+        // leaving the cap-table slot Occupied.
+        let resolved = kernel.processes[slot].cap_table.as_ref().unwrap()
+            .resolve(h, |oid| kernel.fabric.objects.get(&oid).map(|o| o.generation))
+            .expect("table-level resolve should succeed");
+        let removed = kernel.fabric.remove_by_authority_id(domain, resolved.authority_id);
+        assert!(removed, "authority should exist");
+
+        // Now: slot is Occupied, object gen is current, but AuthorityId
+        // is missing from the domain.  Kernel resolve must fail.
+        assert!(kernel.resolve_capability(slot, h).is_none(),
+            "ghost authority: slot occupied but AuthorityId missing → must fail");
+
+        eprintln!("9.2a: ghost-authority resolve failure ✓");
+    }
+
+    /// CAP_DROP cannot report success unless both the name and the
+    /// exact backing authority are removed.
+    ///
+    /// We surgically remove the Fabric authority before the guest
+    /// calls SYS_CAP_DROP.  The syscall must return 1 (failure)
+    /// because the backing authority is absent, even though the
+    /// cap-table handle is valid.
+    #[test]
+    fn p92a_cap_drop_requires_backing_authority() {
+        let mut fabric = Fabric::new(0x200000);
+        let (core, dom, text, data, _stack) =
+            create_process(&mut fabric, CPU0, "cap_drop_ghost",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+
+        let mut kernel = Kernel::new(fabric);
+        let pk = kernel.spawn(core);
+        let slot = pk.slot;
+
+        let h = kernel.install_capability(slot, data, 0, 0x4000, Permissions::READ)
+            .expect("install should succeed");
+
+        // Surgically remove the Fabric authority.
+        let resolved = kernel.processes[slot].cap_table.as_ref().unwrap()
+            .resolve(h, |oid| kernel.fabric.objects.get(&oid).map(|o| o.generation))
+            .expect("table-level resolve");
+        kernel.fabric.remove_by_authority_id(dom, resolved.authority_id);
+
+        // Guest code: CAP_DROP(slot, gen), save result, EXIT
+        let mut asm = Asm64::new();
+        asm.movi(R1, h.slot as i32);
+        asm.movi(R2, h.generation as i32);
+        asm.movi(R0, SYS_CAP_DROP as i32);
+        asm.trap(0);
+        asm.mov(R5, R0); // save result
+        asm.movi(R1, 0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        kernel.fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut kernel.fabric, text, dom);
+
+        kernel.run(10000, 10);
+
+        assert!(kernel.processes[slot].exited());
+        assert_eq!(kernel.processes[slot].core.r[R5 as usize], 1,
+            "CAP_DROP must fail when backing authority is absent");
+
+        eprintln!("9.2a: CAP_DROP requires backing authority ✓");
     }
 }

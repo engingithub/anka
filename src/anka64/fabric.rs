@@ -420,6 +420,18 @@ impl Fabric {
         }
     }
 
+    /// Check whether a specific AuthorityId still exists in a domain.
+    ///
+    /// Used by resolve_capability() for the full architectural
+    /// three-condition check: the cap-table slot says the authority
+    /// exists, but the Fabric domain is the ground truth.
+    pub fn has_authority_id(&self, domain: DomainId, target: AuthorityId) -> bool {
+        match self.domains.get(&domain) {
+            Some(d) => d.capabilities.iter().any(|e| e.authority_id == Some(target)),
+            None => false,
+        }
+    }
+
     /// Derive a child capability from a parent — cannot amplify (I7).
     pub fn derive(
         &mut self,

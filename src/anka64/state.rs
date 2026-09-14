@@ -692,6 +692,12 @@ impl CapabilityTable {
         }
     }
 
+    /// Read-only access to slots — used by preflight checks that
+    /// must inspect slot state without mutating the table.
+    pub fn slots(&self) -> &[CapabilitySlot; CAP_TABLE_SIZE] {
+        &self.slots
+    }
+
     /// Install a new capability.  Returns the handle on success,
     /// or None if the table is full.
     pub fn install(
