@@ -9,7 +9,7 @@
 //!   R1–R3 = arguments
 //!   R0 = return value
 
-use super::block::BlockController;
+use super::block::{BlockController, BlockCompletion};
 use super::core::Anka64Core;
 use super::fabric::Fabric;
 use super::isa::*;
@@ -658,6 +658,113 @@ pub enum BootError {
 
 /// A registered device instance in the kernel (Phase 9.3b).
 ///
+/// Generic device controller (Phase 9.3c).
+///
+/// Wraps device-type-specific controllers behind a common surface for
+/// the kernel's device-agnostic machinery (tick, attention, autonomy,
+/// completion, pair quiescence).
+///
+/// The generic surface delegates directly to the inner controller.
+/// Block-specific operations (submit, storage access) require an
+/// explicit pattern match to unwrap the inner `BlockController`.
+///
+/// Formal basis: anka_generic_device_refinement.kleis GENDEV-1..13.
+///   Generic(Block) = Block for all observables.
+#[derive(Debug)]
+pub enum DeviceController {
+    Block(BlockController),
+}
+
+impl DeviceController {
+    /// Advance the device by one machine tick.
+    /// GENDEV-1: Block wrapper preserves block transition result.
+    pub fn tick(&mut self, fabric: &mut Fabric) {
+        match self {
+            DeviceController::Block(c) => c.tick(fabric),
+        }
+    }
+
+    /// Does this device have autonomous (in-flight) work?
+    /// GENDEV-2: Block wrapper preserves autonomous-work observable.
+    pub fn has_autonomous_work(&self) -> bool {
+        match self {
+            DeviceController::Block(c) => c.has_autonomous_work(),
+        }
+    }
+
+    /// Does this device have serviceable completions?
+    /// GENDEV-3: Block wrapper preserves attention observable.
+    pub fn requires_attention(&self) -> bool {
+        match self {
+            DeviceController::Block(c) => c.requires_attention(),
+        }
+    }
+
+    /// Number of ready completions.
+    pub fn completion_count(&self) -> usize {
+        match self {
+            DeviceController::Block(c) => c.completion_count(),
+        }
+    }
+
+    /// Pop the next ready completion.
+    pub fn consume_completion(&mut self) -> Option<BlockCompletion> {
+        match self {
+            DeviceController::Block(c) => c.consume_completion(),
+        }
+    }
+
+    /// Quantitative nonterminal pair request count.
+    /// GENDEV-4: Block wrapper preserves pair-attributed request count.
+    ///
+    /// This is the primitive; `has_nonterminal_pair_request` is derived
+    /// from it so the Boolean can never diverge from the count:
+    ///   HasNonterminal(C,D) <=> Count(C,D) != 0.
+    pub fn nonterminal_pair_request_count(
+        &self,
+        client: &ProcessKey,
+        peer: &ProcessKey,
+    ) -> usize {
+        match self {
+            DeviceController::Block(c) => c.nonterminal_pair_request_count(client, peer),
+        }
+    }
+
+    /// Boolean projection of `nonterminal_pair_request_count`.
+    /// Derived, not independently dispatched.
+    pub fn has_nonterminal_pair_request(
+        &self,
+        client: &ProcessKey,
+        peer: &ProcessKey,
+    ) -> bool {
+        self.nonterminal_pair_request_count(client, peer) != 0
+    }
+
+    /// Number of free request slots (block-specific but useful for
+    /// capacity checks before submission).
+    pub fn free_slot_count(&self) -> usize {
+        match self {
+            DeviceController::Block(c) => c.free_slot_count(),
+        }
+    }
+
+    /// Unwrap the inner BlockController (shared reference).
+    /// Panics if this is not a Block device.
+    pub fn as_block(&self) -> &BlockController {
+        match self {
+            DeviceController::Block(c) => c,
+        }
+    }
+
+    /// Unwrap the inner BlockController (mutable reference).
+    /// Panics if this is not a Block device.
+    pub fn as_block_mut(&mut self) -> &mut BlockController {
+        match self {
+            DeviceController::Block(c) => c,
+        }
+    }
+}
+
 /// Registry membership means active: there is no DeviceState enum
 /// because 9.3b does not support unregister/recycling.
 ///
@@ -666,7 +773,7 @@ pub enum BootError {
 #[derive(Debug)]
 pub struct DeviceSlot {
     pub binding: DeviceBinding,
-    pub controller: BlockController,
+    pub controller: DeviceController,
 }
 
 /// Registry of all device instances (Phase 9.3b).
@@ -1128,7 +1235,7 @@ impl Kernel {
 
         self.device_registry.devices.push(DeviceSlot {
             binding,
-            controller,
+            controller: DeviceController::Block(controller),
         });
 
         // First registered block device becomes the legacy default
@@ -3213,7 +3320,10 @@ impl Kernel {
 
         // Legacy SYS_BLOCK_READ resolves through the registry.
         let block_size = match self.device_registry.lookup(dev_binding) {
-            Some(slot) => slot.controller.storage_ref().block_size(),
+            Some(slot) => {
+                let DeviceController::Block(ctrl) = &slot.controller;
+                ctrl.storage_ref().block_size()
+            }
             None => {
                 self.processes[idx].core.r[R0 as usize] = u64::MAX;
                 self.resume_from_trap(idx);
@@ -3249,10 +3359,10 @@ impl Kernel {
             delegation_id: None,
         };
 
-        let result = self.device_registry.lookup_mut(dev_binding)
-            .expect("legacy_block_device binding must resolve")
-            .controller
-            .submit(req, &mut self.fabric);
+        let dev_slot = self.device_registry.lookup_mut(dev_binding)
+            .expect("legacy_block_device binding must resolve");
+        let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+        let result = ctrl.submit(req, &mut self.fabric);
 
         match result {
             SubmitResult::Accepted(handle) => {
@@ -3856,10 +3966,10 @@ impl Kernel {
         };
 
         let dev_binding = prepared.device_binding;
-        let result = self.device_registry.lookup_mut(dev_binding)
-            .expect("preflight validated binding exists")
-            .controller
-            .submit(req, &mut self.fabric);
+        let dev_slot = self.device_registry.lookup_mut(dev_binding)
+            .expect("preflight validated binding exists");
+        let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+        let result = ctrl.submit(req, &mut self.fabric);
 
         match result {
             SubmitResult::Accepted(handle) => {
@@ -3932,10 +4042,10 @@ impl Kernel {
             delegation_id: prepared.delegation_id,
         };
 
-        let result = self.device_registry.lookup_mut(dev_binding)
-            .expect("preflight validated binding exists")
-            .controller
-            .submit(req, &mut self.fabric);
+        let dev_slot = self.device_registry.lookup_mut(dev_binding)
+            .expect("preflight validated binding exists");
+        let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+        let result = ctrl.submit(req, &mut self.fabric);
 
         match result {
             SubmitResult::Accepted(handle) => {
@@ -7142,7 +7252,7 @@ mod tests {
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
 
         // Pre-populate block 0 with known data.
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(0, &[0xAA; 512]);
 
         let rk = RequesterKey { slot: 0, generation: 0 };
@@ -7156,7 +7266,7 @@ mod tests {
             delegation_id: None,
         };
 
-        let result = kernel.device_registry.devices[0].controller
+        let result = kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req, &mut kernel.fabric);
         assert!(matches!(result, SubmitResult::Accepted(_)));
 
@@ -7183,9 +7293,9 @@ mod tests {
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
 
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(0, &[0xBB; 512]);
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(1, &[0xCC; 512]);
 
         // Submit two requests — both slots occupied.
@@ -7200,7 +7310,7 @@ mod tests {
             source_authority_id: None,
             delegation_id: None,
             };
-            let result = kernel.device_registry.devices[0].controller
+            let result = kernel.device_registry.devices[0].controller.as_block_mut()
                 .submit(req, &mut kernel.fabric);
             assert!(matches!(result, SubmitResult::Accepted(_)));
         }
@@ -7243,7 +7353,7 @@ mod tests {
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
 
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(0, &[0xDD; 512]);
 
         let rk = RequesterKey {
@@ -7260,7 +7370,7 @@ mod tests {
             delegation_id: None,
         };
 
-        let result = kernel.device_registry.devices[0].controller
+        let result = kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req, &mut kernel.fabric);
         let handle = match result {
             SubmitResult::Accepted(h) => h,
@@ -7322,7 +7432,7 @@ mod tests {
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
 
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(0, &[0xEE; 512]);
 
         // Submit with generation 0 (the current incarnation).
@@ -7340,7 +7450,7 @@ mod tests {
             delegation_id: None,
         };
 
-        let result = kernel.device_registry.devices[0].controller
+        let result = kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req, &mut kernel.fabric);
         let handle = match result {
             SubmitResult::Accepted(h) => h,
@@ -7379,7 +7489,7 @@ mod tests {
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
 
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(0, &[0xFF; 512]);
 
         let rk = RequesterKey {
@@ -7396,7 +7506,7 @@ mod tests {
             delegation_id: None,
         };
 
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req, &mut kernel.fabric);
 
         // Process is NOT io_wait.
@@ -7467,7 +7577,7 @@ mod tests {
             source_authority_id: None,
             delegation_id: None,
         };
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req, &mut kernel.fabric);
 
         // Tick the block controller until completed.
@@ -7795,9 +7905,9 @@ mod tests {
         use super::super::block::{BlockRequest, SubmitResult, RequestHandle};
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(0, &[0xAA; 512]);
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(1, &[0xBB; 512]);
 
         let rk = RequesterKey {
@@ -7815,7 +7925,7 @@ mod tests {
             source_authority_id: None,
             delegation_id: None,
         };
-        let handle0 = match kernel.device_registry.devices[0].controller
+        let handle0 = match kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req0, &mut kernel.fabric)
         {
             SubmitResult::Accepted(h) => h,
@@ -7832,7 +7942,7 @@ mod tests {
             source_authority_id: None,
             delegation_id: None,
         };
-        let handle1 = match kernel.device_registry.devices[0].controller
+        let handle1 = match kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req1, &mut kernel.fabric)
         {
             SubmitResult::Accepted(h) => h,
@@ -9533,7 +9643,7 @@ mod tests {
 
         // Controller must have no in-flight requests
         assert!(kernel.device_registry.devices[0].controller
-            .in_flight_requests().is_empty(),
+            .as_block().in_flight_requests().is_empty(),
             "controller must not have accepted a request");
 
         eprintln!("9.3a.3.3: SUBMIT_READ → NONE succeeds; NONE child → SYS_DEV_SUBMIT error 4 ✓");
@@ -11397,7 +11507,7 @@ mod tests {
             delegation_id: None,
         };
 
-        let result = kernel.device_registry.devices[0].controller
+        let result = kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req, &mut kernel.fabric);
         assert!(matches!(result, super::super::block::SubmitResult::Accepted(_)));
 
@@ -12099,7 +12209,7 @@ mod tests {
             "driver must be in IoWait after successful DEV_SUBMIT");
 
         // Step 4: Verify the request metadata in the controller
-        let ctrl = &kernel.device_registry.devices[0].controller;
+        let ctrl = kernel.device_registry.devices[0].controller.as_block();
         let req_delegation = ctrl.in_flight_requests().iter()
             .find_map(|r| r.delegation_id.clone());
         let request_delegation = req_delegation
@@ -13275,7 +13385,7 @@ mod tests {
             source_authority_id: Some(src_aid),
             delegation_id: Some(tid),
         };
-        let result = kernel.device_registry.devices[0].controller
+        let result = kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(request, &mut kernel.fabric);
         match &result {
             SubmitResult::Accepted(_) => {}
@@ -14591,7 +14701,7 @@ mod tests {
             source_authority_id: Some(src_aid),
             delegation_id: Some(tid),
         };
-        let result = kernel.device_registry.devices[0].controller
+        let result = kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(request, &mut kernel.fabric);
         match &result {
             SubmitResult::Accepted(_) => {}
@@ -17494,7 +17604,7 @@ mod tests {
             target_offset: 0, source_domain: dom_p1,
             source_authority_id: None, delegation_id: None,
         };
-        let handle_a = match kernel.device_registry.devices[0].controller
+        let handle_a = match kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req_a, &mut kernel.fabric)
         {
             SubmitResult::Accepted(h) => h,
@@ -17506,7 +17616,7 @@ mod tests {
             target_offset: 0, source_domain: dom_p2,
             source_authority_id: None, delegation_id: None,
         };
-        let handle_b = match kernel.device_registry.devices[1].controller
+        let handle_b = match kernel.device_registry.devices[1].controller.as_block_mut()
             .submit(req_b, &mut kernel.fabric)
         {
             SubmitResult::Accepted(h) => h,
