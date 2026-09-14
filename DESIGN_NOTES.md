@@ -2172,3 +2172,123 @@ active work are all irrelevant to this predicate.
 700/700 tests; 29 instructions.  Phase 9.2f is complete.
 The 9.2 umbrella (capabilities → device authority → composition →
 blocking IPC → multi-request quiescence) is closed.
+
+
+## DN-21: Runtime Device-Capability Transfer (Phase 9.3a)
+
+Phase 9.3a removes the last special-case kernel-to-driver device provisioning
+path.  After this phase, device authority reaches a driver through ordinary
+`SYS_SEND_CAP` capability transfer — the same mechanism used for memory
+capabilities since Phase 9.2b.
+
+### Kind-sensitive SYS_SEND_CAP
+
+The ABI now resolves the source capability kind before interpreting R5/R6/R7:
+
+```text
+resolve destination → resolve presented source →
+Kind(source) → Interpretation(R5, R6, R7) →
+kind-specific attenuation → receiver-cap capacity →
+delivery route → identity availability →
+derive child authority → install child handle + provenance → deliver.
+```
+
+**Memory source:** R5=offset, R6=length, R7=Permissions (unchanged).
+**Device source:** R5=0 R6=0 required (non-spatial authority), R7=DeviceRights.
+
+This ordering protects the ABI from accidental cross-kind interpretation:
+R7=0x02 is valid `Permissions::WRITE` but undefined `DeviceRights`, and is
+correctly rejected with error 1 only because R7 is decoded *after* the source
+kind is known.
+
+### Dual attenuation check
+
+Two independent subset checks enforce the exact-presented-authority principle:
+
+  1. **Gate 2b (handle_send_cap):** `child_rights ⊆ presented_rights`
+  2. **Fabric primitive:** `child_rights ⊆ backing_rights`
+
+The Fabric `derive_device_from_authority_id()` independently verifies that the
+backing entry matches the presented object, generation, and rights exactly,
+then checks `child_rights ⊆ backing_rights`.  This prevents a backing
+authority from ever "rescuing" an insufficient presented capability — the
+same rule that governed the 9.2c/OIDC exact-presented-authority design.
+
+### Attenuation lattice
+
+`DeviceRights::NONE` is the bottom element:
+
+```text
+∅ ⊆ SUBMIT_READ ⊆ …
+```
+
+A `SUBMIT_READ → NONE` transfer succeeds, but the resulting child capability
+cannot authorize `SYS_DEV_SUBMIT`.  Possession of a device capability is
+not itself authority to operate the device.
+
+### Rollback symmetry
+
+Commit creates two artifacts: a Fabric `DeviceAuthorityEntry` and a receiver
+`CapabilityEntry::Device`.  If an unexpected error occurs after both are
+created, rollback removes both:
+
+```text
+Error(8) ⇒ ΔLiveAuthority = ΔLiveCapability = ΔMessage = 0
+```
+
+Preflight-failure is stronger:
+
+```text
+ΔAuthorityIdCounter = ΔDelegationIdCounter = 0
+```
+
+### Error ABI (generalized)
+
+  1. Malformed ABI / invalid kind-specific rights bits
+  2. Destination not live
+  3. Source handle does not resolve
+  4. Kind-specific attenuation/shape violation
+  5. Receiver cap table full
+  6. Receiver mailbox full
+  7. Identity space exhausted
+  8. Internal error (IDs consumed, no live authority leaked)
+
+### Formal gate
+
+```text
+anka_device_capability_transfer.kleis:       12/12 positive examples
+anka_device_capability_transfer_false_witnesses.kleis: 0/5 pass (all rejected)
+```
+
+### Hostile suite (14 tests)
+
+  1. Successful transfer preserves ObjectId, Generation, Kind=Device.
+  2. Non-amplification: NONE→SUBMIT_READ rejects.
+  3. SUBMIT_READ→NONE succeeds; child cannot DEV_SUBMIT.
+  4. R5≠0 rejects (error 4).
+  5. R6≠0 rejects (error 4).
+  6. R7=0x02 undefined DeviceRights → error 1 (Kind→Decode witness).
+  7. Fresh AuthorityId + DelegationId(client,driver) in receiver.
+  8. Transferred device cap usable for DEV_SUBMIT.
+  9. Sender CAP_DROP ⇏ child revocation.
+  10. Sender death ⇏ child revocation.
+  11. Kind preservation: Device child in device_authorities, not memory caps.
+  12. Receiver-table-full: ΔAuthority = ΔHandle = ΔMessage = 0.
+  13. Direct delivery: full ABI (R1=2, cap handle, sender ProcessKey, mailbox unchanged).
+  14. Fabric derive rejects presented/backing object mismatch.
+
+### Decisive integration witness
+
+`p93a_4_supervisor_to_driver_integration`:
+
+```text
+KernelBootstrap → Supervisor → SYS_SEND_CAP → Driver → SYS_DEV_SUBMIT → Device
+```
+
+The kernel bootstraps root device authority to the supervisor.  The supervisor
+delegates via ordinary `SYS_SEND_CAP`.  The driver uses the transferred
+capability for `SYS_DEV_SUBMIT`.  Supervisor then drops its cap; the driver's
+authority survives.  DMA commits 512 bytes through the delegated authority
+chain.  No special kernel-to-driver provisioning path exists.
+
+715/715 tests; 29 instructions.  Phase 9.3a is complete.

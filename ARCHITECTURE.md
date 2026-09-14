@@ -1754,6 +1754,28 @@ The positive Kleis gate is 11/11 in `anka_multi_request_quiescence.kleis` (impor
 
 With multi-request pair quiescence closed, the 9.2 umbrella is complete: capabilities (9.2a) → device authority (9.2b–c) → composition (9.2d) → blocking IPC (9.2e) → multi-request quiescence (9.2f).  The user-space driver system now handles concurrent I/O with generation-scoped lifecycle isolation, formally verified from Kleis theory through hostile Rust tests.
 
+### Stage 28 -- Runtime device-capability transfer (Phase 9.3a)
+
+Phase 9.3a extends `SYS_SEND_CAP` to transfer device capabilities at runtime, removing the last special-case kernel-to-driver provisioning path.  The syscall is now kind-sensitive: it resolves the source capability kind before interpreting R5/R6/R7.  Device authority is non-spatial (R5=R6=0 required); R7 is decoded as `DeviceRights` only after the source kind is known, preventing accidental cross-kind interpretation.
+
+The transfer enforces dual attenuation: `child_rights ⊆ presented_rights` (syscall gate) and `child_rights ⊆ backing_rights` (Fabric primitive, independently verified).  `DeviceRights::NONE` is the bottom element: a zero-rights device capability can be created but cannot authorize any device operation.
+
+Rollback symmetry ensures that a post-commit failure removes both the Fabric `DeviceAuthorityEntry` and the receiver `CapabilityEntry::Device`: `Error(8) ⇒ ΔLiveAuthority = ΔLiveCapability = ΔMessage = 0`.
+
+The decisive integration test (`p93a_4_supervisor_to_driver_integration`) proves:
+
+```text
+KernelBootstrap → Supervisor → SYS_SEND_CAP → Driver → SYS_DEV_SUBMIT → Device
+```
+
+The kernel bootstraps root device authority; the supervisor delegates via ordinary capability transfer; the driver performs I/O; the supervisor drops its cap; the driver's authority survives.  DMA commits through the delegated authority chain.
+
+The Kleis gate: 12/12 positive (`anka_device_capability_transfer.kleis`) and 0/5 false witnesses (`anka_device_capability_transfer_false_witnesses.kleis`).  The hostile suite adds 14 tests covering attenuation, non-amplification, kind preservation, ABI canonicalization, revocation independence, atomicity, and direct delivery semantics.
+
+715/715 tests; 29 instructions.
+
+With device-capability transfer complete, device authority is no longer an exception to the capability-transfer architecture.  The same `SYS_SEND_CAP` that delegates memory regions now delegates device access.  This directly enables the next phase: multiple device instances with authority-scoped routing, moving toward the NIC and eventually `GET /alive → "Anka64 is alive."`
+
 The project continues to evolve by the same rule that produced its strongest results:
 
 ```text
