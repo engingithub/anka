@@ -1,0 +1,56 @@
+// =============================================================================
+// Anka64 Phase 9.3b falsifiability probes.
+// Every example below is deliberately false and must be rejected.
+// =============================================================================
+
+import "anka_multi_device_routing.kleis"
+
+example "FALSE-DEVROUTE-1: ObjectId match alone is enough despite generation mismatch" {
+    assert(
+        routes_to_device_binding(
+            bvconst(7,64),bvconst(1,64),
+            bvconst(7,64),bvconst(2,64),
+            bvconst(1,1)
+        )
+    )
+}
+
+example "FALSE-DEVROUTE-2: authority for Device A may route to distinct Device B" {
+    assert(
+        routes_to_device_binding(
+            bvconst(10,64),bvconst(0,64),
+            bvconst(20,64),bvconst(0,64),
+            bvconst(1,1)
+        )
+    )
+}
+
+example "FALSE-DEVROUTE-3: controller-local RequestHandle is globally unique without device qualification" {
+    assert(
+        device_request_key_equal(
+            bvconst(10,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),
+            bvconst(20,64),bvconst(0,64),bvconst(0,8),bvconst(0,64)
+        )
+    )
+}
+
+example "FALSE-DEVROUTE-4: request on Device B can be ignored when deciding pair quiescence" {
+    assert(
+        peer_died_multi_device(
+            bvconst(1,1),
+            bvconst(0,3),
+            bvconst(1,3)
+        )
+    )
+}
+
+example "FALSE-DEVROUTE-5: unrelated global autonomous I/O prevents PeerDied for an otherwise quiescent pair" {
+    assert(
+        ¬peer_died_multi_device(
+            bvconst(1,1),
+            bvconst(0,3),
+            bvconst(0,3)
+        )
+        ∧ autonomous_io_global(bvconst(0,1),bvconst(1,1))
+    )
+}

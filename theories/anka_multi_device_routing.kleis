@@ -1,0 +1,218 @@
+// =============================================================================
+// Anka64 Multiple Device Instances and Routing (Phase 9.3b-formal)
+// =============================================================================
+//
+// Formal refinement of Phase 9.3a runtime Device capability transfer.
+// No new axioms.
+//
+// Key laws:
+//   * semantic device identity is DeviceBinding = (ObjectId, Generation),
+//   * registry vector position is storage location, never authority/identity,
+//   * exact DeviceBinding selects one controller instance,
+//   * authority for A cannot route to distinct B,
+//   * controller-local RequestHandle values are not globally unique,
+//   * waits/completions therefore require device-qualified request identity,
+//   * pair quiescence aggregates pair-attributed work across every device,
+//   * unrelated global autonomous I/O does not delay PeerDied for that pair.
+// =============================================================================
+
+import "anka_device_capability_transfer.kleis"
+
+// -----------------------------------------------------------------------------
+// Exact generation-qualified routing
+// -----------------------------------------------------------------------------
+
+define routes_to_device_binding(
+    presented_object : BitVec64,
+    presented_generation : BitVec64,
+    binding_object : BitVec64,
+    binding_generation : BitVec64,
+    binding_active : BitVec1
+) = binding_active=bvconst(1,1)
+    ∧ presented_object=binding_object
+    ∧ presented_generation=binding_generation
+
+// -----------------------------------------------------------------------------
+// Controller-local RequestHandle versus device-qualified request identity
+// -----------------------------------------------------------------------------
+
+define local_request_handle_equal(
+    slot_a : BitVec8, generation_a : BitVec64,
+    slot_b : BitVec8, generation_b : BitVec64
+) = slot_a=slot_b ∧ generation_a=generation_b
+
+define device_request_key_equal(
+    device_object_a : BitVec64,
+    device_generation_a : BitVec64,
+    request_slot_a : BitVec8,
+    request_generation_a : BitVec64,
+    device_object_b : BitVec64,
+    device_generation_b : BitVec64,
+    request_slot_b : BitVec8,
+    request_generation_b : BitVec64
+) = device_object_a=device_object_b
+    ∧ device_generation_a=device_generation_b
+    ∧ request_slot_a=request_slot_b
+    ∧ request_generation_a=request_generation_b
+
+// -----------------------------------------------------------------------------
+// Multi-device pair quiescence
+// -----------------------------------------------------------------------------
+
+// Current BlockController has two request slots.  Two devices therefore have
+// aggregate pair count 0..4, represented without wraparound in 3 bits.
+define controller_pair_count_valid(count : BitVec3) =
+    bvule(count,bvconst(2,3))
+
+define multi_device_pair_count(count_a : BitVec3, count_b : BitVec3) =
+    bvadd(count_a,count_b)
+
+define multi_device_pair_active(count_a : BitVec3, count_b : BitVec3) =
+    ¬(bvadd(count_a,count_b)=bvconst(0,3))
+
+define peer_died_multi_device(
+    peer_dead : BitVec1,
+    pair_count_a : BitVec3,
+    pair_count_b : BitVec3
+) = peer_dead=bvconst(1,1) ∧ bvadd(pair_count_a,pair_count_b)=bvconst(0,3)
+
+define autonomous_io_global(work_a : BitVec1, work_b : BitVec1) =
+    work_a=bvconst(1,1) ∨ work_b=bvconst(1,1)
+
+// -----------------------------------------------------------------------------
+// Positive obligations
+// -----------------------------------------------------------------------------
+
+example "DEVROUTE-1 CENTRAL: exact DeviceBinding routes to its controller" {
+    assert(
+        ∀(o : BitVec64). ∀(g : BitVec64).
+            routes_to_device_binding(o,g,o,g,bvconst(1,1))
+    )
+}
+
+example "DEVROUTE-2 GENERATION: same ObjectId with different generation does not route" {
+    assert(
+        ∀(o : BitVec64). ∀(g1 : BitVec64). ∀(g2 : BitVec64).
+            ¬(g1=g2)
+            ⇒ ¬routes_to_device_binding(o,g1,o,g2,bvconst(1,1))
+    )
+}
+
+example "DEVROUTE-3 ISOLATION: authority for Device A cannot route to distinct Device B" {
+    assert(
+        ∀(oa : BitVec64). ∀(ga : BitVec64).
+        ∀(ob : BitVec64). ∀(gb : BitVec64).
+            (¬(oa=ob) ∨ ¬(ga=gb))
+            ⇒ ¬routes_to_device_binding(oa,ga,ob,gb,bvconst(1,1))
+    )
+}
+
+example "DEVROUTE-4 UNIQUENESS: distinct registry bindings cannot both match one presented capability" {
+    assert(
+        ∀(po : BitVec64). ∀(pg : BitVec64).
+        ∀(oa : BitVec64). ∀(ga : BitVec64).
+        ∀(ob : BitVec64). ∀(gb : BitVec64).
+            (¬(oa=ob) ∨ ¬(ga=gb))
+            ⇒ ¬(
+                routes_to_device_binding(po,pg,oa,ga,bvconst(1,1))
+                ∧ routes_to_device_binding(po,pg,ob,gb,bvconst(1,1))
+            )
+    )
+}
+
+example "DEVROUTE-5 TRANSFER: DEVXFER identity-preservation premises preserve routing instance" {
+    assert(
+        ∀(po : BitVec64). ∀(pg : BitVec64).
+        ∀(co : BitVec64). ∀(cg : BitVec64).
+            (co=po ∧ cg=pg)
+            ⇒ routes_to_device_binding(co,cg,po,pg,bvconst(1,1))
+    )
+}
+
+example "DEVROUTE-6 LOCAL COLLISION: equal controller-local RequestHandles may belong to distinct devices" {
+    assert(
+        local_request_handle_equal(
+            bvconst(0,8),bvconst(0,64),
+            bvconst(0,8),bvconst(0,64)
+        )
+        ∧ ¬device_request_key_equal(
+            bvconst(10,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),
+            bvconst(20,64),bvconst(0,64),bvconst(0,8),bvconst(0,64)
+        )
+    )
+}
+
+example "DEVROUTE-7 COMPLETION: wrong-device completion cannot satisfy wait despite identical local handle" {
+    assert(
+        ∀(oa : BitVec64). ∀(ga : BitVec64).
+        ∀(ob : BitVec64). ∀(gb : BitVec64).
+        ∀(s : BitVec8). ∀(rg : BitVec64).
+            (¬(oa=ob) ∨ ¬(ga=gb))
+            ⇒ ¬device_request_key_equal(
+                oa,ga,s,rg,
+                ob,gb,s,rg
+            )
+    )
+}
+
+example "DEVROUTE-8 COMPLETION: exact device-qualified request key matches itself" {
+    assert(
+        ∀(o : BitVec64). ∀(g : BitVec64).
+        ∀(s : BitVec8). ∀(rg : BitVec64).
+            device_request_key_equal(o,g,s,rg,o,g,s,rg)
+    )
+}
+
+example "DEVROUTE-9 QUIESCENCE: aggregate pair count is the sum of both device-local counts" {
+    assert(
+        ∀(a : BitVec3). ∀(b : BitVec3).
+            (controller_pair_count_valid(a) ∧ controller_pair_count_valid(b))
+            ⇒ multi_device_pair_count(a,b)=bvadd(a,b)
+    )
+}
+
+example "DEVROUTE-10 QUIESCENCE: Device B pair work blocks PeerDied while Device A is quiescent" {
+    assert(
+        ∀(dead : BitVec1).
+            dead=bvconst(1,1)
+            ⇒ ¬peer_died_multi_device(dead,bvconst(0,3),bvconst(1,3))
+    )
+}
+
+example "DEVROUTE-11 QUIESCENCE: dead peer plus zero pair work on all devices permits PeerDied" {
+    assert(
+        ∀(dead : BitVec1).
+            dead=bvconst(1,1)
+            ⇒ peer_died_multi_device(dead,bvconst(0,3),bvconst(0,3))
+    )
+}
+
+example "DEVROUTE-12 INDEPENDENCE: unrelated global autonomous I/O may coexist with PeerDied" {
+    assert(
+        ∀(dead : BitVec1). ∀(work_b : BitVec1).
+            (dead=bvconst(1,1) ∧ work_b=bvconst(1,1))
+            ⇒ (
+                peer_died_multi_device(dead,bvconst(0,3),bvconst(0,3))
+                ∧ autonomous_io_global(bvconst(0,1),work_b)
+            )
+    )
+}
+
+example "DEVROUTE-13 COUNT: one pair request on either device is globally active" {
+    assert(
+        multi_device_pair_active(bvconst(1,3),bvconst(0,3))
+        ∧ multi_device_pair_active(bvconst(0,3),bvconst(1,3))
+    )
+}
+
+example "DEVROUTE-14 COUNT: only zero plus zero is globally quiescent for valid per-device counts" {
+    assert(
+        ∀(a : BitVec3). ∀(b : BitVec3).
+            (
+                controller_pair_count_valid(a)
+                ∧ controller_pair_count_valid(b)
+                ∧ ¬multi_device_pair_active(a,b)
+            )
+            ⇒ (a=bvconst(0,3) ∧ b=bvconst(0,3))
+    )
+}
