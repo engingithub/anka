@@ -1738,13 +1738,15 @@ On completion, the existing timer/device interrupt → `drain_block_completions(
 SYS_DEV_SUBMIT error codes:
 
   0 = success (driver enters IoWait)
-  1 = ABI decode failure
+  1 = ABI decode failure (malformed register, high-bit aliasing)
   2 = caller already in IoWait
-  3 = device handle resolution failure (not Device, missing SubmitRead,
-      wrong binding, or backing authority mismatch)
-  4 = buffer handle resolution failure (not Memory, missing WRITE)
-  5 = provenance violation (T.driver != current ProcessKey)
-  6 = controller rejected submission (bad block, busy slot, DMA failure)
+  3 = device handle resolution failure (does not resolve, or not Device kind)
+  4 = device authority validation failure (wrong rights, wrong binding)
+  5 = no block controller or no device binding
+  6 = buffer handle resolution failure (does not resolve, or not Memory kind)
+  7 = buffer handle missing WRITE permission
+  8 = provenance violation (T.driver != current ProcessKey)
+  9 = controller rejected submission (bad block, busy slot, DMA failure)
 
 **Decision -- legacy SYS_BLOCK_READ unchanged**:
 
@@ -1794,3 +1796,254 @@ centerpiece test was designed before implementation, not discovered
 afterward.
 
 635/635 tests; 29 instructions.  Phase 9.2c is complete.
+
+---
+
+## DN-18: Client-Driver-Device Composition
+
+**Phase**: 9.2d (Chapter 9: Anka64 as an Independent Architecture)
+
+**Problem**: Phases 9.2a-c established naming (handles), transfer
+(SYS_SEND_CAP), and consumption (SYS_DEV_SUBMIT) as independent
+mechanisms.  Phase 9.2d asks whether they compose: can an ordinary
+client delegate narrow buffer authority to an untrusted user-space
+driver, which combines it with its own device authority, completes
+I/O, and returns the result — without either process acquiring any
+authority not explicitly given to it?
+
+The decisive composition test uses real Asm64 guest programs — the
+first time SYS_SEND_CAP and SYS_DEV_SUBMIT are issued by guest code
+rather than test-harness kernel API calls.
+
+**Decision -- formal composition theory before implementation**:
+
+`theories/anka_driver_composition.kleis` was written and verified
+before any Rust composition test.  It derives 9 composition
+properties and 4 falsifiability witnesses from the already-
+established 9.2a-c predicates, with no new axioms:
+
+- COMP-1: successful SEND_CAP gives exact derived driver buffer authority.
+- COMP-2: accepted composition requires device authority AND exact
+  transferred buffer authority (independent conjuncts).
+- COMP-3: A_DMA is a subset of exact transferred driver buffer authority.
+- COMP-4: end-to-end non-amplification A_DMA ⊆ A_driver_buffer ⊆ A_client_buffer.
+- COMP-5: DelegationId preserved from SEND_CAP through request and completion.
+- COMP-6: composition leaves client device authority unchanged.
+- COMP-7: dropping driver transferred handle after acceptance does not
+  destroy request-local DMA authority.
+- COMP-8: terminal completion + CAP_DROP leaves driver device authority
+  but not client buffer authority.
+- COMP-TIME-1: polling client keeps composition outside the known
+  all-blocked dead state.
+
+The 4 false witnesses verify: device authority alone is insufficient,
+ambient WRITE cannot substitute for exact transferred authority, DMA
+cannot exceed transferred authority, and DEV_SUBMIT cannot replace
+DelegationId with a fresh one.  Z3 rejects all four.
+
+**Decision -- no new mechanism**:
+
+The entire composition path uses exactly four existing syscalls:
+
+  SYS_SEND_CAP → SYS_RECV → SYS_DEV_SUBMIT → SYS_SEND_KEY.
+
+No new syscall, no kernel code change, no new type.  The only
+implementation addition is test code.  This validates the
+architectural thesis: if 9.2a-c are really complete, 9.2d requires
+no new mechanism.
+
+The one non-test addition: `BlockController::in_flight_requests()`
+accessor to allow hostile tests to verify request metadata.
+
+**Decision -- real guest programs, not kernel API calls**:
+
+The decisive test builds two Asm64 programs:
+
+Client (46 words):
+  1. Write sentinel values around a 512-byte buffer region.
+  2. SYS_SEND_CAP: transfer a 512-byte WRITE capability to the driver.
+  3. Poll SYS_RECV for the driver's completion message.
+  4. Verify sentinels untouched and DMA data arrived.
+  5. SYS_EXIT(200) on success; distinct error codes on failure.
+
+Driver (30 words):
+  1. Poll SYS_RECV for client request (cap-bearing message).
+  2. Save sender ProcessKey and buffer handle in high registers.
+  3. SYS_DEV_SUBMIT with device cap (slot 0) + received buffer cap.
+  4. Block in IoWait, resume on device completion.
+  5. SYS_SEND_KEY completion to exact client ProcessKey.
+  6. SYS_EXIT(200).
+
+The kernel schedules both processes via round-robin with timer
+preemption.  The client polls while the driver is in IoWait, keeping
+the composition outside the known machine-time dead state.
+
+Verification is two-sided: guest-side (both exit with code 200) and
+host-side (physical memory contains exact block data at the DMA
+target, sentinels untouched).
+
+**Decision -- hostile composition tests attack the joins**:
+
+The hostile suite does not re-test individual mechanisms.  Each test
+attacks a specific composition joint:
+
+1. Driver cannot DEV_SUBMIT before receiving client's buffer cap.
+2. Client has no device authority at any point in the composition.
+3. DelegationId end-to-end: T created by SYS_SEND_CAP is the same T
+   in the accepted block request (COMP-5).
+4. Authority postconditions: after completion + CAP_DROP, driver retains
+   device authority but not client buffer authority (COMP-8).
+5. Ambient driver WRITE irrelevant: READ-only transferred handle fails
+   DEV_SUBMIT despite ambient WRITE over the same span (FALSE-COMP-2).
+6. CAP_DROP after acceptance does not cancel request-local DMA (COMP-7).
+7. Stale client incarnation rejected by completion SEND_KEY.
+8. Non-amplification chain: narrow 512-byte transferred handle is the
+   exact authority used for DEV_SUBMIT.
+
+**The authority lifecycle across the composition**:
+
+  Before:   client = buffer authority; driver = device authority.
+  During:   driver += delegated narrow buffer authority; DMA = narrower.
+  After:    driver = device authority only; DMA = gone.
+
+Authority temporarily crosses the trust boundary and then disappears.
+
+644/644 tests; 29 instructions.  Phase 9.2d is complete.
+
+## DN-19: Blocking IPC, Idle Progress, and the PeerDied Causal Barrier
+
+**Phase**: 9.2e (Chapter 9: Anka64 as an Independent Architecture)
+
+**Problem**: The 9.2d composition works, but the client busy-polls
+`SYS_RECV` while the driver is in IoWait.  That keeps at least one
+process schedulable, hiding a latent liveness question: what happens
+when *every* guest process is blocked and only autonomous DMA remains?
+
+The prior scheduler treated "all exited" as the termination condition.
+With autonomous I/O, a driver can die after the controller has accepted
+an operation.  The correct stopping condition is:
+
+    ¬Runnable ∧ ¬Resolvable ∧ ¬AutonomousIO ⇒ Stop.
+
+**Decision -- SYS_RECV_WAIT (syscall 14) is a scheduling field, not
+a state**: A process in RecvWait remains `ProcessState::Running` —
+just not schedulable.  The `recv_wait: Option<RecvWait>` field joins
+`waiting_on` and `io_wait` as the third scheduling blocker,
+consolidated under a single `is_schedulable()` predicate:
+
+```rust
+fn is_schedulable(&self) -> bool {
+    self.state == ProcessState::Running
+        && self.waiting_on.is_none()
+        && self.io_wait.is_none()
+        && self.recv_wait.is_none()
+}
+```
+
+**Decision -- exact-peer blocking receive with message-before-death
+ordering**: SYS_RECV_WAIT takes a generation-qualified ProcessKey.
+The decision order is:
+
+  1. Search mailbox for exact-peer message (queued history first).
+  2. Inspect peer incarnation state.
+  3. Return immediately or install RecvWait.
+
+A queued message from a dead or recycled peer wins over stale-key
+error.  This preserves successfully delivered history.
+
+**Decision -- single internal delivery operation**: All three message
+producers (SYS_SEND, SYS_SEND_KEY, SYS_SEND_CAP) route through one
+`deliver_message()` function using a `DeliveryRoute` enum:
+
+  - **Direct**: destination has RecvWait(sender) — bypasses mailbox.
+  - **Enqueue**: mailbox has room.
+  - **Full**: mailbox full, no direct route — reject.
+
+Direct delivery bypasses mailbox capacity only; all other validations
+remain intact.  SYS_SEND_CAP preserves atomic preflight ordering:
+cap-slot/authority checks first, then authority+handle installation,
+then receive completion.
+
+**Decision -- idle progress is a kernel machine boundary, not a
+synthetic process**: No domain, no identity, no capabilities.  The
+scheduler becomes a four-phase selector:
+
+  Resolvable                              ⇒ Resolve
+  ¬Resolvable ∧ Runnable                  ⇒ Run
+  ¬Resolvable ∧ ¬Runnable ∧ AutonomousIO  ⇒ Idle
+  ¬Resolvable ∧ ¬Runnable ∧ ¬AutonomousIO ⇒ Stop
+
+The Resolve phase drains completed block I/O, reevaluates RecvWaits,
+and wakes child waiters — in that order.  Idle progress advances the
+block controller once, drains resulting completions, and reevaluates
+RecvWaits.  Timer does NOT advance during idle: "committed instruction
+⇒ timer tick" is preserved.
+
+`BlockController::has_autonomous_work()` returns true for Waiting,
+DmaReady, or DmaInFlight.  Completed is *not* autonomous work — it
+is immediately serviceable kernel work.
+
+**Decision -- quiescence-gated PeerDied keyed by ProcessKey pair**:
+`has_nonterminal_pair_request(client, driver)` scans Waiting,
+DmaReady, and DmaInFlight slots using pair-level matching (client +
+driver ProcessKey, ignoring DelegationId incarnation).
+
+When a peer dies:
+  - If the pair has nonterminal requests: RecvWait stays installed.
+  - If the pair is quiescent: PeerDied(peer_key) is delivered.
+
+`reevaluate_recv_waits()` is called after every completion drain
+(resolve phase, idle progress, device interrupt).  The death predicate
+is incarnation-based: a generation mismatch means the awaited
+incarnation was reclaimed.  Only Running clients receive PeerDied.
+
+This establishes the causal barrier:
+
+    PeerDied(C,D) ⇒ no accepted nonterminal work attributable
+                     to (C,D) can subsequently mutate client-visible
+                     DMA state.
+
+    t ≥ t_PeerDied ⇒ M_target(t) = M_target(t_PeerDied).
+
+**Formal basis**:
+
+- `theories/anka_blocking_receive.kleis`:
+  45/45 positive claims verified, 0 new axioms;
+  imports only `anka_userspace_driver.kleis`;
+  kleis check: 63 functions, 0 data types, 0 structures.
+
+- `theories/anka_blocking_receive_false_witnesses.kleis`:
+  0/7 claims pass — all seven deliberately false architectural
+  statements are rejected (nonzero exit, as intended).
+
+**Hostile coverage** (42 p92e_ tests):
+
+  1. Unrelated sender cannot wake exact wait.
+  2. Queued exact-peer message beats later peer death and recycling.
+  3. Direct message before death — Message wins over PeerDied.
+  4. Recycled generation cannot satisfy old wait.
+  5. Cap-bearing direct delivery works.
+  6. Zombie/quiescent peer produces immediate PeerDied.
+  7. All-blocked/no-async state stops, does not spin.
+  8. Full mailbox does not block exact direct delivery (all 3 producers).
+  9. SEND_CAP direct route with full cap table is atomic failure.
+ 10. All-exited + autonomous DMA does not terminate early.
+ 11. Completed-but-undrained I/O resolved before Stop.
+ 12. Reclaimed peer incarnation still yields PeerDied for stored old key.
+ 13. Dead waiting client receives no IPC completion.
+ 14. Nonterminal pair request prevents premature PeerDied.
+ 15. Post-PeerDied DMA mutation impossible (unit + guest integration).
+
+**Decisive composition witnesses**:
+
+  - `p92e6_blocking_composition`: Client SEND_CAP → RECV_WAIT,
+    Driver RECV → DEV_SUBMIT → IoWait.  Explicit all-blocked state
+    witnessed.  Idle progress resolves DMA, driver SEND_KEYs client
+    via direct delivery.  Both exit 200.
+
+  - `p92e7_death_quiescence_integration`: Same guest setup, but
+    driver is killed while DMA is nonterminal.  Quiescence gate
+    holds.  Idle progress completes DMA.  PeerDied fires with exact
+    block data committed.  Post-notification memory frozen.
+
+690/690 tests; 29 instructions.  Phase 9.2e is complete.

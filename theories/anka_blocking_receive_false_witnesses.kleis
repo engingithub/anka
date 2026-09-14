@@ -1,0 +1,83 @@
+// Anka64 Phase 9.2e negative/falsifiability probes.
+// Every example in this file is deliberately false and MUST be rejected by Kleis/Z3.
+
+import "anka_blocking_receive.kleis"
+
+// =============================================================================
+// DELIBERATELY FALSE FALSIFIABILITY WITNESSES
+// =============================================================================
+
+example "FALSE-1: stale generation may satisfy an exact blocked receive" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32).
+            recyclable_process_generation(g)
+            ⇒ recv_wait_sender_matches_92e(s,g,s,next_process_generation(g))
+    )
+}
+
+example "FALSE-2: peer death may overwrite a latched direct message" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32). ∀(q : Bool).
+            q ⇒ recv_after_peer_death_92e(
+                recv_after_direct_message_92e(RECV_WAITING,s,g,s,g),
+                s,g,s,g,q
+            ) = RECV_PEER_DIED
+    )
+}
+
+example "FALSE-3: controller-wide PeerDied may coexist with active pair request" {
+    assert(
+        ∀(dead : Bool).
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+            peer_died_allowed_all_92e(dead,cs,cg,ds,dg)
+            ⇒ controller_pair_active_92e(cs,cg,ds,dg)
+    )
+}
+
+example "FALSE-4: all-blocked controller-wide autonomous work selects Stop" {
+    assert(
+        ∀(client_alive : Bool). ∀(driver_alive : Bool).
+        ∀(driver_wait : Bool). ∀(other : Bool).
+        ∀(queued : Bool). ∀(peer_dead : Bool). ∀(pair_active : Bool).
+            (client_alive ∧ driver_alive ∧ driver_wait ∧ ¬other
+             ∧ ¬queued ∧ ¬peer_dead
+             ∧ controller_any_autonomous_work_92e
+             ∧ ¬controller_any_completed_92e)
+            ⇒ scheduler_action_92e(
+                machine_resolvable_all_92e(RECV_WAITING,queued,peer_dead,pair_active),
+                runnable_exists_92e(client_alive,RECV_WAITING,driver_alive,driver_wait,other),
+                controller_any_autonomous_work_92e
+            ) = SCHED_STOP
+    )
+}
+
+example "FALSE-5: allowed idle machine step increments instruction timer" {
+    assert(
+        ∀(tb : ℤ). ∀(ta : ℤ).
+            idle_machine_step_allowed_92e(
+                REQ_DMA_INFLIGHT,REQ_COMPLETED,
+                REQ_EMPTY,REQ_EMPTY,
+                tb,ta
+            )
+            ⇒ ta=tb+1
+    )
+}
+
+example "FALSE-6: failed direct SEND_CAP may wake receiver while installing no authority" {
+    assert(
+        ∀(success : Bool). ∀(ra : Bool).
+            (¬success ∧ ¬ra)
+            ⇒ (
+                recv_state_after_send_cap_92e(RECV_WAITING,success)=RECV_MESSAGE
+                ∧ ¬receiver_authority_after_send_cap_92e(ra,success)
+            )
+    )
+}
+
+example "FALSE-7: dead driver may originate a new accepted submit" {
+    assert(
+        ∀(alive : Bool). ∀(gate : Bool).
+            (¬alive ∧ gate) ⇒ new_submit_allowed_92e(alive,gate)
+    )
+}

@@ -28,7 +28,7 @@ use std::collections::VecDeque;
 use super::state::{
     RequesterKey, DomainId, ObjectId, AccessKind,
     Permissions, FaultReason, AgentId, TxState,
-    AuthorityId, DelegationId,
+    AuthorityId, DelegationId, ProcessKey,
 };
 use super::fabric::Fabric;
 
@@ -495,6 +495,61 @@ impl BlockController {
     /// Mutable access to the backing storage (for test setup).
     pub fn storage_mut(&mut self) -> &mut BlockStorage {
         &mut self.storage
+    }
+
+    /// True if any slot is in a nonterminal accepted state:
+    /// Waiting, DmaReady, or DmaInFlight.
+    ///
+    /// These are the states where hardware may still act autonomously.
+    /// Completed is NOT autonomous — it is immediately serviceable
+    /// kernel bookkeeping.
+    ///
+    /// Formal basis: anka_blocking_receive.kleis — request_autonomous_work.
+    pub fn has_autonomous_work(&self) -> bool {
+        self.slots.iter().any(|s| s.is_waiting() || s.is_odma())
+    }
+
+    /// True if any nonterminal slot's DelegationId matches the given
+    /// (client, driver) ProcessKey pair, deliberately ignoring incarnation.
+    ///
+    /// This is the pair-level quiescence predicate: PeerDied(C,D) is
+    /// deferred while this returns true.
+    ///
+    /// Formal basis: anka_blocking_receive.kleis — controller_pair_active_92e.
+    pub fn has_nonterminal_pair_request(
+        &self,
+        client: &ProcessKey,
+        driver: &ProcessKey,
+    ) -> bool {
+        self.slots.iter().any(|s| {
+            let (request, is_nonterminal) = match s {
+                SlotState::Waiting { request, .. } => (request, true),
+                SlotState::DmaReady { request, .. } => (request, true),
+                SlotState::DmaInFlight { request, .. } => (request, true),
+                _ => return false,
+            };
+            if !is_nonterminal { return false; }
+            match &request.delegation_id {
+                Some(did) => {
+                    did.client.slot == client.slot
+                        && did.client.generation == client.generation
+                        && did.driver.slot == driver.slot
+                        && did.driver.generation == driver.generation
+                }
+                None => false,
+            }
+        })
+    }
+
+    /// Return the BlockRequest for each in-flight (non-free, non-completed) slot.
+    /// Used by composition tests to verify request metadata.
+    pub fn in_flight_requests(&self) -> Vec<&BlockRequest> {
+        self.slots.iter().filter_map(|s| match s {
+            SlotState::Waiting { request, .. } => Some(request),
+            SlotState::DmaReady { request, .. } => Some(request),
+            SlotState::DmaInFlight { request, .. } => Some(request),
+            _ => None,
+        }).collect()
     }
 
     /// Structural conservation and coherence invariants.

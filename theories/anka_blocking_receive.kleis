@@ -1,0 +1,1057 @@
+// =============================================================================
+// Anka64 Blocking Receive + PeerDied + Idle Progress (Phase 9.2e-formal)
+// =============================================================================
+//
+// Temporal refinement of anka_userspace_driver.kleis.
+//
+// This theory models actual request lifecycle state, exact ProcessKey provenance,
+// receive state transitions, direct SEND_CAP commit/rollback, and the scheduler
+// boundary. It introduces NO axioms.
+//
+// The design rule is deliberate:
+//   definitions describe machine state/transitions;
+//   examples derive architectural consequences from those definitions.
+//
+// The central safety result is split honestly into two layers:
+//   (1) Kleis proves PeerDied is an inductive quiescence barrier for all modeled
+//       controller transitions: every pair-relevant request is terminal, no
+//       pair-relevant DMA commit is enabled, terminality remains closed under
+//       controller advancement, and pair-visible memory is unchanged by such a
+//       step.
+//   (2) the Rust hostile test checks the concrete implementation's arbitrary
+//       future execution after notification.
+//
+// Expected gate: all positive theorems pass. Negative falsifiability probes live in anka_blocking_receive_false_witnesses.kleis.
+// =============================================================================
+
+import "anka_userspace_driver.kleis"
+
+// =============================================================================
+// I. REQUEST LIFECYCLE -- CONCRETE CONTROLLER STATE
+// =============================================================================
+// Encoded as BitVec3 for robust Z3 translation in the current Kleis build.
+// These correspond to the BlockController slot classes used by 9.2e.
+// =============================================================================
+
+define REQ_EMPTY       = bvconst(0,3)
+define REQ_WAITING     = bvconst(1,3)
+define REQ_DMA_READY   = bvconst(2,3)
+define REQ_DMA_INFLIGHT= bvconst(3,3)
+define REQ_COMPLETED   = bvconst(4,3)
+
+define request_state_valid(s : BitVec3) =
+    s=REQ_EMPTY ∨ s=REQ_WAITING ∨ s=REQ_DMA_READY
+    ∨ s=REQ_DMA_INFLIGHT ∨ s=REQ_COMPLETED
+
+define request_accepted_state(s : BitVec3) =
+    s=REQ_WAITING ∨ s=REQ_DMA_READY ∨ s=REQ_DMA_INFLIGHT ∨ s=REQ_COMPLETED
+
+define request_terminal_state(s : BitVec3) = s=REQ_COMPLETED
+
+define request_nonterminal_state(s : BitVec3) =
+    s=REQ_WAITING ∨ s=REQ_DMA_READY ∨ s=REQ_DMA_INFLIGHT
+
+define request_autonomous_work(s : BitVec3) = request_nonterminal_state(s)
+
+define request_completion_resolvable(s : BitVec3) = s=REQ_COMPLETED
+
+// One controller tick is modeled as a transition relation, not a forced
+// one-state advance. This intentionally over-approximates the Rust tick's
+// internal phases and latency: a nonterminal request may remain in its class or
+// move forward, but it may never move backward or resurrect from Completed.
+// Completed and Empty are absorbing under hardware advancement; completion
+// drain/slot reuse is separate kernel bookkeeping.
+define controller_step_allowed_92e(before : BitVec3, after : BitVec3) =
+    (before=REQ_EMPTY ∧ after=REQ_EMPTY)
+    ∨ (before=REQ_WAITING ∧ (
+        after=REQ_WAITING ∨ after=REQ_DMA_READY
+        ∨ after=REQ_DMA_INFLIGHT ∨ after=REQ_COMPLETED
+    ))
+    ∨ (before=REQ_DMA_READY ∧ (
+        after=REQ_DMA_READY ∨ after=REQ_DMA_INFLIGHT ∨ after=REQ_COMPLETED
+    ))
+    ∨ (before=REQ_DMA_INFLIGHT ∧ (
+        after=REQ_DMA_INFLIGHT ∨ after=REQ_COMPLETED
+    ))
+    ∨ (before=REQ_COMPLETED ∧ after=REQ_COMPLETED)
+
+// Correspondence bridge to the imported Phase 9.2 accepted-request semantics.
+// Existing accepted_request_active(a,t,driver_alive,cap_live) = a ∧ ¬t.
+define request_active_in_imported_model(
+    s : BitVec3,
+    driver_alive : Bool,
+    source_cap_live : Bool
+) = accepted_request_active(
+        request_accepted_state(s),
+        request_terminal_state(s),
+        driver_alive,
+        source_cap_live
+    )
+
+example "REQ92E-1: concrete nonterminal controller states exactly refine imported accepted_request_active" {
+    assert(
+        ∀(s : BitVec3). ∀(driver_alive : Bool). ∀(cap_live : Bool).
+            request_state_valid(s)
+            ⇒ (
+                request_active_in_imported_model(s,driver_alive,cap_live)
+                = request_nonterminal_state(s)
+            )
+    )
+}
+
+example "REQ92E-2: accepted nonterminal work is autonomous machine work even after driver death" {
+    assert(
+        ∀(s : BitVec3). ∀(cap_live : Bool).
+            (request_state_valid(s)
+             ∧ request_active_in_imported_model(s,false,cap_live))
+            ⇒ request_autonomous_work(s)
+    )
+}
+
+example "REQ92E-3: accepted nonterminal work is autonomous machine work even after CAP_DROP" {
+    assert(
+        ∀(s : BitVec3). ∀(driver_alive : Bool).
+            (request_state_valid(s)
+             ∧ request_active_in_imported_model(s,driver_alive,false))
+            ⇒ request_autonomous_work(s)
+    )
+}
+
+example "REQ92E-4: InFlight to Completed is an allowed controller transition" {
+    assert(controller_step_allowed_92e(REQ_DMA_INFLIGHT,REQ_COMPLETED))
+}
+
+example "REQ92E-5: terminal request cannot resurrect under controller advancement" {
+    assert(
+        ∀(before : BitVec3). ∀(after : BitVec3).
+            (request_state_valid(before)
+             ∧ request_state_valid(after)
+             ∧ request_terminal_state(before)
+             ∧ controller_step_allowed_92e(before,after))
+            ⇒ request_terminal_state(after)
+    )
+}
+
+// =============================================================================
+// II. PAIR-LEVEL PROVENANCE AND QUIESCENCE
+// =============================================================================
+// A request carries DelegationId=(client ProcessKey, driver ProcessKey, inc).
+// PeerDied is keyed by the exact ProcessKey pair and intentionally ignores inc.
+// =============================================================================
+
+define delegation_pair_matches_92e(
+    r_c_slot : BitVec32, r_c_gen : BitVec32,
+    r_d_slot : BitVec32, r_d_gen : BitVec32,
+    r_inc : BitVec64,
+    c_slot : BitVec32, c_gen : BitVec32,
+    d_slot : BitVec32, d_gen : BitVec32
+) =
+    process_key_matches(r_c_slot,r_c_gen,c_slot,c_gen)
+    ∧ process_key_matches(r_d_slot,r_d_gen,d_slot,d_gen)
+
+// A request blocks PeerDied precisely when it belongs to the pair and hardware
+// may still act on it (Waiting, DmaReady, or DmaInFlight).
+define request_blocks_peer_died_92e(
+    r_c_slot : BitVec32, r_c_gen : BitVec32,
+    r_d_slot : BitVec32, r_d_gen : BitVec32,
+    r_inc : BitVec64, r_state : BitVec3,
+    c_slot : BitVec32, c_gen : BitVec32,
+    d_slot : BitVec32, d_gen : BitVec32
+) =
+    delegation_pair_matches_92e(
+        r_c_slot,r_c_gen,r_d_slot,r_d_gen,r_inc,
+        c_slot,c_gen,d_slot,d_gen
+    )
+    ∧ request_autonomous_work(r_state)
+
+
+// -----------------------------------------------------------------------------
+// Controller-wide request population
+// -----------------------------------------------------------------------------
+// Request slots are abstract state observers indexed by BitVec1 because the
+// current BlockController has exactly two request slots. Thus quantification
+// over id : BitVec1 ranges over the entire implementation request population.
+// These are STATE OBSERVERS, not axioms: every theorem must hold for every
+// interpretation satisfying its explicit well-formedness premises.
+operation controller_req_present_92e : BitVec1 → Bool
+operation controller_req_client_slot_92e : BitVec1 → BitVec32
+operation controller_req_client_gen_92e : BitVec1 → BitVec32
+operation controller_req_driver_slot_92e : BitVec1 → BitVec32
+operation controller_req_driver_gen_92e : BitVec1 → BitVec32
+operation controller_req_state_92e : BitVec1 → BitVec3
+operation controller_req_next_state_92e : BitVec1 → BitVec3
+
+define controller_requests_wellformed_92e =
+    ∀(id : BitVec1).
+        controller_req_present_92e(id)
+        ⇒ (
+            request_state_valid(controller_req_state_92e(id))
+            ∧ request_accepted_state(controller_req_state_92e(id))
+        )
+
+define controller_request_pair_matches_92e(
+    id : BitVec1,
+    c_slot : BitVec32, c_gen : BitVec32,
+    d_slot : BitVec32, d_gen : BitVec32
+) =
+    controller_req_present_92e(id)
+    ∧ process_key_matches(
+        controller_req_client_slot_92e(id),controller_req_client_gen_92e(id),
+        c_slot,c_gen
+    )
+    ∧ process_key_matches(
+        controller_req_driver_slot_92e(id),controller_req_driver_gen_92e(id),
+        d_slot,d_gen
+    )
+
+define controller_pair_active_92e(
+    c_slot : BitVec32, c_gen : BitVec32,
+    d_slot : BitVec32, d_gen : BitVec32
+) =
+    ∃(id : BitVec1).
+        controller_request_pair_matches_92e(id,c_slot,c_gen,d_slot,d_gen)
+        ∧ request_autonomous_work(controller_req_state_92e(id))
+
+define controller_pair_quiescent_92e(
+    c_slot : BitVec32, c_gen : BitVec32,
+    d_slot : BitVec32, d_gen : BitVec32
+) =
+    ∀(id : BitVec1).
+        controller_request_pair_matches_92e(id,c_slot,c_gen,d_slot,d_gen)
+        ⇒ request_terminal_state(controller_req_state_92e(id))
+
+define peer_died_allowed_all_92e(
+    peer_dead : Bool,
+    c_slot : BitVec32, c_gen : BitVec32,
+    d_slot : BitVec32, d_gen : BitVec32
+) =
+    peer_dead
+    ∧ controller_requests_wellformed_92e
+    ∧ controller_pair_quiescent_92e(c_slot,c_gen,d_slot,d_gen)
+
+define controller_any_autonomous_work_92e =
+    ∃(id : BitVec1).
+        controller_req_present_92e(id)
+        ∧ request_autonomous_work(controller_req_state_92e(id))
+
+define controller_any_completed_92e =
+    ∃(id : BitVec1).
+        controller_req_present_92e(id)
+        ∧ request_completion_resolvable(controller_req_state_92e(id))
+
+// A hardware/controller step does not allocate, drain, or change provenance.
+// For every currently present request it changes only lifecycle state according
+// to controller_step_allowed_92e. Allocation/drain are separate kernel actions.
+define controller_step_wellformed_92e =
+    ∀(id : BitVec1).
+        controller_req_present_92e(id)
+        ⇒ (
+            request_state_valid(controller_req_next_state_92e(id))
+            ∧ controller_step_allowed_92e(
+                controller_req_state_92e(id),
+                controller_req_next_state_92e(id)
+            )
+        )
+
+define controller_pair_quiescent_next_92e(
+    c_slot : BitVec32, c_gen : BitVec32,
+    d_slot : BitVec32, d_gen : BitVec32
+) =
+    ∀(id : BitVec1).
+        controller_request_pair_matches_92e(id,c_slot,c_gen,d_slot,d_gen)
+        ⇒ request_terminal_state(controller_req_next_state_92e(id))
+
+// Conservative commit model: any pair-relevant nonterminal request that reaches
+// Completed in this controller step MAY have committed client-visible DMA.
+// Fault completions are therefore conservatively included; this strengthens
+// the safety proof rather than assuming success.
+define controller_pair_commit_exists_92e(
+    c_slot : BitVec32, c_gen : BitVec32,
+    d_slot : BitVec32, d_gen : BitVec32
+) =
+    ∃(id : BitVec1).
+        controller_request_pair_matches_92e(id,c_slot,c_gen,d_slot,d_gen)
+        ∧ request_nonterminal_state(controller_req_state_92e(id))
+        ∧ controller_req_next_state_92e(id)=REQ_COMPLETED
+        ∧ controller_step_allowed_92e(
+            controller_req_state_92e(id),
+            controller_req_next_state_92e(id)
+        )
+
+example "ALLPAIR-1 CENTRAL: PeerDied implies every present pair-relevant request is terminal" {
+    assert(
+        ∀(dead : Bool).
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(id : BitVec1).
+            (
+                peer_died_allowed_all_92e(dead,cs,cg,ds,dg)
+                ∧ controller_request_pair_matches_92e(id,cs,cg,ds,dg)
+            )
+            ⇒ request_terminal_state(controller_req_state_92e(id))
+    )
+}
+
+example "ALLPAIR-2: any present pair-relevant autonomous request blocks PeerDied" {
+    assert(
+        ∀(dead : Bool).
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(id : BitVec1).
+            (
+                dead ∧ controller_requests_wellformed_92e
+                ∧ controller_request_pair_matches_92e(id,cs,cg,ds,dg)
+                ∧ request_autonomous_work(controller_req_state_92e(id))
+            )
+            ⇒ ¬peer_died_allowed_all_92e(dead,cs,cg,ds,dg)
+    )
+}
+
+example "ALLPAIR-3: PeerDied excludes controller-wide pair-active work" {
+    assert(
+        ∀(dead : Bool).
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+            peer_died_allowed_all_92e(dead,cs,cg,ds,dg)
+            ⇒ ¬controller_pair_active_92e(cs,cg,ds,dg)
+    )
+}
+
+// Finite two-slot projection of the controller request set. 9.2e stresses one
+// request operationally; two slots ensure semantic pair-wide behavior already
+// ignores transfer incarnation before 9.2f adds true multi-request submission.
+define peer_died_allowed_pair2_92e(
+    peer_dead : Bool,
+    c_slot : BitVec32, c_gen : BitVec32,
+    d_slot : BitVec32, d_gen : BitVec32,
+    r1_c_slot : BitVec32, r1_c_gen : BitVec32,
+    r1_d_slot : BitVec32, r1_d_gen : BitVec32,
+    r1_inc : BitVec64, r1_state : BitVec3,
+    r2_c_slot : BitVec32, r2_c_gen : BitVec32,
+    r2_d_slot : BitVec32, r2_d_gen : BitVec32,
+    r2_inc : BitVec64, r2_state : BitVec3
+) =
+    peer_dead
+    ∧ ¬request_blocks_peer_died_92e(
+        r1_c_slot,r1_c_gen,r1_d_slot,r1_d_gen,r1_inc,r1_state,
+        c_slot,c_gen,d_slot,d_gen
+    )
+    ∧ ¬request_blocks_peer_died_92e(
+        r2_c_slot,r2_c_gen,r2_d_slot,r2_d_gen,r2_inc,r2_state,
+        c_slot,c_gen,d_slot,d_gen
+    )
+
+
+// Pair-wide active-work predicate used by RecvWait quiescence gating.
+example "PAIR92E-1: exact DelegationId equality implies pair-level equality" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64).
+            delegation_matches(cs,cg,ds,dg,i1,cs,cg,ds,dg,i1)
+            ⇒ delegation_pair_matches_92e(cs,cg,ds,dg,i2,cs,cg,ds,dg)
+    )
+}
+
+example "PAIR92E-2: pair-level matching deliberately ignores transfer incarnation" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64).
+            ¬(i1=i2)
+            ⇒ delegation_pair_matches_92e(cs,cg,ds,dg,i1,cs,cg,ds,dg)
+    )
+}
+
+example "PAIR92E-3: stale client ProcessKey cannot be pair-relevant" {
+    assert(
+        ∀(rcs : BitVec32). ∀(rcg : BitVec32).
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32). ∀(i : BitVec64).
+            ¬process_key_matches(rcs,rcg,cs,cg)
+            ⇒ ¬delegation_pair_matches_92e(rcs,rcg,ds,dg,i,cs,cg,ds,dg)
+    )
+}
+
+example "PAIR92E-4: stale driver ProcessKey cannot be pair-relevant" {
+    assert(
+        ∀(rds : BitVec32). ∀(rdg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(cs : BitVec32). ∀(cg : BitVec32). ∀(i : BitVec64).
+            ¬process_key_matches(rds,rdg,ds,dg)
+            ⇒ ¬delegation_pair_matches_92e(cs,cg,rds,rdg,i,cs,cg,ds,dg)
+    )
+}
+
+example "PAIR92E-5: a same-pair nonterminal request blocks PeerDied" {
+    assert(
+        ∀(dead : Bool).
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64).
+        ∀(r2s : BitVec3).
+            (dead ∧ request_state_valid(r2s))
+            ⇒ ¬peer_died_allowed_pair2_92e(
+                dead, cs,cg,ds,dg,
+                cs,cg,ds,dg,i1,REQ_DMA_INFLIGHT,
+                cs,cg,ds,dg,i2,r2s
+            )
+    )
+}
+
+example "PAIR92E-6: second transfer incarnation for same pair also blocks PeerDied" {
+    assert(
+        ∀(dead : Bool).
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64).
+            (dead ∧ ¬(i1=i2))
+            ⇒ ¬peer_died_allowed_pair2_92e(
+                dead, cs,cg,ds,dg,
+                cs,cg,ds,dg,i1,REQ_COMPLETED,
+                cs,cg,ds,dg,i2,REQ_DMA_READY
+            )
+    )
+}
+
+example "PAIR92E-7: pair-relevant Completed requests permit PeerDied" {
+    assert(
+        ∀(dead : Bool).
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64).
+            dead
+            ⇒ peer_died_allowed_pair2_92e(
+                dead, cs,cg,ds,dg,
+                cs,cg,ds,dg,i1,REQ_COMPLETED,
+                cs,cg,ds,dg,i2,REQ_COMPLETED
+            )
+    )
+}
+
+example "PAIR92E-8: live peer never permits PeerDied" {
+    assert(
+        ∀(dead : Bool).
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64).
+        ∀(s1 : BitVec3). ∀(s2 : BitVec3).
+            (¬dead ∧ request_state_valid(s1) ∧ request_state_valid(s2))
+            ⇒ ¬peer_died_allowed_pair2_92e(
+                dead, cs,cg,ds,dg,
+                cs,cg,ds,dg,i1,s1,
+                cs,cg,ds,dg,i2,s2
+            )
+    )
+}
+
+// =============================================================================
+// III. RECEIVE STATE MACHINE AND MESSAGE-BEFORE-DEATH
+// =============================================================================
+// Receive completion is latched state. Peer death can complete only WAITING;
+// therefore it cannot overwrite a message already committed by direct delivery.
+// =============================================================================
+
+define RECV_NONE       = bvconst(0,3)
+define RECV_WAITING    = bvconst(1,3)
+define RECV_MESSAGE    = bvconst(2,3)
+define RECV_PEER_DIED  = bvconst(3,3)
+define RECV_ERROR      = bvconst(4,3)
+
+define recv_state_valid(s : BitVec3) =
+    s=RECV_NONE ∨ s=RECV_WAITING ∨ s=RECV_MESSAGE
+    ∨ s=RECV_PEER_DIED ∨ s=RECV_ERROR
+
+define recv_wait_sender_matches_92e(
+    expected_slot : BitVec32, expected_gen : BitVec32,
+    sender_slot : BitVec32, sender_gen : BitVec32
+) = process_key_matches(expected_slot,expected_gen,sender_slot,sender_gen)
+
+// Direct message delivery completes only an exact blocked receive.
+define recv_after_direct_message_92e(
+    recv_state : BitVec3,
+    expected_slot : BitVec32, expected_gen : BitVec32,
+    sender_slot : BitVec32, sender_gen : BitVec32
+) =
+    if (recv_state=RECV_WAITING
+        ∧ recv_wait_sender_matches_92e(expected_slot,expected_gen,sender_slot,sender_gen))
+    then RECV_MESSAGE
+    else recv_state
+
+// Peer-death servicing only owns a still-WAITING receive and only after pair
+// quiescence. Any already completed outcome is left untouched.
+define recv_after_peer_death_92e(
+    recv_state : BitVec3,
+    expected_slot : BitVec32, expected_gen : BitVec32,
+    dead_slot : BitVec32, dead_gen : BitVec32,
+    pair_quiescent : Bool
+) =
+    if (recv_state=RECV_WAITING
+        ∧ process_key_matches(expected_slot,expected_gen,dead_slot,dead_gen)
+        ∧ pair_quiescent)
+    then RECV_PEER_DIED
+    else recv_state
+
+// Entry decision order for SYS_RECV_WAIT. A queued exact-peer message is tested
+// before current peer liveness/staleness.
+define RECV_DECISION_MESSAGE  = bvconst(1,3)
+define RECV_DECISION_BLOCK    = bvconst(2,3)
+define RECV_DECISION_PEERDIED = bvconst(3,3)
+define RECV_DECISION_ERROR    = bvconst(4,3)
+
+define recv_wait_decision_92e(
+    queued_exact_message : Bool,
+    peer_key_current : Bool,
+    peer_live : Bool,
+    peer_dead : Bool,
+    pair_active_dma : Bool
+) =
+    if queued_exact_message then RECV_DECISION_MESSAGE
+    else if ¬peer_key_current then RECV_DECISION_ERROR
+    else if peer_live then RECV_DECISION_BLOCK
+    else if (peer_dead ∧ pair_active_dma) then RECV_DECISION_BLOCK
+    else if (peer_dead ∧ ¬pair_active_dma) then RECV_DECISION_PEERDIED
+    else RECV_DECISION_ERROR
+
+
+// Exact ABI-level peer key check: stale/recycled identity is derived from the
+// actual ProcessKey comparison rather than supplied as a free Boolean.
+define recv_wait_decision_for_current_key_92e(
+    queued_exact_message : Bool,
+    expected_slot : BitVec32, expected_gen : BitVec32,
+    current_slot : BitVec32, current_gen : BitVec32,
+    peer_live : Bool,
+    peer_dead : Bool,
+    pair_active_dma : Bool
+) = recv_wait_decision_92e(
+        queued_exact_message,
+        process_key_matches(expected_slot,expected_gen,current_slot,current_gen),
+        peer_live,peer_dead,pair_active_dma
+    )
+
+example "RECV92E-1: recycled sender generation cannot satisfy exact wait" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32).
+            recyclable_process_generation(g)
+            ⇒ ¬recv_wait_sender_matches_92e(s,g,s,next_process_generation(g))
+    )
+}
+
+example "RECV92E-2: queued old-incarnation message wins even after slot recycle" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32).
+        ∀(queued : Bool). ∀(live : Bool). ∀(dead : Bool). ∀(active : Bool).
+            (recyclable_process_generation(g) ∧ queued)
+            ⇒ recv_wait_decision_for_current_key_92e(
+                queued,s,g,s,next_process_generation(g),live,dead,active
+            ) = RECV_DECISION_MESSAGE
+    )
+}
+
+example "RECV92E-3: dead exact peer with controller-wide pair-active DMA remains blocked" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(queued : Bool). ∀(live : Bool). ∀(dead : Bool).
+            (¬queued ∧ ¬live ∧ dead ∧ controller_pair_active_92e(cs,cg,ds,dg))
+            ⇒ recv_wait_decision_for_current_key_92e(
+                queued,ds,dg,ds,dg,live,dead,
+                controller_pair_active_92e(cs,cg,ds,dg)
+            ) = RECV_DECISION_BLOCK
+    )
+}
+
+example "RECV92E-4: controller-wide PeerDied quiescence makes blocked receive resolvable" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(queued : Bool). ∀(live : Bool). ∀(dead : Bool).
+            (¬queued ∧ ¬live ∧ peer_died_allowed_all_92e(dead,cs,cg,ds,dg))
+            ⇒ recv_wait_decision_for_current_key_92e(
+                queued,ds,dg,ds,dg,live,dead,
+                controller_pair_active_92e(cs,cg,ds,dg)
+            ) = RECV_DECISION_PEERDIED
+    )
+}
+
+example "RECV92E-5: direct exact message latches completion" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32).
+            recv_after_direct_message_92e(RECV_WAITING,s,g,s,g)=RECV_MESSAGE
+    )
+}
+
+example "RECV92E-6 MESSAGE-BEFORE-DEATH: later death cannot overwrite latched direct message" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32). ∀(q : Bool).
+            recv_after_peer_death_92e(
+                recv_after_direct_message_92e(RECV_WAITING,s,g,s,g),
+                s,g,s,g,q
+            ) = RECV_MESSAGE
+    )
+}
+
+example "RECV92E-7: unrelated sender leaves exact wait outstanding" {
+    assert(
+        ∀(es : BitVec32). ∀(eg : BitVec32).
+        ∀(ss : BitVec32). ∀(sg : BitVec32).
+            ¬process_key_matches(es,eg,ss,sg)
+            ⇒ recv_after_direct_message_92e(RECV_WAITING,es,eg,ss,sg)=RECV_WAITING
+    )
+}
+
+
+example "RECV92E-8: stale new wait with no queued historical message is an error" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32).
+        ∀(queued : Bool). ∀(live : Bool). ∀(dead : Bool). ∀(active : Bool).
+            (recyclable_process_generation(g) ∧ ¬queued)
+            ⇒ recv_wait_decision_for_current_key_92e(
+                queued,s,g,s,next_process_generation(g),live,dead,active
+            ) = RECV_DECISION_ERROR
+    )
+}
+
+// =============================================================================
+// IV. DIRECT DELIVERY ROUTING AND SEND_CAP ATOMIC TRANSITION
+// =============================================================================
+
+define delivery_direct_92e(
+    recv_state : BitVec3,
+    expected_slot : BitVec32, expected_gen : BitVec32,
+    sender_slot : BitVec32, sender_gen : BitVec32
+) =
+    recv_state=RECV_WAITING
+    ∧ process_key_matches(expected_slot,expected_gen,sender_slot,sender_gen)
+
+define delivery_enqueue_92e(
+    recv_state : BitVec3,
+    expected_slot : BitVec32, expected_gen : BitVec32,
+    sender_slot : BitVec32, sender_gen : BitVec32,
+    mailbox_has_capacity : Bool
+) =
+    ¬delivery_direct_92e(recv_state,expected_slot,expected_gen,sender_slot,sender_gen)
+    ∧ mailbox_has_capacity
+
+define delivery_full_92e(
+    recv_state : BitVec3,
+    expected_slot : BitVec32, expected_gen : BitVec32,
+    sender_slot : BitVec32, sender_gen : BitVec32,
+    mailbox_has_capacity : Bool
+) =
+    ¬delivery_direct_92e(recv_state,expected_slot,expected_gen,sender_slot,sender_gen)
+    ∧ ¬mailbox_has_capacity
+
+example "DELIV92E-1: exact blocked receiver has direct route despite full mailbox" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32). ∀(capacity : Bool).
+            ¬capacity
+            ⇒ (
+                delivery_direct_92e(RECV_WAITING,s,g,s,g)
+                ∧ ¬delivery_full_92e(RECV_WAITING,s,g,s,g,capacity)
+            )
+    )
+}
+
+example "DELIV92E-2: nonmatching sender cannot use direct route" {
+    assert(
+        ∀(es : BitVec32). ∀(eg : BitVec32).
+        ∀(ss : BitVec32). ∀(sg : BitVec32).
+            ¬process_key_matches(es,eg,ss,sg)
+            ⇒ ¬delivery_direct_92e(RECV_WAITING,es,eg,ss,sg)
+    )
+}
+
+example "DELIV92E-3: absent direct route uses queue when capacity exists" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32). ∀(capacity : Bool).
+            capacity
+            ⇒ delivery_enqueue_92e(RECV_NONE,s,g,s,g,capacity)
+    )
+}
+
+// Direct SEND_CAP success requires every authority/cap preflight plus the direct
+// route. Mailbox capacity is deliberately absent from this preflight.
+define send_cap_direct_success_92e(
+    destination_live_current : Bool,
+    source_resolves : Bool,
+    subset_valid : Bool,
+    receiver_cap_slot_free : Bool,
+    direct_route : Bool
+) =
+    destination_live_current ∧ source_resolves ∧ subset_valid
+    ∧ receiver_cap_slot_free ∧ direct_route
+
+// Observable post-state functions. On failure every field is unchanged. On
+// success sender authority remains (derivation is non-consuming), receiver
+// authority+handle become live, message result is committed, and RecvWait clears.
+define sender_authority_after_send_cap_92e(
+    sender_authority_before : Bool,
+    success : Bool
+) = sender_authority_before
+
+define receiver_authority_after_send_cap_92e(
+    receiver_authority_before : Bool,
+    success : Bool
+) = receiver_authority_before ∨ success
+
+define receiver_handle_after_send_cap_92e(
+    receiver_handle_before : Bool,
+    success : Bool
+) = receiver_handle_before ∨ success
+
+define message_after_send_cap_92e(
+    message_before : Bool,
+    success : Bool
+) = message_before ∨ success
+
+define recv_state_after_send_cap_92e(
+    recv_state_before : BitVec3,
+    success : Bool
+) = if success then RECV_MESSAGE else recv_state_before
+
+example "SCAP92E-1: direct SEND_CAP bypasses mailbox but still requires a free receiver cap slot" {
+    assert(
+        ∀(d : Bool). ∀(src : Bool). ∀(sub : Bool).
+        ∀(slot_free : Bool). ∀(direct : Bool).
+            (d ∧ src ∧ sub ∧ direct ∧ ¬slot_free)
+            ⇒ ¬send_cap_direct_success_92e(d,src,sub,slot_free,direct)
+    )
+}
+
+example "SCAP92E-2 FAILURE ATOMICITY: failed direct SEND_CAP preserves all modeled state" {
+    assert(
+        ∀(sa : Bool). ∀(ra : Bool). ∀(rh : Bool). ∀(m : Bool).
+        ∀(success : Bool). ∀(recv : BitVec3).
+            (recv_state_valid(recv) ∧ ¬success)
+            ⇒ (
+                sender_authority_after_send_cap_92e(sa,success)=sa
+                ∧ receiver_authority_after_send_cap_92e(ra,success)=ra
+                ∧ receiver_handle_after_send_cap_92e(rh,success)=rh
+                ∧ message_after_send_cap_92e(m,success)=m
+                ∧ recv_state_after_send_cap_92e(recv,success)=recv
+            )
+    )
+}
+
+example "SCAP92E-3 SUCCESS ATOMICITY: successful direct SEND_CAP commits authority handle and message together" {
+    assert(
+        ∀(sa : Bool). ∀(ra : Bool). ∀(rh : Bool). ∀(m : Bool). ∀(success : Bool).
+            (¬ra ∧ ¬rh ∧ ¬m ∧ success)
+            ⇒ (
+                sender_authority_after_send_cap_92e(sa,success)=sa
+                ∧ receiver_authority_after_send_cap_92e(ra,success)
+                ∧ receiver_handle_after_send_cap_92e(rh,success)
+                ∧ message_after_send_cap_92e(m,success)
+                ∧ recv_state_after_send_cap_92e(RECV_WAITING,success)=RECV_MESSAGE
+            )
+    )
+}
+
+example "SCAP92E-4: full receiver cap table prevents wake and partial authority install" {
+    assert(
+        ∀(s : BitVec32). ∀(g : BitVec32).
+        ∀(d : Bool). ∀(src : Bool). ∀(sub : Bool).
+        ∀(slot_free : Bool). ∀(direct : Bool).
+        ∀(ra : Bool). ∀(rh : Bool). ∀(m : Bool).
+            (
+                d ∧ src ∧ sub ∧ direct ∧ ¬slot_free
+                ∧ ¬ra ∧ ¬rh ∧ ¬m
+                ∧ delivery_direct_92e(RECV_WAITING,s,g,s,g)
+            )
+            ⇒ (
+                ¬send_cap_direct_success_92e(d,src,sub,slot_free,direct)
+                ∧ receiver_authority_after_send_cap_92e(ra,send_cap_direct_success_92e(d,src,sub,slot_free,direct))=ra
+                ∧ receiver_handle_after_send_cap_92e(rh,send_cap_direct_success_92e(d,src,sub,slot_free,direct))=rh
+                ∧ message_after_send_cap_92e(m,send_cap_direct_success_92e(d,src,sub,slot_free,direct))=m
+                ∧ recv_state_after_send_cap_92e(RECV_WAITING,send_cap_direct_success_92e(d,src,sub,slot_free,direct))=RECV_WAITING
+            )
+    )
+}
+
+
+example "SCAP92E-5: actual successful direct preflight drives the atomic commit transition" {
+    assert(
+        ∀(d : Bool). ∀(src : Bool). ∀(sub : Bool).
+        ∀(slot_free : Bool). ∀(direct : Bool).
+        ∀(sa : Bool). ∀(ra : Bool). ∀(rh : Bool). ∀(m : Bool).
+            (d ∧ src ∧ sub ∧ slot_free ∧ direct ∧ ¬ra ∧ ¬rh ∧ ¬m)
+            ⇒ (
+                send_cap_direct_success_92e(d,src,sub,slot_free,direct)
+                ∧ sender_authority_after_send_cap_92e(
+                    sa,send_cap_direct_success_92e(d,src,sub,slot_free,direct)
+                )=sa
+                ∧ receiver_authority_after_send_cap_92e(
+                    ra,send_cap_direct_success_92e(d,src,sub,slot_free,direct)
+                )
+                ∧ receiver_handle_after_send_cap_92e(
+                    rh,send_cap_direct_success_92e(d,src,sub,slot_free,direct)
+                )
+                ∧ message_after_send_cap_92e(
+                    m,send_cap_direct_success_92e(d,src,sub,slot_free,direct)
+                )
+                ∧ recv_state_after_send_cap_92e(
+                    RECV_WAITING,send_cap_direct_success_92e(d,src,sub,slot_free,direct)
+                )=RECV_MESSAGE
+            )
+    )
+}
+
+// =============================================================================
+// V. SCHEDULER BOUNDARY DERIVED FROM PROCESS/REQUEST STATE
+// =============================================================================
+
+define client_schedulable_92e(client_alive : Bool, recv_state : BitVec3) =
+    client_alive ∧ ¬(recv_state=RECV_WAITING)
+
+define driver_schedulable_92e(driver_alive : Bool, driver_io_wait : Bool) =
+    driver_alive ∧ ¬driver_io_wait
+
+define runnable_exists_92e(
+    client_alive : Bool, recv_state : BitVec3,
+    driver_alive : Bool, driver_io_wait : Bool,
+    other_runnable : Bool
+) =
+    client_schedulable_92e(client_alive,recv_state)
+    ∨ driver_schedulable_92e(driver_alive,driver_io_wait)
+    ∨ other_runnable
+
+
+define recv_wait_resolvable_92e(
+    recv_state : BitVec3,
+    queued_exact_message : Bool,
+    peer_dead : Bool,
+    pair_active_dma : Bool
+) =
+    recv_state=RECV_WAITING
+    ∧ (queued_exact_message ∨ (peer_dead ∧ ¬pair_active_dma))
+
+define machine_resolvable_all_92e(
+    recv_state : BitVec3,
+    queued_exact_message : Bool,
+    peer_dead : Bool,
+    pair_active_dma : Bool
+) =
+    controller_any_completed_92e
+    ∨ recv_wait_resolvable_92e(
+        recv_state,queued_exact_message,peer_dead,pair_active_dma
+    )
+
+define SCHED_RESOLVE = bvconst(0,2)
+define SCHED_RUN     = bvconst(1,2)
+define SCHED_IDLE    = bvconst(2,2)
+define SCHED_STOP    = bvconst(3,2)
+
+define scheduler_action_92e(
+    resolvable : Bool,
+    runnable : Bool,
+    autonomous : Bool
+) =
+    if resolvable then SCHED_RESOLVE
+    else if runnable then SCHED_RUN
+    else if autonomous then SCHED_IDLE
+    else SCHED_STOP
+
+example "SCHED92E-1: selector priority is Resolve then Run then Idle then Stop" {
+    assert(
+        ∀(res : Bool). ∀(run : Bool). ∀(auto : Bool).
+            (res ⇒ scheduler_action_92e(res,run,auto)=SCHED_RESOLVE)
+            ∧ ((¬res ∧ run) ⇒ scheduler_action_92e(res,run,auto)=SCHED_RUN)
+            ∧ ((¬res ∧ ¬run ∧ auto) ⇒ scheduler_action_92e(res,run,auto)=SCHED_IDLE)
+            ∧ ((¬res ∧ ¬run ∧ ¬auto) ⇒ scheduler_action_92e(res,run,auto)=SCHED_STOP)
+    )
+}
+
+example "SCHED92E-2 DECISIVE STATE: Client RecvWait + Driver IoWait + active DMA yields Idle" {
+    assert(
+        ∀(client_alive : Bool). ∀(driver_alive : Bool).
+        ∀(driver_wait : Bool). ∀(other : Bool).
+        ∀(queued : Bool). ∀(peer_dead : Bool).
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+            (client_alive ∧ driver_alive ∧ driver_wait ∧ ¬other
+             ∧ ¬queued ∧ ¬peer_dead
+             ∧ controller_pair_active_92e(cs,cg,ds,dg)
+             ∧ ¬controller_any_completed_92e)
+            ⇒ scheduler_action_92e(
+                machine_resolvable_all_92e(
+                    RECV_WAITING,queued,peer_dead,
+                    controller_pair_active_92e(cs,cg,ds,dg)
+                ),
+                runnable_exists_92e(client_alive,RECV_WAITING,driver_alive,driver_wait,other),
+                controller_any_autonomous_work_92e
+            ) = SCHED_IDLE
+    )
+}
+
+example "SCHED92E-3: all exited with no async work is genuinely Stop" {
+    assert(
+        ∀(client_alive : Bool). ∀(driver_alive : Bool). ∀(driver_wait : Bool). ∀(other : Bool).
+        ∀(queued : Bool). ∀(peer_dead : Bool). ∀(pair_active : Bool).
+            (¬client_alive ∧ ¬driver_alive ∧ ¬other
+             ∧ ¬controller_any_autonomous_work_92e
+             ∧ ¬controller_any_completed_92e)
+            ⇒ scheduler_action_92e(
+                machine_resolvable_all_92e(RECV_NONE,queued,peer_dead,pair_active),
+                runnable_exists_92e(client_alive,RECV_NONE,driver_alive,driver_wait,other),
+                controller_any_autonomous_work_92e
+            ) = SCHED_STOP
+    )
+}
+
+example "SCHED92E-4: any Completed controller request is resolved before idle advancement" {
+    assert(
+        ∀(queued : Bool). ∀(peer_dead : Bool). ∀(pair_active : Bool). ∀(run : Bool).
+            (controller_any_completed_92e ∧ ¬run)
+            ⇒ scheduler_action_92e(
+                machine_resolvable_all_92e(RECV_NONE,queued,peer_dead,pair_active),
+                run,
+                controller_any_autonomous_work_92e
+            ) = SCHED_RESOLVE
+    )
+}
+
+
+example "SCHED92E-4b: dead quiescent exact peer is Resolve, never Stop" {
+    assert(
+        ∀(queued : Bool).
+        ∀(client_alive : Bool). ∀(driver_alive : Bool). ∀(driver_wait : Bool). ∀(other : Bool).
+        ∀(dead : Bool).
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+            (¬queued
+             ∧ client_alive ∧ ¬driver_alive ∧ driver_wait ∧ ¬other
+             ∧ peer_died_allowed_all_92e(dead,cs,cg,ds,dg))
+            ⇒ scheduler_action_92e(
+                machine_resolvable_all_92e(
+                    RECV_WAITING,queued,dead,
+                    controller_pair_active_92e(cs,cg,ds,dg)
+                ),
+                runnable_exists_92e(client_alive,RECV_WAITING,driver_alive,driver_wait,other),
+                controller_any_autonomous_work_92e
+            ) = SCHED_RESOLVE
+    )
+}
+
+example "SCHED92E-4c: all processes exited does not stop accepted autonomous DMA" {
+    assert(
+        ∀(client_alive : Bool). ∀(driver_alive : Bool). ∀(driver_wait : Bool). ∀(other : Bool).
+        ∀(queued : Bool). ∀(peer_dead : Bool). ∀(pair_active : Bool).
+            (¬client_alive ∧ ¬driver_alive ∧ ¬other ∧ ¬queued
+             ∧ controller_any_autonomous_work_92e
+             ∧ ¬controller_any_completed_92e)
+            ⇒ scheduler_action_92e(
+                machine_resolvable_all_92e(RECV_NONE,queued,peer_dead,pair_active),
+                runnable_exists_92e(client_alive,RECV_NONE,driver_alive,driver_wait,other),
+                controller_any_autonomous_work_92e
+            ) = SCHED_IDLE
+    )
+}
+
+example "SCHED92E-5: runnable guest wins over autonomous hardware when nothing is immediately resolvable" {
+    assert(
+        scheduler_action_92e(false,true,true)=SCHED_RUN
+    )
+}
+
+// =============================================================================
+// VI. IDLE TRANSITION + TIMER PRESERVATION
+// =============================================================================
+
+// Idle is a kernel-machine boundary. It advances controller/Fabric state but
+// does not manufacture a committed guest instruction tick.
+define idle_machine_step_allowed_92e(
+    r1_before : BitVec3, r1_after : BitVec3,
+    r2_before : BitVec3, r2_after : BitVec3,
+    timer_before : ℤ, timer_after : ℤ
+) =
+    controller_step_allowed_92e(r1_before,r1_after)
+    ∧ controller_step_allowed_92e(r2_before,r2_after)
+    ∧ timer_after=timer_before
+
+example "IDLE92E-1: every allowed idle machine step preserves instruction timer" {
+    assert(
+        ∀(r1b : BitVec3). ∀(r1a : BitVec3).
+        ∀(r2b : BitVec3). ∀(r2a : BitVec3).
+        ∀(tb : ℤ). ∀(ta : ℤ).
+            idle_machine_step_allowed_92e(r1b,r1a,r2b,r2a,tb,ta)
+            ⇒ ta=tb
+    )
+}
+
+example "IDLE92E-2: idle boundary admits controller progress without guest timer progress" {
+    assert(
+        ∀(t : ℤ).
+            idle_machine_step_allowed_92e(
+                REQ_DMA_INFLIGHT,REQ_COMPLETED,
+                REQ_EMPTY,REQ_EMPTY,
+                t,t
+            )
+    )
+}
+
+// =============================================================================
+// VII. PEERDIED AS AN INDUCTIVE CAUSAL BARRIER
+// =============================================================================
+// A pair-visible memory write is possible only on the commit transition out of
+// a pair-relevant DmaInFlight request. PeerDied excludes that state.
+// =============================================================================
+
+// Abstract client-visible target memory version. The only modeled pair-attributed
+// mutation increments it when a pair-relevant DMA commit is enabled.
+define pair_memory_after_controller_step_92e(
+    memory_before : ℤ,
+    pair_commit_enabled : Bool
+) = if pair_commit_enabled then memory_before+1 else memory_before
+
+// Dead process cannot originate a new SYS_DEV_SUBMIT transition.
+define new_submit_allowed_92e(driver_alive : Bool, device_gate : Bool) =
+    driver_alive ∧ device_gate
+
+example "BARRIER92E-1: controller-wide PeerDied excludes every pair-attributed DMA commit in the next hardware step" {
+    assert(
+        ∀(dead : Bool).
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+            (
+                peer_died_allowed_all_92e(dead,cs,cg,ds,dg)
+                ∧ controller_step_wellformed_92e
+            )
+            ⇒ ¬controller_pair_commit_exists_92e(cs,cg,ds,dg)
+    )
+}
+
+example "BARRIER92E-2: controller-wide PeerDied quiescence is inductive under hardware advancement" {
+    assert(
+        ∀(dead : Bool).
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+            (
+                peer_died_allowed_all_92e(dead,cs,cg,ds,dg)
+                ∧ controller_step_wellformed_92e
+            )
+            ⇒ controller_pair_quiescent_next_92e(cs,cg,ds,dg)
+    )
+}
+
+example "BARRIER92E-3: PeerDied implies client-visible pair memory stability across the whole next controller step" {
+    assert(
+        ∀(dead : Bool). ∀(m : ℤ).
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+            (
+                peer_died_allowed_all_92e(dead,cs,cg,ds,dg)
+                ∧ controller_step_wellformed_92e
+            )
+            ⇒ pair_memory_after_controller_step_92e(
+                m,controller_pair_commit_exists_92e(cs,cg,ds,dg)
+            ) = m
+    )
+}
+
+example "BARRIER92E-4: dead driver cannot create new accepted device work" {
+    assert(
+        ∀(alive : Bool). ∀(gate : Bool).
+            ¬alive ⇒ ¬new_submit_allowed_92e(alive,gate)
+    )
+}

@@ -517,6 +517,14 @@ impl Fabric {
             return None;
         }
 
+        // Enforce AuthorityId uniqueness in destination domain (cross-kind).
+        // Normal callers supply a freshly allocated monotonic ID, but this
+        // primitive accepts an ID argument and must not manufacture the
+        // ambiguity that remove_by_authority_id() assumes cannot exist.
+        if self.has_authority_id(dst_domain, new_authority_id) {
+            return None;
+        }
+
         let cap = Capability64::new(
             parent.object(),
             parent.generation(),

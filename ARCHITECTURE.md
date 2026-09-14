@@ -1301,7 +1301,7 @@ Design questions, with current status.
 2. **Physical translation** — How should `(ObjectId, offset)` map to physical memory?  Is a TLB needed?  Can translation caching remain independent of authority?
 3. **Capability representation** — How are capabilities made unforgeable in hardware?  Tagged memory, capability registers, object handles plus protected metadata, or hybrid approaches?
 6. **Interrupt and exception model** — **Resolved in Phase 9.0.**  Event entry (TRAP, timer interrupt) pushes a protected `EventFrame` containing `return_pc`, `return_privilege`, `interrupts_were_enabled`, and `cause`.  A single `event_return()` primitive consumes the frame, used by both `ERET` (ISA instruction) and `resume_from_trap()` (host-mediated).  Asynchronous delivery: `deliver_pending()` fires at instruction boundaries when `pending_event.is_some() && interrupts_enabled`.  `FabricTimer` is a machine-global instruction-step timer on `Fabric`.  Generation ≠ routing ≠ pending ≠ delivery.  Formally verified: `anka_interrupts.kleis` (7-place Petri net, 6 reachable markings, 4 conservation invariants, 10 safety proofs, 2 falsifiability witnesses).
-7. **Device model** — **Substantially resolved through Phase 9.2c.**  A block device demonstrates capability-mediated asynchronous I/O (9.1).  Device capabilities are delegated as narrow, request-local DMA domains derived at submission time from the submitter's authority.  Command slots are bounded (F + O\_wait + O\_dma + C = N\_slots) with generation-qualified handles.  Completion queues are the source of truth; interrupts are level-triggered notifications (L\_dev := C > 0).  Phase 9.2c introduced kind-sensitive device authority (`DeviceRights`, `CapabilitySlotState` as `Free`/`Memory`/`Device` sum type), `SYS_DEV_SUBMIT` with seven-gate preflight, and exact-AuthorityId DMA delegation — the driver presents two handles (device + buffer) and the kernel derives DMA authority from the exact buffer handle's AuthorityId, not from ambient domain privilege.  Remaining open: user-space interrupt delivery, multi-device routing, device-capability transfer over SYS\_SEND\_CAP.
+7. **Device model** — **Substantially resolved through Phase 9.2c.**  A block device demonstrates capability-mediated asynchronous I/O (9.1).  Device capabilities are delegated as narrow, request-local DMA domains derived at submission time from the submitter's authority.  Command slots are bounded (F + O\_wait + O\_dma + C = N\_slots) with generation-qualified handles.  Completion queues are the source of truth; interrupts are level-triggered notifications (L\_dev := C > 0).  Phase 9.2c introduced kind-sensitive device authority (`DeviceRights`, `CapabilitySlotState` as `Free`/`Memory`/`Device` sum type), `SYS_DEV_SUBMIT` with seven-gate preflight, and exact-AuthorityId DMA delegation — the driver presents two handles (device + buffer) and the kernel derives DMA authority from the exact buffer handle's AuthorityId, not from ambient domain privilege.  Phase 9.2d proved composition: a real two-process guest (client + driver) uses SYS\_SEND\_CAP, SYS\_RECV, SYS\_DEV\_SUBMIT, and SYS\_SEND\_KEY to perform isolated device I/O without new mechanism.  Remaining open: user-space interrupt delivery, multi-device routing, device-capability transfer over SYS\_SEND\_CAP.
 9. **Capability transfer through IPC** — **Resolved in Phase 9.2b.**  `SYS_SEND_CAP` resolves the sender's handle via the three-condition check (9.2a), derives a child capability from the exact `AuthorityId` into the receiver's domain using `derive_from_authority_id()`, installs it in the receiver's cap table with a fresh `DelegationId`, and enqueues a cap-bearing message -- all atomically after a complete read-only preflight.  The receiver observes the transferred handle via the extended `SYS_RECV` ABI.  Non-amplification: `C_child ⊆ C_source`.  Memory-only scope in 9.2b; device capabilities deferred to 9.2c.
 
 ### New (post-self-hosting)
@@ -1453,7 +1453,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions, 63,808 bytes |
 | Canonical source | ~17 KB |
-| Tests | 635 |
+| Tests | 648 |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -1670,7 +1670,59 @@ Legacy `SYS_BLOCK_READ` remains unchanged: kernel-mediated, ambient-domain deleg
 
 635/635 tests; 29 instructions.
 
-Through self-hosting, capabilities, multicore, W⊕X, protected calls/returns, process lifecycle, formal Petri nets, reclamation, a genuine supervisor, an explicitly delegated initial-environment ABI, a compiler managed by Anka rather than merely running inside it, zero host-fabricated compiler processes, a declarative system image, architectural interrupts with preemptive multitasking, asynchronous capability-mediated block I/O with suspended syscall continuations, atomic inter-process capability transfer with structured provenance, and now kind-sensitive device authority with exact-handle DMA delegation, the ISA still has not demanded instruction 30.  Twenty-nine instructions.  635/635 tests.  The software keeps asking for better abstractions rather than instruction proliferation.
+### Stage 25 -- Client-driver-device composition (Phase 9.2d)
+
+Phase 9.2d proved that the 9.2a-c mechanisms compose into a working isolated user-space device driver — without new mechanism, new syscall, or kernel code change.
+
+The decisive test uses two real Asm64 guest programs.  A client program writes sentinel values, delegates a narrow 512-byte WRITE capability to a driver via `SYS_SEND_CAP`, polls `SYS_RECV` for completion, and verifies the DMA data plus sentinel integrity.  A driver program polls `SYS_RECV`, extracts the client's ProcessKey and transferred buffer handle, invokes `SYS_DEV_SUBMIT` with its own pre-provisioned device capability plus the received buffer handle, blocks in IoWait, resumes on device completion, sends a generation-qualified completion message to the exact client incarnation via `SYS_SEND_KEY`, and exits.
+
+The authority chain:
+
+```text
+A_DMA ⊆ A_driver_buffer ⊆ A_client_buffer
+```
+
+Device authority is an independent conjunct — it cannot substitute for the transferred buffer authority, and ambient driver memory authority is not an input to the exact-presented-authority composition gate.
+
+A formal Kleis composition theory (`anka_driver_composition.kleis`) was derived before any Rust test, establishing 9 composition properties and 4 falsifiability witnesses from existing 9.2a-c predicates with no new axioms.  Z3 confirms all 9 intended properties and rejects all 4 false witnesses.
+
+The hostile composition suite attacks the joins between layers: driver cannot submit without client's buffer (mechanism ordering), client never acquires device authority (COMP-6), DelegationId flows end-to-end from SEND_CAP into the accepted block request (COMP-5), authority postconditions after completion + CAP_DROP (COMP-8), ambient WRITE cannot rescue a READ-only transferred handle (FALSE-COMP-2), CAP_DROP after request acceptance does not cancel DMA (COMP-7), stale client incarnation is rejected by completion SEND_KEY, and the non-amplification chain holds through the narrow transferred handle.
+
+The composition path uses exactly four existing syscalls: SYS_SEND_CAP, SYS_RECV, SYS_DEV_SUBMIT, SYS_SEND_KEY.  No new mechanism was needed.
+
+644/644 tests; 29 instructions.
+
+Through self-hosting, capabilities, multicore, W⊕X, protected calls/returns, process lifecycle, formal Petri nets, reclamation, a genuine supervisor, an explicitly delegated initial-environment ABI, a compiler managed by Anka rather than merely running inside it, zero host-fabricated compiler processes, a declarative system image, architectural interrupts with preemptive multitasking, asynchronous capability-mediated block I/O with suspended syscall continuations, atomic inter-process capability transfer with structured provenance, kind-sensitive device authority with exact-handle DMA delegation, and now a fully composed client-driver-device user-space driver system, the ISA still has not demanded instruction 30.  Twenty-nine instructions.  644/644 tests.  The software keeps asking for better abstractions rather than instruction proliferation.
+
+### Stage 26 -- Blocking IPC, idle progress, and PeerDied causal barrier (Phase 9.2e)
+
+Phase 9.2e added blocking exact-peer IPC (`SYS_RECV_WAIT`, syscall 14), autonomous idle I/O progress, and quiescence-gated `PeerDied` with a formal causal barrier.
+
+The central question was temporal composition: what happens when every guest process is blocked and only autonomous DMA remains?  The prior scheduler's "all exited ⇒ stop" rule was incorrect in the presence of request-local DMA authority that outlives its submitting driver.
+
+The scheduler became a four-phase selector: Resolve (drain completions, reevaluate RecvWaits, wake waiters), Run (schedulable guests), Idle (advance block controller without ticking the timer), Stop.  These phases are exhaustive and mutually exclusive.  `is_schedulable()` consolidates all three scheduling blockers (`waiting_on`, `io_wait`, `recv_wait`) under one predicate.
+
+All three message producers (`SYS_SEND`, `SYS_SEND_KEY`, `SYS_SEND_CAP`) route through a single `deliver_message()` with three delivery modes: Direct (bypasses mailbox into RecvWait), Enqueue, Full.  Direct delivery requires a live Running destination with a matching RecvWait.
+
+`PeerDied` is gated by pair-level quiescence: `has_nonterminal_pair_request(client, driver)` scans Waiting, DmaReady, and DmaInFlight slots using ProcessKey pair matching (ignoring DelegationId incarnation).  The death predicate is incarnation-based: a generation mismatch means the awaited incarnation was reclaimed, so knowledge of death survives recycling.  Only Running clients receive PeerDied delivery.  `reevaluate_recv_waits()` runs after every completion drain.
+
+The causal barrier established:
+
+```text
+PeerDied(C,D) ⇒ no accepted nonterminal work attributable to (C,D)
+                 can subsequently mutate client-visible DMA state.
+t ≥ t_PeerDied ⇒ M_target(t) = M_target(t_PeerDied).
+```
+
+Two decisive guest-level composition tests demonstrate the architecture:
+
+1. **Blocking composition** (`p92e6`): Client delegates buffer via `SYS_SEND_CAP`, then blocks with `SYS_RECV_WAIT(driver)`.  Driver receives cap, submits I/O, enters IoWait.  The four-part all-blocked state (`RecvWait ∧ IoWait ∧ AutonomousIO ∧ ¬Runnable`) is explicitly witnessed.  Idle progress advances DMA, driver wakes, sends completion via direct delivery.  Both exit 200.
+
+2. **Death/quiescence integration** (`p92e7`): Same guest setup, but driver is killed while DMA is nonterminal.  Quiescence gate holds; client stays blocked.  Idle progress completes DMA autonomously.  PeerDied fires with exact block data already committed.  Post-notification memory is frozen.
+
+The positive Kleis gate is 45/45 in `anka_blocking_receive.kleis` (63 functions, 0 new axioms, imports only `anka_userspace_driver.kleis`).  A separate falsifiability companion (`anka_blocking_receive_false_witnesses.kleis`) rejects 7/7 forbidden claims.  The hostile test suite contains 42 targeted p92e_ tests covering all 15 required adversarial scenarios.
+
+690/690 tests; 29 instructions.
 
 The project continues to evolve by the same rule that produced its strongest results:
 
