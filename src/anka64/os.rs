@@ -14765,4 +14765,273 @@ mod tests {
         eprintln!("9.2f.5-8: 17th unreaped async → ledger full, atomic rejection ✓");
         eprintln!("          ΔDomain=ΔAuthority=ΔController=ΔLedger=0");
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.2f.6 — Decisive Two-Request Pair-Quiescence Test
+    //
+    // Two processes: client C, driver D.
+    // D submits two staggered async requests attributed to (C,D).
+    // D is killed while both are nonterminal.
+    //
+    // Decisive requirement:
+    //   PairCount(C,D): 2 → [1] → 0
+    // with C remaining in RecvWait(D) at counts 2 and 1.
+    // The intermediate count=1 state MUST be explicitly observed.
+    // Observing only 2→0 does not satisfy the phase.
+    //
+    // At count=1, the test records which target has committed
+    // and which has not (non-vacuous intermediate witness).
+    //
+    // Formal basis: anka_multi_request_quiescence.kleis MULTI92F-*.
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn p92f6_two_request_pair_quiescence() {
+        use super::super::block::{BlockStorage, BlockController, BlockRequest, SubmitResult};
+
+        let mut fabric = Fabric::new(0x800000);
+
+        // ── Client C (slot 0) ──
+        let (core_c, dom_c, text_c, data_c, _stack_c) =
+            create_process(&mut fabric, CPU0, "client",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm_c = Asm64::new();
+        for _ in 0..100 { asm_c.nop(); }
+        asm_c.movi(R1, 0);
+        asm_c.movi(R0, SYS_EXIT as i32);
+        asm_c.trap(0);
+        fabric.write_physical(0x000000, &asm_c.to_bytes());
+        seal_code_object(&mut fabric, text_c, dom_c);
+
+        // ── Driver D (slot 1) ──
+        let (core_d, dom_d, text_d, _data_d, _stack_d) =
+            create_process(&mut fabric, AgentId(1), "driver",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm_d = Asm64::new();
+        for _ in 0..100 { asm_d.nop(); }
+        asm_d.movi(R1, 0);
+        asm_d.movi(R0, SYS_EXIT as i32);
+        asm_d.trap(0);
+        fabric.write_physical(0x100000, &asm_d.to_bytes());
+        seal_code_object(&mut fabric, text_d, dom_d);
+
+        // ── Two DMA target buffers ──
+        // buf_A: client-owned, for request A (block 0 → 0xAA pattern)
+        // buf_B: client-owned, for request B (block 1 → 0xBB pattern)
+        let buf_a_obj = fabric.alloc_object("buf_a", 512, ObjectKind::Memory);
+        fabric.place_object(buf_a_obj, 0x300000);
+        let buf_b_obj = fabric.alloc_object("buf_b", 512, ObjectKind::Memory);
+        fabric.place_object(buf_b_obj, 0x310000);
+
+        // Grant client domain authority over both buffers
+        fabric.grant(dom_c, buf_a_obj, 0, 512, Permissions::RW);
+        fabric.grant(dom_c, buf_b_obj, 0, 512, Permissions::RW);
+
+        // Initialize with distinct known patterns
+        fabric.write_physical(0x300000, &[0x11; 512]); // A_0 = 0x11
+        fabric.write_physical(0x310000, &[0x22; 512]); // B_0 = 0x22
+
+        // ── Block storage: block 0 = 0xAA, block 1 = 0xBB ──
+        // Latency 5 gives enough ticks for staggered observation.
+        let mut storage = BlockStorage::new(4, 512);
+        storage.write_block(0, &[0xAA; 512]);
+        storage.write_block(1, &[0xBB; 512]);
+        let controller = BlockController::new(storage, 5, AgentId(100));
+
+        // ── Kernel + spawn ──
+        let mut kernel = Kernel::new(fabric);
+        let key_c = kernel.spawn(core_c);
+        let key_d = kernel.spawn(core_d);
+        let c = key_c.slot;
+        let d = key_d.slot;
+
+        let dev_obj = kernel.install_block_device(controller)
+            .expect("install block device");
+
+        // ── Device cap for driver ──
+        let dev_handle = kernel.install_device_capability(
+            d, dev_obj, DeviceRights::SUBMIT_READ,
+        ).expect("install device cap");
+
+        // ── Two buffer caps for driver, each with delegation_id(C,D) ──
+        let tid_a = kernel.alloc_delegation_id(key_c, key_d)
+            .expect("delegation ID for A");
+        let aid_a = kernel.fabric.alloc_authority_id()
+            .expect("authority ID for A");
+        let driver_dom = kernel.processes[d].core.domain;
+        kernel.fabric.grant_with_authority_id(
+            driver_dom, buf_a_obj, 0, 512, Permissions::WRITE, aid_a,
+        ).expect("grant A authority to driver");
+        let gen_a = kernel.fabric.objects.get(&buf_a_obj).unwrap().generation;
+        let buf_a_handle = kernel.processes[d].cap_table.as_mut().unwrap()
+            .install_memory(
+                buf_a_obj, gen_a, 0, 512, Permissions::WRITE, aid_a, Some(tid_a),
+            ).expect("install buf_A cap");
+
+        let tid_b = kernel.alloc_delegation_id(key_c, key_d)
+            .expect("delegation ID for B");
+        let aid_b = kernel.fabric.alloc_authority_id()
+            .expect("authority ID for B");
+        kernel.fabric.grant_with_authority_id(
+            driver_dom, buf_b_obj, 0, 512, Permissions::WRITE, aid_b,
+        ).expect("grant B authority to driver");
+        let gen_b = kernel.fabric.objects.get(&buf_b_obj).unwrap().generation;
+        let buf_b_handle = kernel.processes[d].cap_table.as_mut().unwrap()
+            .install_memory(
+                buf_b_obj, gen_b, 0, 512, Permissions::WRITE, aid_b, Some(tid_b),
+            ).expect("install buf_B cap");
+
+        // ── Snapshot initial memory ──
+        let a_0 = kernel.fabric.read_physical(0x300000, 512).to_vec();
+        let b_0 = kernel.fabric.read_physical(0x310000, 512).to_vec();
+        assert!(a_0.iter().all(|&x| x == 0x11), "A_0 = 0x11");
+        assert!(b_0.iter().all(|&x| x == 0x22), "B_0 = 0x22");
+
+        // ── Submit A (block 0 → buf_A), stagger, submit B (block 1 → buf_B) ──
+        let r0_a = do_async_submit(&mut kernel, d, &dev_handle, 0, &buf_a_handle);
+        assert_eq!(r0_a, 0, "submit A must succeed");
+        let h_a_slot = kernel.processes[d].core.r[R1 as usize] as u8;
+        let h_a_gen = kernel.processes[d].core.r[R2 as usize];
+
+        // Tick twice to stagger: A has remaining=3 after 2 ticks
+        kernel.tick_devices(d);
+        kernel.tick_devices(d);
+
+        let r0_b = do_async_submit(&mut kernel, d, &dev_handle, 1, &buf_b_handle);
+        assert_eq!(r0_b, 0, "submit B must succeed");
+        let h_b_slot = kernel.processes[d].core.r[R1 as usize] as u8;
+        let h_b_gen = kernel.processes[d].core.r[R2 as usize];
+
+        // ── Verify PairCount(C,D) = 2 ──
+        let count_initial = kernel.block_controller.as_ref().unwrap()
+            .nonterminal_pair_request_count(&key_c, &key_d);
+        assert_eq!(count_initial, 2,
+            "PairCount(C,D) must be 2 after both submissions");
+
+        // ── D enters DEV_WAIT(A) ──
+        let _r0_wait = do_dev_wait(&mut kernel, d, h_a_slot, h_a_gen);
+        assert!(kernel.processes[d].io_wait.is_some(),
+            "D must block on DEV_WAIT(A)");
+
+        // ── C enters RECV_WAIT(D) ──
+        // Push EventFrame for C's RECV_WAIT
+        let return_pc_c = kernel.processes[c].core.pc + 4;
+        kernel.processes[c].core.event_frames.push(EventFrame {
+            return_pc: return_pc_c,
+            return_privilege: Privilege::User,
+            interrupts_were_enabled: true,
+            cause: EventCause::Syscall,
+        });
+        setup_recv_wait_call(&mut kernel, c, &key_d);
+        kernel.handle_syscall(c);
+        assert!(kernel.processes[c].recv_wait.is_some(),
+            "C must block on RecvWait(D)");
+
+        // ── Kill D ──
+        kernel.finish_process(d, ProcessResult::Exited(0));
+        assert_eq!(kernel.processes[d].state, ProcessState::Zombie);
+
+        // ── Observation point: PairCount=2 ──
+        let count_at_death = kernel.block_controller.as_ref().unwrap()
+            .nonterminal_pair_request_count(&key_c, &key_d);
+        assert_eq!(count_at_death, 2,
+            "PairCount must still be 2 immediately after killing D");
+        kernel.reevaluate_recv_waits();
+        assert!(kernel.processes[c].recv_wait.is_some(),
+            "C must remain in RecvWait at PairCount=2");
+        eprintln!("  PairCount=2: RecvWait(C,D) ✓");
+
+        // ── Idle progress until PairCount drops to 1 ──
+        let mut ticks_to_1 = 0;
+        loop {
+            kernel.idle_progress_once();
+            ticks_to_1 += 1;
+            let count = kernel.block_controller.as_ref().unwrap()
+                .nonterminal_pair_request_count(&key_c, &key_d);
+            if count <= 1 {
+                assert_eq!(count, 1,
+                    "PairCount must transition through 1, not skip to 0");
+                break;
+            }
+            assert!(ticks_to_1 < 50, "PairCount should drop to 1 within 50 ticks");
+        }
+
+        // ── Observation point: PairCount=1 ──
+        // C must still be in RecvWait — PeerDied is NOT delivered yet
+        assert!(kernel.processes[c].recv_wait.is_some(),
+            "C must remain in RecvWait at PairCount=1");
+
+        // Record which target has committed and which has not
+        let a_at_1 = kernel.fabric.read_physical(0x300000, 512).to_vec();
+        let b_at_1 = kernel.fabric.read_physical(0x310000, 512).to_vec();
+        let a_committed = a_at_1.iter().all(|&x| x == 0xAA);
+        let b_committed = b_at_1.iter().all(|&x| x == 0xBB);
+
+        // Exactly one must have committed (A was submitted first)
+        assert!(a_committed || b_committed,
+            "at PairCount=1, at least one DMA must have committed");
+        assert!(!(a_committed && b_committed),
+            "at PairCount=1, exactly one DMA must have committed, not both");
+
+        if a_committed {
+            eprintln!("  PairCount=1: A=Block_A(0xAA), B=B_0(0x22) — RecvWait(C,D) ✓");
+            assert_ne!(a_at_1, a_0, "A changed from A_0");
+            assert_eq!(b_at_1, b_0, "B unchanged from B_0");
+        } else {
+            eprintln!("  PairCount=1: A=A_0(0x11), B=Block_B(0xBB) — RecvWait(C,D) ✓");
+            assert_eq!(a_at_1, a_0, "A unchanged from A_0");
+            assert_ne!(b_at_1, b_0, "B changed from B_0");
+        }
+
+        eprintln!("  PairCount dropped 2→1 after {} idle ticks", ticks_to_1);
+
+        // ── Idle progress until PairCount drops to 0 ──
+        let mut ticks_to_0 = 0;
+        loop {
+            kernel.idle_progress_once();
+            ticks_to_0 += 1;
+            let count = kernel.block_controller.as_ref().unwrap()
+                .nonterminal_pair_request_count(&key_c, &key_d);
+            if count == 0 {
+                break;
+            }
+            assert!(ticks_to_0 < 50, "PairCount should drop to 0 within 50 ticks");
+        }
+
+        // ── Observation point: PairCount=0 → PeerDied ──
+        // idle_progress_once() called reevaluate_recv_waits(), so
+        // C should have received PeerDied.
+        assert!(kernel.processes[c].recv_wait.is_none(),
+            "C's RecvWait must be cleared at PairCount=0");
+        assert_eq!(kernel.processes[c].core.r[R1 as usize], 3,
+            "R1 = tag 3 (PeerDied)");
+        assert_eq!(kernel.processes[c].core.r[R4 as usize], key_d.slot as u64,
+            "R4 = dead peer slot");
+        assert_eq!(kernel.processes[c].core.r[R5 as usize], key_d.generation as u64,
+            "R5 = dead peer generation");
+
+        // Both DMA targets must now contain their block data
+        let a_final = kernel.fabric.read_physical(0x300000, 512).to_vec();
+        let b_final = kernel.fabric.read_physical(0x310000, 512).to_vec();
+        assert!(a_final.iter().all(|&x| x == 0xAA),
+            "A must contain Block_A at PeerDied");
+        assert!(b_final.iter().all(|&x| x == 0xBB),
+            "B must contain Block_B at PeerDied");
+
+        // Structural witnesses at PeerDied
+        assert!(!kernel.has_autonomous_io(),
+            "no autonomous I/O at PeerDied");
+        assert_eq!(
+            kernel.block_controller.as_ref().unwrap().completion_count(), 0,
+            "no undrained completions at PeerDied"
+        );
+
+        eprintln!("  PairCount dropped 1→0 after {} additional idle ticks", ticks_to_0);
+        eprintln!("9.2f.6: DECISIVE TWO-REQUEST PAIR-QUIESCENCE ✓");
+        eprintln!("  PairCount(C,D): 2 → [1] → 0");
+        eprintln!("  RecvWait(C,D) at counts 2 and 1, PeerDied at count 0");
+        eprintln!("  A_0(0x11) ≠ A_P(0xAA), B_0(0x22) ≠ B_P(0xBB)");
+    }
 }
