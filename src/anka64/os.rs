@@ -14889,6 +14889,9 @@ mod tests {
         assert!(a_0.iter().all(|&x| x == 0x11), "A_0 = 0x11");
         assert!(b_0.iter().all(|&x| x == 0x22), "B_0 = 0x22");
 
+        // ── D_0: domain count immediately before submissions ──
+        let d_0 = kernel.fabric.domain_count();
+
         // ── Submit A (block 0 → buf_A), stagger, submit B (block 1 → buf_B) ──
         let r0_a = do_async_submit(&mut kernel, d, &dev_handle, 0, &buf_a_handle);
         assert_eq!(r0_a, 0, "submit A must succeed");
@@ -14904,11 +14907,15 @@ mod tests {
         let h_b_slot = kernel.processes[d].core.r[R1 as usize] as u8;
         let h_b_gen = kernel.processes[d].core.r[R2 as usize];
 
-        // ── Verify PairCount(C,D) = 2 ──
+        // ── Verify PairCount(C,D) = 2, D_2 = D_0 + 2 ──
         let count_initial = kernel.block_controller.as_ref().unwrap()
             .nonterminal_pair_request_count(&key_c, &key_d);
         assert_eq!(count_initial, 2,
             "PairCount(C,D) must be 2 after both submissions");
+        let d_2 = kernel.fabric.domain_count();
+        assert_eq!(d_2, d_0 + 2,
+            "two request-local DMA domains must exist: D_2={} expected D_0+2={}",
+            d_2, d_0 + 2);
 
         // ── D enters DEV_WAIT(A) ──
         let _r0_wait = do_dev_wait(&mut kernel, d, h_a_slot, h_a_gen);
@@ -14962,6 +14969,13 @@ mod tests {
         // C must still be in RecvWait — PeerDied is NOT delivered yet
         assert!(kernel.processes[c].recv_wait.is_some(),
             "C must remain in RecvWait at PairCount=1");
+
+        // D_1 = D_0 + 1: one request-local DMA domain destroyed,
+        // one still active for the remaining nonterminal request.
+        let d_1 = kernel.fabric.domain_count();
+        assert_eq!(d_1, d_0 + 1,
+            "one DMA domain destroyed, one remains: D_1={} expected D_0+1={}",
+            d_1, d_0 + 1);
 
         // Record which target has committed and which has not
         let a_at_1 = kernel.fabric.read_physical(0x300000, 512).to_vec();
@@ -15020,7 +15034,7 @@ mod tests {
         assert!(b_final.iter().all(|&x| x == 0xBB),
             "B must contain Block_B at PeerDied");
 
-        // Structural witnesses at PeerDied
+        // ── Structural witnesses at PeerDied ──
         assert!(!kernel.has_autonomous_io(),
             "no autonomous I/O at PeerDied");
         assert_eq!(
@@ -15028,10 +15042,32 @@ mod tests {
             "no undrained completions at PeerDied"
         );
 
+        // D_P = D_0: both request-local DMA domains destroyed.
+        let d_p = kernel.fabric.domain_count();
+        assert_eq!(d_p, d_0,
+            "both DMA domains destroyed at PeerDied: D_P={} expected D_0={}",
+            d_p, d_0);
+
+        // ── Post-barrier freeze: 10 additional idle rounds ──
+        for _ in 0..10 {
+            kernel.idle_progress_once();
+        }
+
+        let a_later = kernel.fabric.read_physical(0x300000, 512).to_vec();
+        let b_later = kernel.fabric.read_physical(0x310000, 512).to_vec();
+        assert_eq!(a_final, a_later,
+            "A must not change after PeerDied (causal barrier)");
+        assert_eq!(b_final, b_later,
+            "B must not change after PeerDied (causal barrier)");
+
+        // ── Summary ──
+        eprintln!("  PairCount dropped 2→1 after {} idle ticks", ticks_to_1);
         eprintln!("  PairCount dropped 1→0 after {} additional idle ticks", ticks_to_0);
-        eprintln!("9.2f.6: DECISIVE TWO-REQUEST PAIR-QUIESCENCE ✓");
+        eprintln!("9.2f.6+7: DECISIVE TWO-REQUEST PAIR-QUIESCENCE + CAUSAL BARRIER ✓");
         eprintln!("  PairCount(C,D): 2 → [1] → 0");
         eprintln!("  RecvWait(C,D) at counts 2 and 1, PeerDied at count 0");
-        eprintln!("  A_0(0x11) ≠ A_P(0xAA), B_0(0x22) ≠ B_P(0xBB)");
+        eprintln!("  (A_0,B_0) ≠ (A_P,B_P) = (A_∞,B_∞)");
+        eprintln!("  DomainCount: D_0={} → D_0+2={} → D_0+1={} → D_0={}",
+            d_0, d_2, d_1, d_p);
     }
 }
