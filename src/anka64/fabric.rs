@@ -88,6 +88,8 @@ pub struct Fabric {
     next_object_id: u64,
     next_domain_id: u64,
     next_tx_id: u64,
+    /// Monotonic AuthorityId counter.  Never reused.
+    next_authority_id: u64,
     /// Machine-global timer (Phase 9.0c).  None = no timer configured.
     pub timer: Option<FabricTimer>,
 }
@@ -105,8 +107,16 @@ impl Fabric {
             next_object_id: 0,
             next_domain_id: 0,
             next_tx_id: 0,
+            next_authority_id: 0,
             timer: None,
         }
+    }
+
+    /// Allocate a fresh AuthorityId.  Monotonic, never reused.
+    pub fn alloc_authority_id(&mut self) -> AuthorityId {
+        let id = AuthorityId(self.next_authority_id);
+        self.next_authority_id += 1;
+        id
     }
 
     // ───────────────── Timer configuration ────────────────────────
@@ -337,8 +347,77 @@ impl Fabric {
         if offset > obj.size - length { return None; }
 
         let cap = Capability64::new(object, obj.generation, offset, length, perms);
-        self.domains.get_mut(&domain)?.capabilities.push(cap.clone());
+        self.domains.get_mut(&domain)?.capabilities.push(CapabilityEntry {
+            cap: cap.clone(),
+            authority_id: None,
+        });
         Some(cap)
+    }
+
+    /// Grant with a specific AuthorityId for capability-table linkage.
+    ///
+    /// Same validation as `grant`, but the resulting domain entry is
+    /// tagged with the provided AuthorityId so it can be removed
+    /// precisely by `remove_by_authority_id`.
+    pub fn grant_with_authority_id(
+        &mut self,
+        domain: DomainId,
+        object: ObjectId,
+        offset: u64,
+        length: u64,
+        perms: Permissions,
+        authority_id: AuthorityId,
+    ) -> Option<Capability64> {
+        let obj = self.objects.get(&object)?;
+        match obj.state {
+            ObjectState::Active => {
+                if perms.contains(Permissions::EXECUTE) {
+                    return None;
+                }
+            }
+            ObjectState::Sealed => {
+                if perms.contains(Permissions::WRITE)
+                    || perms.contains(Permissions::ATOMIC)
+                    || perms.contains(Permissions::SEAL)
+                {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+        if length > obj.size { return None; }
+        if offset > obj.size - length { return None; }
+
+        let cap = Capability64::new(object, obj.generation, offset, length, perms);
+        self.domains.get_mut(&domain)?.capabilities.push(CapabilityEntry {
+            cap: cap.clone(),
+            authority_id: Some(authority_id),
+        });
+        Some(cap)
+    }
+
+    /// Remove the exact authority entry identified by AuthorityId
+    /// from a domain.  Returns true if found and removed.
+    ///
+    /// Only removes one entry even if multiple entries have the
+    /// same capability value — AuthorityId is unique identity.
+    ///
+    /// Formal basis: anka_userspace_driver.kleis DROP-2, DROP-3.
+    pub fn remove_by_authority_id(
+        &mut self,
+        domain: DomainId,
+        target: AuthorityId,
+    ) -> bool {
+        let dom = match self.domains.get_mut(&domain) {
+            Some(d) => d,
+            None => return false,
+        };
+        if let Some(pos) = dom.capabilities.iter().position(|e| e.authority_id == Some(target)) {
+            dom.capabilities.remove(pos);
+            true
+        } else {
+            false
+        }
     }
 
     /// Derive a child capability from a parent — cannot amplify (I7).
@@ -365,7 +444,10 @@ impl Fabric {
             child_length,
             child_perms,
         );
-        self.domains.get_mut(&domain)?.capabilities.push(cap.clone());
+        self.domains.get_mut(&domain)?.capabilities.push(CapabilityEntry {
+            cap: cap.clone(),
+            authority_id: None,
+        });
         Some(cap)
     }
 
@@ -466,10 +548,12 @@ impl Fabric {
         length: u64,
         required: Permissions,
     ) -> Option<&Capability64> {
-        self.domains.get(&domain)?.capabilities.iter().find(|cap| {
-            self.validate(cap)
-                && cap.covers(object, offset, length, required)
-        })
+        self.domains.get(&domain)?.capabilities.iter()
+            .map(|e| &e.cap)
+            .find(|cap| {
+                self.validate(cap)
+                    && cap.covers(object, offset, length, required)
+            })
     }
 
     /// Authorize a memory request against a domain's capabilities.
@@ -488,10 +572,10 @@ impl Fabric {
         let length = request.length;
         let mut stale = false;
 
-        for cap in &domain.capabilities {
-            if cap.covers(request.object, request.offset, length, required) {
-                if self.validate(cap) {
-                    return AuthResult::Authorized(cap.generation());
+        for entry in &domain.capabilities {
+            if entry.cap.covers(request.object, request.offset, length, required) {
+                if self.validate(&entry.cap) {
+                    return AuthResult::Authorized(entry.cap.generation());
                 }
                 stale = true;
             }
@@ -499,8 +583,8 @@ impl Fabric {
 
         let reason = if stale {
             FaultReason::StaleGeneration
-        } else if domain.capabilities.iter().any(|c| {
-            c.object() == request.object && self.validate(c)
+        } else if domain.capabilities.iter().any(|e| {
+            e.cap.object() == request.object && self.validate(&e.cap)
         }) {
             FaultReason::WrongPermission
         } else {

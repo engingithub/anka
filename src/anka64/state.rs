@@ -257,6 +257,18 @@ pub struct AgentState {
 // Domain state
 // ───────────────────────────────────────────────────────────────────
 
+/// A tagged capability entry — the capability plus its optional
+/// protected identity.
+///
+/// Legacy grants (from existing `grant`/`derive`) have `authority_id: None`.
+/// Phase 9.2+ grants via `grant_with_authority_id` have `Some(id)`.
+/// `remove_by_authority_id` removes only the entry with the exact matching id.
+#[derive(Debug, Clone)]
+pub struct CapabilityEntry {
+    pub cap: Capability64,
+    pub authority_id: Option<AuthorityId>,
+}
+
 /// A protection domain — an authority container.
 ///
 ///   authorize(D, R) ⟺ ∃ C ∈ D : valid(C) ∧ C ⊢ R
@@ -264,7 +276,7 @@ pub struct AgentState {
 /// Set semantics.  No ordering.  No hidden "current global domain."
 pub struct DomainState {
     pub id: DomainId,
-    pub capabilities: Vec<Capability64>,
+    pub capabilities: Vec<CapabilityEntry>,
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -568,6 +580,230 @@ pub struct RequesterKey {
 }
 
 // ───────────────────────────────────────────────────────────────────
+// Capability handle architecture (Phase 9.2a)
+//
+// Three distinct lifetimes, proved orthogonal in
+// anka_userspace_driver.kleis RESOLVE-1..5 and DROP-1..4:
+//
+//   handle_generation   cap-table slot incarnation (u32)
+//   object_generation   Fabric object incarnation (Generation / u64)
+//   AuthorityId         live authority entry in a Fabric domain
+//
+// resolve(H) succeeds iff all three conditions hold simultaneously.
+// CAP_DROP invalidates the first two.  Object revocation invalidates
+// the third independently.
+// ───────────────────────────────────────────────────────────────────
+
+/// Protected identity of a single authority entry in a Fabric domain.
+///
+/// Monotonic, never reused.  Created when authority is installed;
+/// destroyed when CAP_DROP or domain destruction removes it.
+/// Two capabilities with identical (object, offset, length, perms)
+/// have different AuthorityIds if they were installed separately.
+///
+/// Formal basis: anka_userspace_driver.kleis DROP-2, DROP-3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AuthorityId(pub u64);
+
+impl fmt::Display for AuthorityId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "AuthorityId({})", self.0)
+    }
+}
+
+/// Opaque generation-qualified handle into a per-process capability table.
+///
+/// Knowing the bits does not confer authority; the handle resolves
+/// only in the holder's table.  Modeled after LifecycleHandle.
+///
+/// Formal basis: anka_userspace_driver.kleis CAPTAB-1..6, RESOLVE-1..5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityHandle {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+impl fmt::Display for CapabilityHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CapHandle(slot={}, gen={})", self.slot, self.generation)
+    }
+}
+
+/// One slot in a per-process capability table.
+///
+/// `handle_generation` tracks slot reuse (like ProcessKey.generation).
+/// `object_generation` tracks the underlying Fabric object incarnation.
+/// `authority_id` links to the exact entry in the Fabric domain — so
+/// dropping one handle removes only its backing authority, even if
+/// another handle names an equal-looking capability.
+///
+/// Formal basis: anka_userspace_driver.kleis CAPTAB, RESOLVE, DROP.
+#[derive(Debug, Clone)]
+pub enum CapabilitySlotState {
+    /// Slot is free for reuse.  `handle_generation` still records the
+    /// last incarnation so stale handles are permanently rejected.
+    Free,
+    /// Slot holds live authority.
+    Occupied {
+        object: ObjectId,
+        object_generation: Generation,
+        offset: u64,
+        length: u64,
+        perms: Permissions,
+        authority_id: AuthorityId,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct CapabilitySlot {
+    pub handle_generation: u32,
+    pub state: CapabilitySlotState,
+}
+
+/// Fixed-size per-process capability table.
+///
+/// Bounded: F + O = CAP_TABLE_SIZE at all times (CAPTAB-5).
+/// Installation and drop are the only transitions (CAPTAB-6).
+pub const CAP_TABLE_SIZE: usize = 16;
+
+#[derive(Debug, Clone)]
+pub struct CapabilityTable {
+    slots: [CapabilitySlot; CAP_TABLE_SIZE],
+}
+
+/// Result of resolving a CapabilityHandle.
+#[derive(Debug, Clone)]
+pub struct ResolvedCapability {
+    pub object: ObjectId,
+    pub object_generation: Generation,
+    pub offset: u64,
+    pub length: u64,
+    pub perms: Permissions,
+    pub authority_id: AuthorityId,
+}
+
+impl CapabilityTable {
+    pub fn new() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| CapabilitySlot {
+                handle_generation: 0,
+                state: CapabilitySlotState::Free,
+            }),
+        }
+    }
+
+    /// Install a new capability.  Returns the handle on success,
+    /// or None if the table is full.
+    pub fn install(
+        &mut self,
+        object: ObjectId,
+        object_generation: Generation,
+        offset: u64,
+        length: u64,
+        perms: Permissions,
+        authority_id: AuthorityId,
+    ) -> Option<CapabilityHandle> {
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if matches!(slot.state, CapabilitySlotState::Free) {
+                slot.state = CapabilitySlotState::Occupied {
+                    object,
+                    object_generation,
+                    offset,
+                    length,
+                    perms,
+                    authority_id,
+                };
+                return Some(CapabilityHandle {
+                    slot: i as u32,
+                    generation: slot.handle_generation,
+                });
+            }
+        }
+        None
+    }
+
+    /// Three-condition resolution.
+    ///
+    /// Succeeds iff:
+    ///   1. handle_generation matches slot
+    ///   2. AuthorityId entry exists (slot is Occupied)
+    ///   3. object_generation matches current Fabric generation
+    ///
+    /// The caller must supply the current Fabric object generation
+    /// for condition 3.
+    pub fn resolve(
+        &self,
+        handle: CapabilityHandle,
+        current_object_gen: impl Fn(ObjectId) -> Option<Generation>,
+    ) -> Option<ResolvedCapability> {
+        let slot = self.slots.get(handle.slot as usize)?;
+
+        // Condition 1: handle generation matches slot
+        if slot.handle_generation != handle.generation {
+            return None;
+        }
+
+        // Condition 2: slot is occupied (AuthorityId exists)
+        let occ = match &slot.state {
+            CapabilitySlotState::Occupied {
+                object, object_generation, offset, length, perms, authority_id
+            } => ResolvedCapability {
+                object: *object,
+                object_generation: *object_generation,
+                offset: *offset,
+                length: *length,
+                perms: *perms,
+                authority_id: *authority_id,
+            },
+            CapabilitySlotState::Free => return None,
+        };
+
+        // Condition 3: object generation is current
+        let current_gen = current_object_gen(occ.object)?;
+        if occ.object_generation != current_gen {
+            return None;
+        }
+
+        Some(occ)
+    }
+
+    /// Drop a capability handle: invalidate the naming, remove
+    /// the linked authority.  Returns the AuthorityId that was
+    /// removed (so the caller can remove it from the Fabric domain).
+    ///
+    /// Formal: DROP-1, DROP-2.
+    pub fn drop_handle(&mut self, handle: CapabilityHandle) -> Option<AuthorityId> {
+        let slot = self.slots.get_mut(handle.slot as usize)?;
+
+        if slot.handle_generation != handle.generation {
+            return None;
+        }
+
+        let auth_id = match &slot.state {
+            CapabilitySlotState::Occupied { authority_id, .. } => *authority_id,
+            CapabilitySlotState::Free => return None,
+        };
+
+        slot.state = CapabilitySlotState::Free;
+        slot.handle_generation = slot.handle_generation.wrapping_add(1);
+
+        Some(auth_id)
+    }
+
+    /// Number of free slots.
+    pub fn free_count(&self) -> usize {
+        self.slots.iter()
+            .filter(|s| matches!(s.state, CapabilitySlotState::Free))
+            .count()
+    }
+
+    /// Number of occupied slots.
+    pub fn occupied_count(&self) -> usize {
+        CAP_TABLE_SIZE - self.free_count()
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────
 // Events (deterministic scheduler)
 // ───────────────────────────────────────────────────────────────────
 
@@ -581,4 +817,249 @@ pub enum Event {
     /// Move an object to a new physical base (translation change).
     /// Authority must be unaffected (I3).
     Move(ObjectId, u64),
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Tests — capability table (Phase 9.2a)
+// ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod cap_table_tests {
+    use super::*;
+
+    fn obj(n: u64) -> ObjectId { ObjectId(n) }
+    fn g(n: u64) -> Generation { Generation(n) }
+    fn aid(n: u64) -> AuthorityId { AuthorityId(n) }
+
+    /// Stub generation lookup: returns the generation stored in the map.
+    fn gen_lookup(map: &[(ObjectId, Generation)]) -> impl Fn(ObjectId) -> Option<Generation> + '_ {
+        move |oid| map.iter().find(|(o, _)| *o == oid).map(|(_, g)| *g)
+    }
+
+    // ─── CAPTAB-5: F + O = N at all times ───
+
+    #[test]
+    fn captab_invariant_fo_eq_n() {
+        let mut ct = CapabilityTable::new();
+        assert_eq!(ct.free_count(), CAP_TABLE_SIZE);
+        assert_eq!(ct.occupied_count(), 0);
+
+        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0))
+            .expect("install should succeed");
+        assert_eq!(ct.free_count() + ct.occupied_count(), CAP_TABLE_SIZE);
+        assert_eq!(ct.occupied_count(), 1);
+
+        ct.drop_handle(h).expect("drop should succeed");
+        assert_eq!(ct.free_count(), CAP_TABLE_SIZE);
+        assert_eq!(ct.occupied_count(), 0);
+        assert_eq!(ct.free_count() + ct.occupied_count(), CAP_TABLE_SIZE);
+    }
+
+    // ─── CAPTAB-6: table exhaustion ───
+
+    #[test]
+    fn captab_exhaustion() {
+        let mut ct = CapabilityTable::new();
+        let mut handles = Vec::new();
+        for i in 0..CAP_TABLE_SIZE {
+            let h = ct.install(obj(i as u64), g(0), 0, 4096, Permissions::READ, aid(i as u64))
+                .expect("install should succeed");
+            handles.push(h);
+        }
+        assert_eq!(ct.free_count(), 0);
+
+        // 17th install must fail
+        assert!(ct.install(obj(99), g(0), 0, 4096, Permissions::READ, aid(99)).is_none());
+
+        // Drop one, try again
+        ct.drop_handle(handles[0]).expect("drop should succeed");
+        assert_eq!(ct.free_count(), 1);
+        assert!(ct.install(obj(99), g(0), 0, 4096, Permissions::READ, aid(99)).is_some());
+    }
+
+    // ─── RESOLVE-1: handle generation mismatch fails ───
+
+    #[test]
+    fn resolve_stale_handle_generation() {
+        let mut ct = CapabilityTable::new();
+        let gens = [(obj(1), g(0))];
+
+        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0))
+            .expect("install should succeed");
+
+        // Valid resolution
+        assert!(ct.resolve(h, gen_lookup(&gens)).is_some());
+
+        // Drop and reinstall — old handle must fail
+        ct.drop_handle(h).expect("drop should succeed");
+        let h2 = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(1))
+            .expect("reinstall should succeed");
+
+        // Old handle: stale generation
+        assert!(ct.resolve(h, gen_lookup(&gens)).is_none(),
+            "stale handle must not resolve after drop+reinstall");
+
+        // New handle: valid
+        assert!(ct.resolve(h2, gen_lookup(&gens)).is_some());
+
+        // Verify different generations
+        assert_ne!(h.generation, h2.generation);
+    }
+
+    // ─── RESOLVE-3: object generation revocation ───
+
+    #[test]
+    fn resolve_object_generation_revoked() {
+        let mut ct = CapabilityTable::new();
+        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0))
+            .expect("install should succeed");
+
+        // Object at g(0) → resolves
+        let gens_ok = [(obj(1), g(0))];
+        assert!(ct.resolve(h, gen_lookup(&gens_ok)).is_some());
+
+        // Object revoked → g(1) → handle fails condition 3
+        let gens_revoked = [(obj(1), g(1))];
+        assert!(ct.resolve(h, gen_lookup(&gens_revoked)).is_none(),
+            "handle to revoked object must not resolve");
+    }
+
+    // ─── RESOLVE: object not found ───
+
+    #[test]
+    fn resolve_object_not_found() {
+        let mut ct = CapabilityTable::new();
+        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0))
+            .expect("install should succeed");
+
+        // Object doesn't exist in lookup
+        let empty: [(ObjectId, Generation); 0] = [];
+        assert!(ct.resolve(h, gen_lookup(&empty)).is_none(),
+            "handle to nonexistent object must not resolve");
+    }
+
+    // ─── DROP-1: drop invalidates handle permanently ───
+
+    #[test]
+    fn drop_invalidates_permanently() {
+        let mut ct = CapabilityTable::new();
+        let h = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(0))
+            .expect("install should succeed");
+
+        ct.drop_handle(h).expect("drop should succeed");
+
+        // Second drop with same handle must fail
+        assert!(ct.drop_handle(h).is_none(),
+            "double-drop must fail");
+
+        let gens = [(obj(1), g(0))];
+        assert!(ct.resolve(h, gen_lookup(&gens)).is_none(),
+            "dropped handle must not resolve");
+    }
+
+    // ─── DROP-2, DROP-3: equal-looking capabilities, distinct AuthorityIds ───
+
+    #[test]
+    fn drop_removes_only_linked_authority() {
+        let mut ct = CapabilityTable::new();
+
+        // Two handles to the same object/range/perms but different AuthorityIds
+        let h1 = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(100))
+            .expect("install h1");
+        let h2 = ct.install(obj(1), g(0), 0, 4096, Permissions::READ, aid(200))
+            .expect("install h2");
+
+        // Drop h1: returns aid(100), NOT aid(200)
+        let removed = ct.drop_handle(h1).expect("drop h1 should succeed");
+        assert_eq!(removed, AuthorityId(100),
+            "drop(H1) must remove A1, not A2");
+
+        // h2 still resolves
+        let gens = [(obj(1), g(0))];
+        assert!(ct.resolve(h2, gen_lookup(&gens)).is_some(),
+            "H2 must survive drop(H1) even though A1 == A2 by value");
+    }
+
+    // ─── Slot reuse increments generation ───
+
+    #[test]
+    fn slot_reuse_increments_generation() {
+        let mut ct = CapabilityTable::new();
+
+        // Fill all slots, then drop slot 0, install a new one
+        let h0 = ct.install(obj(0), g(0), 0, 4096, Permissions::READ, aid(0))
+            .expect("install");
+        assert_eq!(h0.slot, 0);
+        assert_eq!(h0.generation, 0);
+
+        ct.drop_handle(h0).expect("drop");
+
+        let h0_next = ct.install(obj(0), g(0), 0, 4096, Permissions::READ, aid(1))
+            .expect("reinstall");
+        assert_eq!(h0_next.slot, 0);
+        assert_eq!(h0_next.generation, 1,
+            "slot reuse must increment handle generation");
+    }
+
+    // ─── F+O=N through install/drop/reinstall cycles ───
+
+    #[test]
+    fn fo_conservation_through_cycles() {
+        let mut ct = CapabilityTable::new();
+        let mut handles = Vec::new();
+
+        // Install 8 caps
+        for i in 0..8u64 {
+            handles.push(
+                ct.install(obj(i), g(0), 0, 4096, Permissions::READ, aid(i))
+                    .expect("install")
+            );
+        }
+        assert_eq!(ct.free_count() + ct.occupied_count(), CAP_TABLE_SIZE);
+
+        // Drop every other one
+        for i in (0..8).step_by(2) {
+            ct.drop_handle(handles[i]).expect("drop");
+        }
+        assert_eq!(ct.free_count() + ct.occupied_count(), CAP_TABLE_SIZE);
+        assert_eq!(ct.occupied_count(), 4);
+
+        // Reinstall in freed slots
+        for i in (0..8).step_by(2) {
+            ct.install(obj(100 + i as u64), g(0), 0, 4096, Permissions::RW, aid(100 + i as u64))
+                .expect("reinstall");
+        }
+        assert_eq!(ct.free_count() + ct.occupied_count(), CAP_TABLE_SIZE);
+        assert_eq!(ct.occupied_count(), 8);
+    }
+
+    // ─── Out-of-bounds slot index ───
+
+    #[test]
+    fn resolve_out_of_bounds_slot() {
+        let ct = CapabilityTable::new();
+        let bad_handle = CapabilityHandle { slot: CAP_TABLE_SIZE as u32, generation: 0 };
+        let gens = [(obj(1), g(0))];
+        assert!(ct.resolve(bad_handle, gen_lookup(&gens)).is_none(),
+            "out-of-bounds slot must return None");
+    }
+
+    #[test]
+    fn drop_out_of_bounds_slot() {
+        let mut ct = CapabilityTable::new();
+        let bad_handle = CapabilityHandle { slot: CAP_TABLE_SIZE as u32, generation: 0 };
+        assert!(ct.drop_handle(bad_handle).is_none(),
+            "out-of-bounds drop must return None");
+    }
+
+    // ─── Resolve on free slot fails ───
+
+    #[test]
+    fn resolve_free_slot_fails() {
+        let ct = CapabilityTable::new();
+        let handle = CapabilityHandle { slot: 0, generation: 0 };
+        let gens = [(obj(1), g(0))];
+        assert!(ct.resolve(handle, gen_lookup(&gens)).is_none(),
+            "handle to free slot must not resolve");
+    }
 }

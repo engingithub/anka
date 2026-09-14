@@ -29,6 +29,7 @@ pub const SYS_EXEC: u64 = 6;   // exec(code_addr, code_size, lit_start) → chil
 pub const SYS_SPAWN: u64 = 7;  // spawn(R1-R8: code, grants, maps, layout) → handle
 pub const SYS_WAIT: u64 = 8;   // wait(handle) → result
 pub const SYS_BLOCK_READ: u64 = 9; // block_read(block_num, buf_vaddr) → async
+pub const SYS_CAP_DROP: u64 = 10;  // cap_drop(slot, generation) → 0 ok, 1 bad handle
 
 // ───────────────────────────────────────────────────────────────────
 // Process descriptor
@@ -55,6 +56,9 @@ pub struct Process {
     pub result: Option<ProcessResult>,
     /// Resources owned by this incarnation (None for Free/Retired slots).
     pub resources: Option<OwnedResources>,
+    /// Per-process capability table (Phase 9.2a).
+    /// Some for live incarnations; None for Free/Retired slots.
+    pub cap_table: Option<CapabilityTable>,
 }
 
 impl Process {
@@ -762,6 +766,7 @@ impl Kernel {
                 generation: reuse_gen,
                 result: None,
                 resources: None,
+                cap_table: Some(CapabilityTable::new()),
             };
             self.mailboxes[slot].clear();
             self.lifecycle_tables[slot].clear();
@@ -781,10 +786,61 @@ impl Kernel {
             generation: 0,
             result: None,
             resources: None,
+            cap_table: Some(CapabilityTable::new()),
         });
         self.mailboxes.push(Vec::new());
         self.lifecycle_tables.push(Vec::new());
         ProcessKey { slot, generation: 0 }
+    }
+
+    /// Install a capability into a process's cap table.
+    ///
+    /// Allocates a fresh AuthorityId, grants the capability in the
+    /// process's Fabric domain with that AuthorityId, and installs
+    /// a cap-table slot linking to it.  Returns the CapabilityHandle
+    /// on success, or None if the Fabric grant fails or the table is full.
+    ///
+    /// Used by boot/spawn to seed initial handles and by tests.
+    /// Runtime transfer belongs to 9.2b.
+    pub fn install_capability(
+        &mut self,
+        slot: usize,
+        object: ObjectId,
+        offset: u64,
+        length: u64,
+        perms: Permissions,
+    ) -> Option<CapabilityHandle> {
+        let domain = self.processes[slot].core.domain;
+        let auth_id = self.fabric.alloc_authority_id();
+
+        self.fabric.grant_with_authority_id(
+            domain, object, offset, length, perms, auth_id,
+        )?;
+
+        let obj_gen = self.fabric.objects.get(&object)?.generation;
+
+        self.processes[slot].cap_table.as_mut()?
+            .install(object, obj_gen, offset, length, perms, auth_id)
+    }
+
+    /// Resolve a capability handle for a process.
+    ///
+    /// Three-condition check:
+    ///   1. handle_generation = slot.handle_generation
+    ///   2. slot is Occupied (AuthorityId exists)
+    ///   3. object_generation = current Fabric object generation
+    ///
+    /// This is the kernel-side wrapper that supplies the Fabric
+    /// generation lookup closure.
+    pub fn resolve_capability(
+        &self,
+        slot: usize,
+        handle: CapabilityHandle,
+    ) -> Option<ResolvedCapability> {
+        let ct = self.processes[slot].cap_table.as_ref()?;
+        ct.resolve(handle, |oid| {
+            self.fabric.objects.get(&oid).map(|o| o.generation)
+        })
     }
 
     /// Install a lifecycle entry in a parent's table.
@@ -1464,6 +1520,9 @@ impl Kernel {
             }
             SYS_BLOCK_READ => {
                 self.handle_block_read(idx);
+            }
+            SYS_CAP_DROP => {
+                self.handle_cap_drop(idx);
             }
             _ => {
                 eprintln!("Unknown syscall {} from pid {}",
@@ -2520,6 +2579,41 @@ impl Kernel {
                 self.resume_from_trap(idx);
             }
         }
+    }
+
+    /// SYS_CAP_DROP: release a capability handle.
+    ///
+    /// R1 = slot index, R2 = handle generation.
+    /// Returns: R0 = 0 on success, R0 = 1 on invalid handle.
+    ///
+    /// On success: the cap-table slot is freed (generation incremented),
+    /// and the exact backing authority entry (identified by AuthorityId)
+    /// is removed from the process's Fabric domain.
+    ///
+    /// Formal basis: anka_userspace_driver.kleis DROP-1..4.
+    fn handle_cap_drop(&mut self, idx: usize) {
+        let slot = self.processes[idx].core.r[R1 as usize] as u32;
+        let hgen = self.processes[idx].core.r[R2 as usize] as u32;
+
+        let handle = CapabilityHandle { slot, generation: hgen };
+
+        let domain = self.processes[idx].core.domain;
+
+        let auth_id = match self.processes[idx].cap_table.as_mut() {
+            Some(ct) => ct.drop_handle(handle),
+            None => None,
+        };
+
+        match auth_id {
+            Some(aid) => {
+                self.fabric.remove_by_authority_id(domain, aid);
+                self.processes[idx].core.r[R0 as usize] = 0;
+            }
+            None => {
+                self.processes[idx].core.r[R0 as usize] = 1;
+            }
+        }
+        self.resume_from_trap(idx);
     }
 
     fn resume_from_trap(&mut self, idx: usize) {
@@ -6152,5 +6246,272 @@ mod tests {
         eprintln!("9.1e: all-blocked-no-progress limitation documented ✓");
         eprintln!("      (machine requires at least one running process");
         eprintln!("       to generate instruction boundaries for tick_devices)");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.2a — Capability table kernel tests
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Helper: set up a minimal kernel with one process and a data object.
+    /// Returns (kernel, data_object_id, process_slot).
+    fn captab_kernel_setup() -> (Kernel, ObjectId, usize) {
+        let mut fabric = Fabric::new(0x200000);
+        let (core, dom, text, data, _stack) =
+            create_process(&mut fabric, CPU0, "cap_test",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+
+        // Minimal guest: NOP * 100 then EXIT(0)
+        let mut asm = Asm64::new();
+        for _ in 0..100 { asm.nop(); }
+        asm.movi(R1, 0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+
+        (kernel, data, 0)
+    }
+
+    // ─── Kernel install + resolve ───
+
+    #[test]
+    fn p92a_install_and_resolve() {
+        let (mut kernel, data, slot) = captab_kernel_setup();
+
+        let h = kernel.install_capability(slot, data, 0, 4096, Permissions::READ)
+            .expect("install should succeed");
+
+        let resolved = kernel.resolve_capability(slot, h)
+            .expect("resolve should succeed");
+        assert_eq!(resolved.object, data);
+        assert_eq!(resolved.offset, 0);
+        assert_eq!(resolved.length, 4096);
+        assert_eq!(resolved.perms, Permissions::READ);
+
+        eprintln!("9.2a: install + resolve ✓");
+    }
+
+    // ─── Kernel: resolve fails after object revocation ───
+
+    #[test]
+    fn p92a_resolve_fails_after_revocation() {
+        let (mut kernel, data, slot) = captab_kernel_setup();
+
+        let h = kernel.install_capability(slot, data, 0, 4096, Permissions::READ)
+            .expect("install should succeed");
+
+        // Revoke the object → bumps generation
+        kernel.fabric.revoke(data);
+
+        assert!(kernel.resolve_capability(slot, h).is_none(),
+            "handle must not resolve after object revocation");
+
+        eprintln!("9.2a: resolve-after-revocation ✓");
+    }
+
+    // ─── Kernel: drop removes exactly one backing authority ───
+
+    #[test]
+    fn p92a_drop_removes_only_linked_authority() {
+        let (mut kernel, data, slot) = captab_kernel_setup();
+
+        let domain = kernel.processes[slot].core.domain;
+        let cap_count_before = kernel.fabric.domains.get(&domain).unwrap()
+            .capabilities.len();
+
+        // Install two equal-looking capabilities with different AuthorityIds
+        let h1 = kernel.install_capability(slot, data, 0, 4096, Permissions::READ)
+            .expect("install h1");
+        let h2 = kernel.install_capability(slot, data, 0, 4096, Permissions::READ)
+            .expect("install h2");
+
+        let cap_count_after_install = kernel.fabric.domains.get(&domain).unwrap()
+            .capabilities.len();
+        assert_eq!(cap_count_after_install, cap_count_before + 2,
+            "two grants should add two domain entries");
+
+        // Drop h1
+        let auth_id = kernel.processes[slot].cap_table.as_mut().unwrap()
+            .drop_handle(h1).expect("drop h1");
+        kernel.fabric.remove_by_authority_id(domain, auth_id);
+
+        let cap_count_after_drop = kernel.fabric.domains.get(&domain).unwrap()
+            .capabilities.len();
+        assert_eq!(cap_count_after_drop, cap_count_before + 1,
+            "drop(H1) must remove exactly one domain entry");
+
+        // h2 still resolves
+        assert!(kernel.resolve_capability(slot, h2).is_some(),
+            "H2 must survive drop(H1)");
+
+        eprintln!("9.2a: equal-looking-caps drop isolation ✓");
+    }
+
+    // ─── Kernel: SYS_CAP_DROP via guest code ───
+
+    #[test]
+    fn p92a_syscall_cap_drop() {
+        let mut fabric = Fabric::new(0x200000);
+        let (core, dom, text, data, _stack) =
+            create_process(&mut fabric, CPU0, "cap_drop",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+
+        let mut kernel = Kernel::new(fabric);
+        let pk = kernel.spawn(core);
+        let slot = pk.slot;
+
+        let h = kernel.install_capability(slot, data, 0, 0x4000, Permissions::READ)
+            .expect("install should succeed");
+
+        // Assemble guest code: CAP_DROP(slot, generation), save result, EXIT(0)
+        let mut asm = Asm64::new();
+        asm.movi(R1, h.slot as i32);
+        asm.movi(R2, h.generation as i32);
+        asm.movi(R0, SYS_CAP_DROP as i32);
+        asm.trap(0);
+        asm.mov(R5, R0); // save result
+        asm.movi(R1, 0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        kernel.fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut kernel.fabric, text, dom);
+
+        kernel.run(10000, 10);
+
+        assert!(kernel.processes[slot].exited());
+        assert_eq!(kernel.processes[slot].core.r[R5 as usize], 0,
+            "SYS_CAP_DROP should return 0 on success");
+
+        assert!(kernel.resolve_capability(slot, h).is_none(),
+            "dropped handle must not resolve");
+
+        eprintln!("9.2a: SYS_CAP_DROP via guest code ✓");
+    }
+
+    // ─── Kernel: SYS_CAP_DROP with invalid handle ───
+
+    #[test]
+    fn p92a_syscall_cap_drop_bad_handle() {
+        let mut fabric = Fabric::new(0x200000);
+        let (core, dom, text, _data, _stack) =
+            create_process(&mut fabric, CPU0, "cap_drop_bad",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+
+        // Guest: CAP_DROP(slot=0, gen=99) — no such handle, then EXIT
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0);
+        asm.movi(R2, 99);
+        asm.movi(R0, SYS_CAP_DROP as i32);
+        asm.trap(0);
+        asm.mov(R5, R0); // save result
+        asm.movi(R1, 0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+
+        kernel.run(10000, 10);
+
+        assert!(kernel.processes[0].exited());
+        assert_eq!(kernel.processes[0].core.r[R5 as usize], 1,
+            "SYS_CAP_DROP on bad handle should return 1");
+
+        eprintln!("9.2a: SYS_CAP_DROP bad handle rejection ✓");
+    }
+
+    // ─── Kernel: table exhaustion at kernel level ───
+
+    #[test]
+    fn p92a_kernel_table_exhaustion() {
+        let (mut kernel, data, slot) = captab_kernel_setup();
+
+        // Fill the table
+        for _ in 0..CAP_TABLE_SIZE {
+            kernel.install_capability(slot, data, 0, 4096, Permissions::READ)
+                .expect("install should succeed");
+        }
+
+        // Next install must fail
+        assert!(kernel.install_capability(slot, data, 0, 4096, Permissions::READ).is_none(),
+            "install beyond table capacity must fail");
+
+        eprintln!("9.2a: kernel-level table exhaustion ✓");
+    }
+
+    // ─── Kernel: F+O=N conservation through kernel operations ───
+
+    #[test]
+    fn p92a_kernel_fo_conservation() {
+        let (mut kernel, data, slot) = captab_kernel_setup();
+        let ct = kernel.processes[slot].cap_table.as_ref().unwrap();
+        assert_eq!(ct.free_count() + ct.occupied_count(), CAP_TABLE_SIZE);
+
+        let h1 = kernel.install_capability(slot, data, 0, 4096, Permissions::READ)
+            .expect("install");
+        let h2 = kernel.install_capability(slot, data, 0, 4096, Permissions::RW)
+            .expect("install");
+
+        let ct = kernel.processes[slot].cap_table.as_ref().unwrap();
+        assert_eq!(ct.free_count() + ct.occupied_count(), CAP_TABLE_SIZE);
+
+        // Drop h1
+        let auth_id = kernel.processes[slot].cap_table.as_mut().unwrap()
+            .drop_handle(h1).expect("drop");
+        let domain = kernel.processes[slot].core.domain;
+        kernel.fabric.remove_by_authority_id(domain, auth_id);
+
+        let ct = kernel.processes[slot].cap_table.as_ref().unwrap();
+        assert_eq!(ct.free_count() + ct.occupied_count(), CAP_TABLE_SIZE);
+        assert_eq!(ct.occupied_count(), 1);
+
+        // Reinstall
+        kernel.install_capability(slot, data, 0, 4096, Permissions::READ)
+            .expect("reinstall");
+        let ct = kernel.processes[slot].cap_table.as_ref().unwrap();
+        assert_eq!(ct.free_count() + ct.occupied_count(), CAP_TABLE_SIZE);
+        assert_eq!(ct.occupied_count(), 2);
+
+        eprintln!("9.2a: kernel F+O=N conservation ✓");
+    }
+
+    // ─── Kernel: SYS_CAP_DROP + reinstall ───
+
+    #[test]
+    fn p92a_drop_reinstall_old_handle_stale() {
+        let (mut kernel, data, slot) = captab_kernel_setup();
+
+        let h = kernel.install_capability(slot, data, 0, 4096, Permissions::READ)
+            .expect("install");
+
+        // Drop via kernel API (not syscall) for simplicity
+        let auth_id = kernel.processes[slot].cap_table.as_mut().unwrap()
+            .drop_handle(h).expect("drop");
+        let domain = kernel.processes[slot].core.domain;
+        kernel.fabric.remove_by_authority_id(domain, auth_id);
+
+        // Reinstall in the same slot
+        let h2 = kernel.install_capability(slot, data, 0, 4096, Permissions::READ)
+            .expect("reinstall");
+
+        // Old handle is permanently stale
+        assert!(kernel.resolve_capability(slot, h).is_none(),
+            "old handle must be permanently stale after slot reuse");
+        assert!(kernel.resolve_capability(slot, h2).is_some(),
+            "new handle must resolve");
+        assert_ne!(h.generation, h2.generation,
+            "slot reuse must increment generation");
+
+        eprintln!("9.2a: drop+reinstall handle staleness ✓");
     }
 }
