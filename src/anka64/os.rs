@@ -8987,11 +8987,18 @@ mod tests {
 
     // ─── Non-Memory source rejection ───
 
+    // ─── 9.3a: Device source with nonzero R6 rejects (non-spatial ABI) ───
+    //
+    // Originally this test verified that Device sources were rejected
+    // entirely.  After the 9.3a kind-sensitive refactor, Device sources
+    // are accepted — but the non-spatial ABI requires R5=R6=0.
+    // This test now exercises that R6≠0 on a Device source yields error 4.
+    // No AuthorityId is consumed because rejection is at the preflight gate.
+
     #[test]
-    fn p92b_gate2b_non_memory_rejected() {
+    fn p92b_device_nonzero_r6_rejected() {
         let mut fabric = Fabric::new(0x400000);
 
-        // Sender with a Device object
         let (core_a, dom_a, text_a, _data_a, _stack_a) =
             create_process(&mut fabric, CPU0, "sender_dev",
                 0x000000, 0x010000, 0x020000);
@@ -9007,7 +9014,6 @@ mod tests {
         fabric.write_physical(0x000000, &asm_a.to_bytes());
         seal_code_object(&mut fabric, text_a, dom_a);
 
-        // Receiver
         let (core_b, dom_b, text_b, _data_b, _stack_b) =
             create_process(&mut fabric, AgentId(1), "receiver_dev",
                 0x100000, 0x110000, 0x120000);
@@ -9025,10 +9031,7 @@ mod tests {
         let key_b = kernel.spawn(core_b);
 
         let sender = key_a.slot;
-        let receiver = key_b.slot;
 
-        // Install Device cap in sender's table directly (install_capability
-        // now correctly rejects Device objects via kind boundary).
         let dev_auth_id = kernel.fabric.alloc_authority_id().expect("alloc auth id");
         kernel.fabric.grant_device_with_authority_id(
             kernel.processes[sender].core.domain, dev_obj,
@@ -9040,8 +9043,8 @@ mod tests {
             .expect("install device cap in table");
 
         let receiver_key = ProcessKey {
-            slot: receiver,
-            generation: kernel.processes[receiver].generation,
+            slot: key_b.slot,
+            generation: kernel.processes[key_b.slot].generation,
         };
 
         let aid_before = kernel.fabric.next_authority_id();
@@ -9052,16 +9055,17 @@ mod tests {
         kernel.processes[sender].core.r[R3 as usize] = dev_handle.slot as u64;
         kernel.processes[sender].core.r[R4 as usize] = dev_handle.generation as u64;
         kernel.processes[sender].core.r[R5 as usize] = 0;
-        kernel.processes[sender].core.r[R6 as usize] = 0x1000;
-        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R6 as usize] = 0x1000; // nonzero → error 4
+        kernel.processes[sender].core.r[R7 as usize] = DeviceRights::SUBMIT_READ.0 as u64;
         kernel.processes[sender].core.r[R8 as usize] = 42;
 
         kernel.handle_send_cap(sender);
         assert_eq!(kernel.processes[sender].core.r[R0 as usize], 4,
-            "Device object transfer must be rejected");
-        assert_eq!(kernel.fabric.next_authority_id(), aid_before);
+            "Device transfer with nonzero R6 must be rejected");
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before,
+            "no AuthorityId consumed on preflight failure");
 
-        eprintln!("9.2b: gate 2b non-Memory rejected ✓");
+        eprintln!("9.3a: Device nonzero R6 rejected (error 4) ✓");
     }
 
     // ─── DelegationId: fresh per transfer, not inherited ───
