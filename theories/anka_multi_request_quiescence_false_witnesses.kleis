@@ -1,0 +1,62 @@
+// =============================================================================
+// Phase 9.2f falsifiability probes — every example below MUST FAIL.
+// =============================================================================
+
+import "anka_multi_request_quiescence.kleis"
+
+example "FALSE92F-1: one Completed request is enough even while the second is InFlight" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64). ∀(dead : Bool).
+            dead ⇒ peer_died_same_pair_two_92f(
+                dead,cs,cg,ds,dg,
+                i1,REQ_COMPLETED,
+                i2,REQ_DMA_INFLIGHT
+            )
+    )
+}
+
+example "FALSE92F-2: transfer incarnation partitions pair-level quiescence" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64). ∀(dead : Bool).
+            (dead ∧ ¬(i1=i2))
+            ⇒ peer_died_same_pair_two_92f(
+                dead,cs,cg,ds,dg,
+                i1,REQ_COMPLETED,
+                i2,REQ_DMA_READY
+            )
+    )
+}
+
+example "FALSE92F-3: recycled driver work blocks PeerDied for the old incarnation" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64). ∀(dead : Bool).
+            (dead ∧ recyclable_process_generation(dg))
+            ⇒ ¬peer_died_allowed_pair2_92e(
+                dead,cs,cg,ds,dg,
+                cs,cg,ds,dg,i1,REQ_COMPLETED,
+                cs,cg,ds,next_process_generation(dg),i2,REQ_DMA_INFLIGHT
+            )
+    )
+}
+
+example "FALSE92F-4: PeerDied may be delivered while either same-pair request remains nonterminal" {
+    assert(
+        ∀(s1 : BitVec3). ∀(s2 : BitVec3).
+            (two_requests_accepted_92f(s1,s2) ∧ same_pair_two_active_92f(s1,s2))
+            ⇒ same_pair_two_quiescent_92f(s1,s2)
+    )
+}
+
+example "FALSE92F-5: a terminal request can mutate its target on the next controller step" {
+    assert(
+        ∀(m : ℤ). ∀(after : BitVec3).
+            controller_step_allowed_92e(REQ_COMPLETED,after)
+            ⇒ target_after_request_step_92f(m,REQ_COMPLETED,after)=m+1
+    )
+}

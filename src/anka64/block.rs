@@ -509,26 +509,32 @@ impl BlockController {
         self.slots.iter().any(|s| s.is_waiting() || s.is_odma())
     }
 
-    /// True if any nonterminal slot's DelegationId matches the given
-    /// (client, driver) ProcessKey pair, deliberately ignoring incarnation.
+    /// Count of nonterminal slots whose DelegationId matches the given
+    /// (client, driver) ProcessKey pair exactly (generation-qualified).
     ///
-    /// This is the pair-level quiescence predicate: PeerDied(C,D) is
-    /// deferred while this returns true.
+    /// Nonterminal states: Waiting, DmaReady, DmaInFlight.
+    /// Free and Completed are excluded — they represent either unused
+    /// or already-terminal requests.
     ///
-    /// Formal basis: anka_blocking_receive.kleis — controller_pair_active_92e.
-    pub fn has_nonterminal_pair_request(
+    /// This is the quantitative pair-quiescence predicate:
+    ///   PeerDied(C,D) requires count(C,D) == 0.
+    ///
+    /// The decisive 2→1→0 witness in 9.2f.6 observes this count
+    /// at each intermediate state.
+    ///
+    /// Formal basis: anka_multi_request_quiescence.kleis MULTI92F-*.
+    pub fn nonterminal_pair_request_count(
         &self,
         client: &ProcessKey,
         driver: &ProcessKey,
-    ) -> bool {
-        self.slots.iter().any(|s| {
-            let (request, is_nonterminal) = match s {
-                SlotState::Waiting { request, .. } => (request, true),
-                SlotState::DmaReady { request, .. } => (request, true),
-                SlotState::DmaInFlight { request, .. } => (request, true),
+    ) -> usize {
+        self.slots.iter().filter(|s| {
+            let request = match s {
+                SlotState::Waiting { request, .. } => request,
+                SlotState::DmaReady { request, .. } => request,
+                SlotState::DmaInFlight { request, .. } => request,
                 _ => return false,
             };
-            if !is_nonterminal { return false; }
             match &request.delegation_id {
                 Some(did) => {
                     did.client.slot == client.slot
@@ -538,7 +544,22 @@ impl BlockController {
                 }
                 None => false,
             }
-        })
+        }).count()
+    }
+
+    /// True if any nonterminal slot's DelegationId matches the given
+    /// (client, driver) ProcessKey pair.
+    ///
+    /// Definitionally equivalent to:
+    ///   nonterminal_pair_request_count(client, driver) != 0
+    ///
+    /// Formal basis: anka_blocking_receive.kleis — controller_pair_active_92e.
+    pub fn has_nonterminal_pair_request(
+        &self,
+        client: &ProcessKey,
+        driver: &ProcessKey,
+    ) -> bool {
+        self.nonterminal_pair_request_count(client, driver) != 0
     }
 
     /// Return the BlockRequest for each in-flight (non-free, non-completed) slot.

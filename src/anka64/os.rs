@@ -34,6 +34,8 @@ pub const SYS_SEND_CAP: u64 = 11;  // send_cap(dest_key, value, src_handle, chil
 pub const SYS_SEND_KEY: u64 = 12;  // send_key(dest_slot, dest_gen, value) → 0 ok
 pub const SYS_DEV_SUBMIT: u64 = 13; // dev_submit(device_handle, block_num, buffer_handle) → 0 ok
 pub const SYS_RECV_WAIT: u64 = 14; // recv_wait(peer_slot, peer_gen) → blocking exact-peer receive
+pub const SYS_DEV_SUBMIT_ASYNC: u64 = 15; // dev_submit_async(same args) → R0=0,R1=slot,R2=gen
+pub const SYS_DEV_WAIT: u64 = 16; // dev_wait(slot, gen) → completion status
 
 /// Maximum messages per mailbox.  Enforced by all producers:
 /// SYS_SEND, SYS_SEND_KEY, and SYS_SEND_CAP.
@@ -60,6 +62,12 @@ pub struct Process {
     /// or PeerDied notification (Phase 9.2e).  The process remains
     /// `ProcessState::Running` but is not schedulable.
     pub recv_wait: Option<RecvWait>,
+    /// Per-process async request ledger (Phase 9.2f).
+    ///
+    /// Tracks outstanding SYS_DEV_SUBMIT_ASYNC requests and their
+    /// completion status.  Bounded by MAX_ASYNC_REQUESTS.
+    /// Cleared by reclaim_process(); NOT cleared by finish_process().
+    pub async_requests: Vec<AsyncDeviceRequest>,
     /// Exact incarnation of the parent (None for init).
     pub parent: Option<ProcessKey>,
     /// Generation counter for lifecycle authority.
@@ -251,6 +259,51 @@ struct WaitState {
 #[derive(Debug, Clone)]
 pub struct IoWait {
     pub request: super::block::RequestHandle,
+}
+
+/// Maximum entries in the per-process async request ledger.
+///
+/// Deliberately larger than the controller's NUM_SLOTS (2) to
+/// separate software completion-record lifetime from hardware
+/// slot availability.
+pub const MAX_ASYNC_REQUESTS: usize = 16;
+
+/// An outstanding asynchronous device request tracked in the
+/// per-process ledger.
+///
+/// Lifecycle:
+///   SYS_DEV_SUBMIT_ASYNC → push { handle, completion: None }
+///   drain_block_completions() → fill completion = Some(status)
+///   SYS_DEV_WAIT on completed → return status, remove entry
+///   SYS_DEV_WAIT on pending → install IoWait, completion drain
+///     will later wake + remove entry
+///   reclaim_process() → clear entire ledger
+///
+/// Formal basis: anka_multi_request_quiescence.kleis MULTI92F-*.
+#[derive(Debug, Clone)]
+pub struct AsyncDeviceRequest {
+    pub handle: super::block::RequestHandle,
+    pub completion: Option<super::block::CompletionStatus>,
+}
+
+/// Side-effect-free validation result from preflight_dev_submit().
+///
+/// Contains all validated fields needed to construct a BlockRequest
+/// and submit to the controller, but no DMA domain has been created
+/// and no authority IDs have been consumed.
+///
+/// The caller (handle_dev_submit or handle_dev_submit_async) uses
+/// these fields to mint the DMA authority and submit, ensuring that
+/// preflight failure implies zero side effects.
+#[derive(Debug)]
+struct PreparedDevSubmit {
+    block_number: u64,
+    requester: super::state::RequesterKey,
+    target_object: super::state::ObjectId,
+    target_offset: u64,
+    source_domain: super::state::DomainId,
+    source_authority_id: super::state::AuthorityId,
+    delegation_id: Option<super::state::DelegationId>,
 }
 
 /// Exact-peer blocking receive (Phase 9.2e).
@@ -853,6 +906,7 @@ impl Kernel {
                 waiting_on: None,
                 io_wait: None,
                 recv_wait: None,
+                async_requests: Vec::new(),
                 parent: None,
                 generation: reuse_gen,
                 result: None,
@@ -874,6 +928,7 @@ impl Kernel {
             waiting_on: None,
             io_wait: None,
             recv_wait: None,
+            async_requests: Vec::new(),
             parent: None,
             generation: 0,
             result: None,
@@ -1197,6 +1252,7 @@ impl Kernel {
         self.processes[slot].waiting_on = None;
         self.processes[slot].io_wait = None;
         self.processes[slot].recv_wait = None;
+        self.processes[slot].async_requests.clear();
         self.processes[slot].result = None;
         self.processes[slot].exit_code = 0;
 
@@ -1826,6 +1882,28 @@ impl Kernel {
     ///
     /// The process then becomes schedulable and resumes at user PC
     /// (the instruction after the original TRAP).
+    /// Drain all ready completions from the block controller.
+    ///
+    /// Two-guard completion routing (Phase 9.2f):
+    ///
+    ///   Guard 1 — exact-incarnation match:
+    ///     Completion(P_g, h) may affect only P_g, never the
+    ///     current occupant of P.slot if incarnation differs.
+    ///
+    ///   Guard 2 — process must be Running:
+    ///     A Zombie/Retired process with correct generation must
+    ///     not receive software events.  The request becomes terminal
+    ///     for pair-quiescence purposes but no process is mutated.
+    ///
+    /// Within the exact Running incarnation:
+    ///   - If io_wait matches this handle: wake the process.
+    ///     If async_requests also has an entry for this handle
+    ///     (SYS_DEV_WAIT path), consume the ledger entry.
+    ///     Legacy SYS_DEV_SUBMIT has no ledger entry — no-op.
+    ///   - Else if async_requests has a matching entry: fill
+    ///     completion status for later SYS_DEV_WAIT.
+    ///
+    /// Formal basis: anka_multi_request_quiescence.kleis MULTI92F-*.
     fn drain_block_completions(&mut self) {
         loop {
             let completion = match self.block_controller.as_mut() {
@@ -1842,16 +1920,32 @@ impl Kernel {
             let rk = &completion.requester;
             let slot = rk.slot as usize;
 
-            // Validate: slot in range, generation matches, process
-            // is Running and actually waiting for this exact request.
-            let wake = slot < self.processes.len()
-                && self.processes[slot].generation == rk.generation
-                && self.processes[slot].state == ProcessState::Running
-                && self.processes[slot].io_wait.as_ref()
-                    .map(|w| w.request == completion.handle)
-                    .unwrap_or(false);
+            // Guard 1: slot in range and exact-incarnation match.
+            if slot >= self.processes.len()
+                || self.processes[slot].generation != rk.generation
+            {
+                continue;
+            }
 
-            if wake {
+            // Guard 2: process must be Running.
+            if self.processes[slot].state != ProcessState::Running {
+                continue;
+            }
+
+            // Inner logic: exact incarnation AND Running.
+            let io_wait_matches = self.processes[slot].io_wait.as_ref()
+                .map(|w| w.request == completion.handle)
+                .unwrap_or(false);
+
+            if io_wait_matches {
+                // IoWait matches this handle.  If the ledger also has
+                // an entry (SYS_DEV_WAIT path), consume it.
+                if let Some(pos) = self.processes[slot].async_requests.iter()
+                    .position(|r| r.handle == completion.handle)
+                {
+                    self.processes[slot].async_requests.remove(pos);
+                }
+
                 let proc = &mut self.processes[slot];
                 proc.core.r[R0 as usize] = match completion.status {
                     super::block::CompletionStatus::Success => 0,
@@ -1862,6 +1956,12 @@ impl Kernel {
                 proc.core.pc = pc;
                 proc.io_wait = None;
                 proc.core.halted = false;
+            } else if let Some(entry) = self.processes[slot].async_requests.iter_mut()
+                .find(|r| r.handle == completion.handle)
+            {
+                // Async request not currently waited on — retain
+                // completion for future SYS_DEV_WAIT.
+                entry.completion = Some(completion.status);
             }
         }
     }
@@ -1959,6 +2059,12 @@ impl Kernel {
             }
             SYS_RECV_WAIT => {
                 self.handle_recv_wait(idx);
+            }
+            SYS_DEV_SUBMIT_ASYNC => {
+                self.handle_dev_submit_async(idx);
+            }
+            SYS_DEV_WAIT => {
+                self.handle_dev_wait(idx);
             }
             _ => {
                 eprintln!("Unknown syscall {} from pid {}",
@@ -3351,38 +3457,25 @@ impl Kernel {
     }
 
     /// Helper: fail a SYS_SEND_CAP with a specific error code.
-    /// SYS_DEV_SUBMIT (syscall 13): submit a device I/O request.
+    /// Side-effect-free preflight validation for device submission.
     ///
-    /// ABI:
-    ///   R1 = device handle slot (u32)
-    ///   R2 = device handle generation (u32)
-    ///   R3 = block number
-    ///   R4 = buffer handle slot (u32)
-    ///   R5 = buffer handle generation (u32)
+    /// Validates ABI decode, capability resolution, device authority,
+    /// controller binding, buffer authority, and provenance.
+    /// Returns a PreparedDevSubmit on success, or an error code on failure.
     ///
-    /// Returns: R0 = 0 on success (caller blocked in IoWait),
-    ///   1 = ABI decode failure
-    ///   2 = already in IoWait
-    ///   3 = device handle invalid (not Device, not resolved)
-    ///   4 = device authority invalid (missing SubmitRead, wrong binding)
-    ///   5 = no block controller bound
-    ///   6 = buffer handle invalid (not Memory, not resolved)
-    ///   7 = buffer rights insufficient (missing WRITE)
-    ///   8 = provenance violation (delegation_id.driver ≠ current)
-    ///   9 = controller submission failed (busy, invalid block)
+    /// **Invariant:** this function does NOT create DMA domains,
+    /// consume authority IDs, modify the controller, or touch the
+    /// async ledger.  Failure implies zero side effects.
     ///
-    /// Preflight gates:
+    /// Gates:
     ///   0. ABI fields decode exactly
-    ///   1. Caller is not already in IoWait
-    ///   2. H_d resolves as Device
-    ///   3. H_d has SubmitRead in Fabric and cap table, bound to controller
-    ///   4. Block controller exists
-    ///   5. H_b resolves as Memory
-    ///   6. H_b.perms ⊇ WRITE
-    ///   7. T.driver == current ProcessKey, if T exists
-    fn handle_dev_submit(&mut self, idx: usize) {
-        use super::block::{BlockRequest, SubmitResult};
-
+    ///   1. H_d resolves as Device
+    ///   2. H_d has SubmitRead in Fabric and cap table, bound to controller
+    ///   3. Block controller exists
+    ///   4. H_b resolves as Memory
+    ///   5. H_b.perms ⊇ WRITE
+    ///   6. T.driver == current ProcessKey, if T exists
+    fn preflight_dev_submit(&self, idx: usize) -> Result<PreparedDevSubmit, u64> {
         let r1 = self.processes[idx].core.r[R1 as usize];
         let r2 = self.processes[idx].core.r[R2 as usize];
         let block_number = self.processes[idx].core.r[R3 as usize];
@@ -3390,43 +3483,25 @@ impl Kernel {
         let r5 = self.processes[idx].core.r[R5 as usize];
 
         // ── Gate 0: Checked ABI decode ──
-        let dev_slot = match u32::try_from(r1) {
-            Ok(v) => v, Err(_) => { self.fail_dev_submit(idx, 1); return; }
-        };
-        let dev_gen = match u32::try_from(r2) {
-            Ok(v) => v, Err(_) => { self.fail_dev_submit(idx, 1); return; }
-        };
-        let buf_slot = match u32::try_from(r4) {
-            Ok(v) => v, Err(_) => { self.fail_dev_submit(idx, 1); return; }
-        };
-        let buf_gen = match u32::try_from(r5) {
-            Ok(v) => v, Err(_) => { self.fail_dev_submit(idx, 1); return; }
-        };
+        let dev_slot = u32::try_from(r1).map_err(|_| 1u64)?;
+        let dev_gen = u32::try_from(r2).map_err(|_| 1u64)?;
+        let buf_slot = u32::try_from(r4).map_err(|_| 1u64)?;
+        let buf_gen = u32::try_from(r5).map_err(|_| 1u64)?;
 
         let dev_handle = CapabilityHandle { slot: dev_slot, generation: dev_gen };
         let buf_handle = CapabilityHandle { slot: buf_slot, generation: buf_gen };
 
-        // ── Gate 1: Not already in IoWait ──
-        if self.processes[idx].io_wait.is_some() {
-            self.fail_dev_submit(idx, 2);
-            return;
-        }
-
-        // ── Gate 2: Device handle resolves as Device ──
-        let dev_resolved = match self.resolve_capability(idx, dev_handle) {
-            Some(r) => r,
-            None => { self.fail_dev_submit(idx, 3); return; }
-        };
+        // ── Gate 1: Device handle resolves as Device ──
+        let dev_resolved = self.resolve_capability(idx, dev_handle)
+            .ok_or(3u64)?;
         let (dev_object, dev_gen_resolved, dev_rights, dev_authority_id) = match &dev_resolved {
             ResolvedCapability::Device {
                 object, object_generation, rights, authority_id, ..
             } => (*object, *object_generation, *rights, *authority_id),
-            ResolvedCapability::Memory { .. } => {
-                self.fail_dev_submit(idx, 3); return;
-            }
+            ResolvedCapability::Memory { .. } => return Err(3),
         };
 
-        // ── Gate 3: Device authority valid (SubmitRead, binding) ──
+        // ── Gate 2: Device authority valid (SubmitRead, binding) ──
         let domain = self.processes[idx].core.domain;
         if !self.fabric.validate_device_authority(
             domain,
@@ -3436,74 +3511,95 @@ impl Kernel {
             dev_rights,
             DeviceRights::SUBMIT_READ,
         ) {
-            self.fail_dev_submit(idx, 4);
-            return;
+            return Err(4);
         }
 
-        // ── Gate 3b: Device object is bound to the block controller ──
-        let binding = match &self.block_device_binding {
-            Some(b) => b.clone(),
-            None => { self.fail_dev_submit(idx, 5); return; }
-        };
+        // ── Gate 2b: Device object is bound to the block controller ──
+        let binding = self.block_device_binding.as_ref().ok_or(5u64)?;
         if binding.object != dev_object || binding.generation != dev_gen_resolved {
-            self.fail_dev_submit(idx, 4);
-            return;
+            return Err(4);
         }
 
-        // ── Gate 4: Block controller exists ──
+        // ── Gate 3: Block controller exists ──
         if self.block_controller.is_none() {
-            self.fail_dev_submit(idx, 5);
-            return;
+            return Err(5);
         }
 
-        // ── Gate 5: Buffer handle resolves as Memory ──
-        let buf_resolved = match self.resolve_capability(idx, buf_handle) {
-            Some(r) => r,
-            None => { self.fail_dev_submit(idx, 6); return; }
-        };
+        // ── Gate 4: Buffer handle resolves as Memory ──
+        let buf_resolved = self.resolve_capability(idx, buf_handle)
+            .ok_or(6u64)?;
         let (buf_object, buf_offset, buf_perms, buf_authority_id, buf_delegation_id) =
             match &buf_resolved {
                 ResolvedCapability::Memory {
                     object, offset, perms, authority_id, delegation_id, ..
                 } => (*object, *offset, *perms, *authority_id, *delegation_id),
-                ResolvedCapability::Device { .. } => {
-                    self.fail_dev_submit(idx, 6); return;
-                }
+                ResolvedCapability::Device { .. } => return Err(6),
             };
 
-        // ── Gate 6: Buffer handle has WRITE ──
+        // ── Gate 5: Buffer handle has WRITE ──
         if !buf_perms.contains(Permissions::WRITE) {
-            self.fail_dev_submit(idx, 7);
-            return;
+            return Err(7);
         }
 
-        // ── Gate 7: Provenance check (mandatory when T exists) ──
+        // ── Gate 6: Provenance check (mandatory when T exists) ──
         if let Some(tid) = buf_delegation_id {
             let current_key = ProcessKey {
                 slot: idx,
                 generation: self.processes[idx].generation,
             };
             if tid.driver != current_key {
-                self.fail_dev_submit(idx, 8);
-                return;
+                return Err(8);
             }
         }
 
-        // ── All preflight gates passed — construct and submit request ──
+        // ── All validation passed — return prepared submission ──
         let rk = RequesterKey {
             slot: idx as u32,
             generation: self.processes[idx].generation,
         };
-        let source_domain = self.processes[idx].core.domain;
 
-        let req = BlockRequest {
+        Ok(PreparedDevSubmit {
             block_number,
             requester: rk,
             target_object: buf_object,
             target_offset: buf_offset,
-            source_domain,
-            source_authority_id: Some(buf_authority_id),
+            source_domain: domain,
+            source_authority_id: buf_authority_id,
             delegation_id: buf_delegation_id,
+        })
+    }
+
+    /// SYS_DEV_SUBMIT (13) — blocking device submission.
+    ///
+    /// Transactional order:
+    ///   io_wait gate → preflight → mint DMA authority → submit → install IoWait
+    ///
+    /// Returns: R0 = 0 on success (caller blocked in IoWait),
+    ///   1-8 = preflight error, 9 = controller submission failed.
+    fn handle_dev_submit(&mut self, idx: usize) {
+        use super::block::{BlockRequest, SubmitResult};
+
+        // ── Gate 0: Caller scheduling state — before any validation ──
+        if self.processes[idx].io_wait.is_some() {
+            self.fail_dev_submit(idx, 2);
+            return;
+        }
+
+        // ── Gates 1-6: Pure ABI/authority/provenance validation ──
+        let prepared = match self.preflight_dev_submit(idx) {
+            Ok(p) => p,
+            Err(code) => { self.fail_dev_submit(idx, code); return; }
+        };
+
+        // ── Mint DMA authority + submit ──
+        let req = BlockRequest {
+            block_number: prepared.block_number,
+            requester: prepared.requester,
+            target_object: prepared.target_object,
+            target_offset: prepared.target_offset,
+            source_domain: prepared.source_domain,
+            source_authority_id: Some(prepared.source_authority_id),
+            delegation_id: prepared.delegation_id,
         };
 
         let result = self.block_controller.as_mut().unwrap()
@@ -3516,6 +3612,149 @@ impl Kernel {
             }
             _ => {
                 self.fail_dev_submit(idx, 9);
+            }
+        }
+    }
+
+    /// SYS_DEV_SUBMIT_ASYNC (15) — non-blocking device submission.
+    ///
+    /// Transactional order:
+    ///   io_wait gate → preflight → ledger capacity → controller capacity
+    ///   → mint DMA authority → submit → publish ledger entry
+    ///
+    /// Returns immediately:
+    ///   R0 = 0, R1 = handle.slot, R2 = handle.generation on success.
+    ///   R0 = error code on failure (same 1-9 as SYS_DEV_SUBMIT,
+    ///         plus 10 = ledger full).
+    ///
+    /// Failure atomicity: SubmitAsync failure ⇒
+    ///   ΔController = ΔLedger = ΔFabricDomains = ΔAuthorityIds = 0.
+    fn handle_dev_submit_async(&mut self, idx: usize) {
+        use super::block::{BlockRequest, SubmitResult};
+
+        // ── Gate 0: Caller scheduling state — before any validation ──
+        if self.processes[idx].io_wait.is_some() {
+            self.fail_dev_submit(idx, 2);
+            return;
+        }
+
+        // ── Gates 1-6: Pure ABI/authority/provenance validation ──
+        let prepared = match self.preflight_dev_submit(idx) {
+            Ok(p) => p,
+            Err(code) => { self.fail_dev_submit(idx, code); return; }
+        };
+
+        // ── Gate A: Ledger capacity (async-only, after preflight) ──
+        if self.processes[idx].async_requests.len() >= MAX_ASYNC_REQUESTS {
+            self.fail_dev_submit(idx, 10);
+            return;
+        }
+
+        // ── Gate B: Controller-slot capacity (before minting) ──
+        if self.block_controller.as_ref().unwrap().free_slot_count() == 0 {
+            self.fail_dev_submit(idx, 9);
+            return;
+        }
+
+        // ── Mint DMA authority + submit ──
+        let req = BlockRequest {
+            block_number: prepared.block_number,
+            requester: prepared.requester,
+            target_object: prepared.target_object,
+            target_offset: prepared.target_offset,
+            source_domain: prepared.source_domain,
+            source_authority_id: Some(prepared.source_authority_id),
+            delegation_id: prepared.delegation_id,
+        };
+
+        let result = self.block_controller.as_mut().unwrap()
+            .submit(req, &mut self.fabric);
+
+        match result {
+            SubmitResult::Accepted(handle) => {
+                self.processes[idx].async_requests.push(AsyncDeviceRequest {
+                    handle,
+                    completion: None,
+                });
+                self.processes[idx].core.r[R0 as usize] = 0;
+                self.processes[idx].core.r[R1 as usize] = handle.slot as u64;
+                self.processes[idx].core.r[R2 as usize] = handle.generation;
+                self.resume_from_trap(idx);
+            }
+            _ => {
+                self.fail_dev_submit(idx, 9);
+            }
+        }
+    }
+
+    /// SYS_DEV_WAIT (16) — wait for a specific async request handle.
+    ///
+    /// ABI:
+    ///   R1 = request_handle.slot
+    ///   R2 = request_handle.generation
+    ///
+    /// Returns:
+    ///   R0 = 0 (success) or R0 = u64::MAX (DMA fault) on completion.
+    ///   R0 = 1 (stale/unknown handle), R0 = 2 (already in IoWait) on error.
+    ///
+    /// Logic:
+    ///   1. Checked ABI decode
+    ///   2. Reject if io_wait.is_some() → error 2
+    ///   3. Search async_requests for matching handle
+    ///   4. Not found → error 1
+    ///   5. Found with completion → return status, remove entry, resume
+    ///   6. Found pending → install IoWait, leave EventFrame outstanding
+    fn handle_dev_wait(&mut self, idx: usize) {
+        use super::block::RequestHandle;
+
+        let r1 = self.processes[idx].core.r[R1 as usize];
+        let r2 = self.processes[idx].core.r[R2 as usize];
+
+        // ── Checked ABI decode ──
+        let slot = match u8::try_from(r1) {
+            Ok(v) => v,
+            Err(_) => {
+                self.processes[idx].core.r[R0 as usize] = 1;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+        let generation = r2; // RequestHandle.generation is u64
+
+        let handle = RequestHandle { slot, generation };
+
+        // ── Gate: not already in IoWait ──
+        if self.processes[idx].io_wait.is_some() {
+            self.processes[idx].core.r[R0 as usize] = 2;
+            self.resume_from_trap(idx);
+            return;
+        }
+
+        // ── Search async_requests ──
+        let pos = self.processes[idx].async_requests.iter()
+            .position(|r| r.handle == handle);
+
+        match pos {
+            None => {
+                // Not found → stale or already reaped
+                self.processes[idx].core.r[R0 as usize] = 1;
+                self.resume_from_trap(idx);
+            }
+            Some(p) => {
+                let entry = &self.processes[idx].async_requests[p];
+                if let Some(status) = entry.completion {
+                    // Already completed → return immediately
+                    self.processes[idx].core.r[R0 as usize] = match status {
+                        super::block::CompletionStatus::Success => 0,
+                        super::block::CompletionStatus::DmaFault(_) => u64::MAX,
+                    };
+                    self.processes[idx].async_requests.remove(p);
+                    self.resume_from_trap(idx);
+                } else {
+                    // Pending → block on this handle
+                    self.processes[idx].io_wait = Some(IoWait { request: handle });
+                    // Leave EventFrame outstanding — completion drain will wake us
+                }
             }
         }
     }
@@ -13845,5 +14084,1253 @@ mod tests {
             "no autonomous work after process exits and DMA completes");
 
         eprintln!("9.2e.3: has_autonomous_io() predicate ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.2f — Hostile Async-Completion Suite
+    //
+    // Eight targeted tests attacking the async submission/wait/
+    // completion machinery.  Each witnesses a specific invariant
+    // of the three-lifetime separation:
+    //   hardware request lifetime ≠ process incarnation lifetime
+    //   ≠ software completion-record lifetime.
+    //
+    // Formal basis: anka_multi_request_quiescence.kleis MULTI92F-*.
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Helper: set up a kernel with a driver process that has device +
+    /// buffer caps suitable for SYS_DEV_SUBMIT_ASYNC testing.
+    ///
+    /// Returns (kernel, driver_key, dev_handle, buf_handle, data_obj).
+    /// The driver owns:
+    ///   - Device cap at slot 0
+    ///   - Buffer cap at slot 1 (512B WRITE with delegation_id)
+    /// Two blocks pre-populated: block 0 = 0xAA, block 1 = 0xBB.
+    /// Controller latency = 3 (stays nonterminal across multiple ticks).
+    fn async_submit_setup() -> (Kernel, ProcessKey, ProcessKey,
+                                CapabilityHandle, CapabilityHandle,
+                                ObjectId)
+    {
+        use super::super::block::{BlockStorage, BlockController};
+
+        let mut fabric = Fabric::new(0x800000);
+
+        // Client (slot 0) — minimal, just so we have a delegation pair
+        let (core_c, dom_c, text_c, data_c, _stack_c) =
+            create_process(&mut fabric, CPU0, "client",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm_c = Asm64::new();
+        for _ in 0..100 { asm_c.nop(); }
+        asm_c.movi(R1, 0);
+        asm_c.movi(R0, SYS_EXIT as i32);
+        asm_c.trap(0);
+        fabric.write_physical(0x000000, &asm_c.to_bytes());
+        seal_code_object(&mut fabric, text_c, dom_c);
+
+        // Driver (slot 1)
+        let (core_d, dom_d, text_d, _data_d, _stack_d) =
+            create_process(&mut fabric, AgentId(1), "driver",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm_d = Asm64::new();
+        for _ in 0..100 { asm_d.nop(); }
+        asm_d.movi(R1, 0);
+        asm_d.movi(R0, SYS_EXIT as i32);
+        asm_d.trap(0);
+        fabric.write_physical(0x100000, &asm_d.to_bytes());
+        seal_code_object(&mut fabric, text_d, dom_d);
+
+        // Block storage: latency 3
+        let mut storage = BlockStorage::new(4, 512);
+        storage.write_block(0, &[0xAA; 512]);
+        storage.write_block(1, &[0xBB; 512]);
+        let controller = BlockController::new(storage, 3, AgentId(100));
+
+        let mut kernel = Kernel::new(fabric);
+        let key_c = kernel.spawn(core_c);
+        let key_d = kernel.spawn(core_d);
+
+        let dev_obj = kernel.install_block_device(controller)
+            .expect("install block device");
+
+        let dev_handle = kernel.install_device_capability(
+            key_d.slot, dev_obj, DeviceRights::SUBMIT_READ,
+        ).expect("install device cap");
+
+        // Install a buffer cap with delegation_id(C,D)
+        let tid = kernel.alloc_delegation_id(key_c, key_d)
+            .expect("alloc delegation ID");
+        let src_aid = kernel.fabric.alloc_authority_id()
+            .expect("alloc authority ID");
+        let driver_dom = kernel.processes[key_d.slot].core.domain;
+        kernel.fabric.grant_with_authority_id(
+            driver_dom, data_c, 0, 512, Permissions::WRITE, src_aid,
+        ).expect("grant tagged authority");
+        let obj_gen = kernel.fabric.objects.get(&data_c).unwrap().generation;
+        let buf_handle = kernel.processes[key_d.slot].cap_table.as_mut().unwrap()
+            .install_memory(
+                data_c, obj_gen, 0, 512, Permissions::WRITE, src_aid, Some(tid),
+            ).expect("install buffer cap");
+
+        (kernel, key_c, key_d, dev_handle, buf_handle, data_c)
+    }
+
+    /// Helper: push an EventFrame and issue SYS_DEV_SUBMIT_ASYNC with
+    /// the given device handle, block number, and buffer handle.
+    /// Returns the R0 result code.
+    fn do_async_submit(
+        kernel: &mut Kernel,
+        slot: usize,
+        dev_handle: &CapabilityHandle,
+        block_num: u64,
+        buf_handle: &CapabilityHandle,
+    ) -> u64 {
+        let return_pc = kernel.processes[slot].core.pc + 4;
+        kernel.processes[slot].core.event_frames.push(EventFrame {
+            return_pc,
+            return_privilege: Privilege::User,
+            interrupts_were_enabled: true,
+            cause: EventCause::Syscall,
+        });
+        kernel.processes[slot].core.r[R0 as usize] = SYS_DEV_SUBMIT_ASYNC;
+        kernel.processes[slot].core.r[R1 as usize] = dev_handle.slot as u64;
+        kernel.processes[slot].core.r[R2 as usize] = dev_handle.generation as u64;
+        kernel.processes[slot].core.r[R3 as usize] = block_num;
+        kernel.processes[slot].core.r[R4 as usize] = buf_handle.slot as u64;
+        kernel.processes[slot].core.r[R5 as usize] = buf_handle.generation as u64;
+        kernel.processes[slot].core.halted = true;
+        kernel.handle_syscall(slot);
+        kernel.processes[slot].core.r[R0 as usize]
+    }
+
+    /// Helper: push an EventFrame and issue SYS_DEV_WAIT with the
+    /// given request handle slot and generation.
+    /// Returns R0 result code.
+    fn do_dev_wait(
+        kernel: &mut Kernel,
+        proc_slot: usize,
+        req_slot: u8,
+        req_gen: u64,
+    ) -> u64 {
+        let return_pc = kernel.processes[proc_slot].core.pc + 4;
+        kernel.processes[proc_slot].core.event_frames.push(EventFrame {
+            return_pc,
+            return_privilege: Privilege::User,
+            interrupts_were_enabled: true,
+            cause: EventCause::Syscall,
+        });
+        kernel.processes[proc_slot].core.r[R0 as usize] = SYS_DEV_WAIT;
+        kernel.processes[proc_slot].core.r[R1 as usize] = req_slot as u64;
+        kernel.processes[proc_slot].core.r[R2 as usize] = req_gen;
+        kernel.processes[proc_slot].core.halted = true;
+        kernel.handle_syscall(proc_slot);
+        kernel.processes[proc_slot].core.r[R0 as usize]
+    }
+
+    // ─── 9.2f.5 test 1: two async submissions produce distinct handles ───
+
+    #[test]
+    fn p92f5_1_distinct_async_handles() {
+        let (mut kernel, _key_c, key_d, dev_h, buf_h, _data) = async_submit_setup();
+        let d = key_d.slot;
+
+        let r0_a = do_async_submit(&mut kernel, d, &dev_h, 0, &buf_h);
+        assert_eq!(r0_a, 0, "first async submit must succeed");
+        let h_a_slot = kernel.processes[d].core.r[R1 as usize];
+        let h_a_gen = kernel.processes[d].core.r[R2 as usize];
+
+        let r0_b = do_async_submit(&mut kernel, d, &dev_h, 1, &buf_h);
+        assert_eq!(r0_b, 0, "second async submit must succeed");
+        let h_b_slot = kernel.processes[d].core.r[R1 as usize];
+        let h_b_gen = kernel.processes[d].core.r[R2 as usize];
+
+        assert!(
+            h_a_slot != h_b_slot || h_a_gen != h_b_gen,
+            "two simultaneously active async requests must have distinct full handles: \
+             A=({},{}) B=({},{})", h_a_slot, h_a_gen, h_b_slot, h_b_gen
+        );
+
+        assert_eq!(kernel.processes[d].async_requests.len(), 2,
+            "ledger must contain exactly two entries");
+
+        eprintln!("9.2f.5-1: two distinct async handles ✓");
+    }
+
+    // ─── 9.2f.5 test 2: completion A cannot wake IoWait(B) ───
+    //
+    // Staggered submission: submit A, tick twice, submit B.
+    // With latency 3, A completes while B is still nonterminal.
+    // We wait on B, then drain A's completion and verify:
+    //   Completion(h_A) AND Nonterminal(h_B) AND IoWait(h_B)
+    //   => IoWait(h_B) still installed, A retained in ledger.
+
+    #[test]
+    fn p92f5_2_cross_completion_rejection() {
+        let (mut kernel, _key_c, key_d, dev_h, buf_h, _data) = async_submit_setup();
+        let d = key_d.slot;
+
+        // Submit A to block 0
+        let r0_a = do_async_submit(&mut kernel, d, &dev_h, 0, &buf_h);
+        assert_eq!(r0_a, 0);
+        let h_a_slot = kernel.processes[d].core.r[R1 as usize] as u8;
+        let h_a_gen = kernel.processes[d].core.r[R2 as usize];
+
+        // Advance A by 2 ticks (of latency 3) — A is now at remaining=1
+        kernel.tick_devices(d);
+        kernel.tick_devices(d);
+
+        // Submit B to block 1 — B starts fresh at remaining=3
+        let r0_b = do_async_submit(&mut kernel, d, &dev_h, 1, &buf_h);
+        assert_eq!(r0_b, 0);
+        let h_b_slot = kernel.processes[d].core.r[R1 as usize] as u8;
+        let h_b_gen = kernel.processes[d].core.r[R2 as usize];
+
+        assert!(h_a_slot != h_b_slot || h_a_gen != h_b_gen,
+            "handles must be distinct");
+
+        // DEV_WAIT on B — should block (B is pending with remaining>=2)
+        let _r0_wait = do_dev_wait(&mut kernel, d, h_b_slot, h_b_gen);
+        assert!(kernel.processes[d].io_wait.is_some(),
+            "DEV_WAIT(B) must install IoWait when B is pending");
+        let io_handle = kernel.processes[d].io_wait.as_ref().unwrap().request;
+        assert_eq!(io_handle.slot, h_b_slot);
+        assert_eq!(io_handle.generation, h_b_gen,
+            "IoWait must be for B, not A");
+
+        // One more tick: A reaches remaining=0 -> DmaReady -> DmaInFlight
+        // But B still has remaining>=1.
+        kernel.tick_devices(d);
+
+        // A's DMA will take at least one more tick to commit.
+        // Keep ticking until A completes but B does not.
+        // With latency 3 for A (started 2 ticks ago + 1 just now = DmaReady),
+        // A needs DMA phases.  B needs 2 more latency ticks + DMA phases.
+        // Tick one more for A's DMA:
+        kernel.tick_devices(d);
+        kernel.drain_block_completions();
+
+        // Check: is A terminal and B still nonterminal?
+        // A had a 2-tick head start.  If A is completed, its entry has
+        // completion filled.  B should still be pending.
+        let a_entry = kernel.processes[d].async_requests.iter()
+            .find(|r| r.handle.slot == h_a_slot && r.handle.generation == h_a_gen);
+        let b_entry = kernel.processes[d].async_requests.iter()
+            .find(|r| r.handle.slot == h_b_slot && r.handle.generation == h_b_gen);
+
+        // If A hasn't completed yet, tick more until it does
+        let mut ticks = 0;
+        while kernel.processes[d].async_requests.iter()
+            .find(|r| r.handle.slot == h_a_slot && r.handle.generation == h_a_gen)
+            .map(|r| r.completion.is_none())
+            .unwrap_or(false)
+        {
+            kernel.tick_devices(d);
+            kernel.drain_block_completions();
+            ticks += 1;
+            assert!(ticks < 20, "A should complete within 20 ticks");
+        }
+
+        // DECISIVE STATE: A completed, B still in IoWait
+        // A's completion must NOT have woken IoWait(B).
+        assert!(kernel.processes[d].io_wait.is_some(),
+            "A's completion must NOT wake IoWait(B)");
+        let io_handle = kernel.processes[d].io_wait.as_ref().unwrap().request;
+        assert_eq!(io_handle.slot, h_b_slot,
+            "IoWait must still be for B after A completes");
+        assert_eq!(io_handle.generation, h_b_gen);
+
+        // A's completion must be retained in the ledger
+        let a_entry = kernel.processes[d].async_requests.iter()
+            .find(|r| r.handle.slot == h_a_slot && r.handle.generation == h_a_gen)
+            .expect("A must still be in ledger");
+        assert!(a_entry.completion.is_some(),
+            "A must have completion filled in ledger");
+
+        // B must still be pending (nonterminal)
+        let b_entry = kernel.processes[d].async_requests.iter()
+            .find(|r| r.handle.slot == h_b_slot && r.handle.generation == h_b_gen)
+            .expect("B must still be in ledger");
+        assert!(b_entry.completion.is_none(),
+            "B must still be pending (nonterminal)");
+
+        eprintln!("  Decisive state witnessed:");
+        eprintln!("    Completion(A) AND Nonterminal(B) AND IoWait(B)");
+        eprintln!("    => IoWait(B) undisturbed, A retained in ledger");
+
+        // Now tick until B completes — B's completion wakes IoWait(B)
+        for _ in 0..20 {
+            kernel.tick_devices(d);
+        }
+        kernel.drain_block_completions();
+
+        assert!(kernel.processes[d].io_wait.is_none(),
+            "B's completion must wake IoWait(B)");
+        assert_eq!(kernel.processes[d].core.r[R0 as usize], 0,
+            "B's result must be success");
+
+        // A should still be in ledger (retained), B consumed by wake
+        assert_eq!(kernel.processes[d].async_requests.len(), 1,
+            "only A should remain in ledger after B wakes");
+        let remaining = &kernel.processes[d].async_requests[0];
+        assert_eq!(remaining.handle.slot, h_a_slot);
+        assert!(remaining.completion.is_some());
+
+        // Reap A
+        let r0_reap_a = do_dev_wait(&mut kernel, d, h_a_slot, h_a_gen);
+        assert_eq!(r0_reap_a, 0, "DEV_WAIT(A) must return retained success");
+        assert_eq!(kernel.processes[d].async_requests.len(), 0);
+
+        eprintln!("9.2f.5-2: Completion(h_A) does not wake IoWait(h_B) ✓");
+    }
+
+    // ─── 9.2f.5 test 3: completed A reapable after controller slot reuse ───
+    //
+    // Proves: RequestHandle lifetime < CompletionRecord lifetime.
+    // h_A=(s,g) completes and drains into ledger.
+    // h_B=(s,g+1) active on same controller slot.
+    // DEV_WAIT(h_A) returns A's result without disturbing B.
+
+    #[test]
+    fn p92f5_3_completion_survives_slot_reuse() {
+        let (mut kernel, _key_c, key_d, dev_h, buf_h, _data) = async_submit_setup();
+        let d = key_d.slot;
+
+        // Submit A
+        let r0_a = do_async_submit(&mut kernel, d, &dev_h, 0, &buf_h);
+        assert_eq!(r0_a, 0);
+        let h_a_slot = kernel.processes[d].core.r[R1 as usize] as u8;
+        let h_a_gen = kernel.processes[d].core.r[R2 as usize];
+
+        // Tick A to completion
+        for _ in 0..10 {
+            kernel.tick_devices(d);
+        }
+        kernel.drain_block_completions();
+
+        // A's completion is now in the ledger (no IoWait was installed)
+        assert_eq!(kernel.processes[d].async_requests.len(), 1);
+        assert!(kernel.processes[d].async_requests[0].completion.is_some(),
+            "A must have completion in ledger");
+
+        // Controller slot should be free now
+        assert_eq!(kernel.block_controller.as_ref().unwrap().free_slot_count(), 2);
+
+        // Submit B on what was A's slot — will get a higher generation
+        let r0_b = do_async_submit(&mut kernel, d, &dev_h, 1, &buf_h);
+        assert_eq!(r0_b, 0, "B must succeed — slot is free");
+        let h_b_slot = kernel.processes[d].core.r[R1 as usize] as u8;
+        let h_b_gen = kernel.processes[d].core.r[R2 as usize];
+
+        // Verify slot reuse with newer generation
+        assert_eq!(h_b_slot, h_a_slot,
+            "B must reuse A's controller slot");
+        assert!(h_b_gen > h_a_gen,
+            "B's generation must be strictly greater than A's: B={} A={}",
+            h_b_gen, h_a_gen);
+
+        // B is still nonterminal
+        assert!(kernel.block_controller.as_ref().unwrap().has_autonomous_work(),
+            "B must be nonterminal");
+
+        // DEV_WAIT(A_old_handle) — must return A's retained completion
+        let r0_wait_a = do_dev_wait(&mut kernel, d, h_a_slot, h_a_gen);
+        assert_eq!(r0_wait_a, 0,
+            "DEV_WAIT(A) must return A's retained success");
+        assert!(kernel.processes[d].io_wait.is_none(),
+            "immediate return must not install IoWait");
+
+        // B must still be in the ledger, unaffected
+        assert_eq!(kernel.processes[d].async_requests.len(), 1);
+        assert_eq!(kernel.processes[d].async_requests[0].handle.slot, h_b_slot);
+        assert_eq!(kernel.processes[d].async_requests[0].handle.generation, h_b_gen);
+        assert!(kernel.processes[d].async_requests[0].completion.is_none(),
+            "B must still be pending");
+
+        eprintln!("9.2f.5-3: RequestHandle lifetime < CompletionRecord lifetime ✓");
+        eprintln!("          h_A=({},{}) completed and retained, h_B=({},{}) active on same slot",
+            h_a_slot, h_a_gen, h_b_slot, h_b_gen);
+    }
+
+    // ─── 9.2f.5 test 4: stale generation cannot alias recycled request ───
+
+    #[test]
+    fn p92f5_4_stale_generation_rejected() {
+        let (mut kernel, _key_c, key_d, dev_h, buf_h, _data) = async_submit_setup();
+        let d = key_d.slot;
+
+        // Submit and complete A
+        let r0_a = do_async_submit(&mut kernel, d, &dev_h, 0, &buf_h);
+        assert_eq!(r0_a, 0);
+        let h_a_slot = kernel.processes[d].core.r[R1 as usize] as u8;
+        let h_a_gen = kernel.processes[d].core.r[R2 as usize];
+
+        for _ in 0..10 { kernel.tick_devices(d); }
+        kernel.drain_block_completions();
+
+        // Reap A
+        let r0_reap = do_dev_wait(&mut kernel, d, h_a_slot, h_a_gen);
+        assert_eq!(r0_reap, 0, "reap A");
+        assert_eq!(kernel.processes[d].async_requests.len(), 0);
+
+        // Submit B on the same controller slot
+        let r0_b = do_async_submit(&mut kernel, d, &dev_h, 1, &buf_h);
+        assert_eq!(r0_b, 0);
+        let h_b_slot = kernel.processes[d].core.r[R1 as usize] as u8;
+        let h_b_gen = kernel.processes[d].core.r[R2 as usize];
+        assert_eq!(h_b_slot, h_a_slot);
+        assert!(h_b_gen > h_a_gen);
+
+        // Try to DEV_WAIT on the stale A handle — must fail
+        let r0_stale = do_dev_wait(&mut kernel, d, h_a_slot, h_a_gen);
+        assert_eq!(r0_stale, 1,
+            "stale handle must be rejected (error 1, not found)");
+        assert!(kernel.processes[d].io_wait.is_none(),
+            "stale handle must not install IoWait");
+
+        // B is still in the ledger, untouched
+        assert_eq!(kernel.processes[d].async_requests.len(), 1);
+        assert_eq!(kernel.processes[d].async_requests[0].handle.generation, h_b_gen);
+
+        eprintln!("9.2f.5-4: stale generation rejected, cannot alias recycled request ✓");
+    }
+
+    // ─── 9.2f.5 test 5: recycled process incarnation cannot consume old completion ───
+    //
+    // D_g submits async A, A completes, D_g dies, slot recycled.
+    // D_{g+1} spawns in same slot, attempts DEV_WAIT(h_old) → error 1.
+    // Proves: recycled incarnation cannot consume old completion.
+
+    #[test]
+    fn p92f5_5_recycled_incarnation_no_consumption() {
+        let (mut kernel, _key_c, key_d, dev_h, buf_h, _data) = async_submit_setup();
+        let d = key_d.slot;
+        let old_proc_gen = kernel.processes[d].generation;
+
+        // D_g submits async A
+        let r0_a = do_async_submit(&mut kernel, d, &dev_h, 0, &buf_h);
+        assert_eq!(r0_a, 0);
+        let h_a_slot = kernel.processes[d].core.r[R1 as usize] as u8;
+        let h_a_gen = kernel.processes[d].core.r[R2 as usize];
+
+        // Tick to completion — completion drains into ledger
+        for _ in 0..10 { kernel.tick_devices(d); }
+        kernel.drain_block_completions();
+        assert!(kernel.processes[d].async_requests[0].completion.is_some(),
+            "A must have completion in D_g's ledger");
+
+        // Kill D_g
+        kernel.finish_process(d, ProcessResult::Exited(0));
+        assert_eq!(kernel.processes[d].state, ProcessState::Zombie);
+
+        // Reclaim D_g — slot becomes Free(g+1)
+        kernel.reclaim_process(d);
+        assert_eq!(kernel.processes[d].state, ProcessState::Free);
+        assert_eq!(kernel.processes[d].async_requests.len(), 0,
+            "reclaim must clear async ledger");
+
+        // Spawn D_{g+1} in the same slot
+        let (core_new, dom_new, text_new, _data_new, _stack_new) =
+            create_process(&mut kernel.fabric, AgentId(2), "driver_g1",
+                0x200000, 0x210000, 0x220000);
+        install_trap_handler(&mut kernel.fabric, 0x200000, 0x4000);
+        let mut asm_new = Asm64::new();
+        for _ in 0..10 { asm_new.nop(); }
+        asm_new.movi(R1, 0);
+        asm_new.movi(R0, SYS_EXIT as i32);
+        asm_new.trap(0);
+        kernel.fabric.write_physical(0x200000, &asm_new.to_bytes());
+        seal_code_object(&mut kernel.fabric, text_new, dom_new);
+        let key_d_new = kernel.spawn(core_new);
+
+        // Verify D_{g+1} reused the same slot with incremented generation
+        assert_eq!(key_d_new.slot, d,
+            "D_{{g+1}} must reuse the same slot as D_g");
+        assert_eq!(key_d_new.generation, old_proc_gen + 1,
+            "D_{{g+1}}.generation must be D_g.generation + 1");
+        assert_eq!(kernel.processes[d].state, ProcessState::Running);
+        assert_eq!(kernel.processes[d].async_requests.len(), 0,
+            "D_{{g+1}} must start with empty async ledger");
+
+        // D_{g+1} tries DEV_WAIT(h_old) — must fail
+        let r0_stale = do_dev_wait(&mut kernel, d, h_a_slot, h_a_gen);
+        assert_eq!(r0_stale, 1,
+            "recycled incarnation must get error 1 for old handle");
+        assert!(kernel.processes[d].io_wait.is_none(),
+            "stale handle must not install IoWait in D_{{g+1}}");
+        assert_eq!(kernel.processes[d].async_requests.len(), 0,
+            "D_{{g+1}} ledger must remain empty");
+
+        eprintln!("9.2f.5-5: D_{{g+1}} at slot {} gen {} cannot consume D_g's completion ✓",
+            d, key_d_new.generation);
+    }
+
+    // ─── 9.2f.5 test 6: dead requester gets no software mutation ───
+
+    #[test]
+    fn p92f5_6_dead_requester_no_mutation() {
+        let (mut kernel, _key_c, key_d, dev_h, buf_h, _data) = async_submit_setup();
+        let d = key_d.slot;
+
+        // Submit async A
+        let r0_a = do_async_submit(&mut kernel, d, &dev_h, 0, &buf_h);
+        assert_eq!(r0_a, 0);
+
+        // Install IoWait on A via DEV_WAIT (A is pending)
+        let h_a_slot = kernel.processes[d].core.r[R1 as usize] as u8;
+        let h_a_gen = kernel.processes[d].core.r[R2 as usize];
+        let _r0_wait = do_dev_wait(&mut kernel, d, h_a_slot, h_a_gen);
+        assert!(kernel.processes[d].io_wait.is_some(),
+            "must block — A is pending");
+
+        // Snapshot driver state before death
+        let regs_before: Vec<u64> = kernel.processes[d].core.r.to_vec();
+        let frames_before = kernel.processes[d].core.event_frames.len();
+        let io_wait_before = kernel.processes[d].io_wait.clone();
+        let ledger_before = kernel.processes[d].async_requests.len();
+
+        // Kill the driver
+        kernel.finish_process(d, ProcessResult::Exited(0));
+        assert_eq!(kernel.processes[d].state, ProcessState::Zombie);
+
+        // Tick to complete A at the hardware level
+        for _ in 0..10 { kernel.tick_devices(d); }
+        kernel.drain_block_completions();
+
+        // Dead requester must not receive any software mutation
+        assert_eq!(kernel.processes[d].core.r.to_vec(), regs_before,
+            "dead process registers must not change");
+        assert_eq!(kernel.processes[d].core.event_frames.len(), frames_before,
+            "dead process EventFrames must not change");
+        assert_eq!(kernel.processes[d].io_wait.is_some(), io_wait_before.is_some(),
+            "dead process io_wait must not change");
+        assert_eq!(kernel.processes[d].async_requests.len(), ledger_before,
+            "dead process async_requests must not change");
+
+        // But the request IS terminal at the controller level
+        assert!(!kernel.block_controller.as_ref().unwrap().has_autonomous_work(),
+            "controller must report no autonomous work after completion");
+
+        eprintln!("9.2f.5-6: dead requester — ΔRegisters=ΔEventFrames=ΔIoWait=ΔLedger=0 ✓");
+    }
+
+    // ─── 9.2f.5 test 7: third request on occupied slots fails atomically ───
+
+    #[test]
+    fn p92f5_7_third_request_fails_atomically() {
+        let (mut kernel, _key_c, key_d, dev_h, buf_h, _data) = async_submit_setup();
+        let d = key_d.slot;
+
+        // Fill both controller slots
+        let r0_a = do_async_submit(&mut kernel, d, &dev_h, 0, &buf_h);
+        assert_eq!(r0_a, 0);
+        let r0_b = do_async_submit(&mut kernel, d, &dev_h, 1, &buf_h);
+        assert_eq!(r0_b, 0);
+
+        assert_eq!(kernel.block_controller.as_ref().unwrap().free_slot_count(), 0,
+            "both controller slots must be occupied");
+
+        // Snapshot all quantities that must not change
+        let domain_count_before = kernel.fabric.domain_count();
+        let authority_id_before = kernel.fabric.next_authority_id();
+        let ledger_len_before = kernel.processes[d].async_requests.len();
+        let controller_free_before = kernel.block_controller.as_ref().unwrap().free_slot_count();
+
+        // Third async submission — must fail (controller busy)
+        let r0_c = do_async_submit(&mut kernel, d, &dev_h, 2, &buf_h);
+        assert_eq!(r0_c, 9,
+            "third request must fail with error 9 (controller busy)");
+
+        // Verify zero side effects
+        assert_eq!(kernel.fabric.domain_count(), domain_count_before,
+            "ΔDomainCount must be 0 on rejected submission");
+        assert_eq!(kernel.fabric.next_authority_id(), authority_id_before,
+            "ΔAuthorityIds must be 0 on rejected submission");
+        assert_eq!(kernel.processes[d].async_requests.len(), ledger_len_before,
+            "ΔLedger must be 0 on rejected submission");
+        assert_eq!(kernel.block_controller.as_ref().unwrap().free_slot_count(),
+            controller_free_before,
+            "ΔController must be 0 on rejected submission");
+
+        eprintln!("9.2f.5-7: third request — ΔDomain=ΔAuthority=ΔLedger=ΔController=0 ✓");
+    }
+
+    // ─── 9.2f.5 test 8: ledger exhaustion (17th unreaped) fails atomically ───
+
+    #[test]
+    fn p92f5_8_ledger_exhaustion_fails_atomically() {
+        use super::super::block::{BlockStorage, BlockController};
+
+        // Need a controller with enough slots or repeated submit/complete cycles
+        // to fill the 16-entry ledger.  Since NUM_SLOTS=2, we repeatedly:
+        //   submit → tick to completion → drain (fills ledger) → repeat.
+        // After 16 completions in the ledger, the 17th submit must fail.
+
+        let mut fabric = Fabric::new(0x800000);
+
+        let (core_c, dom_c, text_c, data_c, _stack_c) =
+            create_process(&mut fabric, CPU0, "client",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm_c = Asm64::new();
+        for _ in 0..10 { asm_c.nop(); }
+        asm_c.movi(R1, 0);
+        asm_c.movi(R0, SYS_EXIT as i32);
+        asm_c.trap(0);
+        fabric.write_physical(0x000000, &asm_c.to_bytes());
+        seal_code_object(&mut fabric, text_c, dom_c);
+
+        let (core_d, dom_d, text_d, _data_d, _stack_d) =
+            create_process(&mut fabric, AgentId(1), "driver",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm_d = Asm64::new();
+        for _ in 0..10 { asm_d.nop(); }
+        asm_d.movi(R1, 0);
+        asm_d.movi(R0, SYS_EXIT as i32);
+        asm_d.trap(0);
+        fabric.write_physical(0x100000, &asm_d.to_bytes());
+        seal_code_object(&mut fabric, text_d, dom_d);
+
+        // Short latency (1) so completions happen quickly
+        let mut storage = BlockStorage::new(4, 512);
+        for i in 0..4 { storage.write_block(i, &[i as u8; 512]); }
+        let controller = BlockController::new(storage, 1, AgentId(100));
+
+        let mut kernel = Kernel::new(fabric);
+        let key_c = kernel.spawn(core_c);
+        let key_d = kernel.spawn(core_d);
+
+        let dev_obj = kernel.install_block_device(controller)
+            .expect("install block device");
+        let dev_handle = kernel.install_device_capability(
+            key_d.slot, dev_obj, DeviceRights::SUBMIT_READ,
+        ).expect("install device cap");
+
+        let tid = kernel.alloc_delegation_id(key_c, key_d)
+            .expect("delegation ID");
+        let src_aid = kernel.fabric.alloc_authority_id()
+            .expect("authority ID");
+        let driver_dom = kernel.processes[key_d.slot].core.domain;
+        kernel.fabric.grant_with_authority_id(
+            driver_dom, data_c, 0, 512, Permissions::WRITE, src_aid,
+        ).expect("grant");
+        let obj_gen = kernel.fabric.objects.get(&data_c).unwrap().generation;
+        let buf_handle = kernel.processes[key_d.slot].cap_table.as_mut().unwrap()
+            .install_memory(
+                data_c, obj_gen, 0, 512, Permissions::WRITE, src_aid, Some(tid),
+            ).expect("install buffer cap");
+
+        let d = key_d.slot;
+
+        // Fill the ledger to 16 entries by repeated submit+complete cycles
+        for i in 0..MAX_ASYNC_REQUESTS {
+            let block_num = (i % 4) as u64;
+            let r0 = do_async_submit(&mut kernel, d, &dev_handle, block_num, &buf_handle);
+            assert_eq!(r0, 0, "submit {} must succeed", i);
+
+            // Tick to completion
+            for _ in 0..10 { kernel.tick_devices(d); }
+            kernel.drain_block_completions();
+        }
+
+        // Verify ledger is full
+        assert_eq!(kernel.processes[d].async_requests.len(), MAX_ASYNC_REQUESTS,
+            "ledger must contain exactly {} entries", MAX_ASYNC_REQUESTS);
+        assert!(kernel.processes[d].async_requests.iter()
+            .all(|r| r.completion.is_some()),
+            "all entries must have completions");
+
+        // Snapshot quantities
+        let domain_count_before = kernel.fabric.domain_count();
+        let authority_id_before = kernel.fabric.next_authority_id();
+        let controller_free_before = kernel.block_controller.as_ref().unwrap().free_slot_count();
+
+        // 17th submit must fail
+        let r0_overflow = do_async_submit(&mut kernel, d, &dev_handle, 0, &buf_handle);
+        assert_eq!(r0_overflow, 10,
+            "17th unreaped async request must fail with error 10 (ledger full)");
+
+        // Zero side effects
+        assert_eq!(kernel.fabric.domain_count(), domain_count_before,
+            "ΔDomainCount must be 0");
+        assert_eq!(kernel.fabric.next_authority_id(), authority_id_before,
+            "ΔAuthorityIds must be 0");
+        assert_eq!(kernel.block_controller.as_ref().unwrap().free_slot_count(),
+            controller_free_before,
+            "controller slots must not change");
+        assert_eq!(kernel.processes[d].async_requests.len(), MAX_ASYNC_REQUESTS,
+            "ledger must not grow");
+
+        eprintln!("9.2f.5-8: 17th unreaped async → ledger full, atomic rejection ✓");
+        eprintln!("          ΔDomain=ΔAuthority=ΔController=ΔLedger=0");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.2f.6 — Decisive Two-Request Pair-Quiescence Test
+    //
+    // Two processes: client C, driver D.
+    // D submits two staggered async requests attributed to (C,D).
+    // D is killed while both are nonterminal.
+    //
+    // Decisive requirement:
+    //   PairCount(C,D): 2 → [1] → 0
+    // with C remaining in RecvWait(D) at counts 2 and 1.
+    // The intermediate count=1 state MUST be explicitly observed.
+    // Observing only 2→0 does not satisfy the phase.
+    //
+    // At count=1, the test records which target has committed
+    // and which has not (non-vacuous intermediate witness).
+    //
+    // Formal basis: anka_multi_request_quiescence.kleis MULTI92F-*.
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn p92f6_two_request_pair_quiescence() {
+        use super::super::block::{BlockStorage, BlockController, BlockRequest, SubmitResult};
+
+        let mut fabric = Fabric::new(0x800000);
+
+        // ── Client C (slot 0) ──
+        let (core_c, dom_c, text_c, data_c, _stack_c) =
+            create_process(&mut fabric, CPU0, "client",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm_c = Asm64::new();
+        for _ in 0..100 { asm_c.nop(); }
+        asm_c.movi(R1, 0);
+        asm_c.movi(R0, SYS_EXIT as i32);
+        asm_c.trap(0);
+        fabric.write_physical(0x000000, &asm_c.to_bytes());
+        seal_code_object(&mut fabric, text_c, dom_c);
+
+        // ── Driver D (slot 1) ──
+        let (core_d, dom_d, text_d, _data_d, _stack_d) =
+            create_process(&mut fabric, AgentId(1), "driver",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm_d = Asm64::new();
+        for _ in 0..100 { asm_d.nop(); }
+        asm_d.movi(R1, 0);
+        asm_d.movi(R0, SYS_EXIT as i32);
+        asm_d.trap(0);
+        fabric.write_physical(0x100000, &asm_d.to_bytes());
+        seal_code_object(&mut fabric, text_d, dom_d);
+
+        // ── Two DMA target buffers ──
+        // buf_A: client-owned, for request A (block 0 → 0xAA pattern)
+        // buf_B: client-owned, for request B (block 1 → 0xBB pattern)
+        let buf_a_obj = fabric.alloc_object("buf_a", 512, ObjectKind::Memory);
+        fabric.place_object(buf_a_obj, 0x300000);
+        let buf_b_obj = fabric.alloc_object("buf_b", 512, ObjectKind::Memory);
+        fabric.place_object(buf_b_obj, 0x310000);
+
+        // Grant client domain authority over both buffers
+        fabric.grant(dom_c, buf_a_obj, 0, 512, Permissions::RW);
+        fabric.grant(dom_c, buf_b_obj, 0, 512, Permissions::RW);
+
+        // Initialize with distinct known patterns
+        fabric.write_physical(0x300000, &[0x11; 512]); // A_0 = 0x11
+        fabric.write_physical(0x310000, &[0x22; 512]); // B_0 = 0x22
+
+        // ── Block storage: block 0 = 0xAA, block 1 = 0xBB ──
+        // Latency 5 gives enough ticks for staggered observation.
+        let mut storage = BlockStorage::new(4, 512);
+        storage.write_block(0, &[0xAA; 512]);
+        storage.write_block(1, &[0xBB; 512]);
+        let controller = BlockController::new(storage, 5, AgentId(100));
+
+        // ── Kernel + spawn ──
+        let mut kernel = Kernel::new(fabric);
+        let key_c = kernel.spawn(core_c);
+        let key_d = kernel.spawn(core_d);
+        let c = key_c.slot;
+        let d = key_d.slot;
+
+        let dev_obj = kernel.install_block_device(controller)
+            .expect("install block device");
+
+        // ── Device cap for driver ──
+        let dev_handle = kernel.install_device_capability(
+            d, dev_obj, DeviceRights::SUBMIT_READ,
+        ).expect("install device cap");
+
+        // ── Two buffer caps for driver, each with delegation_id(C,D) ──
+        let tid_a = kernel.alloc_delegation_id(key_c, key_d)
+            .expect("delegation ID for A");
+        let aid_a = kernel.fabric.alloc_authority_id()
+            .expect("authority ID for A");
+        let driver_dom = kernel.processes[d].core.domain;
+        kernel.fabric.grant_with_authority_id(
+            driver_dom, buf_a_obj, 0, 512, Permissions::WRITE, aid_a,
+        ).expect("grant A authority to driver");
+        let gen_a = kernel.fabric.objects.get(&buf_a_obj).unwrap().generation;
+        let buf_a_handle = kernel.processes[d].cap_table.as_mut().unwrap()
+            .install_memory(
+                buf_a_obj, gen_a, 0, 512, Permissions::WRITE, aid_a, Some(tid_a),
+            ).expect("install buf_A cap");
+
+        let tid_b = kernel.alloc_delegation_id(key_c, key_d)
+            .expect("delegation ID for B");
+        let aid_b = kernel.fabric.alloc_authority_id()
+            .expect("authority ID for B");
+        kernel.fabric.grant_with_authority_id(
+            driver_dom, buf_b_obj, 0, 512, Permissions::WRITE, aid_b,
+        ).expect("grant B authority to driver");
+        let gen_b = kernel.fabric.objects.get(&buf_b_obj).unwrap().generation;
+        let buf_b_handle = kernel.processes[d].cap_table.as_mut().unwrap()
+            .install_memory(
+                buf_b_obj, gen_b, 0, 512, Permissions::WRITE, aid_b, Some(tid_b),
+            ).expect("install buf_B cap");
+
+        // ── Snapshot initial memory ──
+        let a_0 = kernel.fabric.read_physical(0x300000, 512).to_vec();
+        let b_0 = kernel.fabric.read_physical(0x310000, 512).to_vec();
+        assert!(a_0.iter().all(|&x| x == 0x11), "A_0 = 0x11");
+        assert!(b_0.iter().all(|&x| x == 0x22), "B_0 = 0x22");
+
+        // ── D_0: domain count immediately before submissions ──
+        let d_0 = kernel.fabric.domain_count();
+
+        // ── Submit A (block 0 → buf_A), stagger, submit B (block 1 → buf_B) ──
+        let r0_a = do_async_submit(&mut kernel, d, &dev_handle, 0, &buf_a_handle);
+        assert_eq!(r0_a, 0, "submit A must succeed");
+        let h_a_slot = kernel.processes[d].core.r[R1 as usize] as u8;
+        let h_a_gen = kernel.processes[d].core.r[R2 as usize];
+
+        // Tick twice to stagger: A has remaining=3 after 2 ticks
+        kernel.tick_devices(d);
+        kernel.tick_devices(d);
+
+        let r0_b = do_async_submit(&mut kernel, d, &dev_handle, 1, &buf_b_handle);
+        assert_eq!(r0_b, 0, "submit B must succeed");
+        let h_b_slot = kernel.processes[d].core.r[R1 as usize] as u8;
+        let h_b_gen = kernel.processes[d].core.r[R2 as usize];
+
+        // ── Verify PairCount(C,D) = 2, D_2 = D_0 + 2 ──
+        let count_initial = kernel.block_controller.as_ref().unwrap()
+            .nonterminal_pair_request_count(&key_c, &key_d);
+        assert_eq!(count_initial, 2,
+            "PairCount(C,D) must be 2 after both submissions");
+        let d_2 = kernel.fabric.domain_count();
+        assert_eq!(d_2, d_0 + 2,
+            "two request-local DMA domains must exist: D_2={} expected D_0+2={}",
+            d_2, d_0 + 2);
+
+        // ── D enters DEV_WAIT(A) ──
+        let _r0_wait = do_dev_wait(&mut kernel, d, h_a_slot, h_a_gen);
+        assert!(kernel.processes[d].io_wait.is_some(),
+            "D must block on DEV_WAIT(A)");
+
+        // ── C enters RECV_WAIT(D) ──
+        // Push EventFrame for C's RECV_WAIT
+        let return_pc_c = kernel.processes[c].core.pc + 4;
+        kernel.processes[c].core.event_frames.push(EventFrame {
+            return_pc: return_pc_c,
+            return_privilege: Privilege::User,
+            interrupts_were_enabled: true,
+            cause: EventCause::Syscall,
+        });
+        setup_recv_wait_call(&mut kernel, c, &key_d);
+        kernel.handle_syscall(c);
+        assert!(kernel.processes[c].recv_wait.is_some(),
+            "C must block on RecvWait(D)");
+
+        // ── Kill D ──
+        kernel.finish_process(d, ProcessResult::Exited(0));
+        assert_eq!(kernel.processes[d].state, ProcessState::Zombie);
+
+        // ── Observation point: PairCount=2 ──
+        let count_at_death = kernel.block_controller.as_ref().unwrap()
+            .nonterminal_pair_request_count(&key_c, &key_d);
+        assert_eq!(count_at_death, 2,
+            "PairCount must still be 2 immediately after killing D");
+        kernel.reevaluate_recv_waits();
+        assert!(kernel.processes[c].recv_wait.is_some(),
+            "C must remain in RecvWait at PairCount=2");
+        eprintln!("  PairCount=2: RecvWait(C,D) ✓");
+
+        // ── Idle progress until PairCount drops to 1 ──
+        let mut ticks_to_1 = 0;
+        loop {
+            kernel.idle_progress_once();
+            ticks_to_1 += 1;
+            let count = kernel.block_controller.as_ref().unwrap()
+                .nonterminal_pair_request_count(&key_c, &key_d);
+            if count <= 1 {
+                assert_eq!(count, 1,
+                    "PairCount must transition through 1, not skip to 0");
+                break;
+            }
+            assert!(ticks_to_1 < 50, "PairCount should drop to 1 within 50 ticks");
+        }
+
+        // ── Observation point: PairCount=1 ──
+        // C must still be in RecvWait — PeerDied is NOT delivered yet
+        assert!(kernel.processes[c].recv_wait.is_some(),
+            "C must remain in RecvWait at PairCount=1");
+
+        // D_1 = D_0 + 1: one request-local DMA domain destroyed,
+        // one still active for the remaining nonterminal request.
+        let d_1 = kernel.fabric.domain_count();
+        assert_eq!(d_1, d_0 + 1,
+            "one DMA domain destroyed, one remains: D_1={} expected D_0+1={}",
+            d_1, d_0 + 1);
+
+        // Record which target has committed and which has not
+        let a_at_1 = kernel.fabric.read_physical(0x300000, 512).to_vec();
+        let b_at_1 = kernel.fabric.read_physical(0x310000, 512).to_vec();
+        let a_committed = a_at_1.iter().all(|&x| x == 0xAA);
+        let b_committed = b_at_1.iter().all(|&x| x == 0xBB);
+
+        // Exactly one must have committed (A was submitted first)
+        assert!(a_committed || b_committed,
+            "at PairCount=1, at least one DMA must have committed");
+        assert!(!(a_committed && b_committed),
+            "at PairCount=1, exactly one DMA must have committed, not both");
+
+        if a_committed {
+            eprintln!("  PairCount=1: A=Block_A(0xAA), B=B_0(0x22) — RecvWait(C,D) ✓");
+            assert_ne!(a_at_1, a_0, "A changed from A_0");
+            assert_eq!(b_at_1, b_0, "B unchanged from B_0");
+        } else {
+            eprintln!("  PairCount=1: A=A_0(0x11), B=Block_B(0xBB) — RecvWait(C,D) ✓");
+            assert_eq!(a_at_1, a_0, "A unchanged from A_0");
+            assert_ne!(b_at_1, b_0, "B changed from B_0");
+        }
+
+        eprintln!("  PairCount dropped 2→1 after {} idle ticks", ticks_to_1);
+
+        // ── Idle progress until PairCount drops to 0 ──
+        let mut ticks_to_0 = 0;
+        loop {
+            kernel.idle_progress_once();
+            ticks_to_0 += 1;
+            let count = kernel.block_controller.as_ref().unwrap()
+                .nonterminal_pair_request_count(&key_c, &key_d);
+            if count == 0 {
+                break;
+            }
+            assert!(ticks_to_0 < 50, "PairCount should drop to 0 within 50 ticks");
+        }
+
+        // ── Observation point: PairCount=0 → PeerDied ──
+        // idle_progress_once() called reevaluate_recv_waits(), so
+        // C should have received PeerDied.
+        assert!(kernel.processes[c].recv_wait.is_none(),
+            "C's RecvWait must be cleared at PairCount=0");
+        assert_eq!(kernel.processes[c].core.r[R1 as usize], 3,
+            "R1 = tag 3 (PeerDied)");
+        assert_eq!(kernel.processes[c].core.r[R4 as usize], key_d.slot as u64,
+            "R4 = dead peer slot");
+        assert_eq!(kernel.processes[c].core.r[R5 as usize], key_d.generation as u64,
+            "R5 = dead peer generation");
+
+        // Both DMA targets must now contain their block data
+        let a_final = kernel.fabric.read_physical(0x300000, 512).to_vec();
+        let b_final = kernel.fabric.read_physical(0x310000, 512).to_vec();
+        assert!(a_final.iter().all(|&x| x == 0xAA),
+            "A must contain Block_A at PeerDied");
+        assert!(b_final.iter().all(|&x| x == 0xBB),
+            "B must contain Block_B at PeerDied");
+
+        // ── Structural witnesses at PeerDied ──
+        assert!(!kernel.has_autonomous_io(),
+            "no autonomous I/O at PeerDied");
+        assert_eq!(
+            kernel.block_controller.as_ref().unwrap().completion_count(), 0,
+            "no undrained completions at PeerDied"
+        );
+
+        // D_P = D_0: both request-local DMA domains destroyed.
+        let d_p = kernel.fabric.domain_count();
+        assert_eq!(d_p, d_0,
+            "both DMA domains destroyed at PeerDied: D_P={} expected D_0={}",
+            d_p, d_0);
+
+        // ── Post-barrier freeze: 10 additional idle rounds ──
+        for _ in 0..10 {
+            kernel.idle_progress_once();
+        }
+
+        let a_later = kernel.fabric.read_physical(0x300000, 512).to_vec();
+        let b_later = kernel.fabric.read_physical(0x310000, 512).to_vec();
+        assert_eq!(a_final, a_later,
+            "A must not change after PeerDied (causal barrier)");
+        assert_eq!(b_final, b_later,
+            "B must not change after PeerDied (causal barrier)");
+
+        // ── Summary ──
+        eprintln!("  PairCount dropped 2→1 after {} idle ticks", ticks_to_1);
+        eprintln!("  PairCount dropped 1→0 after {} additional idle ticks", ticks_to_0);
+        eprintln!("9.2f.6+7: DECISIVE TWO-REQUEST PAIR-QUIESCENCE + CAUSAL BARRIER ✓");
+        eprintln!("  PairCount(C,D): 2 → [1] → 0");
+        eprintln!("  RecvWait(C,D) at counts 2 and 1, PeerDied at count 0");
+        eprintln!("  (A_0,B_0) ≠ (A_P,B_P) = (A_∞,B_∞)");
+        eprintln!("  DomainCount: D_0={} → D_0+2={} → D_0+1={} → D_0={}",
+            d_0, d_2, d_1, d_p);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.2f.8 — Recycled-Driver Concurrency Adversary
+    //
+    // D_g creates one request attributed to (C, D_g), then dies.
+    // D_{g+1} spawns in the same slot and creates one request
+    // attributed to (C, D_{g+1}).
+    //
+    // Decisive observation:
+    //   PairCount(C, D_g) = 1,  PairCount(C, D_{g+1}) = 1
+    //
+    // Then D_g's request terminates while D_{g+1}'s remains active:
+    //   PairCount(C, D_g) = 0,  PairCount(C, D_{g+1}) = 1
+    //
+    // At that exact state:
+    //   PeerDied(C, D_g) must be delivered
+    //   despite global AutonomousIO == true.
+    //
+    // This proves:
+    //   PeerDied(C, D_g) => not AutonomousWorkAttributedTo(C, D_g),
+    //   NOT "the machine has no autonomous work whatsoever."
+    //
+    // Formal basis: anka_multi_request_quiescence.kleis MULTI92F-6,7.
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn p92f8_recycled_driver_concurrency_adversary() {
+        use super::super::block::{BlockStorage, BlockController, BlockRequest, SubmitResult};
+
+        let mut fabric = Fabric::new(0x800000);
+
+        // ── Client C (slot 0) ──
+        let (core_c, dom_c, text_c, data_c, _stack_c) =
+            create_process(&mut fabric, CPU0, "client",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm_c = Asm64::new();
+        for _ in 0..100 { asm_c.nop(); }
+        asm_c.movi(R1, 0);
+        asm_c.movi(R0, SYS_EXIT as i32);
+        asm_c.trap(0);
+        fabric.write_physical(0x000000, &asm_c.to_bytes());
+        seal_code_object(&mut fabric, text_c, dom_c);
+
+        // ── Driver D_g (slot 1) ──
+        let (core_dg, dom_dg, text_dg, _data_dg, _stack_dg) =
+            create_process(&mut fabric, AgentId(1), "driver_g",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm_dg = Asm64::new();
+        for _ in 0..100 { asm_dg.nop(); }
+        asm_dg.movi(R1, 0);
+        asm_dg.movi(R0, SYS_EXIT as i32);
+        asm_dg.trap(0);
+        fabric.write_physical(0x100000, &asm_dg.to_bytes());
+        seal_code_object(&mut fabric, text_dg, dom_dg);
+
+        // ── DMA target buffer (owned by client) ──
+        let buf_obj = fabric.alloc_object("buf_dg", 512, ObjectKind::Memory);
+        fabric.place_object(buf_obj, 0x300000);
+        fabric.grant(dom_c, buf_obj, 0, 512, Permissions::RW);
+        fabric.write_physical(0x300000, &[0x11; 512]);
+
+        // ── Block storage: latency 5 ──
+        let mut storage = BlockStorage::new(4, 512);
+        storage.write_block(0, &[0xAA; 512]);
+        storage.write_block(1, &[0xBB; 512]);
+        let controller = BlockController::new(storage, 5, AgentId(100));
+
+        // ── Kernel + spawn ──
+        let mut kernel = Kernel::new(fabric);
+        let key_c = kernel.spawn(core_c);
+        let key_dg = kernel.spawn(core_dg);
+        let c = key_c.slot;
+        let d = key_dg.slot;
+
+        let dev_obj = kernel.install_block_device(controller)
+            .expect("install block device");
+
+        // ── D_g's device cap ──
+        let dev_handle_g = kernel.install_device_capability(
+            d, dev_obj, DeviceRights::SUBMIT_READ,
+        ).expect("device cap for D_g");
+
+        // ── D_g's buffer cap with delegation_id(C, D_g) ──
+        let tid_g = kernel.alloc_delegation_id(key_c, key_dg)
+            .expect("delegation ID for D_g");
+        let aid_g = kernel.fabric.alloc_authority_id()
+            .expect("authority ID for D_g");
+        let dg_dom = kernel.processes[d].core.domain;
+        kernel.fabric.grant_with_authority_id(
+            dg_dom, buf_obj, 0, 512, Permissions::WRITE, aid_g,
+        ).expect("grant D_g authority");
+        let gen_buf = kernel.fabric.objects.get(&buf_obj).unwrap().generation;
+        let buf_handle_g = kernel.processes[d].cap_table.as_mut().unwrap()
+            .install_memory(
+                buf_obj, gen_buf, 0, 512, Permissions::WRITE, aid_g, Some(tid_g),
+            ).expect("install D_g buffer cap");
+
+        // ── D_g submits async request (block 0 → buf) ──
+        let r0_g = do_async_submit(&mut kernel, d, &dev_handle_g, 0, &buf_handle_g);
+        assert_eq!(r0_g, 0, "D_g async submit must succeed");
+
+        // Give D_g a head start: tick 3 times (of latency 5).
+        // D_g is now at remaining_ticks=2 when D_{g+1} later submits at
+        // remaining_ticks=5, ensuring D_g completes first.
+        kernel.tick_devices(d);
+        kernel.tick_devices(d);
+        kernel.tick_devices(d);
+
+        assert_eq!(
+            kernel.block_controller.as_ref().unwrap()
+                .nonterminal_pair_request_count(&key_c, &key_dg),
+            1,
+            "PairCount(C, D_g) = 1"
+        );
+
+        // ── C enters RECV_WAIT(D_g) ──
+        let return_pc_c = kernel.processes[c].core.pc + 4;
+        kernel.processes[c].core.event_frames.push(EventFrame {
+            return_pc: return_pc_c,
+            return_privilege: Privilege::User,
+            interrupts_were_enabled: true,
+            cause: EventCause::Syscall,
+        });
+        setup_recv_wait_call(&mut kernel, c, &key_dg);
+        kernel.handle_syscall(c);
+        assert!(kernel.processes[c].recv_wait.is_some(),
+            "C must block on RecvWait(D_g)");
+
+        // ── Kill D_g ──
+        kernel.finish_process(d, ProcessResult::Exited(0));
+        assert_eq!(kernel.processes[d].state, ProcessState::Zombie);
+
+        // D_g's request is still nonterminal — PeerDied deferred
+        kernel.reevaluate_recv_waits();
+        assert!(kernel.processes[c].recv_wait.is_some(),
+            "C must remain in RecvWait — D_g request nonterminal");
+
+        // ── Reclaim D_g's slot → Free(g+1) ──
+        kernel.reclaim_process(d);
+        assert_eq!(kernel.processes[d].state, ProcessState::Free);
+        let new_gen = kernel.processes[d].generation;
+        assert_eq!(new_gen, key_dg.generation + 1);
+
+        // D_g's request is STILL nonterminal at the controller level
+        assert_eq!(
+            kernel.block_controller.as_ref().unwrap()
+                .nonterminal_pair_request_count(&key_c, &key_dg),
+            1,
+            "PairCount(C, D_g) must still be 1 after reclaim"
+        );
+
+        // ── Spawn D_{g+1} in the same slot ──
+        let (core_dg1, dom_dg1, text_dg1, _data_dg1, _stack_dg1) =
+            create_process(&mut kernel.fabric, AgentId(2), "driver_g1",
+                0x200000, 0x210000, 0x220000);
+        install_trap_handler(&mut kernel.fabric, 0x200000, 0x4000);
+        let mut asm_dg1 = Asm64::new();
+        for _ in 0..100 { asm_dg1.nop(); }
+        asm_dg1.movi(R1, 0);
+        asm_dg1.movi(R0, SYS_EXIT as i32);
+        asm_dg1.trap(0);
+        kernel.fabric.write_physical(0x200000, &asm_dg1.to_bytes());
+        seal_code_object(&mut kernel.fabric, text_dg1, dom_dg1);
+        let key_dg1 = kernel.spawn(core_dg1);
+        assert_eq!(key_dg1.slot, d, "D_{{g+1}} must reuse D_g's slot");
+        assert_eq!(key_dg1.generation, key_dg.generation + 1);
+
+        // ── D_{g+1}'s device cap ──
+        let dev_handle_g1 = kernel.install_device_capability(
+            d, dev_obj, DeviceRights::SUBMIT_READ,
+        ).expect("device cap for D_{{g+1}}");
+
+        // ── D_{g+1}'s buffer (separate object) with delegation_id(C, D_{g+1}) ──
+        let buf_obj_g1 = kernel.fabric.alloc_object("buf_dg1", 512, ObjectKind::Memory);
+        kernel.fabric.place_object(buf_obj_g1, 0x320000);
+        kernel.fabric.grant(dom_c, buf_obj_g1, 0, 512, Permissions::RW);
+        kernel.fabric.write_physical(0x320000, &[0x33; 512]);
+
+        let tid_g1 = kernel.alloc_delegation_id(key_c, key_dg1)
+            .expect("delegation ID for D_{{g+1}}");
+        let aid_g1 = kernel.fabric.alloc_authority_id()
+            .expect("authority ID for D_{{g+1}}");
+        let dg1_dom = kernel.processes[d].core.domain;
+        kernel.fabric.grant_with_authority_id(
+            dg1_dom, buf_obj_g1, 0, 512, Permissions::WRITE, aid_g1,
+        ).expect("grant D_{{g+1}} authority");
+        let gen_buf_g1 = kernel.fabric.objects.get(&buf_obj_g1).unwrap().generation;
+        let buf_handle_g1 = kernel.processes[d].cap_table.as_mut().unwrap()
+            .install_memory(
+                buf_obj_g1, gen_buf_g1, 0, 512, Permissions::WRITE, aid_g1, Some(tid_g1),
+            ).expect("install D_{{g+1}} buffer cap");
+
+        // ── D_{g+1} submits async request (block 1 → buf_g1) ──
+        let r0_g1 = do_async_submit(&mut kernel, d, &dev_handle_g1, 1, &buf_handle_g1);
+        assert_eq!(r0_g1, 0, "D_{{g+1}} async submit must succeed");
+
+        // ── DECISIVE STATE 1: both counters simultaneously ──
+        let count_g = kernel.block_controller.as_ref().unwrap()
+            .nonterminal_pair_request_count(&key_c, &key_dg);
+        let count_g1 = kernel.block_controller.as_ref().unwrap()
+            .nonterminal_pair_request_count(&key_c, &key_dg1);
+        assert_eq!(count_g, 1, "PairCount(C, D_g) = 1");
+        assert_eq!(count_g1, 1, "PairCount(C, D_{{g+1}}) = 1");
+        assert!(kernel.has_autonomous_io(),
+            "global autonomous I/O must be true (two active requests)");
+        eprintln!("  State 1: PairCount(C,D_g)={}, PairCount(C,D_{{g+1}})={}", count_g, count_g1);
+
+        // C is still in RecvWait(D_g)
+        assert!(kernel.processes[c].recv_wait.is_some(),
+            "C must remain in RecvWait(D_g)");
+        let rw_peer = kernel.processes[c].recv_wait.as_ref().unwrap().peer;
+        assert_eq!(rw_peer.slot, key_dg.slot);
+        assert_eq!(rw_peer.generation, key_dg.generation,
+            "C must be waiting for D_g, not D_{{g+1}}");
+
+        // ── Idle progress until D_g's request terminates ──
+        // D_g's request was submitted first and has a head start.
+        // We need D_g's to finish while D_{g+1}'s is still active.
+        let mut ticks = 0;
+        loop {
+            kernel.idle_progress_once();
+            ticks += 1;
+            let cg = kernel.block_controller.as_ref().unwrap()
+                .nonterminal_pair_request_count(&key_c, &key_dg);
+            if cg == 0 {
+                break;
+            }
+            assert!(ticks < 50, "D_g request should terminate within 50 ticks");
+        }
+
+        // ── DECISIVE STATE 2: D_g quiescent, D_{g+1} active ──
+        let count_g_final = kernel.block_controller.as_ref().unwrap()
+            .nonterminal_pair_request_count(&key_c, &key_dg);
+        let count_g1_at_peer_died = kernel.block_controller.as_ref().unwrap()
+            .nonterminal_pair_request_count(&key_c, &key_dg1);
+        assert_eq!(count_g_final, 0, "PairCount(C, D_g) = 0");
+        assert_eq!(count_g1_at_peer_died, 1,
+            "PairCount(C, D_{{g+1}}) must still be 1");
+
+        // Global autonomous I/O is TRUE because D_{g+1}'s request is active
+        assert!(kernel.has_autonomous_io(),
+            "global autonomous I/O must be true (D_{{g+1}} request active)");
+
+        // But PeerDied(C, D_g) MUST have been delivered
+        // (idle_progress_once calls reevaluate_recv_waits)
+        assert!(kernel.processes[c].recv_wait.is_none(),
+            "PeerDied(C, D_g) must be delivered despite global autonomous I/O");
+        assert_eq!(kernel.processes[c].core.r[R1 as usize], 3,
+            "R1 = tag 3 (PeerDied)");
+        assert_eq!(kernel.processes[c].core.r[R4 as usize], key_dg.slot as u64,
+            "R4 = dead peer slot (D_g)");
+        assert_eq!(kernel.processes[c].core.r[R5 as usize], key_dg.generation as u64,
+            "R5 = dead peer generation (D_g)");
+
+        eprintln!("  State 2: PairCount(C,D_g)=0, PairCount(C,D_{{g+1}})=1");
+        eprintln!("  PeerDied(C,D_g) delivered despite AutonomousIO=true");
+        eprintln!("  D_g request terminated after {} idle ticks", ticks);
+        eprintln!("9.2f.8: RECYCLED-DRIVER CONCURRENCY ADVERSARY ✓");
+        eprintln!("  PeerDied(C,D_g) => not AutonomousWork(C,D_g)");
+        eprintln!("  NOT => not AutonomousIO_global");
     }
 }
