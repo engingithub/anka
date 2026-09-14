@@ -28,6 +28,7 @@ use std::collections::VecDeque;
 use super::state::{
     RequesterKey, DomainId, ObjectId, AccessKind,
     Permissions, FaultReason, AgentId, TxState,
+    AuthorityId, DelegationId, ProcessKey,
 };
 use super::fabric::Fabric;
 
@@ -108,6 +109,15 @@ pub struct RequestHandle {
 /// The `target_object`, `target_offset`, and `source_domain` fields
 /// identify the guest buffer and the authority to delegate from.
 /// The controller delegates a narrow WRITE-only span at submission.
+///
+/// `source_authority_id`: when `Some`, the controller uses
+/// `delegate_dma_span_from_authority_id()` (exact-authority delegation
+/// from SYS_DEV_SUBMIT).  When `None`, uses ambient-domain
+/// `delegate_dma_span()` (legacy SYS_BLOCK_READ path).
+///
+/// Request-metadata consistency invariant:
+///   source_authority_id=None => delegation_id=None
+/// The legacy ambient path may not carry asserted provenance.
 #[derive(Debug, Clone)]
 pub struct BlockRequest {
     pub block_number: u64,
@@ -119,6 +129,12 @@ pub struct BlockRequest {
     /// Domain with WRITE authority over the target span.
     /// The controller derives a narrow DMA domain from this.
     pub source_domain: DomainId,
+    /// When Some, the exact AuthorityId to delegate from (9.2c path).
+    /// When None, ambient domain search (legacy path).
+    pub source_authority_id: Option<AuthorityId>,
+    /// Transfer provenance from the buffer handle.
+    /// Propagated into the completion record for 9.2e quiescence.
+    pub delegation_id: Option<DelegationId>,
 }
 
 /// Outcome of a completed block operation.
@@ -140,12 +156,16 @@ pub enum CompletionStatus {
 ///
 /// `status` replaces the old `data: Vec<u8>` — the 512 bytes
 /// belong in the guest buffer, not the completion record.
+///
+/// `delegation_id` propagates provenance from the accepted request
+/// into the completion for 9.2e quiescence tracking.
 #[derive(Debug, Clone)]
 pub struct BlockCompletion {
     pub handle: RequestHandle,
     pub requester: RequesterKey,
     pub block_number: u64,
     pub status: CompletionStatus,
+    pub delegation_id: Option<DelegationId>,
 }
 
 /// Result of attempting to submit a request.
@@ -267,6 +287,12 @@ impl BlockController {
         request: BlockRequest,
         fabric: &mut Fabric,
     ) -> SubmitResult {
+        // Request-metadata consistency invariant:
+        // source_authority_id=None => delegation_id=None
+        if request.source_authority_id.is_none() && request.delegation_id.is_some() {
+            return SubmitResult::DelegationFailed;
+        }
+
         if request.block_number >= self.storage.num_blocks() {
             return SubmitResult::InvalidBlock;
         }
@@ -280,15 +306,36 @@ impl BlockController {
         };
 
         let block_size = self.storage.block_size();
-        let dma_domain = match fabric.delegate_dma_span(
-            request.source_domain,
-            request.target_object,
-            request.target_offset,
-            block_size,
-            Permissions::WRITE,
-        ) {
-            Some(d) => d,
-            None => return SubmitResult::DelegationFailed,
+
+        // Branch: exact-authority vs ambient delegation
+        let dma_domain = match request.source_authority_id {
+            Some(aid) => {
+                // 9.2c path: exact-authority delegation
+                match fabric.delegate_dma_span_from_authority_id(
+                    request.source_domain,
+                    aid,
+                    request.target_object,
+                    request.target_offset,
+                    block_size,
+                    Permissions::WRITE,
+                ) {
+                    Some(d) => d,
+                    None => return SubmitResult::DelegationFailed,
+                }
+            }
+            None => {
+                // Legacy path: ambient domain search
+                match fabric.delegate_dma_span(
+                    request.source_domain,
+                    request.target_object,
+                    request.target_offset,
+                    block_size,
+                    Permissions::WRITE,
+                ) {
+                    Some(d) => d,
+                    None => return SubmitResult::DelegationFailed,
+                }
+            }
         };
 
         let handle = RequestHandle {
@@ -382,6 +429,7 @@ impl BlockController {
                             requester: request.requester,
                             block_number: request.block_number,
                             status,
+                            delegation_id: request.delegation_id,
                         };
                         self.slots[i] = SlotState::Completed { completion };
                         self.completion_order.push_back(i as u8);
@@ -447,6 +495,61 @@ impl BlockController {
     /// Mutable access to the backing storage (for test setup).
     pub fn storage_mut(&mut self) -> &mut BlockStorage {
         &mut self.storage
+    }
+
+    /// True if any slot is in a nonterminal accepted state:
+    /// Waiting, DmaReady, or DmaInFlight.
+    ///
+    /// These are the states where hardware may still act autonomously.
+    /// Completed is NOT autonomous — it is immediately serviceable
+    /// kernel bookkeeping.
+    ///
+    /// Formal basis: anka_blocking_receive.kleis — request_autonomous_work.
+    pub fn has_autonomous_work(&self) -> bool {
+        self.slots.iter().any(|s| s.is_waiting() || s.is_odma())
+    }
+
+    /// True if any nonterminal slot's DelegationId matches the given
+    /// (client, driver) ProcessKey pair, deliberately ignoring incarnation.
+    ///
+    /// This is the pair-level quiescence predicate: PeerDied(C,D) is
+    /// deferred while this returns true.
+    ///
+    /// Formal basis: anka_blocking_receive.kleis — controller_pair_active_92e.
+    pub fn has_nonterminal_pair_request(
+        &self,
+        client: &ProcessKey,
+        driver: &ProcessKey,
+    ) -> bool {
+        self.slots.iter().any(|s| {
+            let (request, is_nonterminal) = match s {
+                SlotState::Waiting { request, .. } => (request, true),
+                SlotState::DmaReady { request, .. } => (request, true),
+                SlotState::DmaInFlight { request, .. } => (request, true),
+                _ => return false,
+            };
+            if !is_nonterminal { return false; }
+            match &request.delegation_id {
+                Some(did) => {
+                    did.client.slot == client.slot
+                        && did.client.generation == client.generation
+                        && did.driver.slot == driver.slot
+                        && did.driver.generation == driver.generation
+                }
+                None => false,
+            }
+        })
+    }
+
+    /// Return the BlockRequest for each in-flight (non-free, non-completed) slot.
+    /// Used by composition tests to verify request metadata.
+    pub fn in_flight_requests(&self) -> Vec<&BlockRequest> {
+        self.slots.iter().filter_map(|s| match s {
+            SlotState::Waiting { request, .. } => Some(request),
+            SlotState::DmaReady { request, .. } => Some(request),
+            SlotState::DmaInFlight { request, .. } => Some(request),
+            _ => None,
+        }).collect()
     }
 
     /// Structural conservation and coherence invariants.
@@ -533,6 +636,8 @@ mod tests {
             target_object: obj,
             target_offset: 0,
             source_domain: dom,
+            source_authority_id: None,
+            delegation_id: None,
         }
     }
 
@@ -787,6 +892,8 @@ mod tests {
             target_object: big_obj,
             target_offset: 1024,
             source_domain: big_dom,
+            source_authority_id: None,
+            delegation_id: None,
         };
         ctrl.submit(req, &mut f);
         for _ in 0..10 { ctrl.tick(&mut f); }
@@ -963,6 +1070,8 @@ mod tests {
             target_object: obj,
             target_offset: 0,
             source_domain: empty_dom,
+            source_authority_id: None,
+            delegation_id: None,
         }, &mut f);
         assert!(matches!(r, SubmitResult::DelegationFailed));
         assert_eq!(ctrl.free_slot_count(), 2, "no slot consumed");
@@ -990,6 +1099,8 @@ mod tests {
             target_object: obj,
             target_offset: 0,
             source_domain: dom,
+            source_authority_id: None,
+            delegation_id: None,
         }, &mut f);
         for _ in 0..10 { ctrl.tick(&mut f); }
         let comp = ctrl.consume_completion().unwrap();

@@ -1,0 +1,319 @@
+// =============================================================================
+// Anka64 Client-Driver-Device Composition (Phase 9.2d-formal)
+// =============================================================================
+//
+// Pure composition layer over the already-established Phase 9.2a-c model.
+// No new axioms. No new mechanism. The purpose of this file is to prove that
+// the existing transfer, device-submit, request-ownership, provenance, and
+// machine-time relations close transitively when composed as a real
+// client -> driver -> device -> DMA path.
+//
+//   Client(buffer authority)
+//      -- SYS_SEND_CAP -->
+//   Driver(device authority + exact transferred buffer authority)
+//      -- SYS_DEV_SUBMIT -->
+//   DMA(request-local authority derived from exact transferred buffer)
+//      -- completion / SYS_SEND_KEY -->
+//   Client
+//
+// Central composition law:
+//
+//   A_DMA <= A_driver_buffer <= A_client_buffer
+//
+// Device authority is an independent conjunct. It cannot substitute for the
+// transferred buffer authority, and ambient driver memory authority is not an
+// input to the exact-presented-authority composition gate.
+//
+// Expected result:
+//   COMP-1 .. COMP-8 and COMP-TIME-1 pass.
+//   FALSE-COMP-1 .. FALSE-COMP-4 are deliberately false and must be rejected.
+// =============================================================================
+
+import "anka_userspace_driver.kleis"
+
+// =============================================================================
+// I. DERIVED COMPOSITION RELATIONS
+// =============================================================================
+
+// A successful client -> driver transfer is not merely successful IPC: the
+// installed driver memory authority must be a valid derivation of the exact
+// client authority that was explicitly presented to SYS_SEND_CAP.
+define composition_transfer_ready(
+    destination_live_and_current : Bool,
+    source_resolves : Bool,
+    subset_valid : Bool,
+    receiver_slot_free : Bool,
+    receiver_queue_has_capacity : Bool,
+    client_off : ℤ, client_len : ℤ, client_rights : BitVec4,
+    driver_off : ℤ, driver_len : ℤ, driver_rights : BitVec4
+) =
+    destination_live_and_current
+    ∧ source_resolves
+    ∧ subset_valid
+    ∧ receiver_slot_free
+    ∧ receiver_queue_has_capacity
+    ∧ derive_memory_authority(
+        client_off,client_len,client_rights,
+        driver_off,driver_len,driver_rights
+    )
+
+
+// Exact-presented-authority device gate for the composition layer.
+//
+// ambient_driver_write is deliberately NOT used. Its presence documents and
+// tests the 9.2c centerpiece rule: ambient authority cannot rescue a deficient
+// or absent presented buffer handle.
+define composition_submit_eligible(
+    destination_live_and_current : Bool,
+    source_resolves : Bool,
+    subset_valid : Bool,
+    receiver_slot_free : Bool,
+    receiver_queue_has_capacity : Bool,
+    device_handle_resolves : Bool,
+    device_kind : BitVec2,
+    has_submit_read : Bool,
+    buffer_kind : BitVec2,
+    buffer_write : Bool,
+    buffer_len_ok : Bool,
+    ambient_driver_write : Bool
+) =
+    destination_live_and_current
+    ∧ source_resolves
+    ∧ subset_valid
+    ∧ receiver_slot_free
+    ∧ receiver_queue_has_capacity
+    ∧ device_handle_resolves
+    ∧ device_kind=KIND_DEVICE
+    ∧ has_submit_read
+    ∧ buffer_kind=KIND_MEMORY
+    ∧ buffer_write
+    ∧ buffer_len_ok
+
+
+// Projection of the composition transition onto the client's device authority.
+// SEND_CAP transfers memory authority to the receiver; DEV_SUBMIT consumes the
+// driver's device authority. Neither transition installs device authority in
+// the client. This is a state projection, not an additional mechanism.
+define client_device_authority_after_composition(
+    client_device_before : Bool,
+    transfer_happened : Bool,
+    submit_happened : Bool
+) = client_device_before
+
+// =============================================================================
+// II. COMPOSITION CLAIMS
+// =============================================================================
+
+example "COMP-1: successful SEND_CAP gives exact derived driver buffer authority" {
+    assert(
+        ∀(d : Bool). ∀(s : Bool). ∀(sub : Bool). ∀(slot : Bool). ∀(queue : Bool).
+        ∀(co : ℤ). ∀(cl : ℤ). ∀(cr : BitVec4).
+        ∀(doff : ℤ). ∀(dl : ℤ). ∀(dr : BitVec4).
+            composition_transfer_ready(
+                d,s,sub,slot,queue,
+                co,cl,cr,doff,dl,dr
+            )
+            ⇒ (
+                transfer_preflight(d,s,sub,slot,queue)
+                ∧ derive_memory_authority(co,cl,cr,doff,dl,dr)
+            )
+    )
+}
+
+example "COMP-2: accepted composition requires device authority and exact transferred buffer authority" {
+    assert(
+        ∀(d : Bool). ∀(s : Bool). ∀(sub : Bool). ∀(slot : Bool). ∀(queue : Bool).
+        ∀(devr : Bool). ∀(dk : BitVec2). ∀(sr : Bool).
+        ∀(bk : BitVec2). ∀(bw : Bool). ∀(bl : Bool). ∀(ambient : Bool).
+            composition_submit_eligible(
+                d,s,sub,slot,queue,
+                devr,dk,sr,bk,bw,bl,ambient
+            )
+            ⇒ (
+                devr
+                ∧ sr
+                ∧ dk=KIND_DEVICE
+                ∧ transfer_preflight(d,s,sub,slot,queue)
+                ∧ bk=KIND_MEMORY
+                ∧ bw
+                ∧ bl
+            )
+    )
+}
+
+// Any concrete request admitted by request-local DMA authority is also admitted
+// by the exact driver buffer authority from which that DMA authority was
+// derived. This is the operational meaning of A_DMA <= A_driver_buffer.
+example "COMP-3: DMA authority is a subset of exact transferred driver buffer authority" {
+    assert(
+        ∀(bo : ℤ). ∀(bl : ℤ). ∀(br : BitVec4).
+        ∀(doff : ℤ). ∀(dl : ℤ). ∀(dr : BitVec4).
+        ∀(ro : ℤ). ∀(rl : ℤ). ∀(rr : BitVec4).
+            (
+                derive_memory_authority(bo,bl,br,doff,dl,dr)
+                ∧ memory_request_allowed(doff,dl,dr,ro,rl,rr)
+            )
+            ⇒ memory_request_allowed(bo,bl,br,ro,rl,rr)
+    )
+}
+
+// Transitive authority closure across the two derivation boundaries:
+// client -> driver and driver -> DMA.
+example "COMP-4: end-to-end non-amplification A_DMA <= A_driver_buffer <= A_client_buffer" {
+    assert(
+        ∀(co : ℤ). ∀(cl : ℤ). ∀(cr : BitVec4).
+        ∀(bo : ℤ). ∀(bl : ℤ). ∀(br : BitVec4).
+        ∀(doff : ℤ). ∀(dl : ℤ). ∀(dr : BitVec4).
+            (
+                derive_memory_authority(co,cl,cr,bo,bl,br)
+                ∧ derive_memory_authority(bo,bl,br,doff,dl,dr)
+            )
+            ⇒ derive_memory_authority(co,cl,cr,doff,dl,dr)
+    )
+}
+
+// One transfer incarnation T is stamped at SEND_CAP and is copied, not
+// regenerated, through the driver cap, accepted request, and completion.
+example "COMP-5: DelegationId is preserved from SEND_CAP through request and completion" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(t_transfer : BitVec64). ∀(t_driver : BitVec64).
+        ∀(t_request : BitVec64). ∀(t_completion : BitVec64).
+            (
+                t_transfer=t_driver
+                ∧ t_transfer=t_request
+                ∧ t_transfer=t_completion
+            )
+            ⇒ (
+                delegation_matches(
+                    cs,cg,ds,dg,t_transfer,
+                    cs,cg,ds,dg,t_driver
+                )
+                ∧ delegation_matches(
+                    cs,cg,ds,dg,t_transfer,
+                    cs,cg,ds,dg,t_request
+                )
+                ∧ delegation_matches(
+                    cs,cg,ds,dg,t_transfer,
+                    cs,cg,ds,dg,t_completion
+                )
+            )
+    )
+}
+
+
+example "COMP-6: composition leaves client device authority unchanged" {
+    assert(
+        ∀(before : Bool). ∀(xfer : Bool). ∀(submit : Bool).
+            client_device_authority_after_composition(before,xfer,submit)=before
+    )
+}
+
+example "COMP-7: dropping driver transferred handle after acceptance does not destroy request-local DMA" {
+    assert(
+        ∀(accepted : Bool). ∀(terminal : Bool). ∀(driver_alive : Bool).
+            (accepted ∧ ¬terminal)
+            ⇒ accepted_request_active(accepted,terminal,driver_alive,false)
+    )
+}
+
+// Exact CAP_DROP projection used locally. `is_target` abstracts the already-
+// proved AuthorityId equality test from 9.2a. Kleis v0.93 does not always
+// unfold nested imported definitions inside larger quantified conjunctions, so
+// this is the exact definitional expansion of authority_alive_after_drop, not a
+// new axiom or mechanism.
+define composition_authority_alive_after_drop(
+    is_target : Bool,
+    alive_before : Bool
+) = alive_before ∧ ¬is_target
+
+// The dropped buffer authority is the target; the independently provisioned
+// device authority is not. Both are live before cleanup. Exact drop therefore
+// removes the client-buffer authority and preserves the device authority.
+example "COMP-8: terminal completion plus CAP_DROP leaves driver device authority but not client buffer authority" {
+    assert(
+        ∀(buffer_is_target : Bool). ∀(device_is_target : Bool).
+        ∀(buffer_alive : Bool). ∀(device_alive : Bool).
+            (
+                buffer_is_target
+                ∧ ¬device_is_target
+                ∧ buffer_alive
+                ∧ device_alive
+            )
+            ⇒ (
+                ¬composition_authority_alive_after_drop(buffer_is_target,buffer_alive)
+                ∧ composition_authority_alive_after_drop(device_is_target,device_alive)
+            )
+    )
+}
+
+// Consistency only, not an eventual-progress/fairness theorem. A polling client
+// means client_recv_wait=false, so the 9.2d composition is not the known
+// C=RecvWait, D=IoWait, no-other-runnable dead marking.
+example "COMP-TIME-1: polling client keeps composition outside known all-blocked dead state" {
+    assert(
+        ∀(cw : Bool). ∀(dw : Bool). ∀(other : Bool).
+            (¬cw ∧ dw ∧ ¬other)
+            ⇒ runnable_exists(cw,dw,other)
+    )
+}
+
+
+// =============================================================================
+// III. FALSIFIABILITY WITNESSES — DELIBERATELY FALSE
+// =============================================================================
+
+// Device authority alone must not be sufficient when no transferred buffer
+// authority/handle was installed.
+example "FALSE-COMP-1: device authority alone is sufficient for accepted IO" {
+    assert(
+        ∀(dr : Bool). ∀(sr : Bool). ∀(br : Bool). ∀(bw : Bool). ∀(bl : Bool).
+        ∀(dk : BitVec2). ∀(bk : BitVec2).
+            (
+                dr ∧ sr ∧ ¬br ∧ bw ∧ bl
+                ∧ dk=KIND_DEVICE
+                ∧ bk=KIND_MEMORY
+            )
+            ⇒ device_submit_eligible(dr,dk,sr,br,bk,bw,bl)
+    )
+}
+
+// Ambient authority is intentionally modeled separately from the exact
+// transferred authority. This false witness claims ambient WRITE can make an
+// absent exact authority sufficient; Z3 must reject it.
+example "FALSE-COMP-2: ambient driver WRITE authority substitutes for transferred handle" {
+    assert(
+        ∀(exact_transferred_buffer : Bool). ∀(ambient_driver_write : Bool).
+            (¬exact_transferred_buffer ∧ ambient_driver_write)
+            ⇒ exact_transferred_buffer
+    )
+}
+
+
+// Client -> driver derivation is valid, but the attempted DMA derivation is
+// wider than the exact 512-byte driver buffer. The conjunction must be false.
+example "FALSE-COMP-3: DMA may exceed authority transferred by client" {
+    assert(
+        derive_memory_authority(
+            0,1024,bvconst(2,4),
+            8,512,bvconst(2,4)
+        )
+        ∧ derive_memory_authority(
+            8,512,bvconst(2,4),
+            8,1024,bvconst(2,4)
+        )
+    )
+}
+
+// A new transfer incarnation is a different DelegationId. DEV_SUBMIT may copy
+// provenance but may not silently replace it with a fresh transfer identity.
+example "FALSE-COMP-4: DEV_SUBMIT may replace transfer DelegationId with a fresh one" {
+    assert(
+        ∀(cs : BitVec32). ∀(cg : BitVec32).
+        ∀(ds : BitVec32). ∀(dg : BitVec32).
+        ∀(i1 : BitVec64). ∀(i2 : BitVec64).
+            ¬(i1=i2)
+            ⇒ delegation_matches(cs,cg,ds,dg,i1,cs,cg,ds,dg,i2)
+    )
+}

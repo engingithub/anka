@@ -7804,7 +7804,11 @@ mod tests {
         let trap_obj_id = res.trap_obj;
 
         // Dirty the mailbox and lifecycle table
-        kernel.mailboxes[0].push(Message { from_pid: 999, value: 0xBEEF });
+        kernel.mailboxes[0].push(Message {
+            from: ProcessKey { slot: 999, generation: 0 },
+            value: 0xBEEF,
+            cap: None,
+        });
         kernel.lifecycle_tables[0].push(LifecycleEntry {
             slot_generation: 0,
             child: ProcessKey { slot: 99, generation: 0 },

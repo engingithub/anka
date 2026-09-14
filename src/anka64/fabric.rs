@@ -88,6 +88,8 @@ pub struct Fabric {
     next_object_id: u64,
     next_domain_id: u64,
     next_tx_id: u64,
+    /// Monotonic AuthorityId counter.  Never reused.
+    next_authority_id: u64,
     /// Machine-global timer (Phase 9.0c).  None = no timer configured.
     pub timer: Option<FabricTimer>,
 }
@@ -105,8 +107,37 @@ impl Fabric {
             next_object_id: 0,
             next_domain_id: 0,
             next_tx_id: 0,
+            next_authority_id: 0,
             timer: None,
         }
+    }
+
+    /// Allocate a fresh AuthorityId.  Monotonic, never reused.
+    ///
+    /// Returns None if the 64-bit counter has been exhausted.
+    /// The caller must treat exhaustion as an installation failure
+    /// that preserves both-or-neither semantics.
+    pub fn alloc_authority_id(&mut self) -> Option<AuthorityId> {
+        let id = AuthorityId(self.next_authority_id);
+        self.next_authority_id = self.next_authority_id.checked_add(1)?;
+        Some(id)
+    }
+
+    /// Read-only preflight: can a fresh AuthorityId be allocated?
+    pub fn can_alloc_authority_id(&self) -> bool {
+        self.next_authority_id.checked_add(1).is_some()
+    }
+
+    /// Force the AuthorityId counter — test-only boundary forcing.
+    #[cfg(test)]
+    pub fn set_next_authority_id(&mut self, value: u64) {
+        self.next_authority_id = value;
+    }
+
+    /// Read the AuthorityId counter — test-only boundary verification.
+    #[cfg(test)]
+    pub fn next_authority_id(&self) -> u64 {
+        self.next_authority_id
     }
 
     // ───────────────── Timer configuration ────────────────────────
@@ -268,6 +299,7 @@ impl Fabric {
         self.domains.insert(id, DomainState {
             id,
             capabilities: Vec::new(),
+            device_authorities: Vec::new(),
         });
         id
     }
@@ -305,6 +337,7 @@ impl Fabric {
     /// Grant a new capability covering a range within an object.
     ///
     /// W⊕X: refuses WRITE or ATOMIC on Sealed objects.
+    /// Kind boundary: requires ObjectKind::Memory (not merely "not Device").
     pub fn grant(
         &mut self,
         domain: DomainId,
@@ -314,6 +347,7 @@ impl Fabric {
         perms: Permissions,
     ) -> Option<Capability64> {
         let obj = self.objects.get(&object)?;
+        if obj.kind != ObjectKind::Memory { return None; }
         match obj.state {
             ObjectState::Active => {
                 if perms.contains(Permissions::EXECUTE) {
@@ -337,11 +371,177 @@ impl Fabric {
         if offset > obj.size - length { return None; }
 
         let cap = Capability64::new(object, obj.generation, offset, length, perms);
-        self.domains.get_mut(&domain)?.capabilities.push(cap.clone());
+        self.domains.get_mut(&domain)?.capabilities.push(CapabilityEntry {
+            cap: cap.clone(),
+            authority_id: None,
+        });
+        Some(cap)
+    }
+
+    /// Grant with a specific AuthorityId for capability-table linkage.
+    ///
+    /// Same validation as `grant`, but the resulting domain entry is
+    /// tagged with the provided AuthorityId so it can be removed
+    /// precisely by `remove_by_authority_id`.
+    ///
+    /// Kind boundary: requires ObjectKind::Memory.
+    /// AuthorityId uniqueness: rejects an ID already present in the domain
+    /// across either memory or device authority collections.
+    pub fn grant_with_authority_id(
+        &mut self,
+        domain: DomainId,
+        object: ObjectId,
+        offset: u64,
+        length: u64,
+        perms: Permissions,
+        authority_id: AuthorityId,
+    ) -> Option<Capability64> {
+        let obj = self.objects.get(&object)?;
+        if obj.kind != ObjectKind::Memory { return None; }
+        // AuthorityId cross-kind uniqueness
+        if self.has_authority_id(domain, authority_id) { return None; }
+        match obj.state {
+            ObjectState::Active => {
+                if perms.contains(Permissions::EXECUTE) {
+                    return None;
+                }
+            }
+            ObjectState::Sealed => {
+                if perms.contains(Permissions::WRITE)
+                    || perms.contains(Permissions::ATOMIC)
+                    || perms.contains(Permissions::SEAL)
+                {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+        if length > obj.size { return None; }
+        if offset > obj.size - length { return None; }
+
+        let cap = Capability64::new(object, obj.generation, offset, length, perms);
+        self.domains.get_mut(&domain)?.capabilities.push(CapabilityEntry {
+            cap: cap.clone(),
+            authority_id: Some(authority_id),
+        });
+        Some(cap)
+    }
+
+    /// Remove the exact authority entry identified by AuthorityId
+    /// from a domain.  Returns true if found and removed.
+    ///
+    /// Searches both memory and device authority collections.
+    /// Only removes one entry even if multiple entries have the
+    /// same capability value — AuthorityId is unique identity.
+    ///
+    /// Formal basis: anka_userspace_driver.kleis DROP-2, DROP-3.
+    pub fn remove_by_authority_id(
+        &mut self,
+        domain: DomainId,
+        target: AuthorityId,
+    ) -> bool {
+        let dom = match self.domains.get_mut(&domain) {
+            Some(d) => d,
+            None => return false,
+        };
+        if let Some(pos) = dom.capabilities.iter().position(|e| e.authority_id == Some(target)) {
+            dom.capabilities.remove(pos);
+            true
+        } else if let Some(pos) = dom.device_authorities.iter().position(|e| e.authority_id == target) {
+            dom.device_authorities.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check whether a specific AuthorityId still exists in a domain.
+    ///
+    /// Searches both memory (`capabilities`) and device (`device_authorities`)
+    /// collections.  AuthorityId is globally unique across kinds.
+    ///
+    /// Used by resolve_capability() for the full architectural
+    /// three-condition check: the cap-table slot says the authority
+    /// exists, but the Fabric domain is the ground truth.
+    pub fn has_authority_id(&self, domain: DomainId, target: AuthorityId) -> bool {
+        match self.domains.get(&domain) {
+            Some(d) => {
+                d.capabilities.iter().any(|e| e.authority_id == Some(target))
+                || d.device_authorities.iter().any(|e| e.authority_id == target)
+            }
+            None => false,
+        }
+    }
+
+    /// Cross-domain derivation from an exact AuthorityId.
+    ///
+    /// Locates the parent capability by AuthorityId in `src_domain`,
+    /// validates the subset relationship, and installs a new entry
+    /// in `dst_domain` with `new_authority_id`.
+    ///
+    /// Returns the new Capability64 on success.  Fails if:
+    /// - source AuthorityId not found
+    /// - subset relationship violated
+    /// - destination domain does not exist
+    ///
+    /// Used by SYS_SEND_CAP for exact-authority derivation.
+    pub fn derive_from_authority_id(
+        &mut self,
+        src_domain: DomainId,
+        source_authority_id: AuthorityId,
+        dst_domain: DomainId,
+        child_offset: u64,
+        child_length: u64,
+        child_perms: Permissions,
+        new_authority_id: AuthorityId,
+    ) -> Option<Capability64> {
+        // Find the exact parent by AuthorityId
+        let parent = {
+            let dom = self.domains.get(&src_domain)?;
+            let entry = dom.capabilities.iter()
+                .find(|e| e.authority_id == Some(source_authority_id))?;
+            entry.cap.clone()
+        };
+
+        // Kind boundary: require Memory
+        let obj = self.objects.get(&parent.object())?;
+        if obj.kind != ObjectKind::Memory { return None; }
+
+        // Validate subset relationship
+        if !self.validate(&parent) { return None; }
+        if !child_perms.is_subset_of(parent.permissions()) { return None; }
+        if child_length == 0 { return None; }
+        if child_offset < parent.offset() { return None; }
+        if child_length > parent.length() { return None; }
+        if child_offset - parent.offset() > parent.length() - child_length {
+            return None;
+        }
+
+        // Enforce AuthorityId uniqueness in destination domain (cross-kind).
+        // Normal callers supply a freshly allocated monotonic ID, but this
+        // primitive accepts an ID argument and must not manufacture the
+        // ambiguity that remove_by_authority_id() assumes cannot exist.
+        if self.has_authority_id(dst_domain, new_authority_id) {
+            return None;
+        }
+
+        let cap = Capability64::new(
+            parent.object(),
+            parent.generation(),
+            child_offset,
+            child_length,
+            child_perms,
+        );
+        self.domains.get_mut(&dst_domain)?.capabilities.push(CapabilityEntry {
+            cap: cap.clone(),
+            authority_id: Some(new_authority_id),
+        });
         Some(cap)
     }
 
     /// Derive a child capability from a parent — cannot amplify (I7).
+    ///
+    /// Kind boundary: parent must name an ObjectKind::Memory object.
     pub fn derive(
         &mut self,
         domain: DomainId,
@@ -350,6 +550,9 @@ impl Fabric {
         child_length: u64,
         child_perms: Permissions,
     ) -> Option<Capability64> {
+        // Kind boundary: require Memory
+        let obj = self.objects.get(&parent.object())?;
+        if obj.kind != ObjectKind::Memory { return None; }
         if !self.validate(parent) { return None; }
         if !child_perms.is_subset_of(parent.permissions()) { return None; }
         if child_offset < parent.offset() { return None; }
@@ -365,7 +568,10 @@ impl Fabric {
             child_length,
             child_perms,
         );
-        self.domains.get_mut(&domain)?.capabilities.push(cap.clone());
+        self.domains.get_mut(&domain)?.capabilities.push(CapabilityEntry {
+            cap: cap.clone(),
+            authority_id: None,
+        });
         Some(cap)
     }
 
@@ -382,6 +588,7 @@ impl Fabric {
     ///   A_dma ⊆ A_explicitly_delegated.
     ///
     /// Formal basis: anka_block_device.kleis DMA-1..DMA-4.
+    /// Kind boundary: requires ObjectKind::Memory.
     pub fn delegate_dma_span(
         &mut self,
         source_domain: DomainId,
@@ -390,9 +597,147 @@ impl Fabric {
         length: u64,
         perms: Permissions,
     ) -> Option<DomainId> {
+        // Kind boundary: require Memory
+        let obj = self.objects.get(&object)?;
+        if obj.kind != ObjectKind::Memory { return None; }
         let parent = self.find_authorizing_cap(
             source_domain, object, offset, length, perms,
         )?.clone();
+        let dma_domain = self.create_domain();
+        let result = self.derive(dma_domain, &parent, offset, length, perms);
+        if result.is_none() {
+            self.destroy_domain(dma_domain);
+            return None;
+        }
+        Some(dma_domain)
+    }
+
+    // ───────────────── Device authority (Phase 9.2c) ──────────────
+
+    /// Grant device authority to a domain with a specific AuthorityId.
+    ///
+    /// Kind boundary: requires ObjectKind::Device.
+    /// AuthorityId uniqueness: rejects an ID already present in the domain
+    /// across either memory or device authority collections.
+    pub fn grant_device_with_authority_id(
+        &mut self,
+        domain: DomainId,
+        object: ObjectId,
+        rights: DeviceRights,
+        authority_id: AuthorityId,
+    ) -> Option<()> {
+        let obj = self.objects.get(&object)?;
+        if obj.kind != ObjectKind::Device { return None; }
+        if !matches!(obj.state, ObjectState::Active) { return None; }
+        // AuthorityId cross-kind uniqueness
+        if self.has_authority_id(domain, authority_id) { return None; }
+
+        let obj_gen = obj.generation;
+        self.domains.get_mut(&domain)?.device_authorities.push(DeviceAuthorityEntry {
+            object,
+            generation: obj_gen,
+            rights,
+            authority_id,
+        });
+        Some(())
+    }
+
+    /// Validate that a device authority entry in a domain matches
+    /// the expected parameters exactly.
+    ///
+    /// Two distinct rights predicates:
+    ///   1. A_fabric.rights == exact_slot_rights  (backing matches cap-table)
+    ///   2. exact_slot_rights.contains(required_rights)  (sufficient for operation)
+    ///
+    /// Also verifies: AuthorityId, object, generation, object generation
+    /// currency, and ObjectKind::Device.
+    pub fn validate_device_authority(
+        &self,
+        domain: DomainId,
+        authority_id: AuthorityId,
+        expected_object: ObjectId,
+        expected_generation: Generation,
+        exact_slot_rights: DeviceRights,
+        required_rights: DeviceRights,
+    ) -> bool {
+        let dom = match self.domains.get(&domain) {
+            Some(d) => d,
+            None => return false,
+        };
+        let entry = match dom.device_authorities.iter()
+            .find(|e| e.authority_id == authority_id) {
+            Some(e) => e,
+            None => return false,
+        };
+
+        // Object and generation must match the cap-table slot
+        if entry.object != expected_object { return false; }
+        if entry.generation != expected_generation { return false; }
+
+        // Rights predicate 1: backing entry rights == slot rights
+        if entry.rights != exact_slot_rights { return false; }
+
+        // Rights predicate 2: slot rights contain the required operation right
+        if !exact_slot_rights.contains(required_rights) { return false; }
+
+        // Object generation currency
+        let obj = match self.objects.get(&expected_object) {
+            Some(o) => o,
+            None => return false,
+        };
+        if obj.kind != ObjectKind::Device { return false; }
+        if obj.generation != expected_generation { return false; }
+
+        true
+    }
+
+    /// Delegate a narrow DMA span from an exact authority entry
+    /// (identified by AuthorityId) into a fresh DMA domain.
+    ///
+    /// Unlike `delegate_dma_span()` which searches the ambient domain,
+    /// this primitive locates a specific memory authority by its
+    /// AuthorityId and validates that it covers the requested span.
+    ///
+    /// Independently re-verifies the entry's object/generation and
+    /// the underlying object's current generation before creating the
+    /// DMA domain — makes the primitive independently safe rather
+    /// than relying on its caller's earlier resolve.
+    ///
+    /// Kind boundary: the located authority must name an ObjectKind::Memory object.
+    pub fn delegate_dma_span_from_authority_id(
+        &mut self,
+        source_domain: DomainId,
+        source_authority_id: AuthorityId,
+        object: ObjectId,
+        offset: u64,
+        length: u64,
+        perms: Permissions,
+    ) -> Option<DomainId> {
+        // Find the exact authority entry
+        let parent = {
+            let dom = self.domains.get(&source_domain)?;
+            let entry = dom.capabilities.iter()
+                .find(|e| e.authority_id == Some(source_authority_id))?;
+            entry.cap.clone()
+        };
+
+        // Independent re-verification: entry names expected object
+        if parent.object() != object { return None; }
+
+        // Kind boundary: require Memory
+        let obj = self.objects.get(&object)?;
+        if obj.kind != ObjectKind::Memory { return None; }
+
+        // Independent re-verification: object generation is current
+        if parent.generation() != obj.generation { return None; }
+
+        // Validate the parent capability is still valid
+        if !self.validate(&parent) { return None; }
+
+        // Validate the requested span is within the parent
+        if !parent.covers(object, offset, length, perms) { return None; }
+
+        // Create narrow DMA domain with exactly the requested span
         let dma_domain = self.create_domain();
         let result = self.derive(dma_domain, &parent, offset, length, perms);
         if result.is_none() {
@@ -466,10 +811,12 @@ impl Fabric {
         length: u64,
         required: Permissions,
     ) -> Option<&Capability64> {
-        self.domains.get(&domain)?.capabilities.iter().find(|cap| {
-            self.validate(cap)
-                && cap.covers(object, offset, length, required)
-        })
+        self.domains.get(&domain)?.capabilities.iter()
+            .map(|e| &e.cap)
+            .find(|cap| {
+                self.validate(cap)
+                    && cap.covers(object, offset, length, required)
+            })
     }
 
     /// Authorize a memory request against a domain's capabilities.
@@ -488,10 +835,10 @@ impl Fabric {
         let length = request.length;
         let mut stale = false;
 
-        for cap in &domain.capabilities {
-            if cap.covers(request.object, request.offset, length, required) {
-                if self.validate(cap) {
-                    return AuthResult::Authorized(cap.generation());
+        for entry in &domain.capabilities {
+            if entry.cap.covers(request.object, request.offset, length, required) {
+                if self.validate(&entry.cap) {
+                    return AuthResult::Authorized(entry.cap.generation());
                 }
                 stale = true;
             }
@@ -499,8 +846,8 @@ impl Fabric {
 
         let reason = if stale {
             FaultReason::StaleGeneration
-        } else if domain.capabilities.iter().any(|c| {
-            c.object() == request.object && self.validate(c)
+        } else if domain.capabilities.iter().any(|e| {
+            e.cap.object() == request.object && self.validate(&e.cap)
         }) {
             FaultReason::WrongPermission
         } else {

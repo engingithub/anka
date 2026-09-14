@@ -1203,3 +1203,847 @@ own address space; the host independently verifies the underlying physical buffe
 - Toolchain immediate correctness (assembler/compiler range invariant)
 
 557/557 tests; 29 instructions.  Phase 9.1 is complete.
+
+
+## DN-15: Capability-Table Architecture and Protected Naming
+
+**Phase**: 9.2a (Chapter 9: Anka64 as an Independent Architecture)
+
+**Problem**: The Fabric tracks authority as structural equality over
+`Capability64` values: `(object, generation, offset, length, permissions)`.
+Two independently granted capabilities with identical fields are
+indistinguishable.  Dropping one removes an arbitrary matching entry.
+This breaks a fundamental requirement of the user-space driver model:
+a driver holds delegated authority that must be revocable by exact
+identity, not by structural coincidence.
+
+The question that Phase 9.2a answered:
+
+> How does user space name a specific authority entry without
+> being able to forge, guess, or confuse it with a structurally
+> equal twin?
+
+**Decision -- three-condition resolution**:
+
+A `CapabilityHandle` resolves to authority iff all three conditions
+hold simultaneously:
+
+1. `g_handle = g_slot` -- the handle's generation matches the slot's
+   current generation (name currency).
+2. `AuthorityIdExists(domain, aid)` -- the backing AuthorityId still
+   exists in the Fabric domain (authority currency).
+3. `g_object = g_current` -- the object's generation has not been
+   advanced by revocation (object currency).
+
+Each condition is independent.  Revoking an object invalidates
+condition 3 without touching conditions 1 or 2.  Dropping a handle
+invalidates conditions 1 and 2 without touching condition 3.
+Removing an AuthorityId behind the scenes invalidates condition 2
+even if both generations match.
+
+**Decision -- AuthorityId as exact identity**:
+
+`AuthorityId(u64)` is a monotonic, never-reused identifier stamped
+on each authority entry at installation time.  Two capabilities with
+identical `(object, offset, length, perms)` have different
+AuthorityIds if they were installed separately.  This is why
+AuthorityId exists:
+
+  A1 = A2 by value  =/=>  drop(H1) removes A2.
+
+The `remove_by_authority_id()` operation removes exactly one entry
+by identity, not by structural match.
+
+**Decision -- generation wrap prevention**:
+
+Slot handle generations use `checked_add(1)`, not `wrapping_add(1)`.
+If a slot's generation reaches `u32::MAX`, the slot enters a
+retired state (`Free(u32::MAX)`) and is never reused.  This
+prevents an ancient stale handle from becoming current through
+generation wraparound.
+
+AuthorityId allocation uses the same pattern: `checked_add(1)` on
+a `u64` counter, returning `None` on exhaustion.  Exhaustion is a
+normal resource-failure error, not undefined behavior.
+
+**Decision -- atomic install and drop**:
+
+`install_capability()` preflights that the cap table has an
+allocatable slot *before* allocating an AuthorityId or granting
+into the Fabric domain.  If the install unexpectedly fails after
+granting, the newly created authority is rolled back.  Ordinary
+rejection consumes no identities.
+
+`SYS_CAP_DROP` preflights three conditions: valid handle,
+AuthorityId exists in the Fabric, and the slot is recyclable
+(generation < `u32::MAX`).  Both the cap-table slot and the Fabric
+authority entry are removed only after all conditions pass.  The
+drop path never calls `.expect()` based on a weaker preflight.
+
+The precise 9.2a invariant:
+
+  AuthorityId-backed cap-table authority <=> valid protected cap-table name.
+
+Legacy untagged Fabric grants (from `grant()`/`derive()`) are
+explicitly outside this bijection.
+
+**Decision -- retired slots and allocatable capacity**:
+
+A `Free(u32::MAX)` slot is structurally free but not allocatable.
+`free_count()` counts structural free slots; `allocatable_count()`
+counts free slots whose generation is not terminal.  The install
+preflight uses `allocatable_count()` so a retired slot does not
+cause an AuthorityId to be allocated and then rolled back.
+
+  F_structural + O = N (always)
+  F_allocatable <= F_structural
+
+**Formal methodology note**:
+
+All 9.2a "formal-correspondence holes" were discovered by comparing
+the Rust implementation against the Kleis specification theorem,
+not against the test suite.  The tests all passed (577, 580, 582,
+583 at successive discovery points), but the model revealed states
+the tests had not tried: non-atomic install, missing three-condition
+check, generation wraparound, non-recyclable drop, and retired-slot
+reuse.  Each was fixed and converted into a hostile witness test.
+
+584/584 tests; 29 instructions.  Phase 9.2a is complete.
+
+---
+
+## DN-16: User-Space Capability Transfer -- Atomic Runtime Delegation
+
+**Phase**: 9.2b (Chapter 9: Anka64 as an Independent Architecture)
+
+**Problem**: Phase 9.2a established the naming and resolution of
+capabilities within a single process.  Phase 9.2b moves authority
+between live processes atomically without amplifying it.
+
+The formal target:
+
+  successful SEND_CAP =>
+    exists unique (A_new, H_new, T_new, M_new)
+    such that C_new is a subset of C_source,
+    H_new names A_new,
+    T_new = (client_key, driver_key, incarnation),
+    and the message M_new carries H_new.
+
+Every ordinary rejection satisfies:
+
+  delta(A) = delta(H) = delta(M) = delta(T) = delta(identity_counters) = 0.
+
+**Decision -- DelegationId as structured provenance**:
+
+`DelegationId { client: ProcessKey, driver: ProcessKey, incarnation: u64 }`
+is a structured type, not a bare `u64`.  This is driven directly by the
+formal model: Phase 9.2e needs `T.client` for DMA quiescence queries
+without maintaining a separate global lookup table.  A plain `u64`
+would tell you *which* transfer but not *who* transferred, requiring
+extra state to reconstruct the answer.
+
+A fresh DelegationId is the identity of the immediate transfer event.
+If A transfers to B (producing T1) and B later transfers to C
+(producing T2), C carries T2, not T1.  Inherited provenance chains
+are a future concern, not something to smuggle into 9.2b.
+
+**Decision -- Kernel owns DelegationId, Fabric owns AuthorityId**:
+
+`AuthorityId` is a Fabric concept (it identifies a domain capability
+entry).  `DelegationId` contains `ProcessKey` fields, which are
+kernel-layer concepts.  Making Fabric manufacture DelegationIds would
+invert the layering.  Therefore:
+
+- Fabric: `can_alloc_authority_id()`, `alloc_authority_id()`
+- Kernel: `can_alloc_delegation_id()`, `alloc_delegation_id(client, driver)`
+
+Gate 6 of the transfer preflight checks both read-only.  After the
+gate passes, both allocations are guaranteed by single-threaded
+exclusion between preflight and commit.
+
+**Decision -- ProcessKey moved to state.rs**:
+
+`ProcessKey` was originally defined in `os.rs` (the kernel module).
+Because `DelegationId` in `state.rs` needs it, and it will eventually
+travel into block-request metadata (`block.rs`), ProcessKey was moved
+to `state.rs` as a neutral generation-qualified identity type.
+`RequesterKey` was already there for the same layering reason.  Now
+`os.rs`, `block.rs`, and provenance structures all refer to ProcessKey
+without circular module dependencies.
+
+**Decision -- extend SYS_RECV, not SYS_RECV_CAP**:
+
+The formal object is one message:
+
+  Message { from: ProcessKey, value: u64, cap: Option<CapabilityHandle> }
+
+not two kinds of queues or receive operations.  A separate SYS_RECV_CAP
+creates ugly semantics: if the queue is [ordinary, cap-bearing, ordinary],
+does SYS_RECV_CAP skip messages?  Block on a non-cap head?  Use separate
+queues?  Each option breaks FIFO ordering or changes the IPC model.
+
+The clean abstraction: receive returns a message; capability transfer is
+message metadata.  The extended SYS_RECV ABI uses six registers:
+
+  R0 = value           (preserves old behavior)
+  R1 = tag             (0=empty, 1=ordinary, 2=cap-bearing)
+  R2 = cap handle slot (u32::MAX if none)
+  R3 = cap handle generation (0 if none)
+  R4 = sender process slot
+  R5 = sender process generation
+
+Existing clients that only inspect R0 continue working.
+
+**Decision -- SYS_SEND_KEY for generation-qualified ordinary send**:
+
+Phase 9.2 committed to ProcessKey-addressed inter-process edges.
+Legacy SYS_SEND uses PID addressing, which reintroduces slot-recycling
+ambiguity.  SYS_SEND_KEY (syscall 12) provides ProcessKey-addressed
+ordinary send: R1=dest_slot (u32), R2=dest_generation (u32), R3=value.
+Legacy SYS_SEND (syscall 3) is preserved only for old tests.  The 9.2
+protocol is fully generation-qualified:
+
+  SEND_CAP, SEND_KEY, RECV -- all expose ProcessKey semantics.
+
+SYS_SEND_KEY error codes:
+
+  0 = success
+  1 = destination not live (malformed register, stale generation, Zombie, absent)
+  2 = mailbox full
+
+**Decision -- checked ABI decode as security boundary**:
+
+R1-R4 are 64-bit registers naming architecturally 32-bit fields.
+The ABI decoder uses `u32::try_from()` for every narrow field and
+`Permissions::from_bits_checked()` for permission encoding.  A
+malformed register like `0x1_0000_0001` is rejected rather than
+silently aliased to 1 via `as u32`.  This prevents a malicious
+guest from aliasing a forged ProcessKey or CapabilityHandle onto
+a real one through high-bit smuggling.
+
+**Decision -- Memory-only scope for 9.2b**:
+
+`SYS_SEND_CAP` accepts only `ObjectKind::Memory` source capabilities.
+`ObjectKind::Device` exists but its rights representation is
+deliberately postponed to 9.2c.  Accepting device capabilities now
+risks interpreting device objects through memory `Permissions`.  This
+is a scope guard, not a permanent architectural restriction.
+
+**Decision -- MAX_MAILBOX_SIZE bounded**:
+
+`MAX_MAILBOX_SIZE = 16` is enforced by all three producers: SYS_SEND,
+SYS_SEND_KEY, and SYS_SEND_CAP.  Without a universal bound, the
+mailbox is not actually bounded, and the SYS_SEND_CAP preflight
+cannot guarantee capacity.
+
+**Decision -- preflight-then-commit transaction shape**:
+
+The SYS_SEND_CAP handler is structured as:
+
+  Gates 0-6: read-only checks (decode, dest current, source resolves,
+             Memory-only, subset valid, receiver slot available,
+             mailbox capacity, identity availability)
+
+  then: allocate AuthorityId + DelegationId
+
+  then: derive into destination domain (from exact source AuthorityId)
+
+  then: install in receiver cap table (with DelegationId)
+
+  then: enqueue message (capacity already preflighted)
+
+The key transaction rule: preflight rejection consumes nothing.
+Unexpected commit failure (implementation-correspondence error)
+may burn monotonic identities but must not leak authority, handles,
+or messages.  Structural state is rolled back; monotonic identities
+are never rolled back.  No kernel panic is required to maintain
+an invariant.
+
+**Decision -- SYS_SEND_CAP error-code ABI**:
+
+  0 = success
+  1 = ABI decode failure (malformed register, bad permission bits)
+  2 = destination not live (not Running, stale generation, or Zombie)
+  3 = source handle does not resolve (three-condition failure)
+  4 = subset/attenuation violation (non-Memory, amplification, bad range, zero length)
+  5 = receiver has no allocatable cap slot
+  6 = receiver mailbox full
+  7 = identity space exhausted (AuthorityId or DelegationId)
+  8 = internal error (unexpected commit failure; IDs consumed, no authority leaked)
+
+Code 4 deliberately groups non-Memory rejection with subset violations:
+both are "the requested capability transfer is not a valid attenuation
+of the source."  A guest that needs to distinguish non-Memory from
+bad-range can inspect its own capability before calling SEND_CAP.
+
+**Decision -- exact-AuthorityId cross-domain derivation**:
+
+`derive_from_authority_id()` locates the source capability by its
+exact AuthorityId rather than by structural equality.  This preserves
+the identity discipline established in 9.2a: if two value-equal
+capabilities exist with different AuthorityIds, transferring one does
+not consume or reference the other.
+
+**Decision -- Zombie processes are not valid IPC destinations**:
+
+`validate_process_key()` accepts Zombie processes because SYS_WAIT
+deliberately needs to resolve a zombie child (observation of a dead
+child is the purpose of WAIT).  But "generation-current" and "alive
+enough to receive authority" are different predicates.
+
+`validate_message_destination()` requires `Running` state.  A Zombie
+is generation-current but dead -- delivering authority, cap-table
+entries, and messages into a dead process violates the preflight
+theorem's premise that the destination is live.
+
+Both SYS_SEND_KEY and SYS_SEND_CAP use `validate_message_destination()`.
+
+**Decision -- stale-while-queued is defined behavior**:
+
+Installation occurs at send time.  SYS_RECV reveals a committed
+handle but makes no promise that it remains valid.  If the underlying
+object is revoked between send and receive, the handle resolves at
+send commit but fails resolution at use time.  This is the intended
+capability semantics: possession of a name does not override
+subsequent object revocation.  Any actual use (SYS_DEV_SUBMIT,
+memory access) re-resolves via the three-condition check.
+
+**Rejected alternative -- SYS_RECV_CAP**:
+
+A separate receive syscall for cap-bearing messages was rejected for
+the reasons stated above.  The unified message envelope with an
+optional capability handle is simpler and preserves FIFO semantics.
+
+**Rejected alternative -- DelegationId as u64**:
+
+A globally unique u64 tells you *which* transfer but not T.client,
+which 9.2e explicitly needs for quiescence queries.  Unless a
+persistent global lookup table is added (needless extra state), the
+ProcessKeys belong in the provenance token itself.
+
+**Rejected alternative -- Fabric owns DelegationId allocation**:
+
+Rejected because it inverts the layering.  ProcessKey is a kernel
+concept; Fabric should not know about processes.
+
+616/616 tests; 29 instructions.  Phase 9.2b is complete.
+
+---
+
+## DN-17: Device Capability and Kind-Sensitive Authority
+
+**Phase**: 9.2c (Chapter 9: Anka64 as an Independent Architecture)
+
+**Problem**: Phase 9.2b moved memory authority between live processes.
+Phase 9.2c asks: how does a user-space driver prove to the kernel
+that it may invoke a specific device using a specific buffer — and
+how does the kernel ensure no ambient authority can rescue a
+deficient presented handle?
+
+The formal target:
+
+  Accepted(R) =>
+    A_d = exact(H_d) and SubmitRead in A_d
+    and A_b = exact(H_b) and WRITE in A_b
+    and A_DMA is a subset of A_b
+    and T_R = T(H_b).
+
+No ambient authority may repair either presented handle.
+
+**Decision -- kind-sensitive capability slot state**:
+
+Memory and device capabilities carry fundamentally different rights.
+`Permissions` (R/W/X/S) is meaningful for memory; `DeviceRights`
+(SubmitRead, future SubmitWrite) is meaningful for devices.  Allowing
+both in the same representation creates nonsensical states such as
+executable devices or SubmitRead memory.
+
+`CapabilitySlotState` is now a sum type:
+
+  Free { handle_generation }
+  Memory { object, object_generation, offset, length, perms, authority_id, delegation_id }
+  Device { object, object_generation, rights, authority_id, delegation_id }
+
+`ResolvedCapability` is similarly restructured as `Memory { ... } | Device { ... }`
+with accessor methods for common fields (`authority_id()`, `object()`,
+`object_generation()`, `delegation_id()`).
+
+Illegal combinations are structurally impossible.  Pattern matching
+enforces kind-sensitivity at every consumer:
+
+  Memory authority carries Permissions.
+  Device authority carries DeviceRights.
+
+`DeviceRights` is a bitfield type with `contains()` for compositional
+right checking.  Currently only `SUBMIT_READ` is defined.
+
+**Decision -- separate Fabric device-authority collection**:
+
+Memory authority uses the existing `Vec<CapabilityEntry>` in each
+`DomainState`.  Device authority uses a new `Vec<DeviceAuthorityEntry>`.
+The two collections are separate because their protected fields differ:
+memory entries carry (object, generation, offset, length, permissions);
+device entries carry (object, generation, rights).
+
+Operations that generalize across kinds:
+
+- `has_authority_id()` -- searches both collections.
+- `remove_by_authority_id()` -- searches both collections.
+
+Operations that are kind-specific:
+
+- `grant_with_authority_id()` -- requires `ObjectKind::Memory`.
+- `grant_device_with_authority_id()` -- requires `ObjectKind::Device`.
+- `validate_device_authority()` -- searches device-authority collection.
+- `delegate_dma_span()` and `delegate_dma_span_from_authority_id()` --
+  memory-only.
+
+Every tagged insertion boundary enforces:
+
+  AuthorityId may occur at most once in a domain -- across both kinds.
+
+The global monotonic allocator makes collisions impossible through
+normal operation, but the grant functions accept AuthorityId as an
+argument and refuse an already-present ID rather than trusting
+callers blindly.
+
+**Decision -- positive kind boundary enforcement**:
+
+Memory-authority paths require `object.kind == ObjectKind::Memory`,
+not merely "not Device."  Device-authority paths require
+`object.kind == ObjectKind::Device`.  This prevents a future object
+kind (e.g., `ObjectKind::Ipc`) from accidentally receiving memory
+or device semantics:
+
+  Memory authority => ObjectKind::Memory.
+  Device authority => ObjectKind::Device.
+
+The hardened paths include: `grant()`, `grant_with_authority_id()`,
+`derive()`, `derive_from_authority_id()`, `delegate_dma_span()`,
+`delegate_dma_span_from_authority_id()`, `grant_device_with_authority_id()`,
+`install_capability()`, and `install_device_capability()`.
+
+**Decision -- device object lifecycle without physical placement**:
+
+A Device object is allocated via `alloc_object(ObjectKind::Device)`
+and placed via `place_object()` with a zero-size span.  This
+transitions the object to Active without consuming physical memory.
+The object table supplies identity, generation, kind, and lifecycle
+-- not a physical address.  A device object's "placement" is its
+binding to the kernel's block controller, not a physical memory
+region.
+
+  object identity != memory placement.
+
+**Decision -- generation-qualified one-shot device binding**:
+
+`install_block_device()` allocates a `Device` object, binds it to the
+existing `BlockController`, and records the binding in
+`Kernel.block_device_binding: Option<DeviceBinding>`.  The binding
+stores both `ObjectId` and the object's `Generation` at bind time.
+
+The operation is one-shot: a second call returns `None`.  This
+prevents rebinding a device to a different object or controller.
+
+**Decision -- two-predicate device authority validation**:
+
+`validate_device_authority()` takes both `exact_slot_rights` and
+`required_rights`:
+
+  A_Fabric.rights = H_device.rights  (exact match: slot matches backing)
+  and H_device.rights >= SubmitRead  (capability has the needed right)
+
+These predicates are distinct.  The exact-match predicate prevents
+a backing entry from being silently widened.  The required-rights
+predicate ensures the capability actually authorizes the operation.
+When device rights become compositional (SubmitRead + SubmitWrite),
+an equality check against SubmitRead alone would incorrectly reject
+a broader capability.
+
+**Decision -- exact-authority DMA delegation**:
+
+`SYS_DEV_SUBMIT` does not use ambient-domain delegation.  It uses
+`delegate_dma_span_from_authority_id()`, which locates the exact
+authority entry named by the buffer handle's AuthorityId and derives
+the DMA span only from that entry.
+
+The primitive independently re-validates: the found entry still names
+the expected object and generation, and the underlying object generation
+is current.  This makes the primitive safe regardless of its caller's
+earlier checks.
+
+The causal chain:
+
+  H_b -> A_b^exact -> A_DMA.
+
+Not:
+
+  H_b -> ambient domain search -> A_DMA.
+
+This is proved by the centerpiece test: a driver holds a READ-only
+buffer handle alongside an unrelated ambient WRITE capability over
+the same object span.  SYS_DEV_SUBMIT fails.  The ambient authority
+cannot rescue the deficient presented handle.
+
+**Decision -- DelegationId propagation, not creation**:
+
+SYS_DEV_SUBMIT does not allocate a DelegationId.  It copies the
+buffer handle's `delegation_id` (which may be `None` for directly
+provisioned authority) into the `BlockRequest` and ultimately into
+the `BlockCompletion`.  This implements:
+
+  9.2c propagates T;  9.2c never creates T.
+
+**Decision -- request-metadata consistency invariant**:
+
+  source_authority_id = None => delegation_id = None.
+
+The legacy ambient-domain path may not carry asserted provenance.
+This prevents an internally constructed request from using ambient
+authority while attaching an arbitrary DelegationId.  The converse
+need not hold: `source_authority_id = Some(A), delegation_id = None`
+is valid for directly provisioned buffer capability.
+
+This gives a clean representation invariant:
+
+  T != None => the request used exact-authority delegation.
+
+**Decision -- SYS_DEV_SUBMIT ABI and preflight**:
+
+Syscall 13.  Register encoding:
+
+  R1 = device handle slot (u32)
+  R2 = device handle generation (u32)
+  R3 = block number (u64)
+  R4 = buffer handle slot (u32)
+  R5 = buffer handle generation (u32)
+
+R1/R2/R4/R5 use `u32::try_from()` for checked decode.
+
+Preflight gates:
+
+  0. ABI fields decode exactly
+  1. caller is not already in IoWait
+  2. H_d resolves as Device
+  3. H_d has SubmitRead in Fabric and cap table
+  4. H_d.object is bound to the installed BlockController
+  5. H_b resolves as Memory
+  6. H_b.perms >= WRITE
+  7. T.driver = current ProcessKey (if T exists)
+
+On success, the process enters IoWait with the EventFrame outstanding.
+On completion, the existing timer/device interrupt → `drain_block_completions()`
+→ `event_return()` path resumes the driver.
+
+SYS_DEV_SUBMIT error codes:
+
+  0 = success (driver enters IoWait)
+  1 = ABI decode failure (malformed register, high-bit aliasing)
+  2 = caller already in IoWait
+  3 = device handle resolution failure (does not resolve, or not Device kind)
+  4 = device authority validation failure (wrong rights, wrong binding)
+  5 = no block controller or no device binding
+  6 = buffer handle resolution failure (does not resolve, or not Memory kind)
+  7 = buffer handle missing WRITE permission
+  8 = provenance violation (T.driver != current ProcessKey)
+  9 = controller rejected submission (bad block, busy slot, DMA failure)
+
+**Decision -- legacy SYS_BLOCK_READ unchanged**:
+
+The existing `SYS_BLOCK_READ` path uses ambient-domain delegation
+with `source_authority_id: None` and `delegation_id: None`.  It
+remains the kernel-mediated read path for old tests and does not
+require a device capability.  SYS_DEV_SUBMIT is the new
+authority-checked path.
+
+**Phase boundary -- explicitly excluded from 9.2c**:
+
+- No user-space interrupt delivery.
+- No Device-cap transfer over SYS_SEND_CAP.
+- No blocking SYS_RECV_WAIT.
+- No PeerDied notification.
+- No driver-death handling.
+- No idle-progress change.
+- No multi-device routing.
+- No full client+driver guest program.
+
+These belong to 9.2d–f.
+
+**Hostile correspondence tests (19 witnesses)**:
+
+The decisive tests prove both layers of the exact-authority chain:
+
+  H_b(READ) + A_ambient(WRITE)  =>  syscall rejects
+  (centerpiece: `read_handle_fails_despite_ambient_write`)
+
+  Memory handle as Device  =>  kind gate rejects
+  Device handle as buffer  =>  kind gate rejects
+  High-bit handle fields   =>  ABI decode rejects
+
+Together these establish:
+
+  H_d -> A_d^exact -> SubmitRead checked
+  H_b -> A_b^exact -> A_DMA
+
+rather than merely proving two independent permission checks.
+
+**Formal methodology note**:
+
+Like 9.2a and 9.2b, the 9.2c plan was developed by comparing the
+intended implementation against the Kleis specification and the
+architectural thesis statement before writing any Rust code.  The
+centerpiece test was designed before implementation, not discovered
+afterward.
+
+635/635 tests; 29 instructions.  Phase 9.2c is complete.
+
+---
+
+## DN-18: Client-Driver-Device Composition
+
+**Phase**: 9.2d (Chapter 9: Anka64 as an Independent Architecture)
+
+**Problem**: Phases 9.2a-c established naming (handles), transfer
+(SYS_SEND_CAP), and consumption (SYS_DEV_SUBMIT) as independent
+mechanisms.  Phase 9.2d asks whether they compose: can an ordinary
+client delegate narrow buffer authority to an untrusted user-space
+driver, which combines it with its own device authority, completes
+I/O, and returns the result — without either process acquiring any
+authority not explicitly given to it?
+
+The decisive composition test uses real Asm64 guest programs — the
+first time SYS_SEND_CAP and SYS_DEV_SUBMIT are issued by guest code
+rather than test-harness kernel API calls.
+
+**Decision -- formal composition theory before implementation**:
+
+`theories/anka_driver_composition.kleis` was written and verified
+before any Rust composition test.  It derives 9 composition
+properties and 4 falsifiability witnesses from the already-
+established 9.2a-c predicates, with no new axioms:
+
+- COMP-1: successful SEND_CAP gives exact derived driver buffer authority.
+- COMP-2: accepted composition requires device authority AND exact
+  transferred buffer authority (independent conjuncts).
+- COMP-3: A_DMA is a subset of exact transferred driver buffer authority.
+- COMP-4: end-to-end non-amplification A_DMA ⊆ A_driver_buffer ⊆ A_client_buffer.
+- COMP-5: DelegationId preserved from SEND_CAP through request and completion.
+- COMP-6: composition leaves client device authority unchanged.
+- COMP-7: dropping driver transferred handle after acceptance does not
+  destroy request-local DMA authority.
+- COMP-8: terminal completion + CAP_DROP leaves driver device authority
+  but not client buffer authority.
+- COMP-TIME-1: polling client keeps composition outside the known
+  all-blocked dead state.
+
+The 4 false witnesses verify: device authority alone is insufficient,
+ambient WRITE cannot substitute for exact transferred authority, DMA
+cannot exceed transferred authority, and DEV_SUBMIT cannot replace
+DelegationId with a fresh one.  Z3 rejects all four.
+
+**Decision -- no new mechanism**:
+
+The entire composition path uses exactly four existing syscalls:
+
+  SYS_SEND_CAP → SYS_RECV → SYS_DEV_SUBMIT → SYS_SEND_KEY.
+
+No new syscall, no kernel code change, no new type.  The only
+implementation addition is test code.  This validates the
+architectural thesis: if 9.2a-c are really complete, 9.2d requires
+no new mechanism.
+
+The one non-test addition: `BlockController::in_flight_requests()`
+accessor to allow hostile tests to verify request metadata.
+
+**Decision -- real guest programs, not kernel API calls**:
+
+The decisive test builds two Asm64 programs:
+
+Client (46 words):
+  1. Write sentinel values around a 512-byte buffer region.
+  2. SYS_SEND_CAP: transfer a 512-byte WRITE capability to the driver.
+  3. Poll SYS_RECV for the driver's completion message.
+  4. Verify sentinels untouched and DMA data arrived.
+  5. SYS_EXIT(200) on success; distinct error codes on failure.
+
+Driver (30 words):
+  1. Poll SYS_RECV for client request (cap-bearing message).
+  2. Save sender ProcessKey and buffer handle in high registers.
+  3. SYS_DEV_SUBMIT with device cap (slot 0) + received buffer cap.
+  4. Block in IoWait, resume on device completion.
+  5. SYS_SEND_KEY completion to exact client ProcessKey.
+  6. SYS_EXIT(200).
+
+The kernel schedules both processes via round-robin with timer
+preemption.  The client polls while the driver is in IoWait, keeping
+the composition outside the known machine-time dead state.
+
+Verification is two-sided: guest-side (both exit with code 200) and
+host-side (physical memory contains exact block data at the DMA
+target, sentinels untouched).
+
+**Decision -- hostile composition tests attack the joins**:
+
+The hostile suite does not re-test individual mechanisms.  Each test
+attacks a specific composition joint:
+
+1. Driver cannot DEV_SUBMIT before receiving client's buffer cap.
+2. Client has no device authority at any point in the composition.
+3. DelegationId end-to-end: T created by SYS_SEND_CAP is the same T
+   in the accepted block request (COMP-5).
+4. Authority postconditions: after completion + CAP_DROP, driver retains
+   device authority but not client buffer authority (COMP-8).
+5. Ambient driver WRITE irrelevant: READ-only transferred handle fails
+   DEV_SUBMIT despite ambient WRITE over the same span (FALSE-COMP-2).
+6. CAP_DROP after acceptance does not cancel request-local DMA (COMP-7).
+7. Stale client incarnation rejected by completion SEND_KEY.
+8. Non-amplification chain: narrow 512-byte transferred handle is the
+   exact authority used for DEV_SUBMIT.
+
+**The authority lifecycle across the composition**:
+
+  Before:   client = buffer authority; driver = device authority.
+  During:   driver += delegated narrow buffer authority; DMA = narrower.
+  After:    driver = device authority only; DMA = gone.
+
+Authority temporarily crosses the trust boundary and then disappears.
+
+644/644 tests; 29 instructions.  Phase 9.2d is complete.
+
+## DN-19: Blocking IPC, Idle Progress, and the PeerDied Causal Barrier
+
+**Phase**: 9.2e (Chapter 9: Anka64 as an Independent Architecture)
+
+**Problem**: The 9.2d composition works, but the client busy-polls
+`SYS_RECV` while the driver is in IoWait.  That keeps at least one
+process schedulable, hiding a latent liveness question: what happens
+when *every* guest process is blocked and only autonomous DMA remains?
+
+The prior scheduler treated "all exited" as the termination condition.
+With autonomous I/O, a driver can die after the controller has accepted
+an operation.  The correct stopping condition is:
+
+    ¬Runnable ∧ ¬Resolvable ∧ ¬AutonomousIO ⇒ Stop.
+
+**Decision -- SYS_RECV_WAIT (syscall 14) is a scheduling field, not
+a state**: A process in RecvWait remains `ProcessState::Running` —
+just not schedulable.  The `recv_wait: Option<RecvWait>` field joins
+`waiting_on` and `io_wait` as the third scheduling blocker,
+consolidated under a single `is_schedulable()` predicate:
+
+```rust
+fn is_schedulable(&self) -> bool {
+    self.state == ProcessState::Running
+        && self.waiting_on.is_none()
+        && self.io_wait.is_none()
+        && self.recv_wait.is_none()
+}
+```
+
+**Decision -- exact-peer blocking receive with message-before-death
+ordering**: SYS_RECV_WAIT takes a generation-qualified ProcessKey.
+The decision order is:
+
+  1. Search mailbox for exact-peer message (queued history first).
+  2. Inspect peer incarnation state.
+  3. Return immediately or install RecvWait.
+
+A queued message from a dead or recycled peer wins over stale-key
+error.  This preserves successfully delivered history.
+
+**Decision -- single internal delivery operation**: All three message
+producers (SYS_SEND, SYS_SEND_KEY, SYS_SEND_CAP) route through one
+`deliver_message()` function using a `DeliveryRoute` enum:
+
+  - **Direct**: destination has RecvWait(sender) — bypasses mailbox.
+  - **Enqueue**: mailbox has room.
+  - **Full**: mailbox full, no direct route — reject.
+
+Direct delivery bypasses mailbox capacity only; all other validations
+remain intact.  SYS_SEND_CAP preserves atomic preflight ordering:
+cap-slot/authority checks first, then authority+handle installation,
+then receive completion.
+
+**Decision -- idle progress is a kernel machine boundary, not a
+synthetic process**: No domain, no identity, no capabilities.  The
+scheduler becomes a four-phase selector:
+
+  Resolvable                              ⇒ Resolve
+  ¬Resolvable ∧ Runnable                  ⇒ Run
+  ¬Resolvable ∧ ¬Runnable ∧ AutonomousIO  ⇒ Idle
+  ¬Resolvable ∧ ¬Runnable ∧ ¬AutonomousIO ⇒ Stop
+
+The Resolve phase drains completed block I/O, reevaluates RecvWaits,
+and wakes child waiters — in that order.  Idle progress advances the
+block controller once, drains resulting completions, and reevaluates
+RecvWaits.  Timer does NOT advance during idle: "committed instruction
+⇒ timer tick" is preserved.
+
+`BlockController::has_autonomous_work()` returns true for Waiting,
+DmaReady, or DmaInFlight.  Completed is *not* autonomous work — it
+is immediately serviceable kernel work.
+
+**Decision -- quiescence-gated PeerDied keyed by ProcessKey pair**:
+`has_nonterminal_pair_request(client, driver)` scans Waiting,
+DmaReady, and DmaInFlight slots using pair-level matching (client +
+driver ProcessKey, ignoring DelegationId incarnation).
+
+When a peer dies:
+  - If the pair has nonterminal requests: RecvWait stays installed.
+  - If the pair is quiescent: PeerDied(peer_key) is delivered.
+
+`reevaluate_recv_waits()` is called after every completion drain
+(resolve phase, idle progress, device interrupt).  The death predicate
+is incarnation-based: a generation mismatch means the awaited
+incarnation was reclaimed.  Only Running clients receive PeerDied.
+
+This establishes the causal barrier:
+
+    PeerDied(C,D) ⇒ no accepted nonterminal work attributable
+                     to (C,D) can subsequently mutate client-visible
+                     DMA state.
+
+    t ≥ t_PeerDied ⇒ M_target(t) = M_target(t_PeerDied).
+
+**Formal basis**:
+
+- `theories/anka_blocking_receive.kleis`:
+  45/45 positive claims verified, 0 new axioms;
+  imports only `anka_userspace_driver.kleis`;
+  kleis check: 63 functions, 0 data types, 0 structures.
+
+- `theories/anka_blocking_receive_false_witnesses.kleis`:
+  0/7 claims pass — all seven deliberately false architectural
+  statements are rejected (nonzero exit, as intended).
+
+**Hostile coverage** (42 p92e_ tests):
+
+  1. Unrelated sender cannot wake exact wait.
+  2. Queued exact-peer message beats later peer death and recycling.
+  3. Direct message before death — Message wins over PeerDied.
+  4. Recycled generation cannot satisfy old wait.
+  5. Cap-bearing direct delivery works.
+  6. Zombie/quiescent peer produces immediate PeerDied.
+  7. All-blocked/no-async state stops, does not spin.
+  8. Full mailbox does not block exact direct delivery (all 3 producers).
+  9. SEND_CAP direct route with full cap table is atomic failure.
+ 10. All-exited + autonomous DMA does not terminate early.
+ 11. Completed-but-undrained I/O resolved before Stop.
+ 12. Reclaimed peer incarnation still yields PeerDied for stored old key.
+ 13. Dead waiting client receives no IPC completion.
+ 14. Nonterminal pair request prevents premature PeerDied.
+ 15. Post-PeerDied DMA mutation impossible (unit + guest integration).
+
+**Decisive composition witnesses**:
+
+  - `p92e6_blocking_composition`: Client SEND_CAP → RECV_WAIT,
+    Driver RECV → DEV_SUBMIT → IoWait.  Explicit all-blocked state
+    witnessed.  Idle progress resolves DMA, driver SEND_KEYs client
+    via direct delivery.  Both exit 200.
+
+  - `p92e7_death_quiescence_integration`: Same guest setup, but
+    driver is killed while DMA is nonterminal.  Quiescence gate
+    holds.  Idle progress completes DMA.  PeerDied fires with exact
+    block data committed.  Post-notification memory frozen.
+
+690/690 tests; 29 instructions.  Phase 9.2e is complete.
