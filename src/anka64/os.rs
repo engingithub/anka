@@ -17894,4 +17894,321 @@ mod tests {
         eprintln!("  R1 overflow → error 1, Δ=0");
         eprintln!("  Unknown (R3,R4) → error 1, Δ=0");
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.3c — Generic Device Substrate refinement witnesses
+    // ═══════════════════════════════════════════════════════════════
+    //
+    // Formal basis: anka_generic_device_refinement.kleis GENDEV-1..13.
+    //
+    // These tests witness that wrapping BlockController in
+    // DeviceController::Block preserves all observable behavior.
+    //
+    // GENDEV-9/10 (InterruptTarget ≠ CompletionOwner) is already
+    // witnessed by p93b4_9_aggregate_interrupt_three_process.
+    // GENDEV-11 (ambient rights cannot rescue) is already witnessed
+    // by the 9.3a exact-presented-authority hostile suite.
+
+    // ─── 9.3c test 1: Generic Block observables preserved ───
+    //
+    // GENDEV-1..4: tick, autonomous, attention, pair-count through
+    // the DeviceController enum produce identical results to direct
+    // BlockController access.
+
+    #[test]
+    fn p93c_generic_block_observables_preserved() {
+        use super::super::block::{BlockStorage, BlockController, BlockRequest, SubmitResult};
+
+        let mut fabric = Fabric::new(0x100000);
+        let (core, dom, text, _data, _stack) =
+            create_process(&mut fabric, CPU0, "obs", 0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0); asm.movi(R0, SYS_EXIT as i32); asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let buf = fabric.alloc_object("buf", 0x1000, ObjectKind::Memory);
+        fabric.place_object(buf, 0x080000);
+        fabric.grant(dom, buf, 0, 0x1000, Permissions::WRITE);
+
+        let mut storage = BlockStorage::new(4, 512);
+        storage.write_block(0, &[0xAA; 512]);
+        let ctrl = BlockController::new(storage, 3, AgentId(50));
+
+        let mut kernel = Kernel::new(fabric);
+        let key = kernel.spawn(core);
+        let binding = kernel.register_block_device(ctrl).expect("register");
+
+        // Initial: no autonomous work, no attention
+        assert!(!kernel.device_registry.devices[0].controller.has_autonomous_work(),
+            "GENDEV-2: no work initially");
+        assert!(!kernel.device_registry.devices[0].controller.requires_attention(),
+            "GENDEV-3: no attention initially");
+        assert_eq!(kernel.device_registry.devices[0].controller.completion_count(), 0);
+
+        // Submit a request through the controller
+        let rk = RequesterKey { slot: 0, generation: kernel.processes[0].generation };
+        let req = BlockRequest {
+            block_number: 0, requester: rk, target_object: buf,
+            target_offset: 0, source_domain: dom,
+            source_authority_id: None, delegation_id: None,
+        };
+        let handle = match kernel.device_registry.devices[0].controller
+            .as_block_mut().submit(req, &mut kernel.fabric)
+        {
+            SubmitResult::Accepted(h) => h,
+            other => panic!("submit failed: {:?}", other),
+        };
+
+        // GENDEV-2: autonomous work present after submit
+        assert!(kernel.device_registry.devices[0].controller.has_autonomous_work(),
+            "GENDEV-2: autonomous after submit");
+
+        // GENDEV-4: pair count through generic surface
+        let pair_key = ProcessKey { slot: 0, generation: kernel.processes[0].generation };
+        let pair_peer = ProcessKey { slot: 1, generation: 0 };
+        assert_eq!(
+            kernel.device_registry.devices[0].controller
+                .nonterminal_pair_request_count(&pair_key, &pair_peer), 0,
+            "GENDEV-4: unrelated pair has count 0"
+        );
+
+        // GENDEV-1: tick through generic surface advances to completion
+        for _ in 0..10 {
+            kernel.device_registry.devices[0].controller.tick(&mut kernel.fabric);
+        }
+
+        // GENDEV-3: attention after completion
+        assert!(kernel.device_registry.devices[0].controller.requires_attention(),
+            "GENDEV-3: attention after completion");
+        assert_eq!(kernel.device_registry.devices[0].controller.completion_count(), 1);
+
+        // Consume and verify
+        let comp = kernel.device_registry.devices[0].controller.consume_completion().unwrap();
+        assert_eq!(comp.handle(), handle);
+        assert_eq!(comp.requester(), rk);
+
+        eprintln!("9.3c-1: generic Block observables preserved ✓");
+        eprintln!("  GENDEV-1: tick, GENDEV-2: autonomous, GENDEV-3: attention, GENDEV-4: pair count");
+    }
+
+    // ─── 9.3c test 2: Generic binding identity preserved ───
+    //
+    // GENDEV-5: DeviceBinding is unchanged after wrapping in
+    // DeviceController::Block.
+
+    #[test]
+    fn p93c_generic_binding_identity_preserved() {
+        use super::super::block::{BlockStorage, BlockController};
+
+        let mut fabric = Fabric::new(0x100000);
+        let (core, _dom, text, _data, _stack) =
+            create_process(&mut fabric, CPU0, "bind", 0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0); asm.movi(R0, SYS_EXIT as i32); asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, _dom);
+
+        let storage = BlockStorage::new(4, 512);
+        let ctrl = BlockController::new(storage, 1, AgentId(50));
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+
+        let binding = kernel.register_block_device(ctrl).expect("register");
+
+        // GENDEV-5: the binding stored in the DeviceSlot matches exactly
+        let slot = &kernel.device_registry.devices[0];
+        assert_eq!(slot.binding, binding,
+            "GENDEV-5: DeviceBinding must be preserved exactly");
+
+        // The binding's object is a real Fabric object at the right generation
+        let obj = kernel.fabric.objects.get(&binding.object).unwrap();
+        assert_eq!(obj.generation, binding.generation,
+            "GENDEV-5: generation must match Fabric object");
+        assert_eq!(obj.kind, ObjectKind::Device,
+            "GENDEV-5: must be a Device object");
+
+        // Registry lookup by binding succeeds
+        assert!(kernel.device_registry.lookup(binding).is_some(),
+            "GENDEV-5: lookup by exact binding must succeed");
+
+        eprintln!("9.3c-2: generic binding identity preserved ✓");
+    }
+
+    // ─── 9.3c test 3: Generic registry pair count = block aggregate ───
+    //
+    // GENDEV-6: with two all-Block devices, the registry-wide pair
+    // count equals the sum of the individual block controller counts.
+
+    #[test]
+    fn p93c_generic_registry_pair_count_equals_block() {
+        use super::super::block::{BlockStorage, BlockController, BlockRequest, SubmitResult};
+
+        let (mut kernel, key_c, key_d, dev_a_h, dev_b_h, buf_h,
+             binding_a, binding_b) = two_device_setup();
+        let d = key_d.slot;
+
+        // Submit one request to each device
+        let r0_a = do_async_submit(&mut kernel, d, &dev_a_h, 0, &buf_h);
+        assert_eq!(r0_a, 0, "submit to A");
+        let r0_b = do_async_submit(&mut kernel, d, &dev_b_h, 0, &buf_h);
+        assert_eq!(r0_b, 0, "submit to B");
+
+        // GENDEV-6: registry pair count = sum of individual counts
+        let count_a = kernel.device_registry.devices[0].controller
+            .nonterminal_pair_request_count(&key_c, &key_d);
+        let count_b = kernel.device_registry.devices[1].controller
+            .nonterminal_pair_request_count(&key_c, &key_d);
+        let count_registry = kernel.device_registry
+            .nonterminal_pair_request_count(&key_c, &key_d);
+
+        assert_eq!(count_a + count_b, count_registry,
+            "GENDEV-6: Count_registry = Count_A + Count_B");
+        assert_eq!(count_registry, 2,
+            "GENDEV-6: one request per device = 2 total");
+
+        eprintln!("9.3c-3: registry pair count = block aggregate ✓");
+        eprintln!("  Count_A={}, Count_B={}, Count_registry={}",
+            count_a, count_b, count_registry);
+    }
+
+    // ─── 9.3c test 4: Registry order independence ───
+    //
+    // GENDEV-13: pair quiescence count is independent of the order
+    // devices appear in the registry vector.
+
+    #[test]
+    fn p93c_generic_registry_order_independent() {
+        use super::super::block::{BlockStorage, BlockController, BlockRequest, SubmitResult};
+
+        let (mut kernel, key_c, key_d, dev_a_h, dev_b_h, buf_h,
+             binding_a, binding_b) = two_device_setup();
+        let d = key_d.slot;
+
+        // Submit one request to each device
+        let r0_a = do_async_submit(&mut kernel, d, &dev_a_h, 0, &buf_h);
+        assert_eq!(r0_a, 0);
+        let r0_b = do_async_submit(&mut kernel, d, &dev_b_h, 0, &buf_h);
+        assert_eq!(r0_b, 0);
+
+        // Count in current order [A, B]
+        let count_forward = kernel.device_registry
+            .nonterminal_pair_request_count(&key_c, &key_d);
+
+        // Swap the devices in the registry
+        kernel.device_registry.devices.swap(0, 1);
+
+        // Count in reversed order [B, A]
+        let count_reversed = kernel.device_registry
+            .nonterminal_pair_request_count(&key_c, &key_d);
+
+        assert_eq!(count_forward, count_reversed,
+            "GENDEV-13: Count([A,B]) = Count([B,A])");
+        assert_eq!(count_forward, 2);
+
+        // Restore order for cleanliness
+        kernel.device_registry.devices.swap(0, 1);
+
+        eprintln!("9.3c-4: registry order independent ✓");
+        eprintln!("  Count([A,B])={}, Count([B,A])={}", count_forward, count_reversed);
+    }
+
+    // ─── 9.3c test 5: Block completion round-trip preserves payload ───
+    //
+    // Construct a real BlockCompletion, pass it through
+    // DeviceController::consume_completion(), and prove the resulting
+    // DeviceCompletion::Block(c) contains the exact original payload:
+    //   requester, handle, status, block_number, delegation_id.
+    //
+    // Wrap_generic(Block) loses no block semantics.
+
+    #[test]
+    fn p93c_block_completion_round_trip_preserves_payload() {
+        use super::super::block::{BlockStorage, BlockController, BlockRequest, SubmitResult};
+
+        let mut fabric = Fabric::new(0x100000);
+        let (core, dom, text, _data, _stack) =
+            create_process(&mut fabric, CPU0, "rt", 0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0); asm.movi(R0, SYS_EXIT as i32); asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let buf = fabric.alloc_object("buf", 0x1000, ObjectKind::Memory);
+        fabric.place_object(buf, 0x080000);
+        fabric.grant(dom, buf, 0, 0x1000, Permissions::WRITE);
+
+        let mut storage = BlockStorage::new(4, 512);
+        storage.write_block(2, &[0xCC; 512]);
+        let ctrl = BlockController::new(storage, 1, AgentId(50));
+
+        let mut kernel = Kernel::new(fabric);
+        let key = kernel.spawn(core);
+
+        // Create a delegation for provenance tracking
+        let tid = kernel.alloc_delegation_id(
+            ProcessKey { slot: 0, generation: kernel.processes[0].generation },
+            ProcessKey { slot: 0, generation: kernel.processes[0].generation },
+        ).expect("alloc delegation");
+        let src_aid = kernel.fabric.alloc_authority_id().expect("alloc authority");
+        kernel.fabric.grant_with_authority_id(
+            dom, buf, 0, 512, Permissions::WRITE, src_aid,
+        ).expect("grant tagged authority");
+
+        let binding = kernel.register_block_device(ctrl).expect("register");
+
+        // Submit with explicit delegation_id and authority
+        let rk = RequesterKey { slot: 0, generation: kernel.processes[0].generation };
+        let req = BlockRequest {
+            block_number: 2,
+            requester: rk,
+            target_object: buf,
+            target_offset: 0,
+            source_domain: dom,
+            source_authority_id: Some(src_aid),
+            delegation_id: Some(tid),
+        };
+        let handle = match kernel.device_registry.devices[0].controller
+            .as_block_mut().submit(req, &mut kernel.fabric)
+        {
+            SubmitResult::Accepted(h) => h,
+            other => panic!("submit failed: {:?}", other),
+        };
+
+        // Tick to completion
+        for _ in 0..10 {
+            kernel.device_registry.devices[0].controller.tick(&mut kernel.fabric);
+        }
+
+        // Consume through the generic DeviceController surface
+        let generic_comp = kernel.device_registry.devices[0].controller
+            .consume_completion()
+            .expect("must have a completion");
+
+        // Generic accessors work
+        assert_eq!(generic_comp.handle(), handle, "handle preserved");
+        assert_eq!(generic_comp.requester(), rk, "requester preserved");
+        assert!(matches!(generic_comp.status(),
+            super::super::block::CompletionStatus::Success),
+            "status preserved");
+
+        // Unwrap the lossless envelope — block-specific fields intact
+        let DeviceCompletion::Block(block_comp) = generic_comp;
+        assert_eq!(block_comp.handle, handle, "inner handle");
+        assert_eq!(block_comp.requester, rk, "inner requester");
+        assert_eq!(block_comp.block_number, 2, "block_number preserved");
+        assert_eq!(block_comp.delegation_id, Some(tid),
+            "delegation_id preserved — provenance is architectural");
+        assert!(matches!(block_comp.status,
+            super::super::block::CompletionStatus::Success),
+            "inner status");
+
+        eprintln!("9.3c-5: block completion round-trip preserves payload ✓");
+        eprintln!("  handle, requester, status, block_number, delegation_id all intact");
+        eprintln!("  Wrap_generic(Block) loses no block semantics");
+    }
 }
