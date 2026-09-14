@@ -2405,3 +2405,121 @@ The decisive collision is tests 4–5: `h_A = h_B = (0,0)` but
 was safe with one controller but would silently corrupt two-device operation.
 
 727/727 tests; 29 instructions.  Phase 9.3b is complete.
+
+---
+
+## DN-23: Generic Device Substrate (Phase 9.3c)
+
+### Central Theorem
+
+```text
+Generic(Block) = Block
+```
+
+Genericization may change representation, but not semantics.  Every
+pre-9.3c observable remains unchanged through the generic substrate.
+
+### Architecture
+
+Phase 9.3c extracts the device-type-agnostic machinery from the
+block-specific implementation by introducing:
+
+```text
+enum DeviceController {
+    Block(BlockController),
+}
+```
+
+with a **generic surface** for kernel device machinery:
+
+| Method | GENDEV | Purpose |
+|--------|--------|---------|
+| `tick` | 1 | Advance device by one machine tick |
+| `has_autonomous_work` | 2 | In-flight DMA / device activity |
+| `requires_attention` | 3 | Serviceable completions exist |
+| `nonterminal_pair_request_count` | 4 | Pair-attributed quiescence (quantitative) |
+| `has_nonterminal_pair_request` | — | Derived: `count != 0` (never independently dispatched) |
+| `completion_count` | — | Number of ready completions |
+| `consume_completion` | — | Pop as lossless `DeviceCompletion` envelope |
+| `free_slot_count` | — | Request-slot capacity |
+
+**Block-specific operations** (`submit`, `storage_ref`, `storage_mut`,
+`in_flight_requests`) require explicit unwrapping via `as_block()` /
+`as_block_mut()`.  When the NIC variant arrives, Rust's exhaustive
+matching will force each block-specific call site to be revisited.
+
+### Lossless Completion Envelope
+
+```text
+enum DeviceCompletion {
+    Block(BlockCompletion),
+}
+```
+
+The generic completion wraps rather than projects:
+
+- **Generic accessors** (`handle()`, `requester()`, `status()`) used
+  by `drain_completions()` for routing.
+- **Block-specific payload** (`block_number`, `delegation_id`) preserved
+  inside the envelope.  Pattern match to unwrap.
+
+This avoids prematurely impoverishing the completion type.  A future
+NIC completion (packet length, descriptor, RX/TX) simply adds:
+
+```text
+enum DeviceCompletion {
+    Block(BlockCompletion),
+    Nic(NicCompletion),
+}
+```
+
+### Derived Boolean Invariant
+
+```text
+HasNonterminal(C,D) <=> Count(C,D) != 0
+```
+
+`has_nonterminal_pair_request` is defined in terms of
+`nonterminal_pair_request_count`, not independently dispatched.
+This prevents the Boolean and the count from diverging when a second
+device implementation arrives.
+
+### Formal Basis
+
+```text
+anka_generic_device_refinement.kleis              — 13/13 positive
+anka_generic_device_refinement_false_witnesses.kleis — 0/5 false claims pass
+```
+
+### GENDEV Traceability
+
+| GENDEV | Claim | Runtime Witness |
+|--------|-------|-----------------|
+| 1–4 | Block wrapper preserves tick/autonomous/attention/pair-count | `p93c_generic_block_observables_preserved` |
+| 5 | DeviceBinding identity preserved | `p93c_generic_binding_identity_preserved` |
+| 6 | All-Block registry pair count = block aggregate | `p93c_generic_registry_pair_count_equals_block` |
+| 7 | PeerDied conservative extension | `p93b4_7_cross_device_quiescence_blocks_peer_died` (9.3b) |
+| 8 | Request-handle collision isolation | `p93b4_4_cross_completion_isolation` (9.3b) |
+| 9–10 | InterruptTarget ≠ CompletionOwner | `p93b4_9_aggregate_interrupt_three_process` (9.3b) |
+| 11 | Ambient rights cannot rescue | 9.3a exact-presented-authority hostile suite |
+| 12 | Exact generation-qualified routing | `p93b4_1_exact_device_routing` (9.3b) |
+| 13 | Registry-order independence | `p93c_generic_registry_order_independent` |
+| — | Lossless completion round-trip | `p93c_block_completion_round_trip_preserves_payload` |
+
+### What 9.3c Does Not Do
+
+- No NIC variant.  `DeviceController` has only `Block`.
+- No trait-based polymorphism.  The enum is sufficient.
+- No generic request payload.  `BlockRequest` stays block-specific.
+- No device unregister/recycling.
+
+### Generic/Specific Boundary
+
+```text
+Generic:  tick, attention, autonomy, completion, pair quiescence
+Specific: submit payload, storage, block/NIC operation
+```
+
+That is the boundary the NIC should challenge.
+
+732/732 tests; 29 instructions.  Phase 9.3c is complete.
