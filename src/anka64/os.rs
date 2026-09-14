@@ -34,6 +34,8 @@ pub const SYS_SEND_CAP: u64 = 11;  // send_cap(dest_key, value, src_handle, chil
 pub const SYS_SEND_KEY: u64 = 12;  // send_key(dest_slot, dest_gen, value) → 0 ok
 pub const SYS_DEV_SUBMIT: u64 = 13; // dev_submit(device_handle, block_num, buffer_handle) → 0 ok
 pub const SYS_RECV_WAIT: u64 = 14; // recv_wait(peer_slot, peer_gen) → blocking exact-peer receive
+pub const SYS_DEV_SUBMIT_ASYNC: u64 = 15; // dev_submit_async(same args) → R0=0,R1=slot,R2=gen
+pub const SYS_DEV_WAIT: u64 = 16; // dev_wait(slot, gen) → completion status
 
 /// Maximum messages per mailbox.  Enforced by all producers:
 /// SYS_SEND, SYS_SEND_KEY, and SYS_SEND_CAP.
@@ -60,6 +62,12 @@ pub struct Process {
     /// or PeerDied notification (Phase 9.2e).  The process remains
     /// `ProcessState::Running` but is not schedulable.
     pub recv_wait: Option<RecvWait>,
+    /// Per-process async request ledger (Phase 9.2f).
+    ///
+    /// Tracks outstanding SYS_DEV_SUBMIT_ASYNC requests and their
+    /// completion status.  Bounded by MAX_ASYNC_REQUESTS.
+    /// Cleared by reclaim_process(); NOT cleared by finish_process().
+    pub async_requests: Vec<AsyncDeviceRequest>,
     /// Exact incarnation of the parent (None for init).
     pub parent: Option<ProcessKey>,
     /// Generation counter for lifecycle authority.
@@ -251,6 +259,51 @@ struct WaitState {
 #[derive(Debug, Clone)]
 pub struct IoWait {
     pub request: super::block::RequestHandle,
+}
+
+/// Maximum entries in the per-process async request ledger.
+///
+/// Deliberately larger than the controller's NUM_SLOTS (2) to
+/// separate software completion-record lifetime from hardware
+/// slot availability.
+pub const MAX_ASYNC_REQUESTS: usize = 16;
+
+/// An outstanding asynchronous device request tracked in the
+/// per-process ledger.
+///
+/// Lifecycle:
+///   SYS_DEV_SUBMIT_ASYNC → push { handle, completion: None }
+///   drain_block_completions() → fill completion = Some(status)
+///   SYS_DEV_WAIT on completed → return status, remove entry
+///   SYS_DEV_WAIT on pending → install IoWait, completion drain
+///     will later wake + remove entry
+///   reclaim_process() → clear entire ledger
+///
+/// Formal basis: anka_multi_request_quiescence.kleis MULTI92F-*.
+#[derive(Debug, Clone)]
+pub struct AsyncDeviceRequest {
+    pub handle: super::block::RequestHandle,
+    pub completion: Option<super::block::CompletionStatus>,
+}
+
+/// Side-effect-free validation result from preflight_dev_submit().
+///
+/// Contains all validated fields needed to construct a BlockRequest
+/// and submit to the controller, but no DMA domain has been created
+/// and no authority IDs have been consumed.
+///
+/// The caller (handle_dev_submit or handle_dev_submit_async) uses
+/// these fields to mint the DMA authority and submit, ensuring that
+/// preflight failure implies zero side effects.
+#[derive(Debug)]
+struct PreparedDevSubmit {
+    block_number: u64,
+    requester: super::state::RequesterKey,
+    target_object: super::state::ObjectId,
+    target_offset: u64,
+    source_domain: super::state::DomainId,
+    source_authority_id: super::state::AuthorityId,
+    delegation_id: Option<super::state::DelegationId>,
 }
 
 /// Exact-peer blocking receive (Phase 9.2e).
@@ -853,6 +906,7 @@ impl Kernel {
                 waiting_on: None,
                 io_wait: None,
                 recv_wait: None,
+                async_requests: Vec::new(),
                 parent: None,
                 generation: reuse_gen,
                 result: None,
@@ -874,6 +928,7 @@ impl Kernel {
             waiting_on: None,
             io_wait: None,
             recv_wait: None,
+            async_requests: Vec::new(),
             parent: None,
             generation: 0,
             result: None,
@@ -1197,6 +1252,7 @@ impl Kernel {
         self.processes[slot].waiting_on = None;
         self.processes[slot].io_wait = None;
         self.processes[slot].recv_wait = None;
+        self.processes[slot].async_requests.clear();
         self.processes[slot].result = None;
         self.processes[slot].exit_code = 0;
 
@@ -1826,6 +1882,28 @@ impl Kernel {
     ///
     /// The process then becomes schedulable and resumes at user PC
     /// (the instruction after the original TRAP).
+    /// Drain all ready completions from the block controller.
+    ///
+    /// Two-guard completion routing (Phase 9.2f):
+    ///
+    ///   Guard 1 — exact-incarnation match:
+    ///     Completion(P_g, h) may affect only P_g, never the
+    ///     current occupant of P.slot if incarnation differs.
+    ///
+    ///   Guard 2 — process must be Running:
+    ///     A Zombie/Retired process with correct generation must
+    ///     not receive software events.  The request becomes terminal
+    ///     for pair-quiescence purposes but no process is mutated.
+    ///
+    /// Within the exact Running incarnation:
+    ///   - If io_wait matches this handle: wake the process.
+    ///     If async_requests also has an entry for this handle
+    ///     (SYS_DEV_WAIT path), consume the ledger entry.
+    ///     Legacy SYS_DEV_SUBMIT has no ledger entry — no-op.
+    ///   - Else if async_requests has a matching entry: fill
+    ///     completion status for later SYS_DEV_WAIT.
+    ///
+    /// Formal basis: anka_multi_request_quiescence.kleis MULTI92F-*.
     fn drain_block_completions(&mut self) {
         loop {
             let completion = match self.block_controller.as_mut() {
@@ -1842,16 +1920,32 @@ impl Kernel {
             let rk = &completion.requester;
             let slot = rk.slot as usize;
 
-            // Validate: slot in range, generation matches, process
-            // is Running and actually waiting for this exact request.
-            let wake = slot < self.processes.len()
-                && self.processes[slot].generation == rk.generation
-                && self.processes[slot].state == ProcessState::Running
-                && self.processes[slot].io_wait.as_ref()
-                    .map(|w| w.request == completion.handle)
-                    .unwrap_or(false);
+            // Guard 1: slot in range and exact-incarnation match.
+            if slot >= self.processes.len()
+                || self.processes[slot].generation != rk.generation
+            {
+                continue;
+            }
 
-            if wake {
+            // Guard 2: process must be Running.
+            if self.processes[slot].state != ProcessState::Running {
+                continue;
+            }
+
+            // Inner logic: exact incarnation AND Running.
+            let io_wait_matches = self.processes[slot].io_wait.as_ref()
+                .map(|w| w.request == completion.handle)
+                .unwrap_or(false);
+
+            if io_wait_matches {
+                // IoWait matches this handle.  If the ledger also has
+                // an entry (SYS_DEV_WAIT path), consume it.
+                if let Some(pos) = self.processes[slot].async_requests.iter()
+                    .position(|r| r.handle == completion.handle)
+                {
+                    self.processes[slot].async_requests.remove(pos);
+                }
+
                 let proc = &mut self.processes[slot];
                 proc.core.r[R0 as usize] = match completion.status {
                     super::block::CompletionStatus::Success => 0,
@@ -1862,6 +1956,12 @@ impl Kernel {
                 proc.core.pc = pc;
                 proc.io_wait = None;
                 proc.core.halted = false;
+            } else if let Some(entry) = self.processes[slot].async_requests.iter_mut()
+                .find(|r| r.handle == completion.handle)
+            {
+                // Async request not currently waited on — retain
+                // completion for future SYS_DEV_WAIT.
+                entry.completion = Some(completion.status);
             }
         }
     }
@@ -1959,6 +2059,12 @@ impl Kernel {
             }
             SYS_RECV_WAIT => {
                 self.handle_recv_wait(idx);
+            }
+            SYS_DEV_SUBMIT_ASYNC => {
+                self.handle_dev_submit_async(idx);
+            }
+            SYS_DEV_WAIT => {
+                self.handle_dev_wait(idx);
             }
             _ => {
                 eprintln!("Unknown syscall {} from pid {}",
@@ -3351,38 +3457,25 @@ impl Kernel {
     }
 
     /// Helper: fail a SYS_SEND_CAP with a specific error code.
-    /// SYS_DEV_SUBMIT (syscall 13): submit a device I/O request.
+    /// Side-effect-free preflight validation for device submission.
     ///
-    /// ABI:
-    ///   R1 = device handle slot (u32)
-    ///   R2 = device handle generation (u32)
-    ///   R3 = block number
-    ///   R4 = buffer handle slot (u32)
-    ///   R5 = buffer handle generation (u32)
+    /// Validates ABI decode, capability resolution, device authority,
+    /// controller binding, buffer authority, and provenance.
+    /// Returns a PreparedDevSubmit on success, or an error code on failure.
     ///
-    /// Returns: R0 = 0 on success (caller blocked in IoWait),
-    ///   1 = ABI decode failure
-    ///   2 = already in IoWait
-    ///   3 = device handle invalid (not Device, not resolved)
-    ///   4 = device authority invalid (missing SubmitRead, wrong binding)
-    ///   5 = no block controller bound
-    ///   6 = buffer handle invalid (not Memory, not resolved)
-    ///   7 = buffer rights insufficient (missing WRITE)
-    ///   8 = provenance violation (delegation_id.driver ≠ current)
-    ///   9 = controller submission failed (busy, invalid block)
+    /// **Invariant:** this function does NOT create DMA domains,
+    /// consume authority IDs, modify the controller, or touch the
+    /// async ledger.  Failure implies zero side effects.
     ///
-    /// Preflight gates:
+    /// Gates:
     ///   0. ABI fields decode exactly
-    ///   1. Caller is not already in IoWait
-    ///   2. H_d resolves as Device
-    ///   3. H_d has SubmitRead in Fabric and cap table, bound to controller
-    ///   4. Block controller exists
-    ///   5. H_b resolves as Memory
-    ///   6. H_b.perms ⊇ WRITE
-    ///   7. T.driver == current ProcessKey, if T exists
-    fn handle_dev_submit(&mut self, idx: usize) {
-        use super::block::{BlockRequest, SubmitResult};
-
+    ///   1. H_d resolves as Device
+    ///   2. H_d has SubmitRead in Fabric and cap table, bound to controller
+    ///   3. Block controller exists
+    ///   4. H_b resolves as Memory
+    ///   5. H_b.perms ⊇ WRITE
+    ///   6. T.driver == current ProcessKey, if T exists
+    fn preflight_dev_submit(&self, idx: usize) -> Result<PreparedDevSubmit, u64> {
         let r1 = self.processes[idx].core.r[R1 as usize];
         let r2 = self.processes[idx].core.r[R2 as usize];
         let block_number = self.processes[idx].core.r[R3 as usize];
@@ -3390,43 +3483,25 @@ impl Kernel {
         let r5 = self.processes[idx].core.r[R5 as usize];
 
         // ── Gate 0: Checked ABI decode ──
-        let dev_slot = match u32::try_from(r1) {
-            Ok(v) => v, Err(_) => { self.fail_dev_submit(idx, 1); return; }
-        };
-        let dev_gen = match u32::try_from(r2) {
-            Ok(v) => v, Err(_) => { self.fail_dev_submit(idx, 1); return; }
-        };
-        let buf_slot = match u32::try_from(r4) {
-            Ok(v) => v, Err(_) => { self.fail_dev_submit(idx, 1); return; }
-        };
-        let buf_gen = match u32::try_from(r5) {
-            Ok(v) => v, Err(_) => { self.fail_dev_submit(idx, 1); return; }
-        };
+        let dev_slot = u32::try_from(r1).map_err(|_| 1u64)?;
+        let dev_gen = u32::try_from(r2).map_err(|_| 1u64)?;
+        let buf_slot = u32::try_from(r4).map_err(|_| 1u64)?;
+        let buf_gen = u32::try_from(r5).map_err(|_| 1u64)?;
 
         let dev_handle = CapabilityHandle { slot: dev_slot, generation: dev_gen };
         let buf_handle = CapabilityHandle { slot: buf_slot, generation: buf_gen };
 
-        // ── Gate 1: Not already in IoWait ──
-        if self.processes[idx].io_wait.is_some() {
-            self.fail_dev_submit(idx, 2);
-            return;
-        }
-
-        // ── Gate 2: Device handle resolves as Device ──
-        let dev_resolved = match self.resolve_capability(idx, dev_handle) {
-            Some(r) => r,
-            None => { self.fail_dev_submit(idx, 3); return; }
-        };
+        // ── Gate 1: Device handle resolves as Device ──
+        let dev_resolved = self.resolve_capability(idx, dev_handle)
+            .ok_or(3u64)?;
         let (dev_object, dev_gen_resolved, dev_rights, dev_authority_id) = match &dev_resolved {
             ResolvedCapability::Device {
                 object, object_generation, rights, authority_id, ..
             } => (*object, *object_generation, *rights, *authority_id),
-            ResolvedCapability::Memory { .. } => {
-                self.fail_dev_submit(idx, 3); return;
-            }
+            ResolvedCapability::Memory { .. } => return Err(3),
         };
 
-        // ── Gate 3: Device authority valid (SubmitRead, binding) ──
+        // ── Gate 2: Device authority valid (SubmitRead, binding) ──
         let domain = self.processes[idx].core.domain;
         if !self.fabric.validate_device_authority(
             domain,
@@ -3436,74 +3511,95 @@ impl Kernel {
             dev_rights,
             DeviceRights::SUBMIT_READ,
         ) {
-            self.fail_dev_submit(idx, 4);
-            return;
+            return Err(4);
         }
 
-        // ── Gate 3b: Device object is bound to the block controller ──
-        let binding = match &self.block_device_binding {
-            Some(b) => b.clone(),
-            None => { self.fail_dev_submit(idx, 5); return; }
-        };
+        // ── Gate 2b: Device object is bound to the block controller ──
+        let binding = self.block_device_binding.as_ref().ok_or(5u64)?;
         if binding.object != dev_object || binding.generation != dev_gen_resolved {
-            self.fail_dev_submit(idx, 4);
-            return;
+            return Err(4);
         }
 
-        // ── Gate 4: Block controller exists ──
+        // ── Gate 3: Block controller exists ──
         if self.block_controller.is_none() {
-            self.fail_dev_submit(idx, 5);
-            return;
+            return Err(5);
         }
 
-        // ── Gate 5: Buffer handle resolves as Memory ──
-        let buf_resolved = match self.resolve_capability(idx, buf_handle) {
-            Some(r) => r,
-            None => { self.fail_dev_submit(idx, 6); return; }
-        };
+        // ── Gate 4: Buffer handle resolves as Memory ──
+        let buf_resolved = self.resolve_capability(idx, buf_handle)
+            .ok_or(6u64)?;
         let (buf_object, buf_offset, buf_perms, buf_authority_id, buf_delegation_id) =
             match &buf_resolved {
                 ResolvedCapability::Memory {
                     object, offset, perms, authority_id, delegation_id, ..
                 } => (*object, *offset, *perms, *authority_id, *delegation_id),
-                ResolvedCapability::Device { .. } => {
-                    self.fail_dev_submit(idx, 6); return;
-                }
+                ResolvedCapability::Device { .. } => return Err(6),
             };
 
-        // ── Gate 6: Buffer handle has WRITE ──
+        // ── Gate 5: Buffer handle has WRITE ──
         if !buf_perms.contains(Permissions::WRITE) {
-            self.fail_dev_submit(idx, 7);
-            return;
+            return Err(7);
         }
 
-        // ── Gate 7: Provenance check (mandatory when T exists) ──
+        // ── Gate 6: Provenance check (mandatory when T exists) ──
         if let Some(tid) = buf_delegation_id {
             let current_key = ProcessKey {
                 slot: idx,
                 generation: self.processes[idx].generation,
             };
             if tid.driver != current_key {
-                self.fail_dev_submit(idx, 8);
-                return;
+                return Err(8);
             }
         }
 
-        // ── All preflight gates passed — construct and submit request ──
+        // ── All validation passed — return prepared submission ──
         let rk = RequesterKey {
             slot: idx as u32,
             generation: self.processes[idx].generation,
         };
-        let source_domain = self.processes[idx].core.domain;
 
-        let req = BlockRequest {
+        Ok(PreparedDevSubmit {
             block_number,
             requester: rk,
             target_object: buf_object,
             target_offset: buf_offset,
-            source_domain,
-            source_authority_id: Some(buf_authority_id),
+            source_domain: domain,
+            source_authority_id: buf_authority_id,
             delegation_id: buf_delegation_id,
+        })
+    }
+
+    /// SYS_DEV_SUBMIT (13) — blocking device submission.
+    ///
+    /// Transactional order:
+    ///   io_wait gate → preflight → mint DMA authority → submit → install IoWait
+    ///
+    /// Returns: R0 = 0 on success (caller blocked in IoWait),
+    ///   1-8 = preflight error, 9 = controller submission failed.
+    fn handle_dev_submit(&mut self, idx: usize) {
+        use super::block::{BlockRequest, SubmitResult};
+
+        // ── Gate 0: Caller scheduling state — before any validation ──
+        if self.processes[idx].io_wait.is_some() {
+            self.fail_dev_submit(idx, 2);
+            return;
+        }
+
+        // ── Gates 1-6: Pure ABI/authority/provenance validation ──
+        let prepared = match self.preflight_dev_submit(idx) {
+            Ok(p) => p,
+            Err(code) => { self.fail_dev_submit(idx, code); return; }
+        };
+
+        // ── Mint DMA authority + submit ──
+        let req = BlockRequest {
+            block_number: prepared.block_number,
+            requester: prepared.requester,
+            target_object: prepared.target_object,
+            target_offset: prepared.target_offset,
+            source_domain: prepared.source_domain,
+            source_authority_id: Some(prepared.source_authority_id),
+            delegation_id: prepared.delegation_id,
         };
 
         let result = self.block_controller.as_mut().unwrap()
@@ -3516,6 +3612,149 @@ impl Kernel {
             }
             _ => {
                 self.fail_dev_submit(idx, 9);
+            }
+        }
+    }
+
+    /// SYS_DEV_SUBMIT_ASYNC (15) — non-blocking device submission.
+    ///
+    /// Transactional order:
+    ///   io_wait gate → preflight → ledger capacity → controller capacity
+    ///   → mint DMA authority → submit → publish ledger entry
+    ///
+    /// Returns immediately:
+    ///   R0 = 0, R1 = handle.slot, R2 = handle.generation on success.
+    ///   R0 = error code on failure (same 1-9 as SYS_DEV_SUBMIT,
+    ///         plus 10 = ledger full).
+    ///
+    /// Failure atomicity: SubmitAsync failure ⇒
+    ///   ΔController = ΔLedger = ΔFabricDomains = ΔAuthorityIds = 0.
+    fn handle_dev_submit_async(&mut self, idx: usize) {
+        use super::block::{BlockRequest, SubmitResult};
+
+        // ── Gate 0: Caller scheduling state — before any validation ──
+        if self.processes[idx].io_wait.is_some() {
+            self.fail_dev_submit(idx, 2);
+            return;
+        }
+
+        // ── Gates 1-6: Pure ABI/authority/provenance validation ──
+        let prepared = match self.preflight_dev_submit(idx) {
+            Ok(p) => p,
+            Err(code) => { self.fail_dev_submit(idx, code); return; }
+        };
+
+        // ── Gate A: Ledger capacity (async-only, after preflight) ──
+        if self.processes[idx].async_requests.len() >= MAX_ASYNC_REQUESTS {
+            self.fail_dev_submit(idx, 10);
+            return;
+        }
+
+        // ── Gate B: Controller-slot capacity (before minting) ──
+        if self.block_controller.as_ref().unwrap().free_slot_count() == 0 {
+            self.fail_dev_submit(idx, 9);
+            return;
+        }
+
+        // ── Mint DMA authority + submit ──
+        let req = BlockRequest {
+            block_number: prepared.block_number,
+            requester: prepared.requester,
+            target_object: prepared.target_object,
+            target_offset: prepared.target_offset,
+            source_domain: prepared.source_domain,
+            source_authority_id: Some(prepared.source_authority_id),
+            delegation_id: prepared.delegation_id,
+        };
+
+        let result = self.block_controller.as_mut().unwrap()
+            .submit(req, &mut self.fabric);
+
+        match result {
+            SubmitResult::Accepted(handle) => {
+                self.processes[idx].async_requests.push(AsyncDeviceRequest {
+                    handle,
+                    completion: None,
+                });
+                self.processes[idx].core.r[R0 as usize] = 0;
+                self.processes[idx].core.r[R1 as usize] = handle.slot as u64;
+                self.processes[idx].core.r[R2 as usize] = handle.generation;
+                self.resume_from_trap(idx);
+            }
+            _ => {
+                self.fail_dev_submit(idx, 9);
+            }
+        }
+    }
+
+    /// SYS_DEV_WAIT (16) — wait for a specific async request handle.
+    ///
+    /// ABI:
+    ///   R1 = request_handle.slot
+    ///   R2 = request_handle.generation
+    ///
+    /// Returns:
+    ///   R0 = 0 (success) or R0 = u64::MAX (DMA fault) on completion.
+    ///   R0 = 1 (stale/unknown handle), R0 = 2 (already in IoWait) on error.
+    ///
+    /// Logic:
+    ///   1. Checked ABI decode
+    ///   2. Reject if io_wait.is_some() → error 2
+    ///   3. Search async_requests for matching handle
+    ///   4. Not found → error 1
+    ///   5. Found with completion → return status, remove entry, resume
+    ///   6. Found pending → install IoWait, leave EventFrame outstanding
+    fn handle_dev_wait(&mut self, idx: usize) {
+        use super::block::RequestHandle;
+
+        let r1 = self.processes[idx].core.r[R1 as usize];
+        let r2 = self.processes[idx].core.r[R2 as usize];
+
+        // ── Checked ABI decode ──
+        let slot = match u8::try_from(r1) {
+            Ok(v) => v,
+            Err(_) => {
+                self.processes[idx].core.r[R0 as usize] = 1;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+        let generation = r2; // RequestHandle.generation is u64
+
+        let handle = RequestHandle { slot, generation };
+
+        // ── Gate: not already in IoWait ──
+        if self.processes[idx].io_wait.is_some() {
+            self.processes[idx].core.r[R0 as usize] = 2;
+            self.resume_from_trap(idx);
+            return;
+        }
+
+        // ── Search async_requests ──
+        let pos = self.processes[idx].async_requests.iter()
+            .position(|r| r.handle == handle);
+
+        match pos {
+            None => {
+                // Not found → stale or already reaped
+                self.processes[idx].core.r[R0 as usize] = 1;
+                self.resume_from_trap(idx);
+            }
+            Some(p) => {
+                let entry = &self.processes[idx].async_requests[p];
+                if let Some(status) = entry.completion {
+                    // Already completed → return immediately
+                    self.processes[idx].core.r[R0 as usize] = match status {
+                        super::block::CompletionStatus::Success => 0,
+                        super::block::CompletionStatus::DmaFault(_) => u64::MAX,
+                    };
+                    self.processes[idx].async_requests.remove(p);
+                    self.resume_from_trap(idx);
+                } else {
+                    // Pending → block on this handle
+                    self.processes[idx].io_wait = Some(IoWait { request: handle });
+                    // Leave EventFrame outstanding — completion drain will wake us
+                }
             }
         }
     }
