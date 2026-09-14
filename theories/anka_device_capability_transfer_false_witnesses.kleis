@@ -1,0 +1,52 @@
+// =============================================================================
+// Anka64 Phase 9.3a falsifiability probes.
+// Every example below is deliberately false and must be rejected.
+// =============================================================================
+
+import "anka_device_capability_transfer.kleis"
+
+example "FALSE-DEVXFER-1: child may amplify a right absent from presented parent" {
+    assert(
+        derive_device_authority(
+            KIND_DEVICE,bvconst(1,64),bvconst(0,64),bvconst(1,8),
+            bvconst(1,64),bvconst(0,64),bvconst(3,8),
+            bvconst(0,64),bvconst(0,64)
+        )
+    )
+}
+
+example "FALSE-DEVXFER-2: Device transfer may silently change protected object identity" {
+    assert(
+        derive_device_authority(
+            KIND_DEVICE,bvconst(1,64),bvconst(0,64),bvconst(1,8),
+            bvconst(2,64),bvconst(0,64),bvconst(1,8),
+            bvconst(0,64),bvconst(0,64)
+        )
+    )
+}
+
+example "FALSE-DEVXFER-3: nonzero spatial ABI fields are harmless and accepted" {
+    assert(
+        derive_device_authority(
+            KIND_DEVICE,bvconst(1,64),bvconst(0,64),bvconst(1,8),
+            bvconst(1,64),bvconst(0,64),bvconst(1,8),
+            bvconst(9,64),bvconst(512,64)
+        )
+    )
+}
+
+example "FALSE-DEVXFER-4: ambient broader authority rescues an insufficient presented device capability" {
+    assert(
+        exact_presented_device_transfer(
+            bvconst(1,8),  // presented
+            bvconst(3,8),  // ambient
+            bvconst(2,8)   // requested child right absent from presented
+        )
+    )
+}
+
+example "FALSE-DEVXFER-5: zero-rights device capability authorizes SUBMIT_READ" {
+    assert(
+        device_request_allowed(DEVICE_RIGHTS_NONE,bvconst(1,8))
+    )
+}
