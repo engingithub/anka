@@ -1770,9 +1770,9 @@ KernelBootstrap → Supervisor → SYS_SEND_CAP → Driver → SYS_DEV_SUBMIT �
 
 The kernel bootstraps root device authority; the supervisor delegates via ordinary capability transfer; the driver performs I/O; the supervisor drops its cap; the driver's authority survives.  DMA commits through the delegated authority chain.
 
-The Kleis gate: 12/12 positive (`anka_device_capability_transfer.kleis`) and 0/5 false witnesses (`anka_device_capability_transfer_false_witnesses.kleis`).  The hostile suite adds 14 tests covering attenuation, non-amplification, kind preservation, ABI canonicalization, revocation independence, atomicity, and direct delivery semantics.
+The Kleis gate: 12/12 positive (`anka_device_capability_transfer.kleis`) and 0/5 false witnesses (`anka_device_capability_transfer_false_witnesses.kleis`).  The hostile suite adds 15 tests covering attenuation, non-amplification, kind preservation, ABI canonicalization, revocation independence, atomicity, delivery-full precommit safety, and direct delivery semantics.
 
-715/715 tests; 29 instructions.
+716/716 tests; 29 instructions.
 
 With device-capability transfer complete, device authority is no longer an exception to the capability-transfer architecture.  The same `SYS_SEND_CAP` that delegates memory regions now delegates device access.  This directly enables the next phase: multiple device instances with authority-scoped routing, moving toward the NIC and eventually `GET /alive → "Anka64 is alive."`
 

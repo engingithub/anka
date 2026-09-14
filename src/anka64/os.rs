@@ -9620,13 +9620,13 @@ mod tests {
     fn p93a_13_direct_delivery_device_transfer() {
         let (mut kernel, sender, receiver, _, dev_handle) = dev_transfer_setup();
 
-        // Put receiver in RecvWait(sender)
+        // Put receiver in RecvWait(sender) via actual SYS_RECV_WAIT
         let sender_key = ProcessKey {
             slot: sender,
             generation: kernel.processes[sender].generation,
         };
-        kernel.processes[receiver].recv_wait = Some(RecvWait { peer: sender_key });
-        kernel.processes[receiver].core.halted = true;
+        setup_recv_wait_call(&mut kernel, receiver, &sender_key);
+        kernel.handle_syscall(receiver);
         assert!(kernel.processes[receiver].recv_wait.is_some(),
             "receiver must be in RecvWait(sender)");
 
@@ -9703,6 +9703,71 @@ mod tests {
             "no device authority in destination after rejection");
 
         eprintln!("9.3a.3.14: Fabric derive rejects object mismatch ✓");
+    }
+
+    // ─── 9.3a.3.15: Delivery-Full (full mailbox, no RecvWait) → error 6 ───
+    //
+    // Forces the Device branch through Gate 4 (DeliveryRoute::Full).
+    // The receiver has cap-table room but a full mailbox and no
+    // matching RecvWait.  Proves:
+    //   DeliveryFull ⇒ nothing minted or published.
+
+    #[test]
+    fn p93a_15_delivery_full_device_atomic() {
+        let (mut kernel, sender, receiver, dev_obj, dev_handle) = dev_transfer_setup();
+        let recv_gen = kernel.processes[receiver].generation;
+
+        // Fill receiver mailbox to MAX_MAILBOX_SIZE
+        let filler_key = ProcessKey { slot: 99, generation: 0 };
+        for i in 0..MAX_MAILBOX_SIZE {
+            kernel.mailboxes[receiver].push(Message {
+                from: filler_key,
+                value: 1000 + i as u64,
+                cap: None,
+            });
+        }
+        assert_eq!(kernel.mailboxes[receiver].len(), MAX_MAILBOX_SIZE);
+
+        // Confirm: no RecvWait on receiver
+        assert!(kernel.processes[receiver].recv_wait.is_none(),
+            "no RecvWait to provide a Direct route");
+        // Confirm: receiver cap table still has room
+        assert!(kernel.processes[receiver].cap_table.as_ref()
+            .map_or(false, |ct| ct.allocatable_count() > 0),
+            "cap table must have room — this test targets mailbox-full only");
+
+        // Snapshot all counters
+        let aid_before = kernel.fabric.next_authority_id();
+        let tid_before = kernel.next_delegation_incarnation();
+        let recv_dom = kernel.processes[receiver].core.domain;
+        let dev_auth_before = kernel.fabric.domains.get(&recv_dom)
+            .unwrap().device_authorities.len();
+        let recv_cap_before = kernel.processes[receiver].cap_table.as_ref()
+            .unwrap().allocatable_count();
+        let mailbox_before = kernel.mailboxes[receiver].len();
+
+        // Attempt Device cap transfer → DeliveryRoute::Full → error 6
+        let r0 = do_dev_send_cap(
+            &mut kernel, sender, receiver, recv_gen, &dev_handle,
+            0, 0, DeviceRights::SUBMIT_READ.0 as u64, 42,
+        );
+        assert_eq!(r0, 6, "full mailbox (no RecvWait) must yield error 6");
+
+        // Nothing minted or published
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before,
+            "ΔAuthorityIdCounter = 0");
+        assert_eq!(kernel.next_delegation_incarnation(), tid_before,
+            "ΔDelegationIdCounter = 0");
+        assert_eq!(kernel.fabric.domains.get(&recv_dom)
+            .unwrap().device_authorities.len(), dev_auth_before,
+            "ΔDeviceAuthorityCount = 0");
+        assert_eq!(kernel.processes[receiver].cap_table.as_ref()
+            .unwrap().allocatable_count(), recv_cap_before,
+            "ΔReceiverCapCount = 0");
+        assert_eq!(kernel.mailboxes[receiver].len(), mailbox_before,
+            "ΔMailbox = 0");
+
+        eprintln!("9.3a.3.15: Delivery-Full for Device cap → error 6, nothing minted ✓");
     }
 
     // ═══════════════════════════════════════════════════════════════

@@ -2260,7 +2260,7 @@ anka_device_capability_transfer.kleis:       12/12 positive examples
 anka_device_capability_transfer_false_witnesses.kleis: 0/5 pass (all rejected)
 ```
 
-### Hostile suite (14 tests)
+### Hostile suite (15 tests)
 
   1. Successful transfer preserves ObjectId, Generation, Kind=Device.
   2. Non-amplification: NONE→SUBMIT_READ rejects.
@@ -2274,8 +2274,11 @@ anka_device_capability_transfer_false_witnesses.kleis: 0/5 pass (all rejected)
   10. Sender death ⇏ child revocation.
   11. Kind preservation: Device child in device_authorities, not memory caps.
   12. Receiver-table-full: ΔAuthority = ΔHandle = ΔMessage = 0.
-  13. Direct delivery: full ABI (R1=2, cap handle, sender ProcessKey, mailbox unchanged).
+  13. Direct delivery via SYS_RECV_WAIT: full ABI (R1=2, cap handle,
+      sender ProcessKey, mailbox unchanged).
   14. Fabric derive rejects presented/backing object mismatch.
+  15. Delivery-Full (full mailbox, no RecvWait): error 6,
+      ΔAuthorityId = ΔDelegationId = ΔDeviceAuthority = ΔCapSlot = ΔMailbox = 0.
 
 ### Decisive integration witness
 
@@ -2291,4 +2294,4 @@ capability for `SYS_DEV_SUBMIT`.  Supervisor then drops its cap; the driver's
 authority survives.  DMA commits 512 bytes through the delegated authority
 chain.  No special kernel-to-driver provisioning path exists.
 
-715/715 tests; 29 instructions.  Phase 9.3a is complete.
+716/716 tests; 29 instructions.  Phase 9.3a is complete.
