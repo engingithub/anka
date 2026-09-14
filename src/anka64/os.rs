@@ -14257,69 +14257,131 @@ mod tests {
         eprintln!("9.2f.5-1: two distinct async handles ✓");
     }
 
-    // ─── 9.2f.5 test 2: completion B cannot wake IoWait(A) ───
+    // ─── 9.2f.5 test 2: completion A cannot wake IoWait(B) ───
+    //
+    // Staggered submission: submit A, tick twice, submit B.
+    // With latency 3, A completes while B is still nonterminal.
+    // We wait on B, then drain A's completion and verify:
+    //   Completion(h_A) AND Nonterminal(h_B) AND IoWait(h_B)
+    //   => IoWait(h_B) still installed, A retained in ledger.
 
     #[test]
     fn p92f5_2_cross_completion_rejection() {
         let (mut kernel, _key_c, key_d, dev_h, buf_h, _data) = async_submit_setup();
         let d = key_d.slot;
 
+        // Submit A to block 0
         let r0_a = do_async_submit(&mut kernel, d, &dev_h, 0, &buf_h);
         assert_eq!(r0_a, 0);
         let h_a_slot = kernel.processes[d].core.r[R1 as usize] as u8;
         let h_a_gen = kernel.processes[d].core.r[R2 as usize];
 
+        // Advance A by 2 ticks (of latency 3) — A is now at remaining=1
+        kernel.tick_devices(d);
+        kernel.tick_devices(d);
+
+        // Submit B to block 1 — B starts fresh at remaining=3
         let r0_b = do_async_submit(&mut kernel, d, &dev_h, 1, &buf_h);
         assert_eq!(r0_b, 0);
         let h_b_slot = kernel.processes[d].core.r[R1 as usize] as u8;
         let h_b_gen = kernel.processes[d].core.r[R2 as usize];
 
-        // DEV_WAIT on A — should block (pending)
-        let r0_wait = do_dev_wait(&mut kernel, d, h_a_slot, h_a_gen);
-        // Should not have returned (EventFrame outstanding)
+        assert!(h_a_slot != h_b_slot || h_a_gen != h_b_gen,
+            "handles must be distinct");
+
+        // DEV_WAIT on B — should block (B is pending with remaining>=2)
+        let _r0_wait = do_dev_wait(&mut kernel, d, h_b_slot, h_b_gen);
         assert!(kernel.processes[d].io_wait.is_some(),
-            "DEV_WAIT(A) must install IoWait when A is pending");
+            "DEV_WAIT(B) must install IoWait when B is pending");
+        let io_handle = kernel.processes[d].io_wait.as_ref().unwrap().request;
+        assert_eq!(io_handle.slot, h_b_slot);
+        assert_eq!(io_handle.generation, h_b_gen,
+            "IoWait must be for B, not A");
 
-        // Now tick only enough for B to complete (B was submitted second,
-        // to a different block, but uses the same latency).
-        // Both have latency 3, so they complete together.  But we can
-        // still verify that B's completion doesn't wake the A waiter
-        // by checking that if A is still nonterminal, we stay blocked.
-        //
-        // With latency 3, both will progress together.  To isolate:
-        // we manually check that the IoWait handle is for A, not B.
-        let io_wait_handle = kernel.processes[d].io_wait.as_ref().unwrap().request;
-        assert_eq!(io_wait_handle.slot, h_a_slot);
-        assert_eq!(io_wait_handle.generation, h_a_gen);
+        // One more tick: A reaches remaining=0 -> DmaReady -> DmaInFlight
+        // But B still has remaining>=1.
+        kernel.tick_devices(d);
 
-        // Tick and drain: both complete at the same time
-        for _ in 0..10 {
+        // A's DMA will take at least one more tick to commit.
+        // Keep ticking until A completes but B does not.
+        // With latency 3 for A (started 2 ticks ago + 1 just now = DmaReady),
+        // A needs DMA phases.  B needs 2 more latency ticks + DMA phases.
+        // Tick one more for A's DMA:
+        kernel.tick_devices(d);
+        kernel.drain_block_completions();
+
+        // Check: is A terminal and B still nonterminal?
+        // A had a 2-tick head start.  If A is completed, its entry has
+        // completion filled.  B should still be pending.
+        let a_entry = kernel.processes[d].async_requests.iter()
+            .find(|r| r.handle.slot == h_a_slot && r.handle.generation == h_a_gen);
+        let b_entry = kernel.processes[d].async_requests.iter()
+            .find(|r| r.handle.slot == h_b_slot && r.handle.generation == h_b_gen);
+
+        // If A hasn't completed yet, tick more until it does
+        let mut ticks = 0;
+        while kernel.processes[d].async_requests.iter()
+            .find(|r| r.handle.slot == h_a_slot && r.handle.generation == h_a_gen)
+            .map(|r| r.completion.is_none())
+            .unwrap_or(false)
+        {
+            kernel.tick_devices(d);
+            kernel.drain_block_completions();
+            ticks += 1;
+            assert!(ticks < 20, "A should complete within 20 ticks");
+        }
+
+        // DECISIVE STATE: A completed, B still in IoWait
+        // A's completion must NOT have woken IoWait(B).
+        assert!(kernel.processes[d].io_wait.is_some(),
+            "A's completion must NOT wake IoWait(B)");
+        let io_handle = kernel.processes[d].io_wait.as_ref().unwrap().request;
+        assert_eq!(io_handle.slot, h_b_slot,
+            "IoWait must still be for B after A completes");
+        assert_eq!(io_handle.generation, h_b_gen);
+
+        // A's completion must be retained in the ledger
+        let a_entry = kernel.processes[d].async_requests.iter()
+            .find(|r| r.handle.slot == h_a_slot && r.handle.generation == h_a_gen)
+            .expect("A must still be in ledger");
+        assert!(a_entry.completion.is_some(),
+            "A must have completion filled in ledger");
+
+        // B must still be pending (nonterminal)
+        let b_entry = kernel.processes[d].async_requests.iter()
+            .find(|r| r.handle.slot == h_b_slot && r.handle.generation == h_b_gen)
+            .expect("B must still be in ledger");
+        assert!(b_entry.completion.is_none(),
+            "B must still be pending (nonterminal)");
+
+        eprintln!("  Decisive state witnessed:");
+        eprintln!("    Completion(A) AND Nonterminal(B) AND IoWait(B)");
+        eprintln!("    => IoWait(B) undisturbed, A retained in ledger");
+
+        // Now tick until B completes — B's completion wakes IoWait(B)
+        for _ in 0..20 {
             kernel.tick_devices(d);
         }
         kernel.drain_block_completions();
 
-        // A's completion woke the waiter
         assert!(kernel.processes[d].io_wait.is_none(),
-            "A's completion must wake IoWait(A)");
+            "B's completion must wake IoWait(B)");
         assert_eq!(kernel.processes[d].core.r[R0 as usize], 0,
-            "A's result must be success");
+            "B's result must be success");
 
-        // B's completion should be retained in the ledger (not consumed)
+        // A should still be in ledger (retained), B consumed by wake
         assert_eq!(kernel.processes[d].async_requests.len(), 1,
-            "B must still be in ledger");
-        let b_entry = &kernel.processes[d].async_requests[0];
-        assert_eq!(b_entry.handle.slot, h_b_slot);
-        assert_eq!(b_entry.handle.generation, h_b_gen);
-        assert!(b_entry.completion.is_some(),
-            "B must have completion filled");
+            "only A should remain in ledger after B wakes");
+        let remaining = &kernel.processes[d].async_requests[0];
+        assert_eq!(remaining.handle.slot, h_a_slot);
+        assert!(remaining.completion.is_some());
 
-        // Now DEV_WAIT(B) returns immediately
-        let r0_b = do_dev_wait(&mut kernel, d, h_b_slot, h_b_gen);
-        assert_eq!(r0_b, 0, "DEV_WAIT(B) must return success immediately");
-        assert_eq!(kernel.processes[d].async_requests.len(), 0,
-            "ledger must be empty after reaping B");
+        // Reap A
+        let r0_reap_a = do_dev_wait(&mut kernel, d, h_a_slot, h_a_gen);
+        assert_eq!(r0_reap_a, 0, "DEV_WAIT(A) must return retained success");
+        assert_eq!(kernel.processes[d].async_requests.len(), 0);
 
-        eprintln!("9.2f.5-2: B completion cannot wake IoWait(A), B retained in ledger ✓");
+        eprintln!("9.2f.5-2: Completion(h_A) does not wake IoWait(h_B) ✓");
     }
 
     // ─── 9.2f.5 test 3: completed A reapable after controller slot reuse ───
@@ -14434,40 +14496,73 @@ mod tests {
     }
 
     // ─── 9.2f.5 test 5: recycled process incarnation cannot consume old completion ───
+    //
+    // D_g submits async A, A completes, D_g dies, slot recycled.
+    // D_{g+1} spawns in same slot, attempts DEV_WAIT(h_old) → error 1.
+    // Proves: recycled incarnation cannot consume old completion.
 
     #[test]
     fn p92f5_5_recycled_incarnation_no_consumption() {
         let (mut kernel, _key_c, key_d, dev_h, buf_h, _data) = async_submit_setup();
         let d = key_d.slot;
+        let old_proc_gen = kernel.processes[d].generation;
 
-        // Submit async A
+        // D_g submits async A
         let r0_a = do_async_submit(&mut kernel, d, &dev_h, 0, &buf_h);
         assert_eq!(r0_a, 0);
         let h_a_slot = kernel.processes[d].core.r[R1 as usize] as u8;
         let h_a_gen = kernel.processes[d].core.r[R2 as usize];
-        let old_proc_gen = kernel.processes[d].generation;
 
         // Tick to completion — completion drains into ledger
         for _ in 0..10 { kernel.tick_devices(d); }
         kernel.drain_block_completions();
-        assert!(kernel.processes[d].async_requests[0].completion.is_some());
+        assert!(kernel.processes[d].async_requests[0].completion.is_some(),
+            "A must have completion in D_g's ledger");
 
-        // Kill the driver — process goes Zombie
+        // Kill D_g
         kernel.finish_process(d, ProcessResult::Exited(0));
         assert_eq!(kernel.processes[d].state, ProcessState::Zombie);
 
-        // Reclaim — slot becomes Free(g+1)
+        // Reclaim D_g — slot becomes Free(g+1)
         kernel.reclaim_process(d);
         assert_eq!(kernel.processes[d].state, ProcessState::Free);
-        let new_gen = kernel.processes[d].generation;
-        assert_eq!(new_gen, old_proc_gen + 1,
-            "generation must advance after reclaim");
-
-        // Async ledger must be empty after reclaim
         assert_eq!(kernel.processes[d].async_requests.len(), 0,
             "reclaim must clear async ledger");
 
-        eprintln!("9.2f.5-5: recycled incarnation has empty ledger, old completion gone ✓");
+        // Spawn D_{g+1} in the same slot
+        let (core_new, dom_new, text_new, _data_new, _stack_new) =
+            create_process(&mut kernel.fabric, AgentId(2), "driver_g1",
+                0x200000, 0x210000, 0x220000);
+        install_trap_handler(&mut kernel.fabric, 0x200000, 0x4000);
+        let mut asm_new = Asm64::new();
+        for _ in 0..10 { asm_new.nop(); }
+        asm_new.movi(R1, 0);
+        asm_new.movi(R0, SYS_EXIT as i32);
+        asm_new.trap(0);
+        kernel.fabric.write_physical(0x200000, &asm_new.to_bytes());
+        seal_code_object(&mut kernel.fabric, text_new, dom_new);
+        let key_d_new = kernel.spawn(core_new);
+
+        // Verify D_{g+1} reused the same slot with incremented generation
+        assert_eq!(key_d_new.slot, d,
+            "D_{{g+1}} must reuse the same slot as D_g");
+        assert_eq!(key_d_new.generation, old_proc_gen + 1,
+            "D_{{g+1}}.generation must be D_g.generation + 1");
+        assert_eq!(kernel.processes[d].state, ProcessState::Running);
+        assert_eq!(kernel.processes[d].async_requests.len(), 0,
+            "D_{{g+1}} must start with empty async ledger");
+
+        // D_{g+1} tries DEV_WAIT(h_old) — must fail
+        let r0_stale = do_dev_wait(&mut kernel, d, h_a_slot, h_a_gen);
+        assert_eq!(r0_stale, 1,
+            "recycled incarnation must get error 1 for old handle");
+        assert!(kernel.processes[d].io_wait.is_none(),
+            "stale handle must not install IoWait in D_{{g+1}}");
+        assert_eq!(kernel.processes[d].async_requests.len(), 0,
+            "D_{{g+1}} ledger must remain empty");
+
+        eprintln!("9.2f.5-5: D_{{g+1}} at slot {} gen {} cannot consume D_g's completion ✓",
+            d, key_d_new.generation);
     }
 
     // ─── 9.2f.5 test 6: dead requester gets no software mutation ───
@@ -14539,6 +14634,7 @@ mod tests {
         let domain_count_before = kernel.fabric.domain_count();
         let authority_id_before = kernel.fabric.next_authority_id();
         let ledger_len_before = kernel.processes[d].async_requests.len();
+        let controller_free_before = kernel.block_controller.as_ref().unwrap().free_slot_count();
 
         // Third async submission — must fail (controller busy)
         let r0_c = do_async_submit(&mut kernel, d, &dev_h, 2, &buf_h);
@@ -14552,8 +14648,11 @@ mod tests {
             "ΔAuthorityIds must be 0 on rejected submission");
         assert_eq!(kernel.processes[d].async_requests.len(), ledger_len_before,
             "ΔLedger must be 0 on rejected submission");
+        assert_eq!(kernel.block_controller.as_ref().unwrap().free_slot_count(),
+            controller_free_before,
+            "ΔController must be 0 on rejected submission");
 
-        eprintln!("9.2f.5-7: third request — ΔDomain=ΔAuthority=ΔLedger=0 ✓");
+        eprintln!("9.2f.5-7: third request — ΔDomain=ΔAuthority=ΔLedger=ΔController=0 ✓");
     }
 
     // ─── 9.2f.5 test 8: ledger exhaustion (17th unreaped) fails atomically ───
