@@ -16931,15 +16931,101 @@ mod tests {
     // ─── 9.3b.4 test 4: Cross-completion isolation ───
     //
     // Decisive collision test: h_A = h_B = (0, 0).
-    // Completion(B, 0, 0) must NOT wake IoWait(A, 0, 0).
+    // Completion(B, 0, 0) AND Nonterminal(A, 0, 0) AND IoWait(A, 0, 0)
+    //   => IoWait(A) remains blocked.
+    //
+    // Asymmetric latency: A=5, B=2 so B completes while A is still
+    // nonterminal.  This is the actual theorem DeviceRequestKey exists for:
+    //   Completion(B,h) ≠> Wake(IoWait(A,h))   when A ≠ B.
+
+    /// Asymmetric two-device setup for cross-completion isolation.
+    /// Device A: latency 5, block 0 = 0xAA.
+    /// Device B: latency 2, block 0 = 0xBB.
+    fn asymmetric_two_device_setup() -> (
+        Kernel, ProcessKey, ProcessKey,
+        CapabilityHandle, CapabilityHandle, CapabilityHandle,
+        DeviceBinding, DeviceBinding,
+    ) {
+        use super::super::block::{BlockStorage, BlockController};
+
+        let mut fabric = Fabric::new(0x800000);
+
+        // Client (slot 0)
+        let (core_c, dom_c, text_c, data_c, _stack_c) =
+            create_process(&mut fabric, CPU0, "client",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm_c = Asm64::new();
+        for _ in 0..100 { asm_c.nop(); }
+        asm_c.movi(R1, 0);
+        asm_c.movi(R0, SYS_EXIT as i32);
+        asm_c.trap(0);
+        fabric.write_physical(0x000000, &asm_c.to_bytes());
+        seal_code_object(&mut fabric, text_c, dom_c);
+
+        // Driver (slot 1)
+        let (core_d, dom_d, text_d, _data_d, _stack_d) =
+            create_process(&mut fabric, AgentId(1), "driver",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm_d = Asm64::new();
+        for _ in 0..200 { asm_d.nop(); }
+        asm_d.movi(R1, 0);
+        asm_d.movi(R0, SYS_EXIT as i32);
+        asm_d.trap(0);
+        fabric.write_physical(0x100000, &asm_d.to_bytes());
+        seal_code_object(&mut fabric, text_d, dom_d);
+
+        // Device A: latency 5 (slow)
+        let mut storage_a = BlockStorage::new(4, 512);
+        storage_a.write_block(0, &[0xAA; 512]);
+        let ctrl_a = BlockController::new(storage_a, 5, AgentId(100));
+
+        // Device B: latency 2 (fast)
+        let mut storage_b = BlockStorage::new(4, 512);
+        storage_b.write_block(0, &[0xBB; 512]);
+        let ctrl_b = BlockController::new(storage_b, 2, AgentId(101));
+
+        let mut kernel = Kernel::new(fabric);
+        let key_c = kernel.spawn(core_c);
+        let key_d = kernel.spawn(core_d);
+
+        let binding_a = kernel.register_block_device(ctrl_a)
+            .expect("register device A");
+        let binding_b = kernel.register_block_device(ctrl_b)
+            .expect("register device B");
+
+        let dev_a_handle = kernel.install_device_capability(
+            key_d.slot, binding_a.object, DeviceRights::SUBMIT_READ,
+        ).expect("install dev_A cap");
+        let dev_b_handle = kernel.install_device_capability(
+            key_d.slot, binding_b.object, DeviceRights::SUBMIT_READ,
+        ).expect("install dev_B cap");
+
+        let tid = kernel.alloc_delegation_id(key_c, key_d)
+            .expect("alloc delegation ID");
+        let src_aid = kernel.fabric.alloc_authority_id()
+            .expect("alloc authority ID");
+        kernel.fabric.grant_with_authority_id(
+            dom_d, data_c, 0, 512, Permissions::WRITE, src_aid,
+        ).expect("grant tagged authority");
+        let obj_gen = kernel.fabric.objects.get(&data_c).unwrap().generation;
+        let buf_handle = kernel.processes[key_d.slot].cap_table.as_mut().unwrap()
+            .install_memory(
+                data_c, obj_gen, 0, 512, Permissions::WRITE, src_aid, Some(tid),
+            ).expect("install buffer cap");
+
+        (kernel, key_c, key_d, dev_a_handle, dev_b_handle, buf_handle,
+         binding_a, binding_b)
+    }
 
     #[test]
     fn p93b4_4_cross_completion_isolation() {
         let (mut kernel, _key_c, key_d, dev_a_h, dev_b_h, buf_h,
-             binding_a, binding_b) = two_device_setup();
+             binding_a, binding_b) = asymmetric_two_device_setup();
         let d = key_d.slot;
 
-        // Submit to A
+        // Submit to A (slow, latency 5)
         let r0_a = do_async_submit(&mut kernel, d, &dev_a_h, 0, &buf_h);
         assert_eq!(r0_a, 0);
         let ha_slot = kernel.processes[d].core.r[R1 as usize] as u8;
@@ -16947,7 +17033,7 @@ mod tests {
         let dev_a_obj = kernel.processes[d].core.r[R3 as usize];
         let dev_a_gen = kernel.processes[d].core.r[R4 as usize];
 
-        // Submit to B
+        // Submit to B (fast, latency 2)
         let r0_b = do_async_submit(&mut kernel, d, &dev_b_h, 0, &buf_h);
         assert_eq!(r0_b, 0);
         let hb_slot = kernel.processes[d].core.r[R1 as usize] as u8;
@@ -16959,8 +17045,6 @@ mod tests {
         assert_eq!(ha_slot, 0, "A must get slot 0");
         assert_eq!(hb_slot, 0, "B must get slot 0");
         assert_eq!(ha_gen, hb_gen, "both controllers start at gen 0");
-
-        // But device identities differ
         assert_ne!(dev_a_obj, dev_b_obj, "device A != device B");
 
         // DEV_WAIT on A — pending, must block
@@ -16970,39 +17054,64 @@ mod tests {
         assert!(kernel.processes[d].io_wait.is_some(),
             "must block on A (pending)");
 
-        // Complete ONLY B by ticking — but we can't selectively tick.
-        // Instead, tick everything and let both complete, then verify
-        // that drain correctly routes.
-        // Actually — both complete simultaneously with latency 3.
-        // The key test: after drain, IoWait(A) must be consumed by
-        // A's completion, not B's.
+        // ── Phase 1: Tick until B completes but A is still nonterminal ──
+        // B has latency 2, A has latency 5.  After ~4 ticks B should be
+        // complete while A is still in-flight.
+        for _ in 0..4 {
+            kernel.tick_devices(d);
+        }
+
+        // Drain — B's completion arrives, A is still nonterminal
+        kernel.drain_block_completions();
+
+        // DECISIVE ASSERTION: IoWait(A,0,0) must NOT be woken by
+        // Completion(B,0,0) even though the local handles are identical.
+        assert!(kernel.processes[d].io_wait.is_some(),
+            "Completion(B,0,0) must NOT wake IoWait(A,0,0) — \
+             A is still nonterminal, DeviceRequestKey differs");
+
+        // Verify A is genuinely nonterminal
+        let a_entry = kernel.processes[d].async_requests.iter()
+            .find(|r| r.key.device == binding_a);
+        assert!(a_entry.is_some(), "A must be in ledger");
+        assert!(a_entry.unwrap().completion.is_none(),
+            "A must be nonterminal (no completion yet)");
+
+        // B's completion must be retained in ledger
+        let b_entry = kernel.processes[d].async_requests.iter()
+            .find(|r| r.key.device == binding_b);
+        assert!(b_entry.is_some(), "B must be in ledger");
+        assert!(b_entry.unwrap().completion.is_some(),
+            "B's completion must be retained");
+
+        // ── Phase 2: Advance A to completion ──
         for _ in 0..10 {
             kernel.tick_devices(d);
         }
         kernel.drain_block_completions();
 
-        // IoWait(A) must be consumed by A's completion
+        // NOW IoWait(A) must be woken by A's own completion
         assert!(kernel.processes[d].io_wait.is_none(),
-            "A's completion must wake IoWait(A)");
+            "A's completion must finally wake IoWait(A)");
         assert_eq!(kernel.processes[d].core.r[R0 as usize], 0,
             "A's completion must be success");
 
-        // B's completion should be in the ledger (no IoWait for B)
-        let b_entry = kernel.processes[d].async_requests.iter()
+        // B still retained in ledger
+        let b_entry2 = kernel.processes[d].async_requests.iter()
             .find(|r| r.key.device == binding_b);
-        assert!(b_entry.is_some(), "B must still be in ledger");
-        assert!(b_entry.unwrap().completion.is_some(),
-            "B's completion must be retained in ledger");
+        assert!(b_entry2.is_some(), "B must still be in ledger");
+        assert!(b_entry2.unwrap().completion.is_some());
 
         // Reap B
         let r0_reap_b = do_dev_wait(
             &mut kernel, d, hb_slot, hb_gen, dev_b_obj, dev_b_gen,
         );
         assert_eq!(r0_reap_b, 0, "reaping B must succeed");
-        assert_eq!(kernel.processes[d].async_requests.len(), 0,
-            "ledger must be empty after reaping both");
+        assert_eq!(kernel.processes[d].async_requests.len(), 0);
 
         eprintln!("9.3b.4-4: cross-completion isolation h_A=h_B=(0,0) ✓");
+        eprintln!("  Completion(B,0,0) ∧ Nonterminal(A,0,0) ∧ IoWait(A,0,0)");
+        eprintln!("  => IoWait(A) remains blocked until A's own completion");
     }
 
     // ─── 9.3b.4 test 5: Dual ledger collision ───
@@ -17430,26 +17539,49 @@ mod tests {
             request: DeviceRequestKey { device: binding_b, request: handle_b },
         });
 
-        // Snapshot P3 state
+        // Snapshot P3 state (before any interrupt activity)
         let p3_regs_before: Vec<u64> = kernel.processes[2].core.r.to_vec();
         let p3_io_wait_before = kernel.processes[2].io_wait.clone();
-        let p3_halted_before = kernel.processes[2].core.halted;
+        let p3_frames_before = kernel.processes[2].core.event_frames.len();
 
-        // Tick both controllers to completion (latency 2)
+        // P3 must have interrupts enabled for delivery
+        kernel.processes[2].core.interrupts_enabled = true;
+        assert!(!kernel.processes[2].core.pending.device,
+            "P3 must not have a pending device interrupt yet");
+
+        // ── Use the real aggregate tick path through P3 ──
+        // tick_devices(2) ticks ALL controllers and posts the generic
+        // device interrupt to P3 if any controller requires attention.
         for _ in 0..5 {
-            for slot in &mut kernel.device_registry.devices {
-                slot.controller.tick(&mut kernel.fabric);
-            }
+            kernel.tick_devices(2);
         }
 
-        // Both require attention
+        // Both controllers must have completed
         assert!(kernel.device_registry.devices[0].controller.requires_attention(),
             "A must require attention");
         assert!(kernel.device_registry.devices[1].controller.requires_attention(),
             "B must require attention");
 
-        // One drain pass handles both
-        kernel.drain_block_completions();
+        // P3 must have received the generic device interrupt
+        assert!(kernel.processes[2].core.pending.device,
+            "tick_devices must post generic device interrupt to P3");
+
+        // ── Deliver the actual pending device interrupt to P3 ──
+        assert!(kernel.processes[2].core.deliver_pending(),
+            "P3 must accept interrupt delivery");
+
+        // Verify P3 got a DeviceInterrupt event frame
+        assert_eq!(
+            kernel.processes[2].core.event_frames.last().unwrap().cause,
+            EventCause::DeviceInterrupt,
+            "P3 must have a DeviceInterrupt EventFrame"
+        );
+
+        // P3 enters the interrupt handler — this drains ALL completions
+        kernel.processes[2].core.halted = true;
+        kernel.handle_async_interrupt(2);
+
+        // ── Verify: Completion_A → P1, Completion_B → P2 ──
 
         // P1 woken by A's completion
         assert!(kernel.processes[0].io_wait.is_none(),
@@ -17463,16 +17595,24 @@ mod tests {
         assert_eq!(kernel.processes[1].core.r[R0 as usize], 0,
             "P2 must get success from B");
 
-        // P3 completely untouched
+        // ── Verify: P3 is NOT a completion owner ──
+        // P3's ordinary registers must be untouched (handle_async_interrupt
+        // only calls drain + reevaluate + resume_from_trap on P3)
         assert_eq!(kernel.processes[2].core.r.to_vec(), p3_regs_before,
-            "P3 registers must be untouched");
+            "P3 registers must be untouched — InterruptTarget ≠ CompletionOwner");
         assert_eq!(kernel.processes[2].io_wait.is_none(), p3_io_wait_before.is_none(),
             "P3 io_wait must be untouched");
-        assert_eq!(kernel.processes[2].core.halted, p3_halted_before,
-            "P3 halted must be untouched");
+        // P3's interrupt frame was consumed by handle_async_interrupt's
+        // resume_from_trap, returning P3 to normal execution
+        assert_eq!(kernel.processes[2].core.event_frames.len(), p3_frames_before,
+            "P3 interrupt frame must be consumed by resume_from_trap");
 
         eprintln!("9.3b.4-9: aggregate interrupt, three-process routing ✓");
+        eprintln!("  tick_devices(P3) → pending.device = true");
+        eprintln!("  deliver_pending(P3) → EventCause::DeviceInterrupt");
+        eprintln!("  handle_async_interrupt(P3) → drain_block_completions()");
         eprintln!("  Completion_A → P1, Completion_B → P2, ΔP3 = 0");
+        eprintln!("  InterruptTarget ≠ CompletionOwner ✓");
     }
 
     // ─── 9.3b.4 test 10: Capability-drop lifetime ───
