@@ -3271,38 +3271,55 @@ impl Kernel {
         self.resume_from_trap(idx);
     }
 
-    /// SYS_SEND_CAP (syscall 11): Atomic capability transfer.
+    /// SYS_SEND_CAP (syscall 11): Kind-sensitive atomic capability transfer.
     ///
-    /// ABI:
+    /// ABI (common fields):
     ///   R1 = destination process slot (u32)
     ///   R2 = destination process generation (u32)
     ///   R3 = source cap handle slot (u32)
     ///   R4 = source cap handle generation (u32)
-    ///   R5 = child offset (u64, absolute object offset)
-    ///   R6 = child length (u64)
-    ///   R7 = child permissions (u64 → Permissions)
     ///   R8 = value (u64, message payload)
     ///
+    /// ABI (kind-specific, interpreted after source resolution):
+    ///   Memory source:
+    ///     R5 = child offset (u64)
+    ///     R6 = child length (u64)
+    ///     R7 = child permissions (u64 → Permissions)
+    ///   Device source:
+    ///     R5 = 0 (required — device authority is non-spatial)
+    ///     R6 = 0 (required)
+    ///     R7 = child device rights (u64 → DeviceRights)
+    ///
     /// Returns: R0 = 0 on success, R0 = error code on failure.
-    ///   1 = ABI decode failure (malformed register, bad permission bits)
+    ///   1 = ABI decode failure (malformed register, bad rights bits)
     ///   2 = destination not live (not Running, or stale generation, or Zombie)
     ///   3 = source handle does not resolve (three-condition failure)
-    ///   4 = subset/attenuation violation (non-Memory, amplification, bad range, zero length)
+    ///   4 = kind-specific attenuation/shape violation
     ///   5 = receiver has no allocatable cap slot
     ///   6 = receiver mailbox full
     ///   7 = identity space exhausted (AuthorityId or DelegationId)
-    ///   8 = internal error (unexpected commit failure; IDs consumed, no authority leaked)
+    ///   8 = internal error (unexpected commit failure; IDs consumed,
+    ///       no live authority or capability leaked)
+    ///
+    /// Gate ordering (frozen):
+    ///   resolve destination → resolve presented source →
+    ///   kind-specific attenuation → receiver-cap capacity →
+    ///   delivery route → identity availability →
+    ///   derive child authority → install child handle + provenance → deliver.
+    ///
+    /// Formal basis: anka_device_capability_transfer.kleis DEVXFER-1..12.
     fn handle_send_cap(&mut self, idx: usize) {
         let r1 = self.processes[idx].core.r[R1 as usize];
         let r2 = self.processes[idx].core.r[R2 as usize];
         let r3 = self.processes[idx].core.r[R3 as usize];
         let r4 = self.processes[idx].core.r[R4 as usize];
-        let child_offset = self.processes[idx].core.r[R5 as usize];
-        let child_length = self.processes[idx].core.r[R6 as usize];
+        let r5 = self.processes[idx].core.r[R5 as usize];
+        let r6 = self.processes[idx].core.r[R6 as usize];
         let r7 = self.processes[idx].core.r[R7 as usize];
         let value = self.processes[idx].core.r[R8 as usize];
 
-        // ── Gate 0: Checked ABI decode ──
+        // ── Gate 0: Checked ABI decode (common fields only) ──
+        // R5/R6/R7 are NOT decoded here — they are kind-specific.
         let dest_slot_u32 = match u32::try_from(r1) {
             Ok(v) => v, Err(_) => { self.fail_send_cap(idx, 1); return; }
         };
@@ -3318,12 +3335,6 @@ impl Kernel {
         let src_gen = match u32::try_from(r4) {
             Ok(v) => v, Err(_) => { self.fail_send_cap(idx, 1); return; }
         };
-        let child_perms = match Permissions::from_bits_checked(r7) {
-            Some(p) => p, None => { self.fail_send_cap(idx, 1); return; }
-        };
-
-        // child_length > 0
-        if child_length == 0 { self.fail_send_cap(idx, 4); return; }
 
         let dest_key = ProcessKey { slot: dest_slot, generation: dest_gen };
         let src_handle = CapabilityHandle { slot: src_slot, generation: src_gen };
@@ -3340,42 +3351,90 @@ impl Kernel {
             None => { self.fail_send_cap(idx, 3); return; }
         };
 
-        // ── Gate 2b: Source must be Memory (kind-sensitive pattern match) ──
-        let (parent_offset, parent_length, parent_perms) = match &resolved {
-            ResolvedCapability::Memory { offset, length, perms, .. } => (*offset, *length, *perms),
-            ResolvedCapability::Device { .. } => {
-                self.fail_send_cap(idx, 4); return;
+        // ── Gate 2b: Kind-sensitive ABI interpretation ──
+        //
+        // Kind(source) → Interpretation(R5, R6, R7).
+        // R7 is decoded as Permissions or DeviceRights depending on
+        // the resolved source kind — never before.
+        enum PreparedTransfer {
+            Memory {
+                child_offset: u64,
+                child_length: u64,
+                child_perms: Permissions,
+            },
+            Device {
+                child_rights: DeviceRights,
+                presented_object: ObjectId,
+                presented_generation: Generation,
+                presented_rights: DeviceRights,
+            },
+        }
+
+        let prepared = match &resolved {
+            ResolvedCapability::Memory { offset, length, perms, .. } => {
+                let parent_offset = *offset;
+                let parent_length = *length;
+                let parent_perms = *perms;
+
+                let child_perms = match Permissions::from_bits_checked(r7) {
+                    Some(p) => p,
+                    None => { self.fail_send_cap(idx, 1); return; }
+                };
+                let child_offset = r5;
+                let child_length = r6;
+
+                if child_length == 0 {
+                    self.fail_send_cap(idx, 4); return;
+                }
+                if !child_perms.is_subset_of(parent_perms) {
+                    self.fail_send_cap(idx, 4); return;
+                }
+                if child_offset < parent_offset {
+                    self.fail_send_cap(idx, 4); return;
+                }
+                if child_length > parent_length {
+                    self.fail_send_cap(idx, 4); return;
+                }
+                if child_offset - parent_offset > parent_length - child_length {
+                    self.fail_send_cap(idx, 4); return;
+                }
+
+                PreparedTransfer::Memory { child_offset, child_length, child_perms }
+            }
+            ResolvedCapability::Device {
+                object, object_generation, rights, ..
+            } => {
+                // Device authority is non-spatial: R5=R6=0 required.
+                if r5 != 0 { self.fail_send_cap(idx, 4); return; }
+                if r6 != 0 { self.fail_send_cap(idx, 4); return; }
+
+                let child_rights = match DeviceRights::from_bits_checked(r7) {
+                    Some(dr) => dr,
+                    None => { self.fail_send_cap(idx, 1); return; }
+                };
+
+                // Presented-authority attenuation check (Rule 1).
+                if !child_rights.is_subset_of(*rights) {
+                    self.fail_send_cap(idx, 4); return;
+                }
+
+                PreparedTransfer::Device {
+                    child_rights,
+                    presented_object: *object,
+                    presented_generation: *object_generation,
+                    presented_rights: *rights,
+                }
             }
         };
 
-        // ── Gate 3: Subset relationship ──
-        if !child_perms.is_subset_of(parent_perms) {
-            self.fail_send_cap(idx, 4); return;
-        }
-        if child_offset < parent_offset {
-            self.fail_send_cap(idx, 4); return;
-        }
-        if child_length > parent_length {
-            self.fail_send_cap(idx, 4); return;
-        }
-        // Overflow-safe: child_offset - parent_offset <= parent_length - child_length
-        if child_offset - parent_offset > parent_length - child_length {
-            self.fail_send_cap(idx, 4); return;
-        }
-
-        // ── Gate 4: Receiver has an allocatable cap slot ──
+        // ── Gate 3: Receiver has an allocatable cap slot ──
         let dest_allocatable = self.processes[dest_idx].cap_table.as_ref()
             .map_or(0, |ct| ct.allocatable_count());
         if dest_allocatable == 0 {
             self.fail_send_cap(idx, 5); return;
         }
 
-        // ── Gate 5: Delivery routing (Direct / Enqueue / Full) ──
-        //
-        // Compute route BEFORE the atomic commit section.
-        // Direct delivery bypasses mailbox capacity only; cap-slot
-        // and identity checks still apply.  If the route is Full,
-        // fail before any ID allocation.
+        // ── Gate 4: Delivery routing (Direct / Enqueue / Full) ──
         let sender_key = ProcessKey {
             slot: idx,
             generation: self.processes[idx].generation,
@@ -3385,15 +3444,17 @@ impl Kernel {
             self.fail_send_cap(idx, 6); return;
         }
 
-        // ── Gate 6: Fresh identity availability ──
+        // ── Gate 5: Fresh identity availability ──
         if !self.fabric.can_alloc_authority_id() || !self.can_alloc_delegation_id() {
             self.fail_send_cap(idx, 7); return;
         }
 
         // ─── All preflights passed — atomic commit ───
-        // After this point, ID allocation is guaranteed by preflight.
+        //
+        // Preflight failures: ΔAuthorityIdCounter = ΔDelegationIdCounter = 0.
+        // Post-commit error 8: monotonic IDs may be consumed, but
+        // ΔLiveAuthority = ΔLiveCapability = ΔMessage = 0.
 
-        // Allocate identities (guaranteed by gate 6)
         let new_aid = match self.fabric.alloc_authority_id() {
             Some(a) => a,
             None => { self.fail_send_cap(idx, 8); return; }
@@ -3403,56 +3464,102 @@ impl Kernel {
             None => { self.fail_send_cap(idx, 8); return; }
         };
 
-        // Cross-domain derivation from exact AuthorityId
         let src_domain = self.processes[idx].core.domain;
         let dst_domain = self.processes[dest_idx].core.domain;
-        let derived = self.fabric.derive_from_authority_id(
-            src_domain,
-            resolved.authority_id(),
-            dst_domain,
-            child_offset,
-            child_length,
-            child_perms,
-            new_aid,
-        );
-        if derived.is_none() {
-            // Unexpected derivation failure — IDs consumed but no authority leaked
-            self.fail_send_cap(idx, 8);
-            return;
-        }
-        let derived_cap = derived.unwrap();
 
-        // Install in receiver's cap table
-        let obj_gen = Generation(derived_cap.generation().0);
-        let new_handle = self.processes[dest_idx].cap_table.as_mut()
-            .and_then(|ct| ct.install_memory(
-                derived_cap.object(),
-                obj_gen,
-                child_offset,
-                child_length,
-                child_perms,
-                new_aid,
-                Some(new_tid),
-            ));
-        match new_handle {
-            Some(h) => {
-                // Deliver via computed route (capacity preflighted at gate 5)
-                let msg = Message {
-                    from: sender_key,
-                    value,
-                    cap: Some(h),
-                };
-                self.deliver_message(dest_idx, msg, route);
-                self.processes[idx].core.r[R0 as usize] = 0;
+        // Kind-sensitive derivation + installation.
+        let new_handle = match prepared {
+            PreparedTransfer::Memory { child_offset, child_length, child_perms } => {
+                let derived = self.fabric.derive_from_authority_id(
+                    src_domain,
+                    resolved.authority_id(),
+                    dst_domain,
+                    child_offset,
+                    child_length,
+                    child_perms,
+                    new_aid,
+                );
+                match derived {
+                    None => {
+                        self.fail_send_cap(idx, 8);
+                        return;
+                    }
+                    Some(derived_cap) => {
+                        let obj_gen = Generation(derived_cap.generation().0);
+                        let h = self.processes[dest_idx].cap_table.as_mut()
+                            .and_then(|ct| ct.install_memory(
+                                derived_cap.object(),
+                                obj_gen,
+                                child_offset,
+                                child_length,
+                                child_perms,
+                                new_aid,
+                                Some(new_tid),
+                            ));
+                        match h {
+                            Some(handle) => handle,
+                            None => {
+                                self.fabric.remove_by_authority_id(dst_domain, new_aid);
+                                self.fail_send_cap(idx, 8);
+                                return;
+                            }
+                        }
+                    }
+                }
             }
-            None => {
-                // Rollback: remove the derived authority from destination domain
-                self.fabric.remove_by_authority_id(dst_domain, new_aid);
-                // IDs remain consumed but no authority or handle leaked
-                self.fail_send_cap(idx, 8);
-                return;
+            PreparedTransfer::Device {
+                child_rights,
+                presented_object,
+                presented_generation,
+                presented_rights,
+            } => {
+                // Derive with exact presented/backing correspondence (Rule 4).
+                let derived = self.fabric.derive_device_from_authority_id(
+                    src_domain,
+                    resolved.authority_id(),
+                    presented_object,
+                    presented_generation,
+                    presented_rights,
+                    dst_domain,
+                    child_rights,
+                    new_aid,
+                );
+                match derived {
+                    None => {
+                        self.fail_send_cap(idx, 8);
+                        return;
+                    }
+                    Some((obj, obj_gen, derived_rights)) => {
+                        let h = self.processes[dest_idx].cap_table.as_mut()
+                            .and_then(|ct| ct.install_device(
+                                obj,
+                                obj_gen,
+                                derived_rights,
+                                new_aid,
+                                Some(new_tid),
+                            ));
+                        match h {
+                            Some(handle) => handle,
+                            None => {
+                                // Rollback both planes: Fabric authority + cap slot.
+                                self.fabric.remove_by_authority_id(dst_domain, new_aid);
+                                self.fail_send_cap(idx, 8);
+                                return;
+                            }
+                        }
+                    }
+                }
             }
-        }
+        };
+
+        // Deliver via computed route (capacity preflighted at gate 4).
+        let msg = Message {
+            from: sender_key,
+            value,
+            cap: Some(new_handle),
+        };
+        self.deliver_message(dest_idx, msg, route);
+        self.processes[idx].core.r[R0 as usize] = 0;
         self.resume_from_trap(idx);
     }
 

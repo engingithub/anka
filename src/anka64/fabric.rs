@@ -539,6 +539,74 @@ impl Fabric {
         Some(cap)
     }
 
+    /// Cross-domain device authority derivation from an exact AuthorityId.
+    ///
+    /// The caller supplies `expected_object`, `expected_generation`, and
+    /// `exact_source_rights` from the presented resolved capability slot.
+    /// This primitive independently verifies that the backing Fabric entry
+    /// matches those values exactly, proving:
+    ///
+    ///   H_presented = A_backing >= A_child.
+    ///
+    /// This is the device-kind analogue of `derive_from_authority_id()`.
+    /// Device authority is non-spatial: attenuation applies only to rights.
+    ///
+    /// Returns None if:
+    ///   - source AuthorityId does not exist as a device entry in src_domain
+    ///   - backing entry does not match expected_object/generation/rights
+    ///   - object is not ObjectKind::Device or not ObjectState::Active
+    ///   - object generation does not match expected_generation
+    ///   - child_rights is not a subset of exact_source_rights
+    ///   - new_authority_id already exists in destination domain (cross-kind)
+    ///   - destination domain does not exist
+    ///
+    /// Formal basis: anka_device_capability_transfer.kleis DEVXFER-1..6.
+    pub fn derive_device_from_authority_id(
+        &mut self,
+        src_domain: DomainId,
+        source_authority_id: AuthorityId,
+        expected_object: ObjectId,
+        expected_generation: Generation,
+        exact_source_rights: DeviceRights,
+        dst_domain: DomainId,
+        child_rights: DeviceRights,
+        new_authority_id: AuthorityId,
+    ) -> Option<(ObjectId, Generation, DeviceRights)> {
+        // Find the exact backing entry by AuthorityId in source domain.
+        let entry = {
+            let dom = self.domains.get(&src_domain)?;
+            dom.device_authorities.iter()
+                .find(|e| e.authority_id == source_authority_id)?
+                .clone()
+        };
+
+        // Presented/backing correspondence (Rule 4).
+        if entry.object != expected_object { return None; }
+        if entry.generation != expected_generation { return None; }
+        if entry.rights != exact_source_rights { return None; }
+
+        // Object kind, state, and generation currency.
+        let obj = self.objects.get(&expected_object)?;
+        if obj.kind != ObjectKind::Device { return None; }
+        if obj.state != ObjectState::Active { return None; }
+        if obj.generation != expected_generation { return None; }
+
+        // Rights attenuation: child <= source.
+        if !child_rights.is_subset_of(exact_source_rights) { return None; }
+
+        // AuthorityId cross-kind uniqueness in destination.
+        if self.has_authority_id(dst_domain, new_authority_id) { return None; }
+
+        // Commit: install device authority in destination domain.
+        self.domains.get_mut(&dst_domain)?.device_authorities.push(DeviceAuthorityEntry {
+            object: expected_object,
+            generation: expected_generation,
+            rights: child_rights,
+            authority_id: new_authority_id,
+        });
+        Some((expected_object, expected_generation, child_rights))
+    }
+
     /// Derive a child capability from a parent — cannot amplify (I7).
     ///
     /// Kind boundary: parent must name an ObjectKind::Memory object.
