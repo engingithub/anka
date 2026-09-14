@@ -9705,6 +9705,175 @@ mod tests {
         eprintln!("9.3a.3.14: Fabric derive rejects object mismatch ✓");
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.3a.4 — Supervisor→Driver Runtime Delegation Integration
+    //
+    // Decisive witness:
+    //   KernelBootstrap → Supervisor → SYS_SEND_CAP → Driver → SYS_DEV_SUBMIT → Device
+    //
+    // The kernel establishes root device authority.  The supervisor holds
+    // it and delegates via ordinary SYS_SEND_CAP to a driver.  The driver
+    // uses the transferred capability for SYS_DEV_SUBMIT.  No special
+    // kernel-to-driver provisioning path exists.
+    //
+    // Proves:
+    //   - RootDeviceAuthority → RuntimeDelegation → DriverOperation
+    //   - SenderDrop ⇏ ChildRevocation
+    //   - DelegationId records provenance (client=supervisor, driver=driver)
+    //   - Authority chain is clean: supervisor AuthorityId ≠ driver AuthorityId
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn p93a_4_supervisor_to_driver_integration() {
+        use super::super::block::{BlockStorage, BlockController};
+
+        let mut fabric = Fabric::new(0x800000);
+
+        // ── Supervisor (slot 0) ──
+        let (core_sup, dom_sup, text_sup, data_sup, _stack_sup) =
+            create_process(&mut fabric, CPU0, "supervisor",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm_sup = Asm64::new();
+        for _ in 0..100 { asm_sup.nop(); }
+        asm_sup.movi(R1, 0); asm_sup.movi(R0, SYS_EXIT as i32); asm_sup.trap(0);
+        fabric.write_physical(0x000000, &asm_sup.to_bytes());
+        seal_code_object(&mut fabric, text_sup, dom_sup);
+
+        // ── Driver (slot 1) ──
+        let (core_drv, dom_drv, text_drv, data_drv, _stack_drv) =
+            create_process(&mut fabric, AgentId(1), "driver",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm_drv = Asm64::new();
+        for _ in 0..100 { asm_drv.nop(); }
+        asm_drv.movi(R1, 0); asm_drv.movi(R0, SYS_EXIT as i32); asm_drv.trap(0);
+        fabric.write_physical(0x100000, &asm_drv.to_bytes());
+        seal_code_object(&mut fabric, text_drv, dom_drv);
+
+        // ── DMA buffer (for driver I/O) ──
+        let buf_obj = fabric.alloc_object("dma_buf", 512, ObjectKind::Memory);
+        fabric.place_object(buf_obj, 0x300000);
+        // Write baseline pattern so we can verify DMA later
+        fabric.write_physical(0x300000, &[0x11; 512]);
+
+        // ── Block storage with known data ──
+        let mut storage = BlockStorage::new(4, 512);
+        storage.write_block(0, &[0xBB; 512]);
+        let controller = BlockController::new(storage, 3, AgentId(100));
+
+        let mut kernel = Kernel::new(fabric);
+        let key_sup = kernel.spawn(core_sup);
+        let key_drv = kernel.spawn(core_drv);
+        let sup = key_sup.slot;
+        let drv = key_drv.slot;
+
+        // ══════════════════════════════════════════════════
+        // Phase 1: Kernel bootstraps root device authority
+        // ══════════════════════════════════════════════════
+        let dev_obj = kernel.install_block_device(controller)
+            .expect("kernel installs block device");
+
+        // Root device cap goes to supervisor — this is the ONLY
+        // kernel-to-process device provisioning.
+        let sup_dev_handle = kernel.install_device_capability(
+            sup, dev_obj, DeviceRights::SUBMIT_READ,
+        ).expect("supervisor root device cap");
+
+        let sup_resolved = kernel.resolve_capability(sup, sup_dev_handle)
+            .expect("supervisor device cap resolves");
+        let sup_aid = sup_resolved.authority_id();
+
+        // ══════════════════════════════════════════════════
+        // Phase 2: Supervisor delegates to driver via SYS_SEND_CAP
+        // ══════════════════════════════════════════════════
+        let r0 = do_dev_send_cap(
+            &mut kernel, sup, drv, key_drv.generation,
+            &sup_dev_handle,
+            0, 0, DeviceRights::SUBMIT_READ.0 as u64, 0xDEAD,
+        );
+        assert_eq!(r0, 0, "supervisor→driver SYS_SEND_CAP must succeed");
+
+        // Driver receives the message
+        let msg = kernel.mailboxes[drv].pop()
+            .expect("driver must receive the cap-bearing message");
+        assert_eq!(msg.value, 0xDEAD);
+        let drv_dev_handle = msg.cap
+            .expect("message must carry a device capability");
+
+        // Verify delegation identity chain
+        let drv_resolved = kernel.resolve_capability(drv, drv_dev_handle)
+            .expect("driver device cap resolves");
+        assert!(drv_resolved.is_device());
+        assert_eq!(drv_resolved.object(), dev_obj);
+        assert_eq!(drv_resolved.as_device_rights(), DeviceRights::SUBMIT_READ);
+
+        let drv_aid = drv_resolved.authority_id();
+        assert_ne!(drv_aid, sup_aid,
+            "driver AuthorityId must differ from supervisor's");
+
+        let drv_tid = drv_resolved.delegation_id()
+            .expect("transferred cap must carry DelegationId");
+        assert_eq!(drv_tid.client, key_sup,
+            "DelegationId.client = supervisor");
+        assert_eq!(drv_tid.driver, key_drv,
+            "DelegationId.driver = driver");
+
+        // ══════════════════════════════════════════════════
+        // Phase 3: Supervisor drops its cap (not required for driver)
+        // ══════════════════════════════════════════════════
+        kernel.processes[sup].core.r[R0 as usize] = SYS_CAP_DROP;
+        kernel.processes[sup].core.r[R1 as usize] = sup_dev_handle.slot as u64;
+        kernel.processes[sup].core.r[R2 as usize] = sup_dev_handle.generation as u64;
+        kernel.handle_syscall(sup);
+        assert_eq!(kernel.processes[sup].core.r[R0 as usize], 0,
+            "supervisor drop must succeed");
+
+        // Driver cap must survive
+        assert!(kernel.resolve_capability(drv, drv_dev_handle).is_some(),
+            "driver cap must survive supervisor drop");
+
+        // ══════════════════════════════════════════════════
+        // Phase 4: Driver gets buffer authority and does DEV_SUBMIT
+        // ══════════════════════════════════════════════════
+        let drv_dom = kernel.processes[drv].core.domain;
+        let tid_buf = kernel.alloc_delegation_id(key_sup, key_drv).unwrap();
+        let aid_buf = kernel.fabric.alloc_authority_id().unwrap();
+        kernel.fabric.grant_with_authority_id(
+            drv_dom, buf_obj, 0, 512, Permissions::WRITE, aid_buf,
+        ).expect("grant driver buffer authority");
+        let buf_gen = kernel.fabric.objects.get(&buf_obj).unwrap().generation;
+        let drv_buf_handle = kernel.processes[drv].cap_table.as_mut().unwrap()
+            .install_memory(buf_obj, buf_gen, 0, 512, Permissions::WRITE, aid_buf, Some(tid_buf))
+            .expect("install driver buffer cap");
+
+        // Execute DEV_SUBMIT using the TRANSFERRED device cap
+        let r0_submit = do_async_submit(
+            &mut kernel, drv, &drv_dev_handle, 0, &drv_buf_handle,
+        );
+        assert_eq!(r0_submit, 0,
+            "DEV_SUBMIT with runtime-delegated device cap must succeed");
+
+        // ══════════════════════════════════════════════════
+        // Phase 5: Complete I/O and verify DMA committed
+        // ══════════════════════════════════════════════════
+        for _ in 0..20 { kernel.idle_progress_once(); }
+        let buf_data = kernel.fabric.read_physical(0x300000, 512).to_vec();
+        assert!(buf_data.iter().all(|&b| b == 0xBB),
+            "DMA must commit block[0] data (0xBB) through runtime-delegated authority");
+
+        // Verify baseline was overwritten (not unchanged)
+        assert_ne!(&[0x11u8; 512][..], &buf_data[..],
+            "buffer must differ from baseline");
+
+        eprintln!("9.3a.4: Supervisor→Driver runtime delegation integration ✓");
+        eprintln!("  KernelBootstrap → Supervisor → SYS_SEND_CAP → Driver → SYS_DEV_SUBMIT");
+        eprintln!("  Authority chain: sup_aid={} → drv_aid={}", sup_aid, drv_aid);
+        eprintln!("  DelegationId: client={}, driver={}", drv_tid.client, drv_tid.driver);
+        eprintln!("  Supervisor drop: child survived");
+        eprintln!("  DMA verified: 512 bytes of 0xBB committed to buffer");
+    }
+
     // ─── DelegationId: fresh per transfer, not inherited ───
 
     #[test]
