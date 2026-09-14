@@ -820,7 +820,7 @@ impl Kernel {
         }
 
         let domain = self.processes[slot].core.domain;
-        let auth_id = self.fabric.alloc_authority_id();
+        let auth_id = self.fabric.alloc_authority_id()?;
 
         self.fabric.grant_with_authority_id(
             domain, object, offset, length, perms, auth_id,
@@ -6708,5 +6708,104 @@ mod tests {
             "CAP_DROP must fail when backing authority is absent");
 
         eprintln!("9.2a: CAP_DROP requires backing authority ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.2a final — generation wrap and AuthorityId exhaustion
+    // ═══════════════════════════════════════════════════════════════
+
+    /// A slot at handle_generation = u32::MAX cannot be dropped.
+    ///
+    /// If drop_handle() used wrapping_add, the generation would wrap
+    /// to 0 and an ancient stale handle would become current again.
+    /// The Kleis model requires: recyclable(g) ≡ g ≠ 2^32 − 1.
+    ///
+    /// Drop must fail, the handle must still resolve, and the
+    /// backing AuthorityId must still exist in the Fabric domain.
+    #[test]
+    fn p92a_handle_generation_max_does_not_wrap() {
+        let (mut kernel, data, slot) = captab_kernel_setup();
+        let domain = kernel.processes[slot].core.domain;
+
+        // Install a capability, then force the slot generation to u32::MAX.
+        let h = kernel.install_capability(slot, data, 0, 0x4000, Permissions::READ)
+            .expect("install should succeed");
+
+        // Surgically set the slot generation to u32::MAX.
+        let ct = kernel.processes[slot].cap_table.as_mut().unwrap();
+        ct.slots_mut()[h.slot as usize].handle_generation = u32::MAX;
+
+        // Build a handle that matches the forced generation.
+        let h_max = CapabilityHandle { slot: h.slot, generation: u32::MAX };
+
+        // Verify it resolves before the drop attempt.
+        assert!(kernel.resolve_capability(slot, h_max).is_some(),
+            "handle at MAX generation should resolve");
+
+        // Record Fabric state before attempt.
+        let cap_count_before = kernel.fabric.domains.get(&domain).unwrap()
+            .capabilities.len();
+
+        // Attempt drop — must fail because generation cannot advance.
+        let ct = kernel.processes[slot].cap_table.as_mut().unwrap();
+        assert!(ct.drop_handle(h_max).is_none(),
+            "drop_handle at u32::MAX must fail (no wrap)");
+
+        // Handle still resolves.
+        assert!(kernel.resolve_capability(slot, h_max).is_some(),
+            "handle must survive failed drop");
+
+        // Fabric authority unchanged.
+        let cap_count_after = kernel.fabric.domains.get(&domain).unwrap()
+            .capabilities.len();
+        assert_eq!(cap_count_before, cap_count_after,
+            "Fabric authority must survive failed drop");
+
+        eprintln!("9.2a: handle generation MAX does not wrap ✓");
+    }
+
+    /// AuthorityId exhaustion prevents installation — no reuse.
+    ///
+    /// If alloc_authority_id() used unchecked addition, the u64
+    /// counter would eventually wrap and re-emit an AuthorityId
+    /// that was supposed to be permanently dead.  The formal model
+    /// requires: AuthorityId is monotonic, never reused.
+    ///
+    /// alloc_authority_id() emits counter then advances; the last
+    /// emittable value is u64::MAX − 1 because checked_add(MAX, 1)
+    /// fails before returning AuthorityId(MAX).
+    #[test]
+    fn p92a_authority_id_exhaustion_does_not_reuse() {
+        let (mut kernel, data, slot) = captab_kernel_setup();
+        let domain = kernel.processes[slot].core.domain;
+
+        let cap_count_before = kernel.fabric.domains.get(&domain).unwrap()
+            .capabilities.len();
+
+        // Force counter to u64::MAX − 1.
+        // First alloc: emits AuthorityId(MAX−1), counter → MAX.
+        // Second alloc: tries to advance past MAX → None.
+        kernel.fabric.next_authority_id = u64::MAX - 1;
+
+        let h = kernel.install_capability(slot, data, 0, 0x4000, Permissions::READ);
+        assert!(h.is_some(), "install at u64::MAX - 1 should succeed");
+        assert_eq!(kernel.fabric.next_authority_id, u64::MAX,
+            "counter should now be at MAX");
+
+        // Second allocation must fail — counter cannot advance past MAX.
+        let h2 = kernel.install_capability(slot, data, 0, 0x4000, Permissions::READ);
+        assert!(h2.is_none(), "install after exhaustion must fail");
+
+        // Counter must NOT have wrapped to 0.
+        assert_eq!(kernel.fabric.next_authority_id, u64::MAX,
+            "counter must not wrap — still at MAX");
+
+        // Only one new authority should exist.
+        let cap_count_after = kernel.fabric.domains.get(&domain).unwrap()
+            .capabilities.len();
+        assert_eq!(cap_count_after, cap_count_before + 1,
+            "only the first install should add Fabric authority");
+
+        eprintln!("9.2a: AuthorityId exhaustion does not reuse ✓");
     }
 }

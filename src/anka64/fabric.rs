@@ -89,7 +89,8 @@ pub struct Fabric {
     next_domain_id: u64,
     next_tx_id: u64,
     /// Monotonic AuthorityId counter.  Never reused.
-    next_authority_id: u64,
+    /// Pub for test boundary forcing (e.g. exhaustion at u64::MAX).
+    pub next_authority_id: u64,
     /// Machine-global timer (Phase 9.0c).  None = no timer configured.
     pub timer: Option<FabricTimer>,
 }
@@ -113,10 +114,14 @@ impl Fabric {
     }
 
     /// Allocate a fresh AuthorityId.  Monotonic, never reused.
-    pub fn alloc_authority_id(&mut self) -> AuthorityId {
+    ///
+    /// Returns None if the 64-bit counter has been exhausted.
+    /// The caller must treat exhaustion as an installation failure
+    /// that preserves both-or-neither semantics.
+    pub fn alloc_authority_id(&mut self) -> Option<AuthorityId> {
         let id = AuthorityId(self.next_authority_id);
-        self.next_authority_id += 1;
-        id
+        self.next_authority_id = self.next_authority_id.checked_add(1)?;
+        Some(id)
     }
 
     // ───────────────── Timer configuration ────────────────────────

@@ -698,6 +698,13 @@ impl CapabilityTable {
         &self.slots
     }
 
+    /// Mutable access to slots — used by tests to force boundary
+    /// conditions (e.g. generation = u32::MAX).
+    #[cfg(test)]
+    pub fn slots_mut(&mut self) -> &mut [CapabilitySlot; CAP_TABLE_SIZE] {
+        &mut self.slots
+    }
+
     /// Install a new capability.  Returns the handle on success,
     /// or None if the table is full.
     pub fn install(
@@ -777,6 +784,10 @@ impl CapabilityTable {
     /// the linked authority.  Returns the AuthorityId that was
     /// removed (so the caller can remove it from the Fabric domain).
     ///
+    /// Fails if the slot generation is `u32::MAX` — advancing it
+    /// would wrap to 0, making an ancient stale handle current again.
+    /// The Kleis model requires `recyclable(g) ≡ g ≠ 2^32 − 1`.
+    ///
     /// Formal: DROP-1, DROP-2.
     pub fn drop_handle(&mut self, handle: CapabilityHandle) -> Option<AuthorityId> {
         let slot = self.slots.get_mut(handle.slot as usize)?;
@@ -790,8 +801,11 @@ impl CapabilityTable {
             CapabilitySlotState::Free => return None,
         };
 
+        // Checked: refuse if advancing the generation would wrap.
+        let next_gen = slot.handle_generation.checked_add(1)?;
+
         slot.state = CapabilitySlotState::Free;
-        slot.handle_generation = slot.handle_generation.wrapping_add(1);
+        slot.handle_generation = next_gen;
 
         Some(auth_id)
     }
