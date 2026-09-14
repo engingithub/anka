@@ -810,6 +810,35 @@ impl CapabilityTable {
         Some(auth_id)
     }
 
+    /// Read-only preflight for drop: checks handle generation,
+    /// occupancy, AND recyclability (generation can advance).
+    ///
+    /// Returns the AuthorityId if all conditions hold, without
+    /// mutating the table.  The kernel uses this to verify
+    /// everything before committing the two-sided removal.
+    ///
+    /// Three conditions checked:
+    ///   1. handle generation matches slot
+    ///   2. slot is Occupied (has an AuthorityId)
+    ///   3. generation is recyclable (g_h ≠ u32::MAX)
+    pub fn preflight_drop(&self, handle: CapabilityHandle) -> Option<AuthorityId> {
+        let slot = self.slots.get(handle.slot as usize)?;
+
+        if slot.handle_generation != handle.generation {
+            return None;
+        }
+
+        let auth_id = match &slot.state {
+            CapabilitySlotState::Occupied { authority_id, .. } => *authority_id,
+            CapabilitySlotState::Free => return None,
+        };
+
+        // Recyclability: generation must be able to advance.
+        slot.handle_generation.checked_add(1)?;
+
+        Some(auth_id)
+    }
+
     /// Number of free slots.
     pub fn free_count(&self) -> usize {
         self.slots.iter()

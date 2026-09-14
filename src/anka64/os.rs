@@ -2618,9 +2618,17 @@ impl Kernel {
     /// Returns: R0 = 0 on success, R0 = 1 on invalid handle.
     ///
     /// Both-or-neither semantics: succeeds only if both the cap-table
-    /// handle AND the backing Fabric authority are removed.  Preflight
-    /// verifies the AuthorityId exists in the domain before mutating
-    /// either structure.
+    /// handle AND the backing Fabric authority are removed.
+    ///
+    /// Preflight (all read-only, no mutations):
+    ///   1. preflight_drop(handle) → AuthorityId
+    ///      (checks generation match, occupancy, recyclability)
+    ///   2. has_authority_id(domain, aid) → true
+    ///
+    /// Only after both pass does the kernel commit both removals.
+    /// No .expect() is needed — drop_handle() is guaranteed to
+    /// succeed because preflight_drop() verified the same conditions
+    /// plus recyclability.
     ///
     /// Formal basis: anka_userspace_driver.kleis DROP-1..4.
     fn handle_cap_drop(&mut self, idx: usize) {
@@ -2630,31 +2638,11 @@ impl Kernel {
         let handle = CapabilityHandle { slot, generation: hgen };
         let domain = self.processes[idx].core.domain;
 
-        // Phase 1: read the AuthorityId from the slot without mutating.
-        let auth_id = match self.processes[idx].cap_table.as_ref() {
-            Some(ct) => {
-                let s = match ct.slots().get(handle.slot as usize) {
-                    Some(s) => s,
-                    None => {
-                        self.processes[idx].core.r[R0 as usize] = 1;
-                        self.resume_from_trap(idx);
-                        return;
-                    }
-                };
-                if s.handle_generation != handle.generation {
-                    self.processes[idx].core.r[R0 as usize] = 1;
-                    self.resume_from_trap(idx);
-                    return;
-                }
-                match &s.state {
-                    CapabilitySlotState::Occupied { authority_id, .. } => *authority_id,
-                    CapabilitySlotState::Free => {
-                        self.processes[idx].core.r[R0 as usize] = 1;
-                        self.resume_from_trap(idx);
-                        return;
-                    }
-                }
-            }
+        // Phase 1: preflight — handle valid, occupied, AND recyclable.
+        let auth_id = match self.processes[idx].cap_table.as_ref()
+            .and_then(|ct| ct.preflight_drop(handle))
+        {
+            Some(aid) => aid,
             None => {
                 self.processes[idx].core.r[R0 as usize] = 1;
                 self.resume_from_trap(idx);
@@ -2669,15 +2657,17 @@ impl Kernel {
             return;
         }
 
-        // Phase 3: atomic removal of both name and authority.
+        // Phase 3: commit both removals.
+        // preflight_drop checked gen match + occupancy + recyclability,
+        // so drop_handle is guaranteed to succeed here.
         let removed_aid = self.processes[idx].cap_table.as_mut()
-            .expect("cap_table verified in phase 1")
+            .expect("cap_table present — preflight passed")
             .drop_handle(handle)
-            .expect("handle verified in phase 1");
+            .expect("drop_handle must succeed — preflight_drop passed");
         debug_assert_eq!(removed_aid, auth_id);
 
         let removed = self.fabric.remove_by_authority_id(domain, removed_aid);
-        debug_assert!(removed, "authority verified in phase 2");
+        debug_assert!(removed, "authority present — phase 2 passed");
 
         self.processes[idx].core.r[R0 as usize] = 0;
         self.resume_from_trap(idx);
@@ -6785,11 +6775,11 @@ mod tests {
         // Force counter to u64::MAX − 1.
         // First alloc: emits AuthorityId(MAX−1), counter → MAX.
         // Second alloc: tries to advance past MAX → None.
-        kernel.fabric.next_authority_id = u64::MAX - 1;
+        kernel.fabric.set_next_authority_id(u64::MAX - 1);
 
         let h = kernel.install_capability(slot, data, 0, 0x4000, Permissions::READ);
         assert!(h.is_some(), "install at u64::MAX - 1 should succeed");
-        assert_eq!(kernel.fabric.next_authority_id, u64::MAX,
+        assert_eq!(kernel.fabric.next_authority_id(), u64::MAX,
             "counter should now be at MAX");
 
         // Second allocation must fail — counter cannot advance past MAX.
@@ -6797,7 +6787,7 @@ mod tests {
         assert!(h2.is_none(), "install after exhaustion must fail");
 
         // Counter must NOT have wrapped to 0.
-        assert_eq!(kernel.fabric.next_authority_id, u64::MAX,
+        assert_eq!(kernel.fabric.next_authority_id(), u64::MAX,
             "counter must not wrap — still at MAX");
 
         // Only one new authority should exist.
@@ -6807,5 +6797,79 @@ mod tests {
             "only the first install should add Fabric authority");
 
         eprintln!("9.2a: AuthorityId exhaustion does not reuse ✓");
+    }
+
+    /// Valid but non-recyclable handle through SYS_CAP_DROP.
+    ///
+    /// The handle is valid (generation matches, slot occupied,
+    /// backing authority exists), but the slot generation is
+    /// u32::MAX so advancing it would wrap.  SYS_CAP_DROP must
+    /// return failure (R0 = 1), NOT panic at an .expect().
+    ///
+    /// The handle must still resolve and the Fabric authority
+    /// must still exist after the failed syscall.
+    #[test]
+    fn p92a_syscall_cap_drop_non_recyclable() {
+        let mut fabric = Fabric::new(0x200000);
+        let (core, dom, text, data, _stack) =
+            create_process(&mut fabric, CPU0, "cap_drop_maxgen",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+
+        let mut kernel = Kernel::new(fabric);
+        let pk = kernel.spawn(core);
+        let slot = pk.slot;
+
+        let h = kernel.install_capability(slot, data, 0, 0x4000, Permissions::READ)
+            .expect("install should succeed");
+
+        // Force the slot generation to u32::MAX.
+        kernel.processes[slot].cap_table.as_mut().unwrap()
+            .slots_mut()[h.slot as usize].handle_generation = u32::MAX;
+
+        let h_max = CapabilityHandle { slot: h.slot, generation: u32::MAX };
+
+        // Verify it resolves before the syscall.
+        assert!(kernel.resolve_capability(slot, h_max).is_some(),
+            "handle at MAX gen should resolve");
+
+        // Guest: CAP_DROP(slot, u32::MAX), save result, EXIT
+        let mut asm = Asm64::new();
+        asm.movi(R1, h_max.slot as i32);
+        // u32::MAX as two's complement i32 is -1.
+        asm.movi(R2, -1_i32);
+        asm.movi(R0, SYS_CAP_DROP as i32);
+        asm.trap(0);
+        asm.mov(R5, R0); // save result
+        asm.movi(R1, 0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        kernel.fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut kernel.fabric, text, dom);
+
+        // Snapshot AFTER seal (which adds an RX entry).
+        let domain = kernel.processes[slot].core.domain;
+        let cap_count_before = kernel.fabric.domains.get(&domain).unwrap()
+            .capabilities.len();
+
+        // Must NOT panic.
+        kernel.run(10000, 10);
+
+        assert!(kernel.processes[slot].exited());
+        assert_eq!(kernel.processes[slot].core.r[R5 as usize], 1,
+            "SYS_CAP_DROP at u32::MAX must return 1 (failure)");
+
+        // Handle still resolves (nothing was mutated).
+        assert!(kernel.resolve_capability(slot, h_max).is_some(),
+            "handle must survive non-recyclable drop failure");
+
+        // Fabric authority unchanged.
+        let cap_count_after = kernel.fabric.domains.get(&domain).unwrap()
+            .capabilities.len();
+        assert_eq!(cap_count_before, cap_count_after,
+            "Fabric authority must survive non-recyclable drop failure");
+
+        eprintln!("9.2a: SYS_CAP_DROP non-recyclable handle ✓");
     }
 }
