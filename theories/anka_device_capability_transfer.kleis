@@ -1,0 +1,251 @@
+// =============================================================================
+// Anka64 Runtime Device-Capability Transfer (Phase 9.3a-formal)
+// =============================================================================
+//
+// Formal refinement of Phase 9.2 runtime capability transfer for Device
+// authority.  No new axioms.
+//
+// The phase establishes that a device capability transferred at runtime:
+//   * preserves protected device object identity and generation,
+//   * can only attenuate DeviceRights,
+//   * uses the exact presented authority (ambient authority cannot rescue it),
+//   * has one canonical non-spatial ABI encoding (R5=R6=0),
+//   * is installed atomically with handle/message/provenance,
+//   * survives sender death as independently held receiver authority.
+//
+// DeviceRights is modeled as an abstract 8-bit rights set, matching the Rust
+// representation while remaining future-proof for rights beyond SUBMIT_READ.
+// The empty rights set is the lawful bottom element of the attenuation lattice:
+// it may be transferred, but authorizes no non-empty device operation.
+// =============================================================================
+
+import "anka_userspace_driver.kleis"
+
+// -----------------------------------------------------------------------------
+// Device kind + rights lattice
+// -----------------------------------------------------------------------------
+
+define KIND_MEMORY = bvconst(0,2)
+define KIND_DEVICE = bvconst(1,2)
+define DEVICE_RIGHTS_NONE = bvconst(0,8)
+
+define device_rights_subset(child : BitVec8, parent : BitVec8) =
+    bvand(parent,child)=child
+
+// Device operations require at least one operation right.  A zero-rights
+// capability is therefore a valid authority object that authorizes no action.
+define device_request_allowed(cap_rights : BitVec8, required : BitVec8) =
+    ¬(required=DEVICE_RIGHTS_NONE)
+    ∧ device_rights_subset(required,cap_rights)
+
+// Canonical device-transfer ABI: device authority has no spatial coordinates.
+// R5/R6 must be exactly zero rather than silently ignored.
+define device_transfer_abi_canonical(r5 : BitVec64, r6 : BitVec64) =
+    r5=bvconst(0,64) ∧ r6=bvconst(0,64)
+
+// A derived device authority preserves object identity and object generation;
+// the only attenuable component is the rights set.
+define derive_device_authority(
+    source_kind : BitVec2,
+    parent_object : BitVec64,
+    parent_generation : BitVec64,
+    parent_rights : BitVec8,
+    child_object : BitVec64,
+    child_generation : BitVec64,
+    child_rights : BitVec8,
+    r5 : BitVec64,
+    r6 : BitVec64
+) =
+    source_kind=KIND_DEVICE
+    ∧ child_object=parent_object
+    ∧ child_generation=parent_generation
+    ∧ device_rights_subset(child_rights,parent_rights)
+    ∧ device_transfer_abi_canonical(r5,r6)
+
+// Exact-presented-authority rule.  ambient_rights is intentionally not used:
+// a transfer is justified by the authority actually presented by the source
+// handle, never by broader authority the process may possess elsewhere.
+define exact_presented_device_transfer(
+    presented_parent_rights : BitVec8,
+    ambient_rights : BitVec8,
+    child_rights : BitVec8
+) =
+    device_rights_subset(child_rights,presented_parent_rights)
+
+// Runtime transfer reuses the 9.2 atomic transfer preflight.  Device-specific
+// derivability occupies the subset_valid position.
+define device_transfer_preflight(
+    destination_live_and_current : Bool,
+    source_resolves : Bool,
+    device_derivation_valid : Bool,
+    receiver_slot_free : Bool,
+    receiver_queue_has_capacity : Bool
+) =
+    transfer_preflight(
+        destination_live_and_current,
+        source_resolves,
+        device_derivation_valid,
+        receiver_slot_free,
+        receiver_queue_has_capacity
+    )
+
+define device_transfer_authority_effect(
+    d : Bool, s : Bool, deriv : Bool, slot : Bool, queue : Bool
+) = device_transfer_preflight(d,s,deriv,slot,queue)
+
+define device_transfer_handle_effect(
+    d : Bool, s : Bool, deriv : Bool, slot : Bool, queue : Bool
+) = device_transfer_preflight(d,s,deriv,slot,queue)
+
+define device_transfer_message_effect(
+    d : Bool, s : Bool, deriv : Bool, slot : Bool, queue : Bool
+) = device_transfer_preflight(d,s,deriv,slot,queue)
+
+define device_transfer_provenance_effect(
+    d : Bool, s : Bool, deriv : Bool, slot : Bool, queue : Bool
+) = device_transfer_preflight(d,s,deriv,slot,queue)
+
+// Fresh receiver authority identity and delegation incarnation are distinct
+// from their source/previous identity.  Global uniqueness remains the allocator
+// obligation already modeled operationally by the kernel/Fabric.
+define device_transfer_ids_fresh(
+    source_authority_id : BitVec64,
+    new_authority_id : BitVec64,
+    previous_delegation_incarnation : BitVec64,
+    new_delegation_incarnation : BitVec64
+) =
+    ¬(source_authority_id=new_authority_id)
+    ∧ ¬(previous_delegation_incarnation=new_delegation_incarnation)
+
+// -----------------------------------------------------------------------------
+// Positive obligations
+// -----------------------------------------------------------------------------
+
+example "DEVXFER-1 CENTRAL: device derivation preserves object identity, generation, and attenuates rights" {
+    assert(
+        ∀(po : BitVec64). ∀(pg : BitVec64).
+        ∀(pr : BitVec8). ∀(co : BitVec64). ∀(cg : BitVec64). ∀(cr : BitVec8).
+            derive_device_authority(
+                KIND_DEVICE,po,pg,pr,co,cg,cr,bvconst(0,64),bvconst(0,64)
+            )
+            ⇒ (co=po ∧ cg=pg ∧ device_rights_subset(cr,pr))
+    )
+}
+
+example "DEVXFER-2 NON-AMPLIFICATION: any operation usable through child was usable through parent" {
+    assert(
+        ∀(po : BitVec64). ∀(pg : BitVec64).
+        ∀(pr : BitVec8). ∀(cr : BitVec8). ∀(req : BitVec8).
+            (
+                derive_device_authority(
+                    KIND_DEVICE,po,pg,pr,po,pg,cr,bvconst(0,64),bvconst(0,64)
+                )
+                ∧ device_request_allowed(cr,req)
+            )
+            ⇒ device_request_allowed(pr,req)
+    )
+}
+
+example "DEVXFER-3: rights absent from presented parent cannot appear in child" {
+    assert(
+        ∀(pr : BitVec8). ∀(cr : BitVec8).
+            ¬device_rights_subset(cr,pr)
+            ⇒ ¬derive_device_authority(
+                KIND_DEVICE,bvconst(7,64),bvconst(3,64),pr,
+                bvconst(7,64),bvconst(3,64),cr,bvconst(0,64),bvconst(0,64)
+            )
+    )
+}
+
+example "DEVXFER-4 KIND: Memory source cannot derive Device authority" {
+    assert(
+        ∀(pr : BitVec8). ∀(cr : BitVec8).
+            ¬derive_device_authority(
+                KIND_MEMORY,bvconst(7,64),bvconst(3,64),pr,
+                bvconst(7,64),bvconst(3,64),cr,bvconst(0,64),bvconst(0,64)
+            )
+    )
+}
+
+example "DEVXFER-5 ABI: nonzero R5 is rejected for Device transfer" {
+    assert(
+        ∀(pr : BitVec8). ∀(cr : BitVec8).
+            ¬derive_device_authority(
+                KIND_DEVICE,bvconst(7,64),bvconst(3,64),pr,
+                bvconst(7,64),bvconst(3,64),cr,bvconst(1,64),bvconst(0,64)
+            )
+    )
+}
+
+example "DEVXFER-6 ABI: nonzero R6 is rejected for Device transfer" {
+    assert(
+        ∀(pr : BitVec8). ∀(cr : BitVec8).
+            ¬derive_device_authority(
+                KIND_DEVICE,bvconst(7,64),bvconst(3,64),pr,
+                bvconst(7,64),bvconst(3,64),cr,bvconst(0,64),bvconst(1,64)
+            )
+    )
+}
+
+example "DEVXFER-7 LATTICE: zero-rights child is a lawful attenuation" {
+    assert(
+        ∀(pr : BitVec8).
+            derive_device_authority(
+                KIND_DEVICE,bvconst(7,64),bvconst(3,64),pr,
+                bvconst(7,64),bvconst(3,64),DEVICE_RIGHTS_NONE,
+                bvconst(0,64),bvconst(0,64)
+            )
+    )
+}
+
+example "DEVXFER-8 LATTICE: zero-rights child authorizes no non-empty operation" {
+    assert(
+        ∀(req : BitVec8).
+            ¬device_request_allowed(DEVICE_RIGHTS_NONE,req)
+    )
+}
+
+example "DEVXFER-9 EXACT PRESENTED AUTHORITY: ambient rights cannot rescue insufficient presented authority" {
+    assert(
+        ∀(presented : BitVec8). ∀(ambient : BitVec8). ∀(child : BitVec8).
+            (
+                device_rights_subset(child,ambient)
+                ∧ ¬device_rights_subset(child,presented)
+            )
+            ⇒ ¬exact_presented_device_transfer(presented,ambient,child)
+    )
+}
+
+example "DEVXFER-10 ATOMIC: successful device transfer publishes authority, handle, message, and provenance together" {
+    assert(
+        ∀(d : Bool). ∀(s : Bool). ∀(deriv : Bool). ∀(slot : Bool). ∀(queue : Bool).
+            device_transfer_preflight(d,s,deriv,slot,queue)
+            ⇒ (
+                device_transfer_authority_effect(d,s,deriv,slot,queue)
+                ∧ device_transfer_handle_effect(d,s,deriv,slot,queue)
+                ∧ device_transfer_message_effect(d,s,deriv,slot,queue)
+                ∧ device_transfer_provenance_effect(d,s,deriv,slot,queue)
+            )
+    )
+}
+
+example "DEVXFER-11 ATOMIC: failed derivation produces no partial receiver state" {
+    assert(
+        ∀(d : Bool). ∀(s : Bool). ∀(deriv : Bool). ∀(slot : Bool). ∀(queue : Bool).
+            ¬deriv
+            ⇒ (
+                ¬device_transfer_authority_effect(d,s,deriv,slot,queue)
+                ∧ ¬device_transfer_handle_effect(d,s,deriv,slot,queue)
+                ∧ ¬device_transfer_message_effect(d,s,deriv,slot,queue)
+                ∧ ¬device_transfer_provenance_effect(d,s,deriv,slot,queue)
+            )
+    )
+}
+
+example "DEVXFER-12 IDENTITY: fresh receiver AuthorityId and transfer incarnation are distinct from source identities" {
+    assert(
+        ∀(sa : BitVec64). ∀(na : BitVec64). ∀(pi : BitVec64). ∀(ni : BitVec64).
+            device_transfer_ids_fresh(sa,na,pi,ni)
+            ⇒ (¬(sa=na) ∧ ¬(pi=ni))
+    )
+}

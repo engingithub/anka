@@ -3271,38 +3271,55 @@ impl Kernel {
         self.resume_from_trap(idx);
     }
 
-    /// SYS_SEND_CAP (syscall 11): Atomic capability transfer.
+    /// SYS_SEND_CAP (syscall 11): Kind-sensitive atomic capability transfer.
     ///
-    /// ABI:
+    /// ABI (common fields):
     ///   R1 = destination process slot (u32)
     ///   R2 = destination process generation (u32)
     ///   R3 = source cap handle slot (u32)
     ///   R4 = source cap handle generation (u32)
-    ///   R5 = child offset (u64, absolute object offset)
-    ///   R6 = child length (u64)
-    ///   R7 = child permissions (u64 → Permissions)
     ///   R8 = value (u64, message payload)
     ///
+    /// ABI (kind-specific, interpreted after source resolution):
+    ///   Memory source:
+    ///     R5 = child offset (u64)
+    ///     R6 = child length (u64)
+    ///     R7 = child permissions (u64 → Permissions)
+    ///   Device source:
+    ///     R5 = 0 (required — device authority is non-spatial)
+    ///     R6 = 0 (required)
+    ///     R7 = child device rights (u64 → DeviceRights)
+    ///
     /// Returns: R0 = 0 on success, R0 = error code on failure.
-    ///   1 = ABI decode failure (malformed register, bad permission bits)
+    ///   1 = ABI decode failure (malformed register, bad rights bits)
     ///   2 = destination not live (not Running, or stale generation, or Zombie)
     ///   3 = source handle does not resolve (three-condition failure)
-    ///   4 = subset/attenuation violation (non-Memory, amplification, bad range, zero length)
+    ///   4 = kind-specific attenuation/shape violation
     ///   5 = receiver has no allocatable cap slot
     ///   6 = receiver mailbox full
     ///   7 = identity space exhausted (AuthorityId or DelegationId)
-    ///   8 = internal error (unexpected commit failure; IDs consumed, no authority leaked)
+    ///   8 = internal error (unexpected commit failure; IDs consumed,
+    ///       no live authority or capability leaked)
+    ///
+    /// Gate ordering (frozen):
+    ///   resolve destination → resolve presented source →
+    ///   kind-specific attenuation → receiver-cap capacity →
+    ///   delivery route → identity availability →
+    ///   derive child authority → install child handle + provenance → deliver.
+    ///
+    /// Formal basis: anka_device_capability_transfer.kleis DEVXFER-1..12.
     fn handle_send_cap(&mut self, idx: usize) {
         let r1 = self.processes[idx].core.r[R1 as usize];
         let r2 = self.processes[idx].core.r[R2 as usize];
         let r3 = self.processes[idx].core.r[R3 as usize];
         let r4 = self.processes[idx].core.r[R4 as usize];
-        let child_offset = self.processes[idx].core.r[R5 as usize];
-        let child_length = self.processes[idx].core.r[R6 as usize];
+        let r5 = self.processes[idx].core.r[R5 as usize];
+        let r6 = self.processes[idx].core.r[R6 as usize];
         let r7 = self.processes[idx].core.r[R7 as usize];
         let value = self.processes[idx].core.r[R8 as usize];
 
-        // ── Gate 0: Checked ABI decode ──
+        // ── Gate 0: Checked ABI decode (common fields only) ──
+        // R5/R6/R7 are NOT decoded here — they are kind-specific.
         let dest_slot_u32 = match u32::try_from(r1) {
             Ok(v) => v, Err(_) => { self.fail_send_cap(idx, 1); return; }
         };
@@ -3318,12 +3335,6 @@ impl Kernel {
         let src_gen = match u32::try_from(r4) {
             Ok(v) => v, Err(_) => { self.fail_send_cap(idx, 1); return; }
         };
-        let child_perms = match Permissions::from_bits_checked(r7) {
-            Some(p) => p, None => { self.fail_send_cap(idx, 1); return; }
-        };
-
-        // child_length > 0
-        if child_length == 0 { self.fail_send_cap(idx, 4); return; }
 
         let dest_key = ProcessKey { slot: dest_slot, generation: dest_gen };
         let src_handle = CapabilityHandle { slot: src_slot, generation: src_gen };
@@ -3340,42 +3351,90 @@ impl Kernel {
             None => { self.fail_send_cap(idx, 3); return; }
         };
 
-        // ── Gate 2b: Source must be Memory (kind-sensitive pattern match) ──
-        let (parent_offset, parent_length, parent_perms) = match &resolved {
-            ResolvedCapability::Memory { offset, length, perms, .. } => (*offset, *length, *perms),
-            ResolvedCapability::Device { .. } => {
-                self.fail_send_cap(idx, 4); return;
+        // ── Gate 2b: Kind-sensitive ABI interpretation ──
+        //
+        // Kind(source) → Interpretation(R5, R6, R7).
+        // R7 is decoded as Permissions or DeviceRights depending on
+        // the resolved source kind — never before.
+        enum PreparedTransfer {
+            Memory {
+                child_offset: u64,
+                child_length: u64,
+                child_perms: Permissions,
+            },
+            Device {
+                child_rights: DeviceRights,
+                presented_object: ObjectId,
+                presented_generation: Generation,
+                presented_rights: DeviceRights,
+            },
+        }
+
+        let prepared = match &resolved {
+            ResolvedCapability::Memory { offset, length, perms, .. } => {
+                let parent_offset = *offset;
+                let parent_length = *length;
+                let parent_perms = *perms;
+
+                let child_perms = match Permissions::from_bits_checked(r7) {
+                    Some(p) => p,
+                    None => { self.fail_send_cap(idx, 1); return; }
+                };
+                let child_offset = r5;
+                let child_length = r6;
+
+                if child_length == 0 {
+                    self.fail_send_cap(idx, 4); return;
+                }
+                if !child_perms.is_subset_of(parent_perms) {
+                    self.fail_send_cap(idx, 4); return;
+                }
+                if child_offset < parent_offset {
+                    self.fail_send_cap(idx, 4); return;
+                }
+                if child_length > parent_length {
+                    self.fail_send_cap(idx, 4); return;
+                }
+                if child_offset - parent_offset > parent_length - child_length {
+                    self.fail_send_cap(idx, 4); return;
+                }
+
+                PreparedTransfer::Memory { child_offset, child_length, child_perms }
+            }
+            ResolvedCapability::Device {
+                object, object_generation, rights, ..
+            } => {
+                // Device authority is non-spatial: R5=R6=0 required.
+                if r5 != 0 { self.fail_send_cap(idx, 4); return; }
+                if r6 != 0 { self.fail_send_cap(idx, 4); return; }
+
+                let child_rights = match DeviceRights::from_bits_checked(r7) {
+                    Some(dr) => dr,
+                    None => { self.fail_send_cap(idx, 1); return; }
+                };
+
+                // Presented-authority attenuation check (Rule 1).
+                if !child_rights.is_subset_of(*rights) {
+                    self.fail_send_cap(idx, 4); return;
+                }
+
+                PreparedTransfer::Device {
+                    child_rights,
+                    presented_object: *object,
+                    presented_generation: *object_generation,
+                    presented_rights: *rights,
+                }
             }
         };
 
-        // ── Gate 3: Subset relationship ──
-        if !child_perms.is_subset_of(parent_perms) {
-            self.fail_send_cap(idx, 4); return;
-        }
-        if child_offset < parent_offset {
-            self.fail_send_cap(idx, 4); return;
-        }
-        if child_length > parent_length {
-            self.fail_send_cap(idx, 4); return;
-        }
-        // Overflow-safe: child_offset - parent_offset <= parent_length - child_length
-        if child_offset - parent_offset > parent_length - child_length {
-            self.fail_send_cap(idx, 4); return;
-        }
-
-        // ── Gate 4: Receiver has an allocatable cap slot ──
+        // ── Gate 3: Receiver has an allocatable cap slot ──
         let dest_allocatable = self.processes[dest_idx].cap_table.as_ref()
             .map_or(0, |ct| ct.allocatable_count());
         if dest_allocatable == 0 {
             self.fail_send_cap(idx, 5); return;
         }
 
-        // ── Gate 5: Delivery routing (Direct / Enqueue / Full) ──
-        //
-        // Compute route BEFORE the atomic commit section.
-        // Direct delivery bypasses mailbox capacity only; cap-slot
-        // and identity checks still apply.  If the route is Full,
-        // fail before any ID allocation.
+        // ── Gate 4: Delivery routing (Direct / Enqueue / Full) ──
         let sender_key = ProcessKey {
             slot: idx,
             generation: self.processes[idx].generation,
@@ -3385,15 +3444,17 @@ impl Kernel {
             self.fail_send_cap(idx, 6); return;
         }
 
-        // ── Gate 6: Fresh identity availability ──
+        // ── Gate 5: Fresh identity availability ──
         if !self.fabric.can_alloc_authority_id() || !self.can_alloc_delegation_id() {
             self.fail_send_cap(idx, 7); return;
         }
 
         // ─── All preflights passed — atomic commit ───
-        // After this point, ID allocation is guaranteed by preflight.
+        //
+        // Preflight failures: ΔAuthorityIdCounter = ΔDelegationIdCounter = 0.
+        // Post-commit error 8: monotonic IDs may be consumed, but
+        // ΔLiveAuthority = ΔLiveCapability = ΔMessage = 0.
 
-        // Allocate identities (guaranteed by gate 6)
         let new_aid = match self.fabric.alloc_authority_id() {
             Some(a) => a,
             None => { self.fail_send_cap(idx, 8); return; }
@@ -3403,56 +3464,102 @@ impl Kernel {
             None => { self.fail_send_cap(idx, 8); return; }
         };
 
-        // Cross-domain derivation from exact AuthorityId
         let src_domain = self.processes[idx].core.domain;
         let dst_domain = self.processes[dest_idx].core.domain;
-        let derived = self.fabric.derive_from_authority_id(
-            src_domain,
-            resolved.authority_id(),
-            dst_domain,
-            child_offset,
-            child_length,
-            child_perms,
-            new_aid,
-        );
-        if derived.is_none() {
-            // Unexpected derivation failure — IDs consumed but no authority leaked
-            self.fail_send_cap(idx, 8);
-            return;
-        }
-        let derived_cap = derived.unwrap();
 
-        // Install in receiver's cap table
-        let obj_gen = Generation(derived_cap.generation().0);
-        let new_handle = self.processes[dest_idx].cap_table.as_mut()
-            .and_then(|ct| ct.install_memory(
-                derived_cap.object(),
-                obj_gen,
-                child_offset,
-                child_length,
-                child_perms,
-                new_aid,
-                Some(new_tid),
-            ));
-        match new_handle {
-            Some(h) => {
-                // Deliver via computed route (capacity preflighted at gate 5)
-                let msg = Message {
-                    from: sender_key,
-                    value,
-                    cap: Some(h),
-                };
-                self.deliver_message(dest_idx, msg, route);
-                self.processes[idx].core.r[R0 as usize] = 0;
+        // Kind-sensitive derivation + installation.
+        let new_handle = match prepared {
+            PreparedTransfer::Memory { child_offset, child_length, child_perms } => {
+                let derived = self.fabric.derive_from_authority_id(
+                    src_domain,
+                    resolved.authority_id(),
+                    dst_domain,
+                    child_offset,
+                    child_length,
+                    child_perms,
+                    new_aid,
+                );
+                match derived {
+                    None => {
+                        self.fail_send_cap(idx, 8);
+                        return;
+                    }
+                    Some(derived_cap) => {
+                        let obj_gen = Generation(derived_cap.generation().0);
+                        let h = self.processes[dest_idx].cap_table.as_mut()
+                            .and_then(|ct| ct.install_memory(
+                                derived_cap.object(),
+                                obj_gen,
+                                child_offset,
+                                child_length,
+                                child_perms,
+                                new_aid,
+                                Some(new_tid),
+                            ));
+                        match h {
+                            Some(handle) => handle,
+                            None => {
+                                self.fabric.remove_by_authority_id(dst_domain, new_aid);
+                                self.fail_send_cap(idx, 8);
+                                return;
+                            }
+                        }
+                    }
+                }
             }
-            None => {
-                // Rollback: remove the derived authority from destination domain
-                self.fabric.remove_by_authority_id(dst_domain, new_aid);
-                // IDs remain consumed but no authority or handle leaked
-                self.fail_send_cap(idx, 8);
-                return;
+            PreparedTransfer::Device {
+                child_rights,
+                presented_object,
+                presented_generation,
+                presented_rights,
+            } => {
+                // Derive with exact presented/backing correspondence (Rule 4).
+                let derived = self.fabric.derive_device_from_authority_id(
+                    src_domain,
+                    resolved.authority_id(),
+                    presented_object,
+                    presented_generation,
+                    presented_rights,
+                    dst_domain,
+                    child_rights,
+                    new_aid,
+                );
+                match derived {
+                    None => {
+                        self.fail_send_cap(idx, 8);
+                        return;
+                    }
+                    Some((obj, obj_gen, derived_rights)) => {
+                        let h = self.processes[dest_idx].cap_table.as_mut()
+                            .and_then(|ct| ct.install_device(
+                                obj,
+                                obj_gen,
+                                derived_rights,
+                                new_aid,
+                                Some(new_tid),
+                            ));
+                        match h {
+                            Some(handle) => handle,
+                            None => {
+                                // Rollback both planes: Fabric authority + cap slot.
+                                self.fabric.remove_by_authority_id(dst_domain, new_aid);
+                                self.fail_send_cap(idx, 8);
+                                return;
+                            }
+                        }
+                    }
+                }
             }
-        }
+        };
+
+        // Deliver via computed route (capacity preflighted at gate 4).
+        let msg = Message {
+            from: sender_key,
+            value,
+            cap: Some(new_handle),
+        };
+        self.deliver_message(dest_idx, msg, route);
+        self.processes[idx].core.r[R0 as usize] = 0;
         self.resume_from_trap(idx);
     }
 
@@ -8880,11 +8987,18 @@ mod tests {
 
     // ─── Non-Memory source rejection ───
 
+    // ─── 9.3a: Device source with nonzero R6 rejects (non-spatial ABI) ───
+    //
+    // Originally this test verified that Device sources were rejected
+    // entirely.  After the 9.3a kind-sensitive refactor, Device sources
+    // are accepted — but the non-spatial ABI requires R5=R6=0.
+    // This test now exercises that R6≠0 on a Device source yields error 4.
+    // No AuthorityId is consumed because rejection is at the preflight gate.
+
     #[test]
-    fn p92b_gate2b_non_memory_rejected() {
+    fn p92b_device_nonzero_r6_rejected() {
         let mut fabric = Fabric::new(0x400000);
 
-        // Sender with a Device object
         let (core_a, dom_a, text_a, _data_a, _stack_a) =
             create_process(&mut fabric, CPU0, "sender_dev",
                 0x000000, 0x010000, 0x020000);
@@ -8900,7 +9014,6 @@ mod tests {
         fabric.write_physical(0x000000, &asm_a.to_bytes());
         seal_code_object(&mut fabric, text_a, dom_a);
 
-        // Receiver
         let (core_b, dom_b, text_b, _data_b, _stack_b) =
             create_process(&mut fabric, AgentId(1), "receiver_dev",
                 0x100000, 0x110000, 0x120000);
@@ -8918,10 +9031,7 @@ mod tests {
         let key_b = kernel.spawn(core_b);
 
         let sender = key_a.slot;
-        let receiver = key_b.slot;
 
-        // Install Device cap in sender's table directly (install_capability
-        // now correctly rejects Device objects via kind boundary).
         let dev_auth_id = kernel.fabric.alloc_authority_id().expect("alloc auth id");
         kernel.fabric.grant_device_with_authority_id(
             kernel.processes[sender].core.domain, dev_obj,
@@ -8933,8 +9043,8 @@ mod tests {
             .expect("install device cap in table");
 
         let receiver_key = ProcessKey {
-            slot: receiver,
-            generation: kernel.processes[receiver].generation,
+            slot: key_b.slot,
+            generation: kernel.processes[key_b.slot].generation,
         };
 
         let aid_before = kernel.fabric.next_authority_id();
@@ -8945,16 +9055,981 @@ mod tests {
         kernel.processes[sender].core.r[R3 as usize] = dev_handle.slot as u64;
         kernel.processes[sender].core.r[R4 as usize] = dev_handle.generation as u64;
         kernel.processes[sender].core.r[R5 as usize] = 0;
-        kernel.processes[sender].core.r[R6 as usize] = 0x1000;
-        kernel.processes[sender].core.r[R7 as usize] = Permissions::READ.0 as u64;
+        kernel.processes[sender].core.r[R6 as usize] = 0x1000; // nonzero → error 4
+        kernel.processes[sender].core.r[R7 as usize] = DeviceRights::SUBMIT_READ.0 as u64;
         kernel.processes[sender].core.r[R8 as usize] = 42;
 
         kernel.handle_send_cap(sender);
         assert_eq!(kernel.processes[sender].core.r[R0 as usize], 4,
-            "Device object transfer must be rejected");
+            "Device transfer with nonzero R6 must be rejected");
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before,
+            "no AuthorityId consumed on preflight failure");
+
+        eprintln!("9.3a: Device nonzero R6 rejected (error 4) ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.3a — Device-Capability Transfer Hostile Suite
+    //
+    // Tests the kind-sensitive SYS_SEND_CAP refactor:
+    //   - Device authority transfer with rights-only attenuation
+    //   - Non-spatial ABI (R5=R6=0 required)
+    //   - Exact-presented-authority enforcement
+    //   - Atomicity / rollback
+    //   - Revocation independence
+    //   - Kind-correct decode ordering
+    //
+    // Formal basis: anka_device_capability_transfer.kleis DEVXFER-1..12.
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Helper: set up a kernel with two processes and a Device object
+    /// with SUBMIT_READ authority installed in the sender's cap table.
+    /// Returns (kernel, sender_slot, receiver_slot, dev_obj, dev_handle).
+    fn dev_transfer_setup() -> (Kernel, usize, usize, ObjectId, CapabilityHandle) {
+        let mut fabric = Fabric::new(0x400000);
+
+        let (core_a, dom_a, text_a, _data_a, _stack_a) =
+            create_process(&mut fabric, CPU0, "dev_sender",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let dev_obj = fabric.alloc_object("device0", 0, ObjectKind::Device);
+        let mut asm_a = Asm64::new();
+        for _ in 0..100 { asm_a.nop(); }
+        asm_a.movi(R1, 0);
+        asm_a.movi(R0, SYS_EXIT as i32);
+        asm_a.trap(0);
+        fabric.write_physical(0x000000, &asm_a.to_bytes());
+        seal_code_object(&mut fabric, text_a, dom_a);
+
+        let (core_b, dom_b, text_b, _data_b, _stack_b) =
+            create_process(&mut fabric, AgentId(1), "dev_receiver",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm_b = Asm64::new();
+        for _ in 0..100 { asm_b.nop(); }
+        asm_b.movi(R1, 0);
+        asm_b.movi(R0, SYS_EXIT as i32);
+        asm_b.trap(0);
+        fabric.write_physical(0x100000, &asm_b.to_bytes());
+        seal_code_object(&mut fabric, text_b, dom_b);
+
+        let mut kernel = Kernel::new(fabric);
+        let key_a = kernel.spawn(core_a);
+        let key_b = kernel.spawn(core_b);
+        let sender = key_a.slot;
+        let receiver = key_b.slot;
+
+        let dev_handle = kernel.install_device_capability(
+            sender, dev_obj, DeviceRights::SUBMIT_READ,
+        ).expect("install device cap for sender");
+
+        (kernel, sender, receiver, dev_obj, dev_handle)
+    }
+
+    /// Helper: execute a SYS_SEND_CAP for a Device source.
+    fn do_dev_send_cap(
+        kernel: &mut Kernel,
+        sender: usize,
+        receiver_slot: usize,
+        receiver_gen: u32,
+        dev_handle: &CapabilityHandle,
+        r5: u64,
+        r6: u64,
+        r7: u64,
+        value: u64,
+    ) -> u64 {
+        kernel.processes[sender].core.r[R0 as usize] = SYS_SEND_CAP;
+        kernel.processes[sender].core.r[R1 as usize] = receiver_slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = receiver_gen as u64;
+        kernel.processes[sender].core.r[R3 as usize] = dev_handle.slot as u64;
+        kernel.processes[sender].core.r[R4 as usize] = dev_handle.generation as u64;
+        kernel.processes[sender].core.r[R5 as usize] = r5;
+        kernel.processes[sender].core.r[R6 as usize] = r6;
+        kernel.processes[sender].core.r[R7 as usize] = r7;
+        kernel.processes[sender].core.r[R8 as usize] = value;
+
+        kernel.handle_send_cap(sender);
+        kernel.processes[sender].core.r[R0 as usize]
+    }
+
+    // ─── 9.3a.3.1: Successful transfer preserves ObjectId, Generation, Kind ───
+
+    #[test]
+    fn p93a_1_device_transfer_preserves_identity() {
+        let (mut kernel, sender, receiver, dev_obj, dev_handle) = dev_transfer_setup();
+        let recv_gen = kernel.processes[receiver].generation;
+
+        let r0 = do_dev_send_cap(
+            &mut kernel, sender, receiver, recv_gen, &dev_handle,
+            0, 0, DeviceRights::SUBMIT_READ.0 as u64, 99,
+        );
+        assert_eq!(r0, 0, "device transfer must succeed");
+
+        // Receiver mailbox has exactly one message with a cap
+        let msg = kernel.mailboxes[receiver].pop().unwrap();
+        assert_eq!(msg.value, 99);
+        let new_handle = msg.cap.unwrap();
+
+        // Resolve the child: must be Device with exact object/generation/rights
+        let resolved = kernel.resolve_capability(receiver, new_handle)
+            .expect("transferred device cap must resolve");
+        assert!(resolved.is_device(), "child must be Device");
+        assert_eq!(resolved.object(), dev_obj, "child object must match parent");
+        assert_eq!(resolved.object_generation(),
+            kernel.fabric.objects.get(&dev_obj).unwrap().generation,
+            "child generation must be current");
+        assert_eq!(resolved.as_device_rights(), DeviceRights::SUBMIT_READ,
+            "child rights must match requested");
+
+        eprintln!("9.3a.3.1: device transfer preserves ObjectId, Generation, Kind ✓");
+    }
+
+    // ─── 9.3a.3.2: Non-amplification: NONE parent → SUBMIT_READ child rejects ───
+
+    #[test]
+    fn p93a_2_non_amplification_none_to_submit_read() {
+        let mut fabric = Fabric::new(0x400000);
+        let (core_a, dom_a, text_a, _, _) =
+            create_process(&mut fabric, CPU0, "sender",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let dev_obj = fabric.alloc_object("device0", 0, ObjectKind::Device);
+        let mut asm = Asm64::new();
+        for _ in 0..100 { asm.nop(); }
+        asm.movi(R1, 0); asm.movi(R0, SYS_EXIT as i32); asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text_a, dom_a);
+
+        let (core_b, dom_b, text_b, _, _) =
+            create_process(&mut fabric, AgentId(1), "receiver",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm_b = Asm64::new();
+        for _ in 0..100 { asm_b.nop(); }
+        asm_b.movi(R1, 0); asm_b.movi(R0, SYS_EXIT as i32); asm_b.trap(0);
+        fabric.write_physical(0x100000, &asm_b.to_bytes());
+        seal_code_object(&mut fabric, text_b, dom_b);
+
+        let mut kernel = Kernel::new(fabric);
+        let key_a = kernel.spawn(core_a);
+        let key_b = kernel.spawn(core_b);
+        let sender = key_a.slot;
+
+        // Install Device cap with NONE rights
+        let dev_handle = kernel.install_device_capability(
+            sender, dev_obj, DeviceRights::NONE,
+        ).expect("install NONE device cap");
+
+        let aid_before = kernel.fabric.next_authority_id();
+        let recv_gen = kernel.processes[key_b.slot].generation;
+
+        let r0 = do_dev_send_cap(
+            &mut kernel, sender, key_b.slot, recv_gen, &dev_handle,
+            0, 0, DeviceRights::SUBMIT_READ.0 as u64, 0,
+        );
+        assert_eq!(r0, 4, "NONE→SUBMIT_READ must be rejected (amplification)");
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before,
+            "no AuthorityId consumed on attenuation failure");
+
+        eprintln!("9.3a.3.2: NONE parent → SUBMIT_READ child rejected ✓");
+    }
+
+    // ─── 9.3a.3.3: SUBMIT_READ → NONE succeeds, child cannot DEV_SUBMIT ───
+
+    #[test]
+    fn p93a_3_submit_read_to_none_succeeds_but_useless() {
+        use super::super::block::{BlockStorage, BlockController};
+
+        // Full setup with block device so we can attempt a real operation.
+        let mut fabric = Fabric::new(0x800000);
+
+        let (core_a, dom_a, text_a, _data_a, _stack_a) =
+            create_process(&mut fabric, CPU0, "sender",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm_a = Asm64::new();
+        for _ in 0..100 { asm_a.nop(); }
+        asm_a.movi(R1, 0); asm_a.movi(R0, SYS_EXIT as i32); asm_a.trap(0);
+        fabric.write_physical(0x000000, &asm_a.to_bytes());
+        seal_code_object(&mut fabric, text_a, dom_a);
+
+        let (core_b, dom_b, text_b, _data_b, _stack_b) =
+            create_process(&mut fabric, AgentId(1), "receiver",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm_b = Asm64::new();
+        for _ in 0..100 { asm_b.nop(); }
+        asm_b.movi(R1, 0); asm_b.movi(R0, SYS_EXIT as i32); asm_b.trap(0);
+        fabric.write_physical(0x100000, &asm_b.to_bytes());
+        seal_code_object(&mut fabric, text_b, dom_b);
+
+        // DMA buffer for the receiver
+        let buf_obj = fabric.alloc_object("buf", 512, ObjectKind::Memory);
+        fabric.place_object(buf_obj, 0x300000);
+        fabric.write_physical(0x300000, &[0x00; 512]);
+
+        // Block storage
+        let mut storage = BlockStorage::new(4, 512);
+        storage.write_block(0, &[0xCC; 512]);
+        let controller = BlockController::new(storage, 3, AgentId(100));
+
+        let mut kernel = Kernel::new(fabric);
+        let key_a = kernel.spawn(core_a);
+        let key_b = kernel.spawn(core_b);
+        let sender = key_a.slot;
+        let receiver = key_b.slot;
+
+        let dev_obj = kernel.install_block_device(controller)
+            .expect("install block device");
+
+        // Sender gets SUBMIT_READ device cap
+        let dev_handle = kernel.install_device_capability(
+            sender, dev_obj, DeviceRights::SUBMIT_READ,
+        ).expect("sender device cap");
+
+        // Transfer SUBMIT_READ → NONE to receiver
+        let recv_gen = kernel.processes[receiver].generation;
+        let r0 = do_dev_send_cap(
+            &mut kernel, sender, receiver, recv_gen, &dev_handle,
+            0, 0, DeviceRights::NONE.0 as u64, 0,
+        );
+        assert_eq!(r0, 0, "SUBMIT_READ→NONE must succeed (valid attenuation)");
+
+        let msg = kernel.mailboxes[receiver].pop().unwrap();
+        let none_handle = msg.cap.unwrap();
+        let resolved = kernel.resolve_capability(receiver, none_handle)
+            .expect("NONE device cap must resolve");
+        assert!(resolved.is_device());
+        assert_eq!(resolved.as_device_rights(), DeviceRights::NONE);
+
+        // Give receiver a valid WRITE buffer cap so the only failure
+        // path is the device-authority gate, not buffer resolution.
+        let recv_dom = kernel.processes[receiver].core.domain;
+        let buf_aid = kernel.fabric.alloc_authority_id().unwrap();
+        kernel.fabric.grant_with_authority_id(
+            recv_dom, buf_obj, 0, 512, Permissions::WRITE, buf_aid,
+        ).expect("grant receiver buffer");
+        let buf_gen = kernel.fabric.objects.get(&buf_obj).unwrap().generation;
+        let buf_handle = kernel.processes[receiver].cap_table.as_mut().unwrap()
+            .install_memory(buf_obj, buf_gen, 0, 512, Permissions::WRITE, buf_aid, None)
+            .expect("install receiver buffer cap");
+
+        // Attempt blocking SYS_DEV_SUBMIT (13) with the NONE device cap.
+        // This must fail at the device-authority gate with error 4.
+        let return_pc = kernel.processes[receiver].core.pc + 4;
+        kernel.processes[receiver].core.event_frames.push(EventFrame {
+            return_pc,
+            return_privilege: Privilege::User,
+            interrupts_were_enabled: true,
+            cause: EventCause::Syscall,
+        });
+        kernel.processes[receiver].core.r[R0 as usize] = SYS_DEV_SUBMIT;
+        kernel.processes[receiver].core.r[R1 as usize] = none_handle.slot as u64;
+        kernel.processes[receiver].core.r[R2 as usize] = none_handle.generation as u64;
+        kernel.processes[receiver].core.r[R3 as usize] = 0; // block 0
+        kernel.processes[receiver].core.r[R4 as usize] = buf_handle.slot as u64;
+        kernel.processes[receiver].core.r[R5 as usize] = buf_handle.generation as u64;
+        kernel.processes[receiver].core.halted = true;
+        kernel.handle_syscall(receiver);
+
+        assert_eq!(kernel.processes[receiver].core.r[R0 as usize], 4,
+            "SYS_DEV_SUBMIT with DeviceRights::NONE must fail at authority gate (error 4)");
+        assert!(kernel.processes[receiver].io_wait.is_none(),
+            "no IoWait installed on rejected submission");
+
+        // Buffer must be unchanged — no DMA occurred
+        let buf_data = kernel.fabric.read_physical(0x300000, 512);
+        assert!(buf_data.iter().all(|&b| b == 0x00),
+            "buffer must remain at baseline — no DMA domain created");
+
+        // Controller must have no in-flight requests
+        assert!(kernel.block_controller.as_ref().unwrap()
+            .in_flight_requests().is_empty(),
+            "controller must not have accepted a request");
+
+        eprintln!("9.3a.3.3: SUBMIT_READ → NONE succeeds; NONE child → SYS_DEV_SUBMIT error 4 ✓");
+    }
+
+    // ─── 9.3a.3.4: R5 != 0 rejects (error 4) ───
+
+    #[test]
+    fn p93a_4_r5_nonzero_rejected() {
+        let (mut kernel, sender, receiver, _, dev_handle) = dev_transfer_setup();
+        let recv_gen = kernel.processes[receiver].generation;
+        let aid_before = kernel.fabric.next_authority_id();
+
+        let r0 = do_dev_send_cap(
+            &mut kernel, sender, receiver, recv_gen, &dev_handle,
+            1, 0, DeviceRights::SUBMIT_READ.0 as u64, 0,
+        );
+        assert_eq!(r0, 4, "nonzero R5 on Device source must yield error 4");
         assert_eq!(kernel.fabric.next_authority_id(), aid_before);
 
-        eprintln!("9.2b: gate 2b non-Memory rejected ✓");
+        eprintln!("9.3a.3.4: R5≠0 rejected ✓");
+    }
+
+    // ─── 9.3a.3.5: R6 != 0 rejects (error 4) ───
+    // (covered by p92b_device_nonzero_r6_rejected above, but explicit here)
+
+    #[test]
+    fn p93a_5_r6_nonzero_rejected() {
+        let (mut kernel, sender, receiver, _, dev_handle) = dev_transfer_setup();
+        let recv_gen = kernel.processes[receiver].generation;
+        let aid_before = kernel.fabric.next_authority_id();
+
+        let r0 = do_dev_send_cap(
+            &mut kernel, sender, receiver, recv_gen, &dev_handle,
+            0, 512, DeviceRights::SUBMIT_READ.0 as u64, 0,
+        );
+        assert_eq!(r0, 4, "nonzero R6 on Device source must yield error 4");
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before);
+
+        eprintln!("9.3a.3.5: R6≠0 rejected ✓");
+    }
+
+    // ─── 9.3a.3.6: Undefined DeviceRights bits reject (error 1) ───
+
+    #[test]
+    fn p93a_6_undefined_device_rights_rejected() {
+        let (mut kernel, sender, receiver, _, dev_handle) = dev_transfer_setup();
+        let recv_gen = kernel.processes[receiver].generation;
+        let aid_before = kernel.fabric.next_authority_id();
+
+        // R7 = 0x02 is valid Permissions::WRITE but undefined DeviceRights.
+        // If R7 were decoded before source-kind resolution, 0x02 would pass
+        // the Permissions decode.  This test protects:
+        //   Kind(source) → Decode(R7).
+        let r0 = do_dev_send_cap(
+            &mut kernel, sender, receiver, recv_gen, &dev_handle,
+            0, 0, 0x02, 0,
+        );
+        assert_eq!(r0, 1, "undefined DeviceRights bit 0x02 must yield error 1");
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before);
+
+        eprintln!("9.3a.3.6: R7=0x02 (WRITE as Permissions, undefined as DeviceRights) → error 1 ✓");
+    }
+
+    // ─── 9.3a.3.7: Fresh AuthorityId + DelegationId ───
+
+    #[test]
+    fn p93a_7_fresh_authority_and_delegation_ids() {
+        let (mut kernel, sender, receiver, _, dev_handle) = dev_transfer_setup();
+        let recv_gen = kernel.processes[receiver].generation;
+
+        let src_resolved = kernel.resolve_capability(sender, dev_handle).unwrap();
+        let src_aid = src_resolved.authority_id();
+        let tid_before = kernel.next_delegation_incarnation();
+
+        let r0 = do_dev_send_cap(
+            &mut kernel, sender, receiver, recv_gen, &dev_handle,
+            0, 0, DeviceRights::SUBMIT_READ.0 as u64, 77,
+        );
+        assert_eq!(r0, 0);
+
+        let msg = kernel.mailboxes[receiver].pop().unwrap();
+        let child_handle = msg.cap.unwrap();
+        let child_resolved = kernel.resolve_capability(receiver, child_handle)
+            .expect("child must resolve");
+        let child_aid = child_resolved.authority_id();
+        let child_tid = child_resolved.delegation_id()
+            .expect("transferred cap must carry DelegationId");
+
+        assert_ne!(child_aid, src_aid,
+            "child AuthorityId must differ from source");
+        assert!(child_tid.incarnation >= tid_before,
+            "DelegationId incarnation must be fresh");
+
+        let sender_key = ProcessKey {
+            slot: sender,
+            generation: kernel.processes[sender].generation,
+        };
+        let receiver_key = ProcessKey {
+            slot: receiver,
+            generation: kernel.processes[receiver].generation,
+        };
+        assert_eq!(child_tid.client, sender_key,
+            "DelegationId.client must be the sender");
+        assert_eq!(child_tid.driver, receiver_key,
+            "DelegationId.driver must be the receiver");
+
+        eprintln!("9.3a.3.7: fresh AuthorityId + DelegationId(sender,receiver) ✓");
+    }
+
+    // ─── 9.3a.3.8: Receiver can use transferred device cap in DEV_SUBMIT ───
+
+    #[test]
+    fn p93a_8_transferred_device_cap_usable_for_dev_submit() {
+        use super::super::block::{BlockStorage, BlockController};
+
+        let mut fabric = Fabric::new(0x800000);
+
+        // Sender (supervisor-like)
+        let (core_sup, dom_sup, text_sup, _data_sup, _stack_sup) =
+            create_process(&mut fabric, CPU0, "supervisor",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm_sup = Asm64::new();
+        for _ in 0..100 { asm_sup.nop(); }
+        asm_sup.movi(R1, 0); asm_sup.movi(R0, SYS_EXIT as i32); asm_sup.trap(0);
+        fabric.write_physical(0x000000, &asm_sup.to_bytes());
+        seal_code_object(&mut fabric, text_sup, dom_sup);
+
+        // Driver
+        let (core_drv, dom_drv, text_drv, _data_drv, _stack_drv) =
+            create_process(&mut fabric, AgentId(1), "driver",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm_drv = Asm64::new();
+        for _ in 0..100 { asm_drv.nop(); }
+        asm_drv.movi(R1, 0); asm_drv.movi(R0, SYS_EXIT as i32); asm_drv.trap(0);
+        fabric.write_physical(0x100000, &asm_drv.to_bytes());
+        seal_code_object(&mut fabric, text_drv, dom_drv);
+
+        // DMA buffer (client-owned, delegated to driver)
+        let buf_obj = fabric.alloc_object("buf", 512, ObjectKind::Memory);
+        fabric.place_object(buf_obj, 0x300000);
+        fabric.grant(dom_sup, buf_obj, 0, 512, Permissions::RW);
+        fabric.write_physical(0x300000, &[0x11; 512]);
+
+        // Block storage
+        let mut storage = BlockStorage::new(4, 512);
+        storage.write_block(0, &[0xAA; 512]);
+        let controller = BlockController::new(storage, 3, AgentId(100));
+
+        let mut kernel = Kernel::new(fabric);
+        let key_sup = kernel.spawn(core_sup);
+        let key_drv = kernel.spawn(core_drv);
+        let sup = key_sup.slot;
+        let drv = key_drv.slot;
+
+        let dev_obj = kernel.install_block_device(controller)
+            .expect("install block device");
+
+        // Supervisor gets root device cap
+        let sup_dev_handle = kernel.install_device_capability(
+            sup, dev_obj, DeviceRights::SUBMIT_READ,
+        ).expect("supervisor device cap");
+
+        // Supervisor transfers device cap to driver via SYS_SEND_CAP
+        let r0 = do_dev_send_cap(
+            &mut kernel, sup, drv, key_drv.generation,
+            &sup_dev_handle,
+            0, 0, DeviceRights::SUBMIT_READ.0 as u64, 42,
+        );
+        assert_eq!(r0, 0, "device cap transfer must succeed");
+
+        // Driver receives and resolves
+        let msg = kernel.mailboxes[drv].pop().unwrap();
+        let drv_dev_handle = msg.cap.unwrap();
+        let drv_dev_resolved = kernel.resolve_capability(drv, drv_dev_handle)
+            .expect("driver device cap must resolve");
+        assert!(drv_dev_resolved.is_device());
+
+        // Driver gets a buffer cap (via direct delegation for simplicity)
+        let drv_dom = kernel.processes[drv].core.domain;
+        let tid = kernel.alloc_delegation_id(key_sup, key_drv).unwrap();
+        let aid_buf = kernel.fabric.alloc_authority_id().unwrap();
+        kernel.fabric.grant_with_authority_id(
+            drv_dom, buf_obj, 0, 512, Permissions::WRITE, aid_buf,
+        ).expect("grant driver buffer");
+        let buf_gen = kernel.fabric.objects.get(&buf_obj).unwrap().generation;
+        let drv_buf_handle = kernel.processes[drv].cap_table.as_mut().unwrap()
+            .install_memory(buf_obj, buf_gen, 0, 512, Permissions::WRITE, aid_buf, Some(tid))
+            .expect("install driver buffer cap");
+
+        // Driver submits I/O using the TRANSFERRED device cap
+        let r0_submit = do_async_submit(
+            &mut kernel, drv, &drv_dev_handle, 0, &drv_buf_handle,
+        );
+        assert_eq!(r0_submit, 0, "DEV_SUBMIT with transferred device cap must succeed");
+
+        // Complete the I/O
+        for _ in 0..20 { kernel.idle_progress_once(); }
+        let buf_data = kernel.fabric.read_physical(0x300000, 512).to_vec();
+        assert!(buf_data.iter().all(|&b| b == 0xAA),
+            "DMA must commit block data through transferred device authority");
+
+        eprintln!("9.3a.3.8: transferred device cap usable for DEV_SUBMIT ✓");
+    }
+
+    // ─── 9.3a.3.9: Sender CAP_DROP does not revoke child ───
+
+    #[test]
+    fn p93a_9_sender_drop_does_not_revoke_child() {
+        let (mut kernel, sender, receiver, dev_obj, dev_handle) = dev_transfer_setup();
+        let recv_gen = kernel.processes[receiver].generation;
+
+        let r0 = do_dev_send_cap(
+            &mut kernel, sender, receiver, recv_gen, &dev_handle,
+            0, 0, DeviceRights::SUBMIT_READ.0 as u64, 0,
+        );
+        assert_eq!(r0, 0);
+
+        let msg = kernel.mailboxes[receiver].pop().unwrap();
+        let child_handle = msg.cap.unwrap();
+
+        // Sender drops their cap
+        kernel.processes[sender].core.r[R0 as usize] = SYS_CAP_DROP;
+        kernel.processes[sender].core.r[R1 as usize] = dev_handle.slot as u64;
+        kernel.processes[sender].core.r[R2 as usize] = dev_handle.generation as u64;
+        kernel.handle_syscall(sender);
+        assert_eq!(kernel.processes[sender].core.r[R0 as usize], 0,
+            "sender CAP_DROP must succeed");
+
+        // Child must still resolve
+        let resolved = kernel.resolve_capability(receiver, child_handle)
+            .expect("child must survive sender CAP_DROP");
+        assert!(resolved.is_device());
+        assert_eq!(resolved.object(), dev_obj);
+        assert_eq!(resolved.as_device_rights(), DeviceRights::SUBMIT_READ);
+
+        eprintln!("9.3a.3.9: sender CAP_DROP does not revoke child ✓");
+    }
+
+    // ─── 9.3a.3.10: Sender death does not revoke child ───
+
+    #[test]
+    fn p93a_10_sender_death_does_not_revoke_child() {
+        let (mut kernel, sender, receiver, dev_obj, dev_handle) = dev_transfer_setup();
+        let recv_gen = kernel.processes[receiver].generation;
+
+        let r0 = do_dev_send_cap(
+            &mut kernel, sender, receiver, recv_gen, &dev_handle,
+            0, 0, DeviceRights::SUBMIT_READ.0 as u64, 0,
+        );
+        assert_eq!(r0, 0);
+
+        let msg = kernel.mailboxes[receiver].pop().unwrap();
+        let child_handle = msg.cap.unwrap();
+
+        // Sender dies and is reclaimed
+        kernel.finish_process(sender, ProcessResult::Exited(0));
+        kernel.reclaim_process(sender);
+
+        // Child must still resolve
+        let resolved = kernel.resolve_capability(receiver, child_handle)
+            .expect("child must survive sender death");
+        assert!(resolved.is_device());
+        assert_eq!(resolved.object(), dev_obj);
+
+        eprintln!("9.3a.3.10: sender death does not revoke child ✓");
+    }
+
+    // ─── 9.3a.3.11: Adversarial kind preservation ───
+    //
+    // Verifies:
+    //   - Device child is in Fabric device_authorities, NOT memory capabilities
+    //   - Device child resolves as ResolvedCapability::Device
+    //   - R7=0x02 with Device source → error 1 (protects decode ordering)
+
+    #[test]
+    fn p93a_11_adversarial_kind_preservation() {
+        let (mut kernel, sender, receiver, dev_obj, dev_handle) = dev_transfer_setup();
+        let recv_gen = kernel.processes[receiver].generation;
+
+        // Successful device transfer
+        let r0 = do_dev_send_cap(
+            &mut kernel, sender, receiver, recv_gen, &dev_handle,
+            0, 0, DeviceRights::SUBMIT_READ.0 as u64, 0,
+        );
+        assert_eq!(r0, 0);
+
+        let msg = kernel.mailboxes[receiver].pop().unwrap();
+        let child_handle = msg.cap.unwrap();
+
+        // Child MUST resolve as Device, not Memory
+        let resolved = kernel.resolve_capability(receiver, child_handle).unwrap();
+        assert!(resolved.is_device(), "child must be Device");
+        assert!(!resolved.is_memory(), "child must not be Memory");
+
+        // Fabric: destination domain must have a device_authorities entry
+        let dst_domain = kernel.processes[receiver].core.domain;
+        let child_aid = resolved.authority_id();
+        let dst_dom = kernel.fabric.domains.get(&dst_domain).unwrap();
+        assert!(
+            dst_dom.device_authorities.iter().any(|e| e.authority_id == child_aid),
+            "child AuthorityId must exist in device_authorities"
+        );
+        assert!(
+            !dst_dom.capabilities.iter().any(|e| e.authority_id == Some(child_aid)),
+            "child AuthorityId must NOT exist in memory capabilities"
+        );
+
+        // The adversarial R7=0x02 test is already covered by p93a_6
+        // (R7=0x02 is Permissions::WRITE but undefined DeviceRights → error 1).
+        // This confirms: Kind(source) → Interpretation(R7).
+
+        eprintln!("9.3a.3.11: Device child in device_authorities, not memory capabilities ✓");
+    }
+
+    // ─── 9.3a.3.12: Receiver-table-full failure is atomic ───
+
+    #[test]
+    fn p93a_12_receiver_table_full_atomic() {
+        let (mut kernel, sender, receiver, _, dev_handle) = dev_transfer_setup();
+        let recv_gen = kernel.processes[receiver].generation;
+
+        // Fill the receiver's cap table
+        let recv_dom = kernel.processes[receiver].core.domain;
+        let dummy_obj = kernel.fabric.alloc_object("dummy_fill", 0x1000, ObjectKind::Memory);
+        kernel.fabric.place_object(dummy_obj, 0x500000);
+        {
+            let ct = kernel.processes[receiver].cap_table.as_mut().unwrap();
+            while ct.allocatable_count() > 0 {
+                let aid = kernel.fabric.alloc_authority_id().unwrap();
+                kernel.fabric.grant_with_authority_id(
+                    recv_dom, dummy_obj, 0, 0x1000, Permissions::READ, aid,
+                ).expect("fill grant");
+                let obj_gen = kernel.fabric.objects.get(&dummy_obj).unwrap().generation;
+                ct.install_memory(dummy_obj, obj_gen, 0, 0x1000, Permissions::READ, aid, None)
+                    .expect("fill cap table");
+            }
+        }
+
+        let aid_before = kernel.fabric.next_authority_id();
+        let tid_before = kernel.next_delegation_incarnation();
+        let dst_dom_state = kernel.fabric.domains.get(&recv_dom).unwrap();
+        let dev_auth_count_before = dst_dom_state.device_authorities.len();
+
+        let r0 = do_dev_send_cap(
+            &mut kernel, sender, receiver, recv_gen, &dev_handle,
+            0, 0, DeviceRights::SUBMIT_READ.0 as u64, 0,
+        );
+        assert_eq!(r0, 5, "receiver table full → error 5");
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before,
+            "no AuthorityId consumed");
+        assert_eq!(kernel.next_delegation_incarnation(), tid_before,
+            "no DelegationId consumed");
+        let dst_dom_state = kernel.fabric.domains.get(&recv_dom).unwrap();
+        assert_eq!(dst_dom_state.device_authorities.len(), dev_auth_count_before,
+            "no device authority created");
+
+        eprintln!("9.3a.3.12: receiver table full → atomic failure (ΔAuthority=ΔHandle=0) ✓");
+    }
+
+    // ─── 9.3a.3.13: Direct delivery for Device cap transfer ───
+
+    #[test]
+    fn p93a_13_direct_delivery_device_transfer() {
+        let (mut kernel, sender, receiver, _, dev_handle) = dev_transfer_setup();
+
+        // Put receiver in RecvWait(sender) via actual SYS_RECV_WAIT
+        let sender_key = ProcessKey {
+            slot: sender,
+            generation: kernel.processes[sender].generation,
+        };
+        setup_recv_wait_call(&mut kernel, receiver, &sender_key);
+        kernel.handle_syscall(receiver);
+        assert!(kernel.processes[receiver].recv_wait.is_some(),
+            "receiver must be in RecvWait(sender)");
+
+        let mailbox_len_before = kernel.mailboxes[receiver].len();
+
+        // Transfer device cap — should use direct delivery
+        let recv_gen = kernel.processes[receiver].generation;
+        let r0 = do_dev_send_cap(
+            &mut kernel, sender, receiver, recv_gen, &dev_handle,
+            0, 0, DeviceRights::SUBMIT_READ.0 as u64, 55,
+        );
+        assert_eq!(r0, 0, "direct delivery device transfer must succeed");
+
+        // RecvWait cleared
+        assert!(kernel.processes[receiver].recv_wait.is_none(),
+            "RecvWait must be cleared by direct delivery");
+
+        // Mailbox unchanged (bypassed)
+        assert_eq!(kernel.mailboxes[receiver].len(), mailbox_len_before,
+            "mailbox must not be used for direct delivery");
+
+        // Verify full ABI in receiver registers
+        assert_eq!(kernel.processes[receiver].core.r[R1 as usize], 2,
+            "R1 = 2 (cap-bearing message)");
+        let cap_slot = kernel.processes[receiver].core.r[R2 as usize] as u32;
+        let cap_gen = kernel.processes[receiver].core.r[R3 as usize] as u32;
+        let from_slot = kernel.processes[receiver].core.r[R4 as usize];
+        let from_gen = kernel.processes[receiver].core.r[R5 as usize];
+        assert_eq!(from_slot, sender as u64, "R4 = sender slot");
+        assert_eq!(from_gen, kernel.processes[sender].generation as u64,
+            "R5 = sender generation");
+
+        // Resolve the directly-delivered Device cap
+        let delivered_handle = CapabilityHandle { slot: cap_slot, generation: cap_gen };
+        let resolved = kernel.resolve_capability(receiver, delivered_handle)
+            .expect("directly delivered device cap must resolve");
+        assert!(resolved.is_device());
+        assert_eq!(resolved.as_device_rights(), DeviceRights::SUBMIT_READ);
+
+        eprintln!("9.3a.3.13: direct delivery for Device cap transfer ✓");
+    }
+
+    // ─── 9.3a.3.14: Fabric derive_device rejects object mismatch ───
+
+    #[test]
+    fn p93a_14_fabric_derive_rejects_object_mismatch() {
+        let mut fabric = Fabric::new(0x400000);
+
+        let dev_a = fabric.alloc_object("dev_a", 0, ObjectKind::Device);
+        let dev_b = fabric.alloc_object("dev_b", 0, ObjectKind::Device);
+        let src_dom = fabric.create_domain();
+        let dst_dom = fabric.create_domain();
+
+        // Install authority for dev_a in src_dom
+        let src_aid = fabric.alloc_authority_id().unwrap();
+        fabric.grant_device_with_authority_id(
+            src_dom, dev_a, DeviceRights::SUBMIT_READ, src_aid,
+        ).expect("grant dev_a");
+
+        let new_aid = fabric.alloc_authority_id().unwrap();
+        let gen_a = fabric.objects.get(&dev_a).unwrap().generation;
+
+        // Present dev_b but backing is dev_a → must reject
+        let result = fabric.derive_device_from_authority_id(
+            src_dom, src_aid,
+            dev_b, gen_a, DeviceRights::SUBMIT_READ,
+            dst_dom, DeviceRights::SUBMIT_READ, new_aid,
+        );
+        assert!(result.is_none(),
+            "presented object != backing object → reject");
+
+        // No authority leaked into destination
+        assert!(fabric.domains.get(&dst_dom).unwrap().device_authorities.is_empty(),
+            "no device authority in destination after rejection");
+
+        eprintln!("9.3a.3.14: Fabric derive rejects object mismatch ✓");
+    }
+
+    // ─── 9.3a.3.15: Delivery-Full (full mailbox, no RecvWait) → error 6 ───
+    //
+    // Forces the Device branch through Gate 4 (DeliveryRoute::Full).
+    // The receiver has cap-table room but a full mailbox and no
+    // matching RecvWait.  Proves:
+    //   DeliveryFull ⇒ nothing minted or published.
+
+    #[test]
+    fn p93a_15_delivery_full_device_atomic() {
+        let (mut kernel, sender, receiver, dev_obj, dev_handle) = dev_transfer_setup();
+        let recv_gen = kernel.processes[receiver].generation;
+
+        // Fill receiver mailbox to MAX_MAILBOX_SIZE
+        let filler_key = ProcessKey { slot: 99, generation: 0 };
+        for i in 0..MAX_MAILBOX_SIZE {
+            kernel.mailboxes[receiver].push(Message {
+                from: filler_key,
+                value: 1000 + i as u64,
+                cap: None,
+            });
+        }
+        assert_eq!(kernel.mailboxes[receiver].len(), MAX_MAILBOX_SIZE);
+
+        // Confirm: no RecvWait on receiver
+        assert!(kernel.processes[receiver].recv_wait.is_none(),
+            "no RecvWait to provide a Direct route");
+        // Confirm: receiver cap table still has room
+        assert!(kernel.processes[receiver].cap_table.as_ref()
+            .map_or(false, |ct| ct.allocatable_count() > 0),
+            "cap table must have room — this test targets mailbox-full only");
+
+        // Snapshot all counters
+        let aid_before = kernel.fabric.next_authority_id();
+        let tid_before = kernel.next_delegation_incarnation();
+        let recv_dom = kernel.processes[receiver].core.domain;
+        let dev_auth_before = kernel.fabric.domains.get(&recv_dom)
+            .unwrap().device_authorities.len();
+        let recv_cap_before = kernel.processes[receiver].cap_table.as_ref()
+            .unwrap().allocatable_count();
+        let mailbox_before = kernel.mailboxes[receiver].len();
+
+        // Attempt Device cap transfer → DeliveryRoute::Full → error 6
+        let r0 = do_dev_send_cap(
+            &mut kernel, sender, receiver, recv_gen, &dev_handle,
+            0, 0, DeviceRights::SUBMIT_READ.0 as u64, 42,
+        );
+        assert_eq!(r0, 6, "full mailbox (no RecvWait) must yield error 6");
+
+        // Nothing minted or published
+        assert_eq!(kernel.fabric.next_authority_id(), aid_before,
+            "ΔAuthorityIdCounter = 0");
+        assert_eq!(kernel.next_delegation_incarnation(), tid_before,
+            "ΔDelegationIdCounter = 0");
+        assert_eq!(kernel.fabric.domains.get(&recv_dom)
+            .unwrap().device_authorities.len(), dev_auth_before,
+            "ΔDeviceAuthorityCount = 0");
+        assert_eq!(kernel.processes[receiver].cap_table.as_ref()
+            .unwrap().allocatable_count(), recv_cap_before,
+            "ΔReceiverCapCount = 0");
+        assert_eq!(kernel.mailboxes[receiver].len(), mailbox_before,
+            "ΔMailbox = 0");
+
+        eprintln!("9.3a.3.15: Delivery-Full for Device cap → error 6, nothing minted ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.3a.4 — Supervisor→Driver Runtime Delegation Integration
+    //
+    // Decisive witness:
+    //   KernelBootstrap → Supervisor → SYS_SEND_CAP → Driver → SYS_DEV_SUBMIT → Device
+    //
+    // The kernel establishes root device authority.  The supervisor holds
+    // it and delegates via ordinary SYS_SEND_CAP to a driver.  The driver
+    // uses the transferred capability for SYS_DEV_SUBMIT.  No special
+    // kernel-to-driver provisioning path exists.
+    //
+    // Proves:
+    //   - RootDeviceAuthority → RuntimeDelegation → DriverOperation
+    //   - SenderDrop ⇏ ChildRevocation
+    //   - DelegationId records provenance (client=supervisor, driver=driver)
+    //   - Authority chain is clean: supervisor AuthorityId ≠ driver AuthorityId
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn p93a_4_supervisor_to_driver_integration() {
+        use super::super::block::{BlockStorage, BlockController};
+
+        let mut fabric = Fabric::new(0x800000);
+
+        // ── Supervisor (slot 0) ──
+        let (core_sup, dom_sup, text_sup, data_sup, _stack_sup) =
+            create_process(&mut fabric, CPU0, "supervisor",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm_sup = Asm64::new();
+        for _ in 0..100 { asm_sup.nop(); }
+        asm_sup.movi(R1, 0); asm_sup.movi(R0, SYS_EXIT as i32); asm_sup.trap(0);
+        fabric.write_physical(0x000000, &asm_sup.to_bytes());
+        seal_code_object(&mut fabric, text_sup, dom_sup);
+
+        // ── Driver (slot 1) ──
+        let (core_drv, dom_drv, text_drv, data_drv, _stack_drv) =
+            create_process(&mut fabric, AgentId(1), "driver",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm_drv = Asm64::new();
+        for _ in 0..100 { asm_drv.nop(); }
+        asm_drv.movi(R1, 0); asm_drv.movi(R0, SYS_EXIT as i32); asm_drv.trap(0);
+        fabric.write_physical(0x100000, &asm_drv.to_bytes());
+        seal_code_object(&mut fabric, text_drv, dom_drv);
+
+        // ── DMA buffer (for driver I/O) ──
+        let buf_obj = fabric.alloc_object("dma_buf", 512, ObjectKind::Memory);
+        fabric.place_object(buf_obj, 0x300000);
+        // Write baseline pattern so we can verify DMA later
+        fabric.write_physical(0x300000, &[0x11; 512]);
+
+        // ── Block storage with known data ──
+        let mut storage = BlockStorage::new(4, 512);
+        storage.write_block(0, &[0xBB; 512]);
+        let controller = BlockController::new(storage, 3, AgentId(100));
+
+        let mut kernel = Kernel::new(fabric);
+        let key_sup = kernel.spawn(core_sup);
+        let key_drv = kernel.spawn(core_drv);
+        let sup = key_sup.slot;
+        let drv = key_drv.slot;
+
+        // ══════════════════════════════════════════════════
+        // Phase 1: Kernel bootstraps root device authority
+        // ══════════════════════════════════════════════════
+        let dev_obj = kernel.install_block_device(controller)
+            .expect("kernel installs block device");
+
+        // Root device cap goes to supervisor — this is the ONLY
+        // kernel-to-process device provisioning.
+        let sup_dev_handle = kernel.install_device_capability(
+            sup, dev_obj, DeviceRights::SUBMIT_READ,
+        ).expect("supervisor root device cap");
+
+        let sup_resolved = kernel.resolve_capability(sup, sup_dev_handle)
+            .expect("supervisor device cap resolves");
+        let sup_aid = sup_resolved.authority_id();
+
+        // ══════════════════════════════════════════════════
+        // Phase 2: Supervisor delegates to driver via SYS_SEND_CAP
+        // ══════════════════════════════════════════════════
+        let r0 = do_dev_send_cap(
+            &mut kernel, sup, drv, key_drv.generation,
+            &sup_dev_handle,
+            0, 0, DeviceRights::SUBMIT_READ.0 as u64, 0xDEAD,
+        );
+        assert_eq!(r0, 0, "supervisor→driver SYS_SEND_CAP must succeed");
+
+        // Driver receives the message
+        let msg = kernel.mailboxes[drv].pop()
+            .expect("driver must receive the cap-bearing message");
+        assert_eq!(msg.value, 0xDEAD);
+        let drv_dev_handle = msg.cap
+            .expect("message must carry a device capability");
+
+        // Verify delegation identity chain
+        let drv_resolved = kernel.resolve_capability(drv, drv_dev_handle)
+            .expect("driver device cap resolves");
+        assert!(drv_resolved.is_device());
+        assert_eq!(drv_resolved.object(), dev_obj);
+        assert_eq!(drv_resolved.as_device_rights(), DeviceRights::SUBMIT_READ);
+
+        let drv_aid = drv_resolved.authority_id();
+        assert_ne!(drv_aid, sup_aid,
+            "driver AuthorityId must differ from supervisor's");
+
+        let drv_tid = drv_resolved.delegation_id()
+            .expect("transferred cap must carry DelegationId");
+        assert_eq!(drv_tid.client, key_sup,
+            "DelegationId.client = supervisor");
+        assert_eq!(drv_tid.driver, key_drv,
+            "DelegationId.driver = driver");
+
+        // ══════════════════════════════════════════════════
+        // Phase 3: Supervisor drops its cap (not required for driver)
+        // ══════════════════════════════════════════════════
+        kernel.processes[sup].core.r[R0 as usize] = SYS_CAP_DROP;
+        kernel.processes[sup].core.r[R1 as usize] = sup_dev_handle.slot as u64;
+        kernel.processes[sup].core.r[R2 as usize] = sup_dev_handle.generation as u64;
+        kernel.handle_syscall(sup);
+        assert_eq!(kernel.processes[sup].core.r[R0 as usize], 0,
+            "supervisor drop must succeed");
+
+        // Driver cap must survive
+        assert!(kernel.resolve_capability(drv, drv_dev_handle).is_some(),
+            "driver cap must survive supervisor drop");
+
+        // ══════════════════════════════════════════════════
+        // Phase 4: Driver gets buffer authority and does DEV_SUBMIT
+        // ══════════════════════════════════════════════════
+        let drv_dom = kernel.processes[drv].core.domain;
+        let tid_buf = kernel.alloc_delegation_id(key_sup, key_drv).unwrap();
+        let aid_buf = kernel.fabric.alloc_authority_id().unwrap();
+        kernel.fabric.grant_with_authority_id(
+            drv_dom, buf_obj, 0, 512, Permissions::WRITE, aid_buf,
+        ).expect("grant driver buffer authority");
+        let buf_gen = kernel.fabric.objects.get(&buf_obj).unwrap().generation;
+        let drv_buf_handle = kernel.processes[drv].cap_table.as_mut().unwrap()
+            .install_memory(buf_obj, buf_gen, 0, 512, Permissions::WRITE, aid_buf, Some(tid_buf))
+            .expect("install driver buffer cap");
+
+        // Execute DEV_SUBMIT using the TRANSFERRED device cap
+        let r0_submit = do_async_submit(
+            &mut kernel, drv, &drv_dev_handle, 0, &drv_buf_handle,
+        );
+        assert_eq!(r0_submit, 0,
+            "DEV_SUBMIT with runtime-delegated device cap must succeed");
+
+        // ══════════════════════════════════════════════════
+        // Phase 5: Complete I/O and verify DMA committed
+        // ══════════════════════════════════════════════════
+        for _ in 0..20 { kernel.idle_progress_once(); }
+        let buf_data = kernel.fabric.read_physical(0x300000, 512).to_vec();
+        assert!(buf_data.iter().all(|&b| b == 0xBB),
+            "DMA must commit block[0] data (0xBB) through runtime-delegated authority");
+
+        // Verify baseline was overwritten (not unchanged)
+        assert_ne!(&[0x11u8; 512][..], &buf_data[..],
+            "buffer must differ from baseline");
+
+        eprintln!("9.3a.4: Supervisor→Driver runtime delegation integration ✓");
+        eprintln!("  KernelBootstrap → Supervisor → SYS_SEND_CAP → Driver → SYS_DEV_SUBMIT");
+        eprintln!("  Authority chain: sup_aid={} → drv_aid={}", sup_aid, drv_aid);
+        eprintln!("  DelegationId: client={}, driver={}", drv_tid.client, drv_tid.driver);
+        eprintln!("  Supervisor drop: child survived");
+        eprintln!("  DMA verified: 512 bytes of 0xBB committed to buffer");
     }
 
     // ─── DelegationId: fresh per transfer, not inherited ───
