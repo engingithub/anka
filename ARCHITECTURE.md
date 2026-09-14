@@ -1724,6 +1724,36 @@ The positive Kleis gate is 45/45 in `anka_blocking_receive.kleis` (63 functions,
 
 690/690 tests; 29 instructions.
 
+### Stage 27 -- Multi-request pair quiescence (Phase 9.2f)
+
+Phase 9.2f extended the single-request quiescence gate from 9.2e to handle multiple concurrent I/O requests per (client, driver) pair.
+
+Two new syscalls: `SYS_DEV_SUBMIT_ASYNC` (15) for non-blocking I/O submission returning a `RequestHandle`, and `SYS_DEV_WAIT` (16) for blocking on a specific handle.  The shared preflight (`preflight_dev_submit(&self)`) is side-effect free — it cannot create DMA domains or consume authority IDs — making failure atomicity trivially provable.
+
+The per-process async request ledger (`async_requests: Vec<AsyncDeviceRequest>`, bounded by `MAX_ASYNC_REQUESTS = 16`) is deliberately larger than the two hardware controller slots, separating software completion-record lifetime from hardware slot availability.  This separation is proved by hostile test 3, where a completion for handle `h_A = (slot=0, gen=g)` remains retrievable via `DEV_WAIT` even while the same controller slot is occupied by a new request `h_B = (slot=0, gen=g+1)`.
+
+Completion drain routing applies two guards before touching any process state: exact-incarnation match and Running-state check.  A completion belonging to a dead or recycled incarnation is consumed at the controller level (making the request terminal for pair-quiescence purposes) but produces zero software mutation — no register, EventFrame, IoWait, or ledger changes.
+
+The quantitative predicate `nonterminal_pair_request_count(C, D)` replaces the Boolean `has_nonterminal_pair_request` (which is now defined as `count != 0`).  The decisive pair-quiescence test witnesses the full count sequence `2 → [1] → 0`, with the client explicitly remaining in `RecvWait(D)` at counts 2 and 1, and receiving `PeerDied(D)` only at count 0.  At the intermediate count=1 state, exactly one DMA has committed while the other target retains its baseline value — proving the intermediate state corresponds to a real mixed terminal/nonterminal machine configuration, not just a counter transition.
+
+A four-point domain-count witness (D₀ → D₀+2 → D₀+1 → D₀) proves that two request-local DMA domains were actually created, that one was destroyed when its request terminated, and that both were destroyed by PeerDied.  A two-buffer causal barrier confirms `(A₀,B₀) ≠ (A_P,B_P) = (A_∞,B_∞)` — both DMA mutations are frozen after PeerDied.
+
+The recycled-driver concurrency adversary (`p92f8`) proves the strongest form of per-generation isolation: `PeerDied(C, D_g)` is delivered when `PairCount(C, D_g) = 0` even though `PairCount(C, D_{g+1}) = 1` and the machine has active autonomous I/O.  This demonstrates that pair quiescence is generation-scoped, not global.
+
+The final PeerDied predicate:
+
+```text
+PeerDied(C, D_g) ⟺ Dead(D_g) ∧ PairCount(C, D_g) = 0
+```
+
+Controller-slot reuse, unread software completions, and D_{g+1}'s active work are all irrelevant to that predicate.
+
+The positive Kleis gate is 11/11 in `anka_multi_request_quiescence.kleis` (imports `anka_blocking_receive.kleis`).  A falsifiability companion rejects 5/5 forbidden claims.  The hostile suite contains 10 p92f_ tests.
+
+700/700 tests; 29 instructions.
+
+With multi-request pair quiescence closed, the 9.2 umbrella is complete: capabilities (9.2a) → device authority (9.2b–c) → composition (9.2d) → blocking IPC (9.2e) → multi-request quiescence (9.2f).  The user-space driver system now handles concurrent I/O with generation-scoped lifecycle isolation, formally verified from Kleis theory through hostile Rust tests.
+
 The project continues to evolve by the same rule that produced its strongest results:
 
 ```text

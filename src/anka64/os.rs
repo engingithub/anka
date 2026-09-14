@@ -15070,4 +15070,267 @@ mod tests {
         eprintln!("  DomainCount: D_0={} → D_0+2={} → D_0+1={} → D_0={}",
             d_0, d_2, d_1, d_p);
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.2f.8 — Recycled-Driver Concurrency Adversary
+    //
+    // D_g creates one request attributed to (C, D_g), then dies.
+    // D_{g+1} spawns in the same slot and creates one request
+    // attributed to (C, D_{g+1}).
+    //
+    // Decisive observation:
+    //   PairCount(C, D_g) = 1,  PairCount(C, D_{g+1}) = 1
+    //
+    // Then D_g's request terminates while D_{g+1}'s remains active:
+    //   PairCount(C, D_g) = 0,  PairCount(C, D_{g+1}) = 1
+    //
+    // At that exact state:
+    //   PeerDied(C, D_g) must be delivered
+    //   despite global AutonomousIO == true.
+    //
+    // This proves:
+    //   PeerDied(C, D_g) => not AutonomousWorkAttributedTo(C, D_g),
+    //   NOT "the machine has no autonomous work whatsoever."
+    //
+    // Formal basis: anka_multi_request_quiescence.kleis MULTI92F-6,7.
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn p92f8_recycled_driver_concurrency_adversary() {
+        use super::super::block::{BlockStorage, BlockController, BlockRequest, SubmitResult};
+
+        let mut fabric = Fabric::new(0x800000);
+
+        // ── Client C (slot 0) ──
+        let (core_c, dom_c, text_c, data_c, _stack_c) =
+            create_process(&mut fabric, CPU0, "client",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm_c = Asm64::new();
+        for _ in 0..100 { asm_c.nop(); }
+        asm_c.movi(R1, 0);
+        asm_c.movi(R0, SYS_EXIT as i32);
+        asm_c.trap(0);
+        fabric.write_physical(0x000000, &asm_c.to_bytes());
+        seal_code_object(&mut fabric, text_c, dom_c);
+
+        // ── Driver D_g (slot 1) ──
+        let (core_dg, dom_dg, text_dg, _data_dg, _stack_dg) =
+            create_process(&mut fabric, AgentId(1), "driver_g",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm_dg = Asm64::new();
+        for _ in 0..100 { asm_dg.nop(); }
+        asm_dg.movi(R1, 0);
+        asm_dg.movi(R0, SYS_EXIT as i32);
+        asm_dg.trap(0);
+        fabric.write_physical(0x100000, &asm_dg.to_bytes());
+        seal_code_object(&mut fabric, text_dg, dom_dg);
+
+        // ── DMA target buffer (owned by client) ──
+        let buf_obj = fabric.alloc_object("buf_dg", 512, ObjectKind::Memory);
+        fabric.place_object(buf_obj, 0x300000);
+        fabric.grant(dom_c, buf_obj, 0, 512, Permissions::RW);
+        fabric.write_physical(0x300000, &[0x11; 512]);
+
+        // ── Block storage: latency 5 ──
+        let mut storage = BlockStorage::new(4, 512);
+        storage.write_block(0, &[0xAA; 512]);
+        storage.write_block(1, &[0xBB; 512]);
+        let controller = BlockController::new(storage, 5, AgentId(100));
+
+        // ── Kernel + spawn ──
+        let mut kernel = Kernel::new(fabric);
+        let key_c = kernel.spawn(core_c);
+        let key_dg = kernel.spawn(core_dg);
+        let c = key_c.slot;
+        let d = key_dg.slot;
+
+        let dev_obj = kernel.install_block_device(controller)
+            .expect("install block device");
+
+        // ── D_g's device cap ──
+        let dev_handle_g = kernel.install_device_capability(
+            d, dev_obj, DeviceRights::SUBMIT_READ,
+        ).expect("device cap for D_g");
+
+        // ── D_g's buffer cap with delegation_id(C, D_g) ──
+        let tid_g = kernel.alloc_delegation_id(key_c, key_dg)
+            .expect("delegation ID for D_g");
+        let aid_g = kernel.fabric.alloc_authority_id()
+            .expect("authority ID for D_g");
+        let dg_dom = kernel.processes[d].core.domain;
+        kernel.fabric.grant_with_authority_id(
+            dg_dom, buf_obj, 0, 512, Permissions::WRITE, aid_g,
+        ).expect("grant D_g authority");
+        let gen_buf = kernel.fabric.objects.get(&buf_obj).unwrap().generation;
+        let buf_handle_g = kernel.processes[d].cap_table.as_mut().unwrap()
+            .install_memory(
+                buf_obj, gen_buf, 0, 512, Permissions::WRITE, aid_g, Some(tid_g),
+            ).expect("install D_g buffer cap");
+
+        // ── D_g submits async request (block 0 → buf) ──
+        let r0_g = do_async_submit(&mut kernel, d, &dev_handle_g, 0, &buf_handle_g);
+        assert_eq!(r0_g, 0, "D_g async submit must succeed");
+
+        // Give D_g a head start: tick 3 times (of latency 5).
+        // D_g is now at remaining_ticks=2 when D_{g+1} later submits at
+        // remaining_ticks=5, ensuring D_g completes first.
+        kernel.tick_devices(d);
+        kernel.tick_devices(d);
+        kernel.tick_devices(d);
+
+        assert_eq!(
+            kernel.block_controller.as_ref().unwrap()
+                .nonterminal_pair_request_count(&key_c, &key_dg),
+            1,
+            "PairCount(C, D_g) = 1"
+        );
+
+        // ── C enters RECV_WAIT(D_g) ──
+        let return_pc_c = kernel.processes[c].core.pc + 4;
+        kernel.processes[c].core.event_frames.push(EventFrame {
+            return_pc: return_pc_c,
+            return_privilege: Privilege::User,
+            interrupts_were_enabled: true,
+            cause: EventCause::Syscall,
+        });
+        setup_recv_wait_call(&mut kernel, c, &key_dg);
+        kernel.handle_syscall(c);
+        assert!(kernel.processes[c].recv_wait.is_some(),
+            "C must block on RecvWait(D_g)");
+
+        // ── Kill D_g ──
+        kernel.finish_process(d, ProcessResult::Exited(0));
+        assert_eq!(kernel.processes[d].state, ProcessState::Zombie);
+
+        // D_g's request is still nonterminal — PeerDied deferred
+        kernel.reevaluate_recv_waits();
+        assert!(kernel.processes[c].recv_wait.is_some(),
+            "C must remain in RecvWait — D_g request nonterminal");
+
+        // ── Reclaim D_g's slot → Free(g+1) ──
+        kernel.reclaim_process(d);
+        assert_eq!(kernel.processes[d].state, ProcessState::Free);
+        let new_gen = kernel.processes[d].generation;
+        assert_eq!(new_gen, key_dg.generation + 1);
+
+        // D_g's request is STILL nonterminal at the controller level
+        assert_eq!(
+            kernel.block_controller.as_ref().unwrap()
+                .nonterminal_pair_request_count(&key_c, &key_dg),
+            1,
+            "PairCount(C, D_g) must still be 1 after reclaim"
+        );
+
+        // ── Spawn D_{g+1} in the same slot ──
+        let (core_dg1, dom_dg1, text_dg1, _data_dg1, _stack_dg1) =
+            create_process(&mut kernel.fabric, AgentId(2), "driver_g1",
+                0x200000, 0x210000, 0x220000);
+        install_trap_handler(&mut kernel.fabric, 0x200000, 0x4000);
+        let mut asm_dg1 = Asm64::new();
+        for _ in 0..100 { asm_dg1.nop(); }
+        asm_dg1.movi(R1, 0);
+        asm_dg1.movi(R0, SYS_EXIT as i32);
+        asm_dg1.trap(0);
+        kernel.fabric.write_physical(0x200000, &asm_dg1.to_bytes());
+        seal_code_object(&mut kernel.fabric, text_dg1, dom_dg1);
+        let key_dg1 = kernel.spawn(core_dg1);
+        assert_eq!(key_dg1.slot, d, "D_{{g+1}} must reuse D_g's slot");
+        assert_eq!(key_dg1.generation, key_dg.generation + 1);
+
+        // ── D_{g+1}'s device cap ──
+        let dev_handle_g1 = kernel.install_device_capability(
+            d, dev_obj, DeviceRights::SUBMIT_READ,
+        ).expect("device cap for D_{{g+1}}");
+
+        // ── D_{g+1}'s buffer (separate object) with delegation_id(C, D_{g+1}) ──
+        let buf_obj_g1 = kernel.fabric.alloc_object("buf_dg1", 512, ObjectKind::Memory);
+        kernel.fabric.place_object(buf_obj_g1, 0x320000);
+        kernel.fabric.grant(dom_c, buf_obj_g1, 0, 512, Permissions::RW);
+        kernel.fabric.write_physical(0x320000, &[0x33; 512]);
+
+        let tid_g1 = kernel.alloc_delegation_id(key_c, key_dg1)
+            .expect("delegation ID for D_{{g+1}}");
+        let aid_g1 = kernel.fabric.alloc_authority_id()
+            .expect("authority ID for D_{{g+1}}");
+        let dg1_dom = kernel.processes[d].core.domain;
+        kernel.fabric.grant_with_authority_id(
+            dg1_dom, buf_obj_g1, 0, 512, Permissions::WRITE, aid_g1,
+        ).expect("grant D_{{g+1}} authority");
+        let gen_buf_g1 = kernel.fabric.objects.get(&buf_obj_g1).unwrap().generation;
+        let buf_handle_g1 = kernel.processes[d].cap_table.as_mut().unwrap()
+            .install_memory(
+                buf_obj_g1, gen_buf_g1, 0, 512, Permissions::WRITE, aid_g1, Some(tid_g1),
+            ).expect("install D_{{g+1}} buffer cap");
+
+        // ── D_{g+1} submits async request (block 1 → buf_g1) ──
+        let r0_g1 = do_async_submit(&mut kernel, d, &dev_handle_g1, 1, &buf_handle_g1);
+        assert_eq!(r0_g1, 0, "D_{{g+1}} async submit must succeed");
+
+        // ── DECISIVE STATE 1: both counters simultaneously ──
+        let count_g = kernel.block_controller.as_ref().unwrap()
+            .nonterminal_pair_request_count(&key_c, &key_dg);
+        let count_g1 = kernel.block_controller.as_ref().unwrap()
+            .nonterminal_pair_request_count(&key_c, &key_dg1);
+        assert_eq!(count_g, 1, "PairCount(C, D_g) = 1");
+        assert_eq!(count_g1, 1, "PairCount(C, D_{{g+1}}) = 1");
+        assert!(kernel.has_autonomous_io(),
+            "global autonomous I/O must be true (two active requests)");
+        eprintln!("  State 1: PairCount(C,D_g)={}, PairCount(C,D_{{g+1}})={}", count_g, count_g1);
+
+        // C is still in RecvWait(D_g)
+        assert!(kernel.processes[c].recv_wait.is_some(),
+            "C must remain in RecvWait(D_g)");
+        let rw_peer = kernel.processes[c].recv_wait.as_ref().unwrap().peer;
+        assert_eq!(rw_peer.slot, key_dg.slot);
+        assert_eq!(rw_peer.generation, key_dg.generation,
+            "C must be waiting for D_g, not D_{{g+1}}");
+
+        // ── Idle progress until D_g's request terminates ──
+        // D_g's request was submitted first and has a head start.
+        // We need D_g's to finish while D_{g+1}'s is still active.
+        let mut ticks = 0;
+        loop {
+            kernel.idle_progress_once();
+            ticks += 1;
+            let cg = kernel.block_controller.as_ref().unwrap()
+                .nonterminal_pair_request_count(&key_c, &key_dg);
+            if cg == 0 {
+                break;
+            }
+            assert!(ticks < 50, "D_g request should terminate within 50 ticks");
+        }
+
+        // ── DECISIVE STATE 2: D_g quiescent, D_{g+1} active ──
+        let count_g_final = kernel.block_controller.as_ref().unwrap()
+            .nonterminal_pair_request_count(&key_c, &key_dg);
+        let count_g1_at_peer_died = kernel.block_controller.as_ref().unwrap()
+            .nonterminal_pair_request_count(&key_c, &key_dg1);
+        assert_eq!(count_g_final, 0, "PairCount(C, D_g) = 0");
+        assert_eq!(count_g1_at_peer_died, 1,
+            "PairCount(C, D_{{g+1}}) must still be 1");
+
+        // Global autonomous I/O is TRUE because D_{g+1}'s request is active
+        assert!(kernel.has_autonomous_io(),
+            "global autonomous I/O must be true (D_{{g+1}} request active)");
+
+        // But PeerDied(C, D_g) MUST have been delivered
+        // (idle_progress_once calls reevaluate_recv_waits)
+        assert!(kernel.processes[c].recv_wait.is_none(),
+            "PeerDied(C, D_g) must be delivered despite global autonomous I/O");
+        assert_eq!(kernel.processes[c].core.r[R1 as usize], 3,
+            "R1 = tag 3 (PeerDied)");
+        assert_eq!(kernel.processes[c].core.r[R4 as usize], key_dg.slot as u64,
+            "R4 = dead peer slot (D_g)");
+        assert_eq!(kernel.processes[c].core.r[R5 as usize], key_dg.generation as u64,
+            "R5 = dead peer generation (D_g)");
+
+        eprintln!("  State 2: PairCount(C,D_g)=0, PairCount(C,D_{{g+1}})=1");
+        eprintln!("  PeerDied(C,D_g) delivered despite AutonomousIO=true");
+        eprintln!("  D_g request terminated after {} idle ticks", ticks);
+        eprintln!("9.2f.8: RECYCLED-DRIVER CONCURRENCY ADVERSARY ✓");
+        eprintln!("  PeerDied(C,D_g) => not AutonomousWork(C,D_g)");
+        eprintln!("  NOT => not AutonomousIO_global");
+    }
 }

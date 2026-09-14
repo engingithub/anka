@@ -2047,3 +2047,128 @@ This establishes the causal barrier:
     block data committed.  Post-notification memory frozen.
 
 690/690 tests; 29 instructions.  Phase 9.2e is complete.
+
+## DN-20: Multi-Request Pair Quiescence (Phase 9.2f)
+
+Phase 9.2e's quiescence gate was per-pair but implicitly single-request:
+the test witness was always one-request-goes-terminal → PeerDied.
+
+Phase 9.2f extends this to multiple concurrent requests per (C,D) pair,
+proving that PeerDied is gated on the terminality of *all* accepted
+requests attributed to that pair, not just one.
+
+### Three-lifetime separation
+
+The architecture enforces three genuinely independent lifetimes:
+
+  1. **Accepted hardware request lifetime** — begins at controller
+     acceptance, ends when the slot reaches Completed/Free.
+  2. **Process incarnation lifetime** — begins at spawn(), ends at
+     finish_process() (Zombie) and reclaim_process() (Free/Retired).
+  3. **Software completion-record lifetime** — begins when
+     `drain_block_completions()` fills the per-process async ledger
+     entry, ends when `SYS_DEV_WAIT` reaps it or reclaim clears it.
+
+These three lifetimes can overlap arbitrarily:
+
+  - A completion record can outlive the hardware slot it came from
+    (the slot is reused with a new generation while the old completion
+    remains in the ledger).
+  - A hardware request can outlive its submitting process (the driver
+    dies while DMA is in flight; the request becomes terminal
+    autonomously).
+  - A completion record can outlive its process incarnation (but only
+    until `reclaim_process()` clears it — the new incarnation starts
+    with an empty ledger).
+
+### Async submission ABI
+
+Two new syscalls:
+
+  - `SYS_DEV_SUBMIT_ASYNC` (15): same preflight as `SYS_DEV_SUBMIT`,
+    returns immediately with `R0=0, R1=handle.slot, R2=handle.generation`.
+    Records an `AsyncDeviceRequest` in the per-process ledger.
+  - `SYS_DEV_WAIT` (16): wait for a specific `RequestHandle`.
+    Immediate return if completed; blocks via IoWait if pending;
+    error 1 for stale/unknown; error 2 if already in IoWait.
+
+Transactional order (frozen):
+
+    io_wait gate → pure preflight → ledger capacity →
+    controller capacity → mint DMA → submit → publish
+
+`preflight_dev_submit(&self)` is side-effect free: no DMA domains
+created, no authority IDs consumed.  Failure at any gate implies
+zero side effects on controller, ledger, domains, and authority IDs.
+
+### Completion drain routing
+
+Two-guard routing in `drain_block_completions()`:
+
+  1. Exact-incarnation match: `current_process_key(slot) == requester`.
+  2. Process must be Running.
+
+A dead or recycled incarnation's completion is consumed at the
+controller level (making the request terminal for pair-quiescence)
+but does not mutate registers, EventFrames, io_wait, or async ledger.
+
+Within the exact Running incarnation:
+
+    IoWait(h) ∧ Ledger(h) ⇒ wake caller AND consume Ledger(h).
+
+### Quantitative pair quiescence
+
+`nonterminal_pair_request_count(C, D)` replaces the old Boolean
+predicate.  `has_nonterminal_pair_request(C, D) ≡ count ≠ 0`.
+
+The decisive requirement is:
+
+    PairCount(C,D): 2 → [1] → 0
+
+with RecvWait(C,D) explicitly surviving at counts 2 and 1, and
+PeerDied delivered only at count 0.
+
+### PeerDied predicate (final form)
+
+    PeerDied(C, D_g) ⟺ Dead(D_g) ∧ PairCount(C, D_g) = 0
+
+Controller-slot reuse, unread software completions, and D_{g+1}'s
+active work are all irrelevant to this predicate.
+
+### Formal basis
+
+- `theories/anka_multi_request_quiescence.kleis`:
+  11/11 positive claims verified; imports `anka_blocking_receive.kleis`.
+
+- `theories/anka_multi_request_quiescence_false_witnesses.kleis`:
+  0/5 claims pass — all five deliberately false statements rejected.
+
+### Hostile coverage (10 p92f_ tests)
+
+  1. Two async submissions produce distinct full handles.
+  2. Completion(h_A) cannot wake IoWait(h_B) — staggered decisive state.
+  3. Completed A reapable after controller slot reused by B
+     (RequestHandle lifetime < CompletionRecord lifetime).
+  4. Stale generation cannot alias recycled controller request.
+  5. Recycled incarnation D_{g+1} cannot consume D_g's completion.
+  6. Dead requester: ΔRegisters = ΔEventFrames = ΔIoWait = ΔLedger = 0.
+  7. Third request on occupied slots: ΔDomain = ΔAuthority = ΔLedger
+     = ΔController = 0.
+  8. 17th unreaped async result: ledger full, atomic rejection.
+
+### Decisive integration witnesses
+
+  - `p92f6_two_request_pair_quiescence` + `9.2f.7` extensions:
+    PairCount 2 → [1] → 0, with four-point domain count
+    (D_0 → D_0+2 → D_0+1 → D_0), two-buffer causal barrier
+    ((A_0,B_0) ≠ (A_P,B_P) = (A_∞,B_∞)), and non-vacuous
+    intermediate memory witness at count=1.
+
+  - `p92f8_recycled_driver_concurrency_adversary`:
+    PairCount(C,D_g)=0 ∧ PairCount(C,D_{g+1})=1 ⇒ PeerDied(C,D_g)
+    despite AutonomousIO=true globally.  Proves pair quiescence is
+    per-generation, not global.
+
+700/700 tests; 29 instructions.  Phase 9.2f is complete.
+The 9.2 umbrella (capabilities → device authority → composition →
+blocking IPC → multi-request quiescence) is closed.
