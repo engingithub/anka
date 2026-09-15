@@ -1,0 +1,80 @@
+// =============================================================================
+// Anka64 Phase 9.3e falsifiability probes.
+// Every example below is deliberately false and must be rejected.
+// =============================================================================
+
+import "anka_userspace_nic.kleis"
+
+example "FALSE-NIC93E-1: unsolicited RX requires a pre-existing submitted request" {
+    assert(
+        ∀(a : Bool). ∀(cap : Bool). ∀(req : Bool).
+            nic_rx_activity(a,cap,req) = (a ∧ cap ∧ req)
+    )
+}
+
+example "FALSE-NIC93E-2: packet arrival alone may mutate guest memory" {
+    assert(nic_arrival_mutates_guest_memory(true,false))
+}
+
+example "FALSE-NIC93E-3: NIC_RX authority also authorizes TX" {
+    assert(device_request_allowed(DEVICE_RIGHT_NIC_RX,DEVICE_RIGHT_NIC_TX))
+}
+
+example "FALSE-NIC93E-4: NIC_TX authority also authorizes RX" {
+    assert(device_request_allowed(DEVICE_RIGHT_NIC_TX,DEVICE_RIGHT_NIC_RX))
+}
+
+example "FALSE-NIC93E-5: ambient NIC_RX rescues presented EVENT_WAIT-only authority" {
+    assert(
+        nic_operation_authorized(
+            bvconst(40,64),bvconst(3,64),
+            bvconst(40,64),bvconst(3,64),
+            DEVICE_RIGHT_EVENT_WAIT,DEVICE_RIGHT_NIC_RX,
+            DEVICE_RIGHT_NIC_RX
+        )
+    )
+}
+
+example "FALSE-NIC93E-6: RX DMA may commit without guest WRITE authority" {
+    assert(nic_rx_dma_allowed(true,true,true,true,false,true,true))
+}
+
+example "FALSE-NIC93E-7: TX DMA may read outside delegated span" {
+    assert(nic_tx_dma_allowed(true,true,true,true,false,true))
+}
+
+example "FALSE-NIC93E-8: NIC A capability may operate distinct NIC B" {
+    assert(
+        nic_operation_authorized(
+            bvconst(40,64),bvconst(3,64),
+            bvconst(41,64),bvconst(3,64),
+            DEVICE_RIGHT_NIC_RX,DEVICE_RIGHTS_NONE,
+            DEVICE_RIGHT_NIC_RX
+        )
+    )
+}
+
+example "FALSE-NIC93E-9: NIC event on one binding is the same event as Block activity on another binding" {
+    assert(
+        device_event_identity_equal(
+            bvconst(10,64),bvconst(1,64),bvconst(9,64),
+            bvconst(40,64),bvconst(1,64),bvconst(9,64)
+        )
+    )
+}
+
+example "FALSE-NIC93E-10: DeviceRights bit 0x02 becomes defined when NIC rights are added" {
+    assert(device_rights_subset(bvconst(2,8),DEVICE_RIGHTS_ALL_93E))
+}
+
+
+example "FALSE-NIC93E-11: queued RX frame becomes pair-attributed request work" {
+    assert(
+        nic_pair_request_count(bvconst(0,3),false)
+        != nic_pair_request_count(bvconst(0,3),true)
+    )
+}
+
+example "FALSE-NIC93E-12: queued RX frame alone counts as autonomous machine progress" {
+    assert(nic_autonomous_work(false,true))
+}

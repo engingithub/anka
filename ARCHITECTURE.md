@@ -1875,10 +1875,86 @@ anka_generic_device_refinement_false_witnesses.kleis — 0/5 false claims pass
 | generic_registry_order_independent | 13 | Count([A,B]) = Count([B,A]) |
 | block_completion_round_trip_preserves_payload | — | handle, requester, status, block_number, delegation_id intact |
 
-732/732 tests.  The path forward:
+732/732 tests.
+
+### Stage 31: User-Space Device Event Delivery (Phase 9.3d)
+
+Phase 9.3d adds a generic event mechanism for user-space drivers to
+learn that a device has produced new activity since a given epoch.
+
+**Central theorem:**
 
 ```text
-9.3d — User-space device event delivery
+Delivery = AcceptedWait ∧ ExactProcessIncarnation ∧ ExactDeviceBinding ∧ EpochChanged
+```
+
+with `CapabilityPossession`, `InterruptTarget`, and `CompletionExistence`
+intentionally excluded from delivery.
+
+**Architecture changes:**
+
+| Component | Change |
+|-----------|--------|
+| `DeviceRights::EVENT_WAIT` | New right 0x04; `ALL_BITS` = 0x05; 0x02 still undefined |
+| `BlockController.event_sequence` | `u64` counter, `checked_add` at Nonterminal→CompletionReady |
+| `DeviceController::event_sequence()` | Generic accessor via enum dispatch |
+| `DeviceEventWait` | Process wait record: `{ device: DeviceBinding, observed_sequence: u64 }` |
+| `Process.event_wait` | `Option<DeviceEventWait>` — third blocking state |
+| `SYS_DEV_EVENT_WAIT` (17) | 3-register input (cap slot, cap gen, epoch), atomic check-or-block |
+| `reevaluate_event_waits()` | Broadcast delivery in all three service paths |
+| `finish_process()` | Clears `event_wait` on death → Zombie |
+
+**Syscall ABI:**
+
+```text
+R1 in  = device capability slot       R0 out = status
+R2 in  = device capability generation  R1 out = current/new epoch
+R3 in  = observed activity epoch
+```
+
+**Check-or-block protocol (zero mutation before branch):**
+
+```text
+DecodeHandle → ResolveExactDeviceCap → ValidateExactBackingAuthority(EVENT_WAIT)
+→ LookupExactDeviceBinding → ReadEpoch → { Return(current) | InstallWait }
+```
+
+**Key properties:**
+
+- Blocking branch: EventFrame outstanding, no `resume_from_trap` — like RecvWait
+- Broadcast: all waiters on (device, epoch) wake; sequence is device state, not token
+- `reevaluate_event_waits()` runs even when `drain_completions` drains zero
+  (`EventWake ≠> CompletionExists` — preparation for unsolicited NIC RX)
+- `IoWait + RecvWait + DeviceEventWait ≤ 1` for any process incarnation
+- Incarnation isolation: lifecycle erasure enforces ExactProcessKey structurally
+
+**Formal basis:**
+
+```text
+anka_user_device_events.kleis              — 16/16 positive
+anka_user_device_events_false_witnesses.kleis — 0/8 false claims pass
+```
+
+**Hostile suite (12 reachable witnesses):**
+
+| Test | Property |
+|------|----------|
+| `immediate_return` | epoch changed → R0=0, R1=current |
+| `blocks_on_same_epoch` | epoch unchanged → unschedulable |
+| `wakes_on_completion` | Nonterminal→Ready ⇒ epoch++ ⇒ wake |
+| `requires_event_wait_right` | SUBMIT_READ alone → error 4 |
+| `no_ambient_rescue` | ambient EVENT_WAIT cannot rescue presented handle |
+| `transfer_blocks_and_wakes` | SYS_SEND_CAP(0x05→0x04) → SYS_DEV_EVENT_WAIT → blocks → wakes |
+| `irq_target_not_owner` | P2 takes IRQ, P1 wakes (deliver_pending asserted) |
+| `cross_device_isolation` | event on B ≠ wake wait on A |
+| `0x02_remains_invalid` | hostile decoder: 0x02, 0x03, 0x06, 0x07 rejected |
+| `broadcast_two_waiters` | P1 and P2 on (A, e=0) both wake |
+| `cursor_loop` | 3-round strictly monotone epoch progression |
+| `incarnation_isolation` | Wait(P_g) → kill → reclaim → spawn P_(g+1) → epoch++ → untouched |
+
+744/744 tests.  The path forward:
+
+```text
 9.3e — First NIC model (second DeviceController variant)
 9.4  — Networking: Ethernet → ARP → ICMP → UDP → TCP → Socket → HTTP
 ```
@@ -1888,6 +1964,10 @@ The target remains:
 ```text
 GET /alive HTTP/1.1 → "Anka64 is alive."
 ```
+
+The NIC will be the first genuinely unsolicited-event producer.
+The event mechanism it inherits was designed for devices generally,
+rather than a block-completion mechanism wearing a generic name.
 
 The project continues to evolve by the same rule that produced its strongest results:
 

@@ -80,10 +80,15 @@ pub(crate) fn enc_s(opcode: i64) -> Expr {
 
 
 // ═══════════════════════════════════════════════════════════
-//  Virtual memory layout — all addresses derived from TEXT_SIZE
+//  Virtual memory layout — structurally derived
 // ═══════════════════════════════════════════════════════════
+//
+// Each region's base is derived from the previous region's end:
+//
+//   Code  ≺  Source  ≺  Workspace  ≺  Output  ≺  Stack
+//
 // TEXT_SIZE = align_up(compiled_bytes, 0x1000).
-// TEXT_SIZE: page-aligned upper bound on the HOST compiler (CC_A, ~21KB).
+// TEXT_SIZE: page-aligned upper bound on the HOST compiler (CC_A, ~27KB).
 // The test `text_size_is_derived` enforces TEXT_SIZE = align_up(CC_A, 0x1000).
 //
 // The canonical compiler binary (CC_B, ~57KB) runs at a SEPARATE virtual
@@ -94,12 +99,19 @@ pub(crate) fn enc_s(opcode: i64) -> Expr {
 // These must fit in the 18-bit signed immediate: max address ≤ 131071.
 pub(crate) const TEXT_SIZE: i64     = 0x7000;
 
-// Data layout (contiguous after TEXT_SIZE):
-//   0x00000 ..TEXT_SIZE  : compiler text  (TEXT_SIZE = 28KB, host only)
-//   TEXT_SIZE+0x00000    : source         (0x5000 = 20KB)
-//   TEXT_SIZE+0x05000    : workspace      (0x6000 = 24KB)
-//   TEXT_SIZE+0x0B000    : output         (0x10000 = 64KB)
-//   TEXT_SIZE+0x1B000    : stack          (0x4000 = 16KB)
+// ── Region sizes ──────────────────────────────────────────
+pub(crate) const SOURCE_SIZE: i64  = 0x5000;   //  20 KiB
+pub(crate) const WS_SIZE: i64      = 0x6000;   //  24 KiB
+pub(crate) const OUTPUT_SIZE: i64  = 0x14000;  //  80 KiB  (was 0x10000; enlarged in 9.3e.2)
+pub(crate) const STACK_SIZE: i64   = 0x4000;   //  16 KiB
+
+// ── Region bases (each derived from previous end) ─────────
+//
+//   [0, TEXT_SIZE)                      : compiler text (host only)
+//   [LAYOUT_SRC, LAYOUT_SRC+SOURCE_SIZE) : source
+//   [LAYOUT_WS,  LAYOUT_WS+WS_SIZE)     : workspace
+//   [LAYOUT_OUT, LAYOUT_OUT+OUTPUT_SIZE) : output
+//   [LAYOUT_STACK, LAYOUT_STACK+STACK_SIZE) : stack
 //
 // Workspace is placed BEFORE output so that workspace addresses
 // (up to WS_LIT_POS ≈ 0x10B68) stay well within the MOVI 18-bit
@@ -107,16 +119,32 @@ pub(crate) const TEXT_SIZE: i64     = 0x7000;
 // addresses are set by the harness or derived from workspace slots
 // and are NOT loaded via MOVI.
 pub(crate) const LAYOUT_SRC: i64   = TEXT_SIZE;
-pub(crate) const SOURCE_SIZE: i64  = 0x5000;
-pub(crate) const LAYOUT_WS: i64    = TEXT_SIZE + 0x5000;
-pub(crate) const WS_SIZE: i64      = 0x6000;
-pub(crate) const LAYOUT_OUT: i64   = TEXT_SIZE + 0xB000;
-pub(crate) const OUTPUT_SIZE: i64  = 0x10000;
-pub(crate) const LAYOUT_STACK: i64 = TEXT_SIZE + 0x1B000;
+pub(crate) const LAYOUT_WS: i64    = LAYOUT_SRC + SOURCE_SIZE;
+pub(crate) const LAYOUT_OUT: i64   = LAYOUT_WS + WS_SIZE;
+pub(crate) const LAYOUT_STACK: i64 = LAYOUT_OUT + OUTPUT_SIZE;
+
+// ── Structural invariants ─────────────────────────────────
+// Regions are contiguous and non-overlapping.
+const _: () = assert!(LAYOUT_SRC   == TEXT_SIZE);
+const _: () = assert!(LAYOUT_WS    == LAYOUT_SRC + SOURCE_SIZE);
+const _: () = assert!(LAYOUT_OUT   == LAYOUT_WS  + WS_SIZE);
+const _: () = assert!(LAYOUT_STACK == LAYOUT_OUT  + OUTPUT_SIZE);
+
+// ── Physical placement (test harness) ─────────────────────
+// Physical addresses for `Fabric::place_object()` in the bootstrap
+// test harness.  Derived so that enlarging any region does not
+// silently create overlapping placements.
+pub(crate) const PHYS_SOURCE: u64 = 0x200000;
+pub(crate) const PHYS_OUTPUT: u64 = 0x210000;
+pub(crate) const PHYS_WORK: u64   = (PHYS_OUTPUT + OUTPUT_SIZE as u64 + 0xFFF) & !0xFFF;
+// Non-overlap invariant.
+const _: () = assert!(PHYS_OUTPUT >= PHYS_SOURCE + SOURCE_SIZE as u64);
+const _: () = assert!(PHYS_WORK   >= PHYS_OUTPUT + OUTPUT_SIZE as u64);
+
 // ─── MOVI immediate range ────────────────────────────────
 // MOVI uses an 18-bit signed immediate.  The maximum positive
 // value is (1 << 17) - 1 = 131071.  Literal offsets within the
-// output buffer range from 0 to OUTPUT_SIZE-1 (65535), which fits.
+// output buffer range from 0 to OUTPUT_SIZE-1 (81919), which fits.
 // WS_LIT_POS must also fit (asserted below, after WS_LIT_POS def).
 const MOVI_MAX: i64 = (1 << 17) - 1;
 const _: () = assert!(OUTPUT_SIZE - 1 <= MOVI_MAX);
@@ -194,6 +222,7 @@ pub(crate) const TOK_AMP: i64   = 25;   // &
 pub(crate) const TOK_BANG: i64  = 26;   // ! (only valid before =)
 pub(crate) const TOK_SYSCALL: i64 = 27; // syscall keyword
 pub(crate) const TOK_STRING: i64 = 28;  // string literal "..."
+pub(crate) const TOK_SYSRET: i64 = 29;  // sysret keyword (9.3e.2)
 
 
 // ─── ISA encoding constants ──────────────────────
@@ -229,6 +258,7 @@ pub(crate) const COND_AL: i64 = 15;
 
 // ─── Register numbers ────────────────────────────
 pub(crate) const GEN_R0: i64  = 0;
+pub(crate) const GEN_R1: i64  = 1;
 pub(crate) const GEN_R4: i64  = 4;
 pub(crate) const GEN_R5: i64  = 5;
 pub(crate) const GEN_FP: i64  = 13;
@@ -239,6 +269,10 @@ pub(crate) const EXPR_SP_INIT: i64 = -0x800;
 
 pub(crate) fn syscall(num: u8, args: Vec<Expr>) -> Expr {
     Expr::Syscall(num, args)
+}
+
+pub(crate) fn sysret(k: u8) -> Expr {
+    Expr::Sysret(k)
 }
 
 // ─── Expression-stack save/restore pattern ───────
@@ -847,6 +881,9 @@ pub(crate) fn guest_classify_kw() -> Function {
             Stmt::If(binop(BinOp::Eq, var(1), lit(6)), vec![
                 kw_byte_chain(0, &[114, 101, 116, 117, 114, 110],
                     Stmt::Return(lit(TOK_RETURN))),
+                // sysret = 115,121,115,114,101,116
+                kw_byte_chain(0, &[115, 121, 115, 114, 101, 116],
+                    Stmt::Return(lit(TOK_SYSRET))),
             ], vec![]),
             Stmt::If(binop(BinOp::Eq, var(1), lit(7)), vec![
                 kw_byte_chain(0, &[115, 121, 115, 99, 97, 108, 108],
@@ -1740,9 +1777,14 @@ pub fn build_6b4_compiler() -> Program {
                     ),
                     Stmt::Return(lit(0)),
                 ], vec![]),
-            // ─── syscall(n, a, b, c) ─────────────────
-            // Reserved builtin: evaluates 4 args, stages R0-R3,
-            // emits TRAP 0, moves R0→R4.
+            // ─── syscall(n, a, b, c [, d [, e]]) ─────
+            // Variable-arity builtin (9.3e.2): 4–6 expressions
+            // (syscall number + 3..5 payload args).
+            // Evaluates all args, pushes to stack, then pops into
+            // R0..R(argc-1).  var(3) tracks argc at compile time.
+            //
+            // Syscall ABI: R0=number, R1..R5=payload.
+            // Result: R0 → R4.
             Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_SYSCALL)),
                 vec![
                     call_stmt("next_token", vec![]),
@@ -1753,7 +1795,8 @@ pub fn build_6b4_compiler() -> Program {
                         vec![],
                     ),
                     call_stmt("next_token", vec![]),
-                    // Evaluate all 4 args, push each to stack
+                    // ── 4 mandatory args (n, a, b, c) ──
+                    // arg 1 (n → R0)
                     call_stmt("compile_expr", vec![]),
                     call_stmt("emit", vec![
                         enc_i(OP_SUBI, GEN_SP, GEN_SP, lit(8))]),
@@ -1766,6 +1809,7 @@ pub fn build_6b4_compiler() -> Program {
                         vec![],
                     ),
                     call_stmt("next_token", vec![]),
+                    // arg 2 (a → R1)
                     call_stmt("compile_expr", vec![]),
                     call_stmt("emit", vec![
                         enc_i(OP_SUBI, GEN_SP, GEN_SP, lit(8))]),
@@ -1778,6 +1822,7 @@ pub fn build_6b4_compiler() -> Program {
                         vec![],
                     ),
                     call_stmt("next_token", vec![]),
+                    // arg 3 (b → R2)
                     call_stmt("compile_expr", vec![]),
                     call_stmt("emit", vec![
                         enc_i(OP_SUBI, GEN_SP, GEN_SP, lit(8))]),
@@ -1790,11 +1835,42 @@ pub fn build_6b4_compiler() -> Program {
                         vec![],
                     ),
                     call_stmt("next_token", vec![]),
+                    // arg 4 (c → R3)
                     call_stmt("compile_expr", vec![]),
                     call_stmt("emit", vec![
                         enc_i(OP_SUBI, GEN_SP, GEN_SP, lit(8))]),
                     call_stmt("emit", vec![
                         enc_i(OP_ST, GEN_R4, GEN_SP, lit(0))]),
+                    assign(3, lit(4)), // argc = 4
+                    // ── Optional 5th arg (d → R4) ──
+                    Stmt::If(
+                        binop(BinOp::Eq, deref(lit(WS_TOK_TYPE)),
+                            lit(TOK_COMMA)),
+                        vec![
+                            call_stmt("next_token", vec![]),
+                            call_stmt("compile_expr", vec![]),
+                            call_stmt("emit", vec![
+                                enc_i(OP_SUBI, GEN_SP, GEN_SP, lit(8))]),
+                            call_stmt("emit", vec![
+                                enc_i(OP_ST, GEN_R4, GEN_SP, lit(0))]),
+                            assign(3, lit(5)), // argc = 5
+                            // ── Optional 6th arg (e → R5) ──
+                            Stmt::If(
+                                binop(BinOp::Eq, deref(lit(WS_TOK_TYPE)),
+                                    lit(TOK_COMMA)),
+                                vec![
+                                    call_stmt("next_token", vec![]),
+                                    call_stmt("compile_expr", vec![]),
+                                    call_stmt("emit", vec![
+                                        enc_i(OP_SUBI, GEN_SP, GEN_SP, lit(8))]),
+                                    call_stmt("emit", vec![
+                                        enc_i(OP_ST, GEN_R4, GEN_SP, lit(0))]),
+                                    assign(3, lit(6)), // argc = 6
+                                ], vec![],
+                            ),
+                        ], vec![],
+                    ),
+                    // ── Expect ')' ──
                     Stmt::If(
                         binop(BinOp::Ne, deref(lit(WS_TOK_TYPE)),
                             lit(TOK_RPAREN)),
@@ -1802,24 +1878,97 @@ pub fn build_6b4_compiler() -> Program {
                         vec![],
                     ),
                     call_stmt("next_token", vec![]),
-                    // Pop 4 args into R0-R3:
-                    //   stack: [arg3(SP+0), arg2(SP+8),
-                    //           arg1(SP+16), n(SP+24)]
+                    // ── Pop args into R0..R(argc-1) ──
+                    // R0 at highest offset: (argc-1)*8
+                    // R1 at (argc-2)*8, ..., R(argc-1) at 0.
                     call_stmt("emit", vec![
-                        enc_i(OP_LD, GEN_R0, GEN_SP, lit(24))]),
+                        enc_i(OP_LD, GEN_R0, GEN_SP,
+                            binop(BinOp::Mul,
+                                binop(BinOp::Sub, var(3), lit(1)),
+                                lit(8)))]),
                     call_stmt("emit", vec![
-                        enc_i(OP_LD, 1, GEN_SP, lit(16))]),
+                        enc_i(OP_LD, GEN_R1, GEN_SP,
+                            binop(BinOp::Mul,
+                                binop(BinOp::Sub, var(3), lit(2)),
+                                lit(8)))]),
                     call_stmt("emit", vec![
-                        enc_i(OP_LD, 2, GEN_SP, lit(8))]),
+                        enc_i(OP_LD, 2, GEN_SP,
+                            binop(BinOp::Mul,
+                                binop(BinOp::Sub, var(3), lit(3)),
+                                lit(8)))]),
                     call_stmt("emit", vec![
-                        enc_i(OP_LD, 3, GEN_SP, lit(0))]),
+                        enc_i(OP_LD, 3, GEN_SP,
+                            binop(BinOp::Mul,
+                                binop(BinOp::Sub, var(3), lit(4)),
+                                lit(8)))]),
+                    // R4 only if argc > 4
+                    Stmt::If(
+                        binop(BinOp::Lt, lit(4), var(3)),
+                        vec![call_stmt("emit", vec![
+                            enc_i(OP_LD, GEN_R4, GEN_SP,
+                                binop(BinOp::Mul,
+                                    binop(BinOp::Sub, var(3), lit(5)),
+                                    lit(8)))])],
+                        vec![],
+                    ),
+                    // R5 only if argc > 5
+                    Stmt::If(
+                        binop(BinOp::Lt, lit(5), var(3)),
+                        vec![call_stmt("emit", vec![
+                            enc_i(OP_LD, GEN_R5, GEN_SP,
+                                binop(BinOp::Mul,
+                                    binop(BinOp::Sub, var(3), lit(6)),
+                                    lit(8)))])],
+                        vec![],
+                    ),
+                    // Reclaim stack: argc * 8
                     call_stmt("emit", vec![
-                        enc_i(OP_ADDI, GEN_SP, GEN_SP, lit(32))]),
+                        enc_i(OP_ADDI, GEN_SP, GEN_SP,
+                            binop(BinOp::Mul, var(3), lit(8)))]),
                     // TRAP 0 → kernel handles syscall
                     call_stmt("emit", vec![enc_s(OP_TRAP)]),
                     // Result: R0 → R4
                     call_stmt("emit", vec![
                         enc_r(OP_MOV, GEN_R4, GEN_R0, 0)]),
+                    Stmt::Return(lit(0)),
+                ], vec![]),
+            // ─── sysret(1) ───────────────────────────
+            // Retrieve secondary syscall result R1 → R4.
+            // Only literal 1 is accepted (9.3e.2).
+            Stmt::If(binop(BinOp::Eq, var(0), lit(TOK_SYSRET)),
+                vec![
+                    call_stmt("next_token", vec![]),
+                    Stmt::If(
+                        binop(BinOp::Ne, deref(lit(WS_TOK_TYPE)),
+                            lit(TOK_LPAREN)),
+                        vec![deref_assign(lit(WS_ERROR), lit(1))],
+                        vec![],
+                    ),
+                    call_stmt("next_token", vec![]),
+                    // Expect literal 1
+                    Stmt::If(
+                        binop(BinOp::Ne, deref(lit(WS_TOK_TYPE)),
+                            lit(TOK_NUMBER)),
+                        vec![deref_assign(lit(WS_ERROR), lit(1))],
+                        vec![],
+                    ),
+                    Stmt::If(
+                        binop(BinOp::Ne, deref(lit(WS_TOK_VALUE)),
+                            lit(1)),
+                        vec![deref_assign(lit(WS_ERROR), lit(1))],
+                        vec![],
+                    ),
+                    call_stmt("next_token", vec![]),
+                    Stmt::If(
+                        binop(BinOp::Ne, deref(lit(WS_TOK_TYPE)),
+                            lit(TOK_RPAREN)),
+                        vec![deref_assign(lit(WS_ERROR), lit(1))],
+                        vec![],
+                    ),
+                    call_stmt("next_token", vec![]),
+                    // MOV R4, R1
+                    call_stmt("emit", vec![
+                        enc_r(OP_MOV, GEN_R4, GEN_R1, 0)]),
                     Stmt::Return(lit(0)),
                 ], vec![]),
             // ─── STRING LITERAL (7.2) ────────────────

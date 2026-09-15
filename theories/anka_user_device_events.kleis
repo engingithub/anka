@@ -1,0 +1,227 @@
+// =============================================================================
+// Anka64 User-Space Device Events (Phase 9.3d-formal)
+// =============================================================================
+//
+// Extension of Phase 9.3c generic-device refinement. No new axioms.
+//
+// A generic device event carries no device-specific payload.  It means only:
+//
+//   "this exact DeviceBinding has produced new serviceable activity since
+//    the sequence observed by this accepted waiter."
+//
+// Device-specific APIs determine what the activity means.  The generic layer
+// establishes source identity, exact-presented authorization, sequence-based
+// no-lost-wakeup behavior, process-incarnation safety, accepted-wait lifetime,
+// and independence from the process that happens to take the hardware IRQ.
+//
+// DeviceRights EVENT_WAIT uses bit 0x04.  Bit 0x02 deliberately remains
+// undefined, preserving the 9.3a witness where 0x02 is Memory WRITE but is not
+// a valid DeviceRights encoding.
+// =============================================================================
+
+import "anka_generic_device_refinement.kleis"
+
+// -----------------------------------------------------------------------------
+// Rights + generic event sequence
+// -----------------------------------------------------------------------------
+
+define DEVICE_RIGHT_SUBMIT_READ = bvconst(1,8)
+define DEVICE_RIGHT_EVENT_WAIT  = bvconst(4,8)
+define DEVICE_RIGHTS_ALL_93D    = bvconst(5,8)
+
+define generic_event_sequence(
+    kind : BitVec2,
+    block_sequence : BitVec64,
+    other_sequence : BitVec64
+) : BitVec64 =
+    if kind=GENERIC_DEVICE_BLOCK then block_sequence else other_sequence
+
+// Event occurrence identity is qualified by the device incarnation.
+define device_event_identity_equal(
+    object_a : BitVec64,
+    generation_a : BitVec64,
+    sequence_a : BitVec64,
+    object_b : BitVec64,
+    generation_b : BitVec64,
+    sequence_b : BitVec64
+) = object_a=object_b
+    ∧ generation_a=generation_b
+    ∧ sequence_a=sequence_b
+
+// -----------------------------------------------------------------------------
+// Exact-presented authority at wait admission
+// -----------------------------------------------------------------------------
+
+// ambient_rights is intentionally ignored.
+define device_event_wait_authorized(
+    presented_object : BitVec64,
+    presented_generation : BitVec64,
+    binding_object : BitVec64,
+    binding_generation : BitVec64,
+    presented_rights : BitVec8,
+    ambient_rights : BitVec8
+) = routes_to_device_binding(
+        presented_object,presented_generation,
+        binding_object,binding_generation,
+        bvconst(1,1)
+    )
+    ∧ device_request_allowed(presented_rights,DEVICE_RIGHT_EVENT_WAIT)
+
+// -----------------------------------------------------------------------------
+// Atomic check-or-block semantics
+// -----------------------------------------------------------------------------
+
+// These predicates deliberately use a Boolean same_sequence input. Runtime
+// computes it from the exact u64 observed/current event sequences.  Factoring
+// this decision keeps the proof independent of solver normalization details.
+define event_wait_ready(authorized : Bool, same_sequence : Bool) =
+    authorized ∧ ¬same_sequence
+
+define event_wait_blocks(authorized : Bool, same_sequence : Bool) =
+    authorized ∧ same_sequence
+
+define event_wait_rejects(authorized : Bool) = ¬authorized
+
+// -----------------------------------------------------------------------------
+// Accepted-wait delivery
+// -----------------------------------------------------------------------------
+
+// process_matches means exact ProcessKey; device_matches means exact
+// DeviceBinding; sequence_changed means current != observed.
+//
+// cap_still_present and interrupt_target_is_waiter are intentionally unused:
+// capability drop is not retroactive revocation, and IRQ target is not event
+// owner.  This is the formal separation between admission and delivery.
+define accepted_event_delivery(
+    accepted : Bool,
+    cap_still_present : Bool,
+    process_matches : Bool,
+    device_matches : Bool,
+    sequence_changed : Bool,
+    interrupt_target_is_waiter : Bool
+) = accepted
+    ∧ process_matches
+    ∧ device_matches
+    ∧ sequence_changed
+
+// -----------------------------------------------------------------------------
+// Positive obligations
+// -----------------------------------------------------------------------------
+
+example "DEVEVENT-1 GENERIC VIEW: Block wrapper preserves event sequence" {
+    assert(
+        ∀(b : BitVec64). ∀(o : BitVec64).
+            generic_event_sequence(GENERIC_DEVICE_BLOCK,b,o)=b
+    )
+}
+
+example "DEVEVENT-2 AUTHORITY: exact presented EVENT_WAIT right authorizes exact binding" {
+    assert(
+        device_event_wait_authorized(
+            bvconst(10,64),bvconst(2,64),
+            bvconst(10,64),bvconst(2,64),
+            DEVICE_RIGHT_EVENT_WAIT,DEVICE_RIGHTS_NONE
+        )
+    )
+}
+
+example "DEVEVENT-3 AUTHORITY SEPARATION: SUBMIT_READ alone does not authorize event wait" {
+    assert(
+        ¬device_event_wait_authorized(
+            bvconst(10,64),bvconst(2,64),
+            bvconst(10,64),bvconst(2,64),
+            DEVICE_RIGHT_SUBMIT_READ,DEVICE_RIGHTS_NONE
+        )
+    )
+}
+
+example "DEVEVENT-4 NO AMBIENT RESCUE: ambient EVENT_WAIT cannot rescue presented SUBMIT_READ" {
+    assert(
+        ¬device_event_wait_authorized(
+            bvconst(10,64),bvconst(2,64),
+            bvconst(10,64),bvconst(2,64),
+            DEVICE_RIGHT_SUBMIT_READ,DEVICE_RIGHT_EVENT_WAIT
+        )
+    )
+}
+
+example "DEVEVENT-5 CHECK-OR-READY: ready iff authorized and sequence changed" {
+    assert(
+        ∀(a : Bool). ∀(same : Bool).
+            event_wait_ready(a,same) = (a ∧ ¬same)
+    )
+}
+
+example "DEVEVENT-6 CHECK-OR-BLOCK: block iff authorized and sequence unchanged" {
+    assert(
+        ∀(a : Bool). ∀(same : Bool).
+            event_wait_blocks(a,same) = (a ∧ same)
+    )
+}
+
+example "DEVEVENT-7 REJECT: unauthorized wait is exactly the reject case" {
+    assert(
+        ∀(a : Bool).
+            event_wait_rejects(a) = ¬a
+    )
+}
+
+example "DEVEVENT-8 DELIVERY REFINEMENT: accepted delivery requires waiter, device, and new sequence" {
+    assert(
+        ∀(a : Bool). ∀(c : Bool). ∀(p : Bool). ∀(d : Bool). ∀(s : Bool). ∀(i : Bool).
+            accepted_event_delivery(a,c,p,d,s,i) = (a ∧ p ∧ d ∧ s)
+    )
+}
+
+example "DEVEVENT-9 ACCEPTED LIFETIME: post-admission capability possession cannot change delivery" {
+    assert(
+        ∀(a : Bool). ∀(c1 : Bool). ∀(c2 : Bool). ∀(p : Bool). ∀(d : Bool). ∀(s : Bool). ∀(i : Bool).
+            accepted_event_delivery(a,c1,p,d,s,i)
+            = accepted_event_delivery(a,c2,p,d,s,i)
+    )
+}
+
+example "DEVEVENT-10 INTERRUPT SEPARATION: IRQ target relation cannot change event delivery" {
+    assert(
+        ∀(a : Bool). ∀(c : Bool). ∀(p : Bool). ∀(d : Bool). ∀(s : Bool). ∀(i1 : Bool). ∀(i2 : Bool).
+            accepted_event_delivery(a,c,p,d,s,i1)
+            = accepted_event_delivery(a,c,p,d,s,i2)
+    )
+}
+
+example "DEVEVENT-11 ATTENUATION: SUBMIT_READ+EVENT_WAIT parent may transfer EVENT_WAIT-only child" {
+    assert(device_rights_subset(DEVICE_RIGHT_EVENT_WAIT,DEVICE_RIGHTS_ALL_93D))
+}
+
+example "DEVEVENT-12 NONAMPLIFICATION: SUBMIT_READ-only parent cannot transfer EVENT_WAIT child" {
+    assert(¬device_rights_subset(DEVICE_RIGHT_EVENT_WAIT,DEVICE_RIGHT_SUBMIT_READ))
+}
+
+example "DEVEVENT-13 DECODER COMPATIBILITY: DeviceRights bit 0x02 remains undefined" {
+    assert(¬device_rights_subset(bvconst(2,8),DEVICE_RIGHTS_ALL_93D))
+}
+
+example "DEVEVENT-14 EVENT IDENTITY: same sequence on different devices is not same event" {
+    assert(
+        ¬device_event_identity_equal(
+            bvconst(10,64),bvconst(2,64),bvconst(7,64),
+            bvconst(20,64),bvconst(2,64),bvconst(7,64)
+        )
+    )
+}
+
+example "DEVEVENT-15 EVENT IDENTITY: generation difference separates device-event occurrence" {
+    assert(
+        ¬device_event_identity_equal(
+            bvconst(10,64),bvconst(2,64),bvconst(7,64),
+            bvconst(10,64),bvconst(3,64),bvconst(7,64)
+        )
+    )
+}
+
+example "DEVEVENT-16 EVENT IDENTITY: exact binding plus exact sequence identifies same occurrence" {
+    assert(
+        ∀(o : BitVec64). ∀(g : BitVec64). ∀(s : BitVec64).
+            device_event_identity_equal(o,g,s,o,g,s)
+    )
+}

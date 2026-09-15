@@ -6,7 +6,7 @@
 //! Phase 9.1c adds real Fabric DMA integration:
 //!   - Per-request DMA domain (narrow delegation at submission)
 //!   - Storage-agent MemoryRequest through full Fabric lifecycle
-//!   - CompletionStatus { Success, DmaFault } replaces data payload
+//!   - DeviceCompletionStatus { Success, DmaFault } replaces data payload
 //!   - DmaInFlight persists across tick boundaries
 //!   - Commit-time generation revalidation (I5) catches revocation
 //!
@@ -29,6 +29,7 @@ use super::state::{
     RequesterKey, DomainId, ObjectId, AccessKind,
     Permissions, FaultReason, AgentId, TxState,
     AuthorityId, DelegationId, ProcessKey,
+    RequestHandle, DeviceCompletionStatus,
 };
 use super::fabric::Fabric;
 
@@ -92,17 +93,7 @@ impl BlockStorage {
 // Request / completion / handle types
 // ───────────────────────────────────────────────────────────────────
 
-/// Opaque handle identifying a specific request submission.
-///
-/// Generation is u64 to match the formal model (anka_block_device.kleis
-/// uses BitVec64 for request-slot generations).
-///
-/// Formal basis: anka_block_device.kleis GEN-1..GEN-4.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RequestHandle {
-    pub slot: u8,
-    pub generation: u64,
-}
+// RequestHandle moved to state.rs (Phase 9.3e.1).
 
 /// A block read request.
 ///
@@ -137,17 +128,7 @@ pub struct BlockRequest {
     pub delegation_id: Option<DelegationId>,
 }
 
-/// Outcome of a completed block operation.
-///
-/// The guest buffer contains the data on success;
-/// the completion record contains only the outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompletionStatus {
-    /// DMA transaction committed — data is in guest buffer.
-    Success,
-    /// DMA transaction faulted — guest buffer unchanged.
-    DmaFault(FaultReason),
-}
+// CompletionStatus moved to state.rs as DeviceCompletionStatus (Phase 9.3e.1).
 
 /// A completed block operation.
 ///
@@ -164,7 +145,7 @@ pub struct BlockCompletion {
     pub handle: RequestHandle,
     pub requester: RequesterKey,
     pub block_number: u64,
-    pub status: CompletionStatus,
+    pub status: DeviceCompletionStatus,
     pub delegation_id: Option<DelegationId>,
 }
 
@@ -256,6 +237,15 @@ pub struct BlockController {
     latency: u32,
     /// Stable agent identity for storage DMA transactions.
     pub storage_agent: AgentId,
+    /// Activity-epoch counter (Phase 9.3d).
+    ///
+    /// Increments exactly once per `Nonterminal → CompletionReady`
+    /// transition — never per-tick while a completion remains ready.
+    /// Uses `checked_add`; exhaustion is a kernel invariant failure
+    /// (no silent wrapping — prevents ABA across device recycling).
+    ///
+    /// Formal basis: anka_user_device_events.kleis DEVEVENT-8.
+    event_sequence: u64,
 }
 
 impl BlockController {
@@ -267,6 +257,7 @@ impl BlockController {
             storage,
             latency,
             storage_agent,
+            event_sequence: 0,
         }
     }
 
@@ -411,13 +402,13 @@ impl BlockController {
                     let state = std::mem::replace(&mut self.slots[i], SlotState::Free);
                     if let SlotState::DmaInFlight { request, dma_domain, tx_idx } = state {
                         let status = match fabric.transaction(tx_idx).state {
-                            TxState::Committed => CompletionStatus::Success,
+                            TxState::Committed => DeviceCompletionStatus::Success,
                             TxState::Faulted => {
                                 let reason = fabric.transaction(tx_idx)
                                     .fault.as_ref()
                                     .map(|f| f.reason)
                                     .unwrap_or(FaultReason::TranslationFault);
-                                CompletionStatus::DmaFault(reason)
+                                DeviceCompletionStatus::DmaFault(reason)
                             }
                             _ => unreachable!(),
                         };
@@ -434,6 +425,12 @@ impl BlockController {
                         };
                         self.slots[i] = SlotState::Completed { completion };
                         self.completion_order.push_back(i as u8);
+                        // Nonterminal → CompletionReady: advance activity epoch.
+                        // Exactly once per transition, never per tick.
+                        // No silent wrapping — ABA prevention for device recycling.
+                        self.event_sequence = self.event_sequence
+                            .checked_add(1)
+                            .expect("device event sequence exhausted");
                     }
                 }
             }
@@ -497,6 +494,15 @@ impl BlockController {
     pub fn storage_mut(&mut self) -> &mut BlockStorage {
         &mut self.storage
     }
+
+    /// Current activity-epoch sequence (Phase 9.3d).
+    ///
+    /// Monotonic: only advances on `Nonterminal → CompletionReady`.
+    /// "This device's activity epoch has advanced since e_o."
+    pub fn event_sequence(&self) -> u64 {
+        self.event_sequence
+    }
+
 
     /// True if any slot is in a nonterminal accepted state:
     /// Waiting, DmaReady, or DmaInFlight.
@@ -890,7 +896,7 @@ mod tests {
         for _ in 0..10 { ctrl.tick(&mut f); }
 
         let comp = ctrl.consume_completion().unwrap();
-        assert_eq!(comp.status, CompletionStatus::Success);
+        assert_eq!(comp.status, DeviceCompletionStatus::Success);
 
         let buf = f.read_physical(0x2000, 512);
         assert_eq!(buf, &vec![0xAA; 512][..], "guest buffer has block 1 data");
@@ -921,7 +927,7 @@ mod tests {
         for _ in 0..10 { ctrl.tick(&mut f); }
 
         let comp = ctrl.consume_completion().unwrap();
-        assert_eq!(comp.status, CompletionStatus::Success);
+        assert_eq!(comp.status, DeviceCompletionStatus::Success);
 
         let buf = f.read_physical(0x5000 + 1024, 512);
         let expected: Vec<u8> = (0..512).map(|i| (i % 256) as u8).collect();
@@ -950,7 +956,7 @@ mod tests {
 
         for _ in 0..10 { ctrl.tick(&mut f); }
         let comp = ctrl.consume_completion().unwrap();
-        assert!(matches!(comp.status, CompletionStatus::DmaFault(_)),
+        assert!(matches!(comp.status, DeviceCompletionStatus::DmaFault(_)),
             "revocation before DMA must produce fault");
 
         let buf = f.read_physical(0x2000, 512);
@@ -985,11 +991,11 @@ mod tests {
 
         let comp = ctrl.consume_completion().unwrap();
         match comp.status {
-            CompletionStatus::DmaFault(reason) => {
+            DeviceCompletionStatus::DmaFault(reason) => {
                 assert_eq!(reason, FaultReason::StaleGeneration,
                     "commit-time revalidation must detect revocation");
             }
-            CompletionStatus::Success => {
+            DeviceCompletionStatus::Success => {
                 panic!("DMA must not succeed after object revocation");
             }
         }
@@ -1009,7 +1015,7 @@ mod tests {
 
         assert_eq!(ctrl.completion_count(), 1);
         let comp = ctrl.consume_completion().unwrap();
-        assert_eq!(comp.status, CompletionStatus::Success);
+        assert_eq!(comp.status, DeviceCompletionStatus::Success);
         assert_eq!(comp.block_number, 2);
         assert!(ctrl.consume_completion().is_none());
     }
@@ -1026,7 +1032,7 @@ mod tests {
 
         assert_eq!(ctrl.completion_count(), 1);
         let comp = ctrl.consume_completion().unwrap();
-        assert!(matches!(comp.status, CompletionStatus::DmaFault(_)));
+        assert!(matches!(comp.status, DeviceCompletionStatus::DmaFault(_)));
         assert!(ctrl.consume_completion().is_none());
     }
 
@@ -1072,7 +1078,7 @@ mod tests {
         // is independent of the process domain.
         for _ in 0..10 { ctrl.tick(&mut f); }
         let comp = ctrl.consume_completion().unwrap();
-        assert_eq!(comp.status, CompletionStatus::Success,
+        assert_eq!(comp.status, DeviceCompletionStatus::Success,
             "DMA authority survives process death");
 
         let buf = f.read_physical(0x2000, 512);
@@ -1142,7 +1148,7 @@ mod tests {
 
         for _ in 0..20 { ctrl.tick(&mut f); }
         let c0 = ctrl.consume_completion().unwrap();
-        assert_eq!(c0.status, CompletionStatus::Success);
+        assert_eq!(c0.status, DeviceCompletionStatus::Success);
         assert_eq!(ctrl.slot_generation(0), 1);
 
         let SubmitResult::Accepted(h1) = ctrl.submit(
@@ -1152,7 +1158,7 @@ mod tests {
 
         for _ in 0..20 { ctrl.tick(&mut f); }
         let c1 = ctrl.consume_completion().unwrap();
-        assert_eq!(c1.status, CompletionStatus::Success);
+        assert_eq!(c1.status, DeviceCompletionStatus::Success);
         assert_eq!(ctrl.slot_generation(h1.slot), 2);
     }
 }

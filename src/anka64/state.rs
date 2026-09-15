@@ -654,9 +654,16 @@ pub struct DeviceRights(pub u8);
 impl DeviceRights {
     pub const NONE: Self = Self(0);
     pub const SUBMIT_READ: Self = Self(0x01);
+    // 0x02 is deliberately undefined — preserved hostile witness.
+    /// Authority to subscribe to device activity-epoch notifications.
+    ///
+    /// Independent of SUBMIT_READ: a process may wait for events
+    /// without being able to submit I/O.  Formal basis:
+    /// anka_user_device_events.kleis DEVEVENT-3, DEVEVENT-4.
+    pub const EVENT_WAIT: Self = Self(0x04);
 
     /// Mask of all defined device right bits.
-    pub const ALL_BITS: u64 = 0x01;
+    pub const ALL_BITS: u64 = 0x05;
 
     /// Checked decoder — rejects undefined bits.
     pub fn from_bits_checked(bits: u64) -> Option<Self> {
@@ -693,6 +700,44 @@ impl fmt::Display for DeviceRights {
 pub struct DeviceBinding {
     pub object: ObjectId,
     pub generation: Generation,
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Generic device request/completion primitives (Phase 9.3e)
+//
+// Controller-local request identity and finite-DMA transaction
+// outcome.  Shared by all device controller types (Block, NIC, …).
+// ───────────────────────────────────────────────────────────────────
+
+/// Opaque handle identifying a specific request submission.
+///
+/// Controller-local: two controllers may independently issue
+/// `(slot=0, gen=0)`.  Global uniqueness requires pairing with
+/// a `DeviceBinding` (see `DeviceRequestKey` in `os.rs`).
+///
+/// Generation is u64 to match the formal model (anka_block_device.kleis
+/// uses BitVec64 for request-slot generations).
+///
+/// Formal basis: anka_block_device.kleis GEN-1..GEN-4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestHandle {
+    pub slot: u8,
+    pub generation: u64,
+}
+
+/// Outcome of an accepted finite device/DMA transaction.
+///
+/// Semantically narrow: this covers only the transaction commit
+/// result, not device-type-specific payload (block number, frame
+/// length, etc.).  Device-specific information belongs in the
+/// respective completion type (`BlockCompletion`, future
+/// `NicCompletion`, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceCompletionStatus {
+    /// DMA transaction committed — data is in guest buffer.
+    Success,
+    /// DMA transaction faulted — guest buffer unchanged.
+    DmaFault(FaultReason),
 }
 
 // ───────────────────────────────────────────────────────────────────

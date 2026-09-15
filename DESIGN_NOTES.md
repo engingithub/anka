@@ -2523,3 +2523,215 @@ Specific: submit payload, storage, block/NIC operation
 That is the boundary the NIC should challenge.
 
 732/732 tests; 29 instructions.  Phase 9.3c is complete.
+
+## DN-24: User-Space Device Event Delivery (Phase 9.3d)
+
+### Central Theorem
+
+```text
+Delivery = AcceptedWait ∧ ExactProcessIncarnation ∧ ExactDeviceBinding ∧ EpochChanged
+```
+
+Three things are intentionally excluded from delivery:
+
+```text
+CapabilityPossession ∉ Delivery
+InterruptTarget      ∉ Delivery
+CompletionExistence  ∉ Delivery
+```
+
+### Architecture
+
+Phase 9.3d adds a generic device event mechanism: a process can
+subscribe to learn that a device has produced new activity since
+a given epoch, without knowing what the activity was.
+
+The event means only:
+
+```text
+"this exact DeviceBinding's activity epoch has advanced since e_o."
+```
+
+It carries no device-specific payload.  A future NIC-specific API
+decides whether the activity means RX data, TX completion, or
+link-state change.  This keeps the generic substrate from learning
+NIC vocabulary.
+
+### Rights Encoding
+
+```text
+DeviceRights::EVENT_WAIT = 0x04
+DeviceRights::ALL_BITS   = 0x05  (SUBMIT_READ | EVENT_WAIT)
+0x02 remains undefined — hostile decoder witness preserved from 9.3a.
+```
+
+The authority rule:
+
+```text
+EventWaitAllowed = ExactBinding ∧ PresentedRights ⊇ EVENT_WAIT
+```
+
+SUBMIT_READ alone is insufficient.  Ambient EVENT_WAIT authority
+elsewhere in the process cannot rescue the presented capability.
+
+### Syscall ABI
+
+```text
+SYS_DEV_EVENT_WAIT = 17
+
+R1 in  = device capability slot      (u32 checked)
+R2 in  = device capability generation (u32 checked)
+R3 in  = observed activity epoch
+
+R0 out = status (0 = epoch advanced, 1 = handle error, 4 = no EVENT_WAIT)
+R1 out = current/new activity epoch
+```
+
+### Check-or-Block Protocol
+
+The syscall is atomic — no scheduler-visible point between ReadSeq
+and InstallWait:
+
+```text
+DecodeHandle
+  → ResolveExactDeviceCap
+  → ValidateExactBackingAuthority(EVENT_WAIT)
+  → LookupExactDeviceBinding
+  → ReadEpoch
+  → { Return(current) if current ≠ observed
+     | InstallWait    if current = observed }
+```
+
+On immediate return: `resume_from_trap(idx)`.
+On block: `event_wait = Some(DeviceEventWait { binding, observed })`,
+no `resume_from_trap`, EventFrame outstanding — exactly like RecvWait.
+
+The syscall is a cursor operation:
+
+```text
+e_next = DEV_EVENT_WAIT(H, e_observed)
+```
+
+Userspace can repeat forever.
+
+### Activity Epoch
+
+`event_sequence` is a `u64` in `BlockController` (and generically
+accessible via `DeviceController::event_sequence()`).
+
+Increment rule: exactly once on the `Nonterminal → CompletionReady`
+transition, never per-tick while a completion remains ready.
+
+```text
+self.event_sequence = self.event_sequence
+    .checked_add(1)
+    .expect("device event sequence exhausted");
+```
+
+No silent wrapping — prevents ABA across device recycling.
+Later device recycling can turn exhaustion into a new DeviceBinding.
+
+### Blocking State
+
+```text
+struct DeviceEventWait {
+    device: DeviceBinding,
+    observed_sequence: u64,
+}
+```
+
+Invariant: `IoWait + RecvWait + DeviceEventWait ≤ 1` for any process.
+`event_wait.is_some()` makes the process unschedulable through the
+same predicate as existing waits.
+
+Process death clears the event wait:
+- `finish_process()` sets `event_wait = None` when state → Zombie.
+- `reclaim_process()` sets `event_wait = None` before reuse.
+
+An accepted wait belongs to the exact incarnation.  Lifecycle erasure
+before slot reuse structurally enforces ExactProcessKey without
+redundantly storing a ProcessKey inside the wait record.
+
+### Broadcast Event Delivery
+
+`reevaluate_event_waits()` scans all Running processes with
+`event_wait.is_some()`.  If the device's current epoch differs from
+the observed epoch, the process wakes with R0=0, R1=current_epoch.
+
+Delivery is broadcast: if P1 and P2 both wait on (A, e) and A
+advances, both wake.  The sequence is device state, not a queued
+event token — one waiter waking does not consume anything.
+
+```text
+Wait(P1,A,e) ∧ Wait(P2,A,e) ∧ Seq_A ≠ e ⇒ Wake(P1) ∧ Wake(P2)
+```
+
+### Service Path Integration
+
+`reevaluate_event_waits()` is called from all three service paths:
+
+1. Main run loop — after `drain_completions` + `reevaluate_recv_waits`
+2. `idle_progress_once` — after drain + reevaluate_recv_waits
+3. `handle_async_interrupt` — after drain + reevaluate_recv_waits
+
+Crucially: runs even when `drain_completions` drains zero completions.
+
+```text
+EventWake ≠> CompletionExists
+```
+
+This is the preparation for unsolicited NIC RX.
+
+### Formal Basis
+
+```text
+anka_user_device_events.kleis              — 16/16 positive
+anka_user_device_events_false_witnesses.kleis — 0/8 false claims pass
+```
+
+### DEVEVENT Traceability
+
+| DEVEVENT | Claim | Runtime Witness |
+|----------|-------|-----------------|
+| 3 | EVENT_WAIT right required | `p93d_event_wait_requires_event_wait_right` |
+| 4 | No ambient rescue | `p93d_event_wait_no_ambient_rescue` |
+| 5 | Epoch changed → immediate return | `p93d_event_wait_immediate_return` |
+| 6 | Epoch unchanged → block | `p93d_event_wait_blocks_on_same_epoch` |
+| 8 | Completion advances epoch → wake | `p93d_event_wait_wakes_on_completion` |
+| 9 | Transfer preserves EVENT_WAIT | `p93d_event_wait_transfer_blocks_and_wakes` |
+| 10 | IRQ target ≠ event owner | `p93d_event_wait_irq_target_not_owner` |
+| 11 | Broadcast delivery | `p93d_event_wait_broadcast_two_waiters` |
+| 13 | 0x02 remains invalid | `p93d_event_wait_0x02_remains_invalid` |
+| 14 | Cross-device isolation | `p93d_event_wait_cross_device_isolation` |
+| — | Cursor loop | `p93d_event_wait_cursor_loop` |
+| — | Incarnation isolation | `p93d_event_wait_incarnation_isolation` |
+
+### What 9.3d Does Not Do
+
+- No device-specific event payload.  The event is "epoch advanced."
+- No NIC variant.  `BlockController` is the only event source.
+- No revocation.  Capability drop cannot retroactively cancel an
+  accepted event wait (and no reachable trace produces this).
+- No device unregister/recycling.
+- No multiple event sources per device (future: NIC RX vs TX vs link).
+
+### Generic Event Contract
+
+```text
+DeviceEventIdentity = (DeviceBinding, EventSequence)
+```
+
+The same numerical sequence on devices A and B is not the same
+occurrence.  Neither is the same ObjectId/sequence across different
+device generations.
+
+The resulting generic event substrate:
+
+```text
+event_sequence()          — DeviceController generic accessor
+DeviceEventWait           — kernel wait record
+SYS_DEV_EVENT_WAIT        — guest syscall (check-or-block)
+reevaluate_event_waits()  — broadcast delivery (all service paths)
+```
+
+744/744 tests; 30 instructions.  Phase 9.3d is complete.

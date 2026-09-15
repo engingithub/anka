@@ -9,6 +9,9 @@
 
 use crate::anka64::isa::*;
 use crate::anka64::os::{SYS_SPAWN, SYS_WAIT, SYS_EXIT};
+use crate::anka64::guest_compiler::{
+    OUTPUT_SIZE, LAYOUT_OUT, LAYOUT_STACK, STACK_SIZE,
+};
 
 /// Where ankad maps the compiler object in its own address space.
 /// SYS_SPAWN.R1 is always this value regardless of whether the
@@ -39,6 +42,21 @@ pub fn build_ankad_code(compiler_len: usize, child_code_vaddr: u64) -> Vec<u8> {
         "child_code_vaddr/2 {:#x} exceeds MOVI range (max 0x1FFFF)",
         child_code_vaddr / 2);
 
+    // Layout-derived constants for assembly.  All values are loaded
+    // via MOVI(half) + ADD(R,R,R) so half must fit in 18-bit signed.
+    const HALF_LAYOUT_OUT: i32   = (LAYOUT_OUT / 2) as i32;
+    const HALF_OUTPUT_SIZE: i32  = (OUTPUT_SIZE / 2) as i32;
+    const HALF_LAYOUT_STACK: i32 = (LAYOUT_STACK / 2) as i32;
+    const HALF_TRAP: i32         = ((LAYOUT_STACK + STACK_SIZE) / 2) as i32;
+    const _: () = assert!(LAYOUT_OUT % 2 == 0);
+    const _: () = assert!(OUTPUT_SIZE % 2 == 0);
+    const _: () = assert!(LAYOUT_STACK % 2 == 0);
+    const _: () = assert!((LAYOUT_STACK + STACK_SIZE) % 2 == 0);
+    const _: () = assert!((LAYOUT_OUT / 2) <= 0x1FFFF);
+    const _: () = assert!((OUTPUT_SIZE / 2) <= 0x1FFFF);
+    const _: () = assert!((LAYOUT_STACK / 2) <= 0x1FFFF);
+    const _: () = assert!(((LAYOUT_STACK + STACK_SIZE) / 2) <= 0x1FFFF);
+
     let mut asm = Asm64::new();
 
     // ── Phase 1: base addresses ──
@@ -59,12 +77,12 @@ pub fn build_ankad_code(compiler_len: usize, child_code_vaddr: u64) -> Vec<u8> {
     asm.st(R9, R4, 32);              // reserved = 0
 
     // ── Phase 2b: Grant[1] — output = RWS ──
-    asm.movi(R3, 0x9000);
-    asm.add(R3, R3, R3);             // R3 = 0x12000
+    asm.movi(R3, HALF_LAYOUT_OUT);
+    asm.add(R3, R3, R3);             // R3 = LAYOUT_OUT
     asm.st(R3, R4, 40);              // parent_vaddr
     asm.st(R9, R4, 48);              // offset = 0
-    asm.movi(R3, 0x8000);
-    asm.add(R3, R3, R3);             // R3 = 0x10000
+    asm.movi(R3, HALF_OUTPUT_SIZE);
+    asm.add(R3, R3, R3);             // R3 = OUTPUT_SIZE
     asm.st(R3, R4, 56);              // size = OUTPUT_SIZE
     asm.movi(R3, 0x13);
     asm.st(R3, R4, 64);              // perms = RWS
@@ -102,13 +120,13 @@ pub fn build_ankad_code(compiler_len: usize, child_code_vaddr: u64) -> Vec<u8> {
     asm.st(R9, R6, 72);              // reserved = 0
 
     // ── Phase 2f: Map[2] — output (identity mapping) ──
-    asm.movi(R3, 0x9000);
-    asm.add(R3, R3, R3);             // R3 = 0x12000
+    asm.movi(R3, HALF_LAYOUT_OUT);
+    asm.add(R3, R3, R3);             // R3 = LAYOUT_OUT
     asm.st(R3, R6, 80);              // child_vaddr
     asm.st(R3, R6, 88);              // parent_vaddr
     asm.st(R9, R6, 96);              // offset = 0
-    asm.movi(R3, 0x8000);
-    asm.add(R3, R3, R3);             // R3 = 0x10000
+    asm.movi(R3, HALF_OUTPUT_SIZE);
+    asm.add(R3, R3, R3);             // R3 = OUTPUT_SIZE
     asm.st(R3, R6, 104);             // size = OUTPUT_SIZE
     asm.st(R9, R6, 112);             // reserved = 0
 
@@ -118,13 +136,13 @@ pub fn build_ankad_code(compiler_len: usize, child_code_vaddr: u64) -> Vec<u8> {
     asm.movi(R3, half_code);
     asm.add(R3, R3, R3);             // R3 = child_code_vaddr
     asm.st(R3, R8, 0);               // code_vaddr
-    asm.movi(R3, 0x11000);
-    asm.add(R3, R3, R3);             // R3 = 0x22000
-    asm.st(R3, R8, 8);               // stack_vaddr = LAYOUT_STACK
-    asm.movi(R3, 0x4000);
-    asm.st(R3, R8, 16);              // stack_size = 0x4000
-    asm.movi(R3, 0x13000);
-    asm.add(R3, R3, R3);             // R3 = 0x26000
+    asm.movi(R3, HALF_LAYOUT_STACK);
+    asm.add(R3, R3, R3);             // R3 = LAYOUT_STACK
+    asm.st(R3, R8, 8);               // stack_vaddr
+    asm.movi(R3, STACK_SIZE as i32);
+    asm.st(R3, R8, 16);              // stack_size
+    asm.movi(R3, HALF_TRAP);
+    asm.add(R3, R3, R3);             // R3 = LAYOUT_STACK + STACK_SIZE
     asm.st(R3, R8, 24);              // trap_vaddr
     asm.st(R9, R8, 32);              // reserved = 0
 

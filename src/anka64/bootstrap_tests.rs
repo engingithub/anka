@@ -3593,8 +3593,8 @@ mod tests {
         core.address_map.add(0x04000, 0x1000, source);
         core.address_map.add(0x05000, 0x1000, output);
         core.address_map.add(LAYOUT_WS as u64, 0x1000, work);
-        core.address_map.add(LAYOUT_STACK as u64, 0x4000, stack);
-        core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
+        core.address_map.add(LAYOUT_STACK as u64, STACK_SIZE as u64, stack);
+        core.r[SP as usize] = LAYOUT_STACK as u64 + STACK_SIZE as u64;
         core.trap_vector = 0x3FF0;
 
         let mut kernel = Kernel::new(fabric);
@@ -3978,8 +3978,8 @@ mod tests {
         core.address_map.add(0x04000, 0x1000, source);
         core.address_map.add(0x05000, 0x1000, output);
         core.address_map.add(LAYOUT_WS as u64, 0x1000, work);
-        core.address_map.add(LAYOUT_STACK as u64, 0x4000, stack);
-        core.r[SP as usize] = LAYOUT_STACK as u64 + 0x4000;
+        core.address_map.add(LAYOUT_STACK as u64, STACK_SIZE as u64, stack);
+        core.r[SP as usize] = LAYOUT_STACK as u64 + STACK_SIZE as u64;
         core.trap_vector = 0x3FF0;
 
         let mut kernel = Kernel::new(fabric);
@@ -4091,22 +4091,25 @@ mod tests {
 
         // Source object: length-prefixed
         let source_obj = fabric.alloc_object("source", SOURCE_SIZE as u64, ObjectKind::Memory);
-        fabric.place_object(source_obj, 0x200000);
-        fabric.write_physical(0x200000, &(source.len() as u64).to_le_bytes());
-        fabric.write_physical(0x200008, source);
+        assert!(fabric.place_object(source_obj, PHYS_SOURCE),
+            "physical placement overlap: source at {:#x}", PHYS_SOURCE);
+        fabric.write_physical(PHYS_SOURCE, &(source.len() as u64).to_le_bytes());
+        fabric.write_physical(PHYS_SOURCE + 8, source);
 
         // Output object (active, empty)
         let output_obj = fabric.alloc_object("output", OUTPUT_SIZE as u64, ObjectKind::Memory);
-        fabric.place_object(output_obj, 0x210000);
+        assert!(fabric.place_object(output_obj, PHYS_OUTPUT),
+            "physical placement overlap: output at {:#x}", PHYS_OUTPUT);
 
         // Workspace object
         let work_obj = fabric.alloc_object("workspace", WS_SIZE as u64, ObjectKind::Memory);
-        fabric.place_object(work_obj, 0x220000);
+        assert!(fabric.place_object(work_obj, PHYS_WORK),
+            "physical placement overlap: workspace at {:#x}", PHYS_WORK);
 
         // Initialize two-ended allocator: WS_LIT_POS = OUTPUT_SIZE
         // Required for CC_A (bootstrap compiler); redundant but harmless for CC_B.
         fabric.write_physical(
-            0x220000 + (WS_LIT_POS - LAYOUT_WS) as u64,
+            PHYS_WORK + (WS_LIT_POS - LAYOUT_WS) as u64,
             &(OUTPUT_SIZE as u64).to_le_bytes());
 
         // ── Assemble ankad (single source of truth in ankad.rs) ──
@@ -4134,9 +4137,9 @@ mod tests {
                 BootGrant { obj: work_obj,     offset: 0, size: WS_SIZE as u64,      perms: Permissions::RW },
             ],
             maps: vec![
-                BootMap { vaddr: 0x07000, size: SOURCE_SIZE as u64, obj: source_obj,   obj_offset: 0 },
-                BootMap { vaddr: 0x0C000, size: WS_SIZE as u64,     obj: work_obj,     obj_offset: 0 },
-                BootMap { vaddr: 0x12000, size: OUTPUT_SIZE as u64,  obj: output_obj,   obj_offset: 0 },
+                BootMap { vaddr: LAYOUT_SRC as u64, size: SOURCE_SIZE as u64, obj: source_obj,   obj_offset: 0 },
+                BootMap { vaddr: LAYOUT_WS as u64,  size: WS_SIZE as u64,     obj: work_obj,     obj_offset: 0 },
+                BootMap { vaddr: LAYOUT_OUT as u64,  size: OUTPUT_SIZE as u64, obj: output_obj,   obj_offset: 0 },
                 BootMap { vaddr: SUPERVISOR_COMPILER_VADDR, size: compiler_size, obj: compiler_obj, obj_offset: 0 },
             ],
             code_vaddr: 0,
@@ -4166,8 +4169,8 @@ mod tests {
 
         SupervisedResult {
             kernel,
-            output_phys: 0x210000,
-            work_phys: 0x220000,
+            output_phys: PHYS_OUTPUT,
+            work_phys: PHYS_WORK,
             wait_tag,
             wait_detail,
         }
@@ -4226,8 +4229,13 @@ mod tests {
                     read(0x00), read(0x20), read(0x18),
                     read(0x48), read(0x58), read(0x60));
             } else {
-                eprintln!("DIAG: error={} tok={} pos={} out_pos={}",
-                    read(0x18), read(0x20), read(0x00), read(0x48));
+                let out_pos = read(0x48);
+                eprintln!("DIAG: error={} tok={} pos={} out_pos={} ({:.0}% of {} arena)",
+                    read(0x18), read(0x20), read(0x00), out_pos,
+                    100.0 * out_pos as f64 / OUTPUT_SIZE as f64, OUTPUT_SIZE);
+                if out_pos >= OUTPUT_SIZE as u64 {
+                    eprintln!("DIAG: *** OUTPUT ARENA EXHAUSTED ***");
+                }
                 eprintln!("DIAG: funcs={} fixups={}", read(0x58), read(0x60));
                 let func_count = read(0x58) as usize;
                 for i in 0..func_count.min(4) {
@@ -4866,16 +4874,17 @@ mod tests {
 
     #[test]
     fn b50b_deref_read() {
-        // Child process layout (from SYS_EXEC in os.rs):
-        //   0x00000 : code (RX)
-        //   0x10000 : stack (RW, 0x4000 bytes)
-        //   0x20000 : trap handler (RX)
+        // Child process layout (from EXEC_DEFAULT_LAYOUT in os.rs,
+        // derived from OUTPUT_SIZE):
+        //   0x00000          : code (RX)
+        //   OUTPUT_SIZE      : stack (RW, STACK_SIZE bytes)
+        //   OUTPUT_SIZE+STACK_SIZE : trap handler (RX)
         //
         // Write a value to the stack, then dereference it.
-        // 0x10000 = 65536: bottom of child's stack (writable).
-        run_6b4_test(
-            b"int main() { *65536 = 77; return *65536; }",
-            77, true);
+        // OUTPUT_SIZE = 81920: bottom of child's stack (writable).
+        let src = format!("int main() {{ *{} = 77; return *{}; }}",
+            OUTPUT_SIZE, OUTPUT_SIZE);
+        run_6b4_test(src.as_bytes(), 77, true);
         eprintln!("6B.5.0b: *addr dereference read ✓");
     }
 
@@ -4883,20 +4892,20 @@ mod tests {
 
     #[test]
     fn b50b_deref_write() {
-        // Write to child stack memory (0x10000 = 65536) and read back.
-        run_6b4_test(
-            b"int main() { *65536 = 99; return *65536; }",
-            99, true);
+        // Write to child stack memory and read back.
+        let src = format!("int main() {{ *{} = 99; return *{}; }}",
+            OUTPUT_SIZE, OUTPUT_SIZE);
+        run_6b4_test(src.as_bytes(), 99, true);
         eprintln!("6B.5.0b: *addr = value; dereference write ✓");
     }
 
     #[test]
     fn b50b_deref_write_computed() {
         // *(base + offset) = value; with expressions
-        // 65544 = 0x10008 (child stack + 8)
-        run_6b4_test(
-            b"int main() { int a = 65544; *a = 42; return *a; }",
-            42, true);
+        let stack_plus_8 = OUTPUT_SIZE + 8;
+        let src = format!("int main() {{ int a = {}; *a = 42; return *a; }}",
+            stack_plus_8);
+        run_6b4_test(src.as_bytes(), 42, true);
         eprintln!("6B.5.0b: deref write via variable ✓");
     }
 
@@ -5160,6 +5169,7 @@ mod tests {
         // Keyword bytes: if=105,102  int=105,110,116
         //   else=101,108,115,101  while=119,104,105,108,101
         //   return=114,101,116,117,114,110
+        //   sysret=115,121,115,114,101,116
         //   syscall=115,121,115,99,97,108,108
         format!(
             "int classifykw(int s, int l) {{ \
@@ -5187,7 +5197,13 @@ mod tests {
              if (readbyte(s + 2) == 116) {{ \
              if (readbyte(s + 3) == 117) {{ \
              if (readbyte(s + 4) == 114) {{ \
-             if (readbyte(s + 5) == 110) {{ return {kw_return}; }} }} }} }} }} }} }} \
+             if (readbyte(s + 5) == 110) {{ return {kw_return}; }} }} }} }} }} }} \
+             if (readbyte(s) == 115) {{ \
+             if (readbyte(s + 1) == 121) {{ \
+             if (readbyte(s + 2) == 115) {{ \
+             if (readbyte(s + 3) == 114) {{ \
+             if (readbyte(s + 4) == 101) {{ \
+             if (readbyte(s + 5) == 116) {{ return {kw_sysret}; }} }} }} }} }} }} }} \
              if (l == 7) {{ \
              if (readbyte(s) == 115) {{ \
              if (readbyte(s + 1) == 121) {{ \
@@ -5199,7 +5215,8 @@ mod tests {
              return {ident}; }} ",
             kw_if = TOK_IF, kw_int = TOK_INT_KW, kw_else = TOK_ELSE,
             kw_while = TOK_WHILE, kw_return = TOK_RETURN,
-            kw_syscall = TOK_SYSCALL, ident = TOK_IDENT)
+            kw_sysret = TOK_SYSRET, kw_syscall = TOK_SYSCALL,
+            ident = TOK_IDENT)
     }
 
     fn canonical_setchartok() -> String {
@@ -5399,6 +5416,7 @@ mod tests {
              int tok = *{tt}; \
              int ns = 0; \
              int nl = 0; \
+             int argc = 0; \
              if (tok == {num}) {{ \
              ns = *{tv}; \
              nexttoken(); \
@@ -5441,15 +5459,41 @@ mod tests {
              compileexpr(); \
              emit(enci({subi}, {sp}, {sp}, 8)); \
              emit(enci({st}, {r4}, {sp}, 0)); \
+             argc = 4; \
+             if (*{tt} == {comma}) {{ \
+             nexttoken(); \
+             compileexpr(); \
+             emit(enci({subi}, {sp}, {sp}, 8)); \
+             emit(enci({st}, {r4}, {sp}, 0)); \
+             argc = 5; \
+             if (*{tt} == {comma}) {{ \
+             nexttoken(); \
+             compileexpr(); \
+             emit(enci({subi}, {sp}, {sp}, 8)); \
+             emit(enci({st}, {r4}, {sp}, 0)); \
+             argc = 6; }} }} \
              if (*{tt} != {rp}) {{ *{e} = 1; }} \
              nexttoken(); \
-             emit(enci({ld2}, {r0}, {sp}, 24)); \
-             emit(enci({ld2}, 1, {sp}, 16)); \
-             emit(enci({ld2}, 2, {sp}, 8)); \
-             emit(enci({ld2}, 3, {sp}, 0)); \
-             emit(enci({addi}, {sp}, {sp}, 32)); \
+             emit(enci({ld2}, {r0}, {sp}, (argc - 1) * 8)); \
+             emit(enci({ld2}, 1, {sp}, (argc - 2) * 8)); \
+             emit(enci({ld2}, 2, {sp}, (argc - 3) * 8)); \
+             emit(enci({ld2}, 3, {sp}, (argc - 4) * 8)); \
+             if (4 < argc) {{ emit(enci({ld2}, {r4}, {sp}, (argc - 5) * 8)); }} \
+             if (5 < argc) {{ emit(enci({ld2}, {r5}, {sp}, (argc - 6) * 8)); }} \
+             emit(enci({addi}, {sp}, {sp}, argc * 8)); \
              emit(encs({trap})); \
              emit(encr({mov}, {r4}, {r0}, 0)); \
+             return 0; }} \
+             if (tok == {sysret}) {{ \
+             nexttoken(); \
+             if (*{tt} != {lp}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             if (*{tt} != {num}) {{ *{e} = 1; }} \
+             if (*{tv} != 1) {{ *{e} = 1; }} \
+             nexttoken(); \
+             if (*{tt} != {rp}) {{ *{e} = 1; }} \
+             nexttoken(); \
+             emit(encr({mov}, {r4}, 1, 0)); \
              return 0; }} \
              if (tok == {str}) {{ \
              int litoff = storeliteral(); \
@@ -5461,13 +5505,14 @@ mod tests {
             tns = WS_TOK_NAME_START, tnl = WS_TOK_NAME_LEN,
             e = WS_ERROR,
             num = TOK_NUMBER, ident = TOK_IDENT,
-            str = TOK_STRING,
+            str = TOK_STRING, sysret = TOK_SYSRET,
             lp = TOK_LPAREN, rp = TOK_RPAREN,
             comma = TOK_COMMA, syscall = TOK_SYSCALL,
             movi = OP_MOVI, ld = OP_LD, ld2 = OP_LD,
             subi = OP_SUBI, addi = OP_ADDI, st = OP_ST, trap = OP_TRAP,
             mov = OP_MOV,
-            r4 = GEN_R4, r0 = GEN_R0, fp = GEN_FP, sp = GEN_SP)
+            r4 = GEN_R4, r5 = GEN_R5, r0 = GEN_R0,
+            fp = GEN_FP, sp = GEN_SP)
     }
 
     fn canonical_exprsave() -> String {
@@ -6433,10 +6478,15 @@ mod tests {
         eprintln!("6B.5.0e: host compiled {} functions, {} bytes output, error={}",
             ws_funcs, ws_out, ws_error);
         assert_eq!(ws_error, 0, "host compiler reported error");
+        assert!(ws_out < OUTPUT_SIZE as u64,
+            "compiler output arena exhausted: out_pos={} >= OUTPUT_SIZE={}",
+            ws_out, OUTPUT_SIZE);
         assert_eq!(ws_funcs, CANONICAL_FUNC_COUNT,
             "expected {} canonical functions", CANONICAL_FUNC_COUNT);
-        eprintln!("6B.5.0e: canonical full compiler ({} functions) [supervised] ✓",
-            CANONICAL_FUNC_COUNT);
+        eprintln!("6B.5.0e: canonical full compiler ({} functions, {} bytes output, \
+            {:.0}% of {} arena) [supervised] ✓",
+            CANONICAL_FUNC_COUNT, ws_out,
+            100.0 * ws_out as f64 / OUTPUT_SIZE as f64, OUTPUT_SIZE);
     }
 
     #[test]
@@ -6990,10 +7040,11 @@ mod tests {
     fn b51_ccb_deref() {
         let ccb = build_ccb();
         // The grandchild only has code+stack+trap (from SYS_EXEC).
-        // Stack: virtual 0x10000, 0x4000 bytes. Use low stack as scratch.
-        // SP starts at 0x14000, so 0x10000 is safe scratch space.
-        run_ccb_test(&ccb,
-            b"int main() { int p = 65536; *p = 42; return *p; }", 42);
+        // Stack: virtual OUTPUT_SIZE, STACK_SIZE bytes. Use low stack as scratch.
+        // SP starts at OUTPUT_SIZE+STACK_SIZE, so OUTPUT_SIZE is safe scratch space.
+        let src = format!("int main() {{ int p = {}; *p = 42; return *p; }}",
+            OUTPUT_SIZE);
+        run_ccb_test(&ccb, src.as_bytes(), 42);
         eprintln!("6B.5.1: CC_B deref write+read ✓");
     }
 
@@ -7064,8 +7115,9 @@ mod tests {
         run_ccb_test(compiler,
             b"int sum(int n) { if (n == 0) { return 0; } else { return n + sum(n - 1); } } \
               int main() { return sum(5); }", 15);
-        run_ccb_test(compiler,
-            b"int main() { int p = 65536; *p = 42; return *p; }", 42);
+        let deref_src = format!("int main() {{ int p = {}; *p = 42; return *p; }}",
+            OUTPUT_SIZE);
+        run_ccb_test(compiler, deref_src.as_bytes(), 42);
         run_ccb_test(compiler, b"int main() { return 6 & 3; }", 2);
         run_ccb_test(compiler, b"int main() { return 5 | 2; }", 7);
         run_ccb_test(compiler, b"int main() { return 1 << 4; }", 16);
@@ -7373,20 +7425,23 @@ mod tests {
 
         // Source object
         let source_obj = fabric.alloc_object("source", SOURCE_SIZE as u64, ObjectKind::Memory);
-        fabric.place_object(source_obj, 0x200000);
+        assert!(fabric.place_object(source_obj, PHYS_SOURCE),
+            "physical placement overlap: source at {:#x}", PHYS_SOURCE);
         let source_text = b"int main() { return 42; }";
-        fabric.write_physical(0x200000, &(source_text.len() as u64).to_le_bytes());
-        fabric.write_physical(0x200008, source_text);
+        fabric.write_physical(PHYS_SOURCE, &(source_text.len() as u64).to_le_bytes());
+        fabric.write_physical(PHYS_SOURCE + 8, source_text);
 
         // Output object
         let output_obj = fabric.alloc_object("output", OUTPUT_SIZE as u64, ObjectKind::Memory);
-        fabric.place_object(output_obj, 0x210000);
+        assert!(fabric.place_object(output_obj, PHYS_OUTPUT),
+            "physical placement overlap: output at {:#x}", PHYS_OUTPUT);
 
         // Workspace object — no host initialization needed.
         // The compiler's main() initializes WS_LIT_POS = OUTPUT_SIZE
         // and all other workspace fields (Phase 8.1c).
         let work_obj = fabric.alloc_object("workspace", WS_SIZE as u64, ObjectKind::Memory);
-        fabric.place_object(work_obj, 0x220000);
+        assert!(fabric.place_object(work_obj, PHYS_WORK),
+            "physical placement overlap: workspace at {:#x}", PHYS_WORK);
 
         // Boot descriptor: CC_B at 0x30000, data at canonical addresses
         let info = BootInfo {
@@ -7409,8 +7464,8 @@ mod tests {
             ],
             code_vaddr: CCB_CODE_BASE,
             stack_vaddr: LAYOUT_STACK as u64,
-            stack_size: 0x4000,
-            trap_vaddr: LAYOUT_STACK as u64 + 0x4000, // after stack
+            stack_size: STACK_SIZE as u64,
+            trap_vaddr: LAYOUT_STACK as u64 + STACK_SIZE as u64,
         };
 
         let mut kernel = Kernel::new(fabric);
@@ -7425,7 +7480,7 @@ mod tests {
 
         // Read workspace results
         let read_ws = |off: u64| -> u64 {
-            let bytes = kernel.fabric.read_physical(0x220000 + off, 8);
+            let bytes = kernel.fabric.read_physical(PHYS_WORK + off, 8);
             u64::from_le_bytes(bytes.try_into().unwrap())
         };
         let ws_error = read_ws((WS_ERROR - LAYOUT_WS) as u64);
@@ -9374,164 +9429,35 @@ mod tests {
 
         // Source object: length-prefixed "int main() { return 42; }"
         let source_obj = fabric.alloc_object("source", SOURCE_SIZE as u64, ObjectKind::Memory);
-        fabric.place_object(source_obj, 0x200000);
+        assert!(fabric.place_object(source_obj, PHYS_SOURCE),
+            "physical placement overlap: source at {:#x}", PHYS_SOURCE);
         let source_text = b"int main() { return 42; }";
-        fabric.write_physical(0x200000, &(source_text.len() as u64).to_le_bytes());
-        fabric.write_physical(0x200008, source_text);
+        fabric.write_physical(PHYS_SOURCE, &(source_text.len() as u64).to_le_bytes());
+        fabric.write_physical(PHYS_SOURCE + 8, source_text);
 
         // Output object (active, empty — CC_B will write + seal)
         let output_obj = fabric.alloc_object("output", OUTPUT_SIZE as u64, ObjectKind::Memory);
-        fabric.place_object(output_obj, 0x210000);
+        assert!(fabric.place_object(output_obj, PHYS_OUTPUT),
+            "physical placement overlap: output at {:#x}", PHYS_OUTPUT);
 
         // Workspace object (uninitialized — CC_B's main() self-initializes)
         let work_obj = fabric.alloc_object("workspace", WS_SIZE as u64, ObjectKind::Memory);
-        fabric.place_object(work_obj, 0x220000);
+        assert!(fabric.place_object(work_obj, PHYS_WORK),
+            "physical placement overlap: workspace at {:#x}", PHYS_WORK);
 
-        // ── Assemble ankad ──
+        // ── Assemble ankad (single source of truth in ankad.rs) ──
         //
-        // Virtual memory layout for ankad:
-        //   0x00000 - 0x02000 : ankad code (Sealed, RX)
-        //   0x07000 - 0x0C000 : source (R)
-        //   0x0C000 - 0x12000 : workspace (RW)
-        //   0x12000 - 0x22000 : output (RWS)
-        //   0x30000+          : CC_B code (RX, sealed)
-        //   0x50000 - 0x54000 : stack (kernel-allocated)
-        //   0x54000 - 0x55000 : trap (kernel-allocated)
+        // p84c originally carried a manual fork of the ankad assembly.
+        // Now uses build_ankad_code() to stay aligned with layout changes.
         //
-        // Values above MOVI 18-bit limit use MOVI half; ADD Rx,Rx,Rx:
-        //   0x0C000 = 0x6000 << 1    0x12000 = 0x9000 << 1
-        //   0x10000 = 0x8000 << 1    0x22000 = 0x11000 << 1
-        //   0x26000 = 0x13000 << 1   0x30000 = 0x18000 << 1
-        //
-        // Register plan:
-        //   R4  = grant_base  (SP - 0x300), becomes SYS_SPAWN R4
-        //   R6  = map_base    (SP - 0x200), becomes SYS_SPAWN R6
-        //   R8  = layout_base (SP - 0x100), becomes SYS_SPAWN R8
-        //   R9  = zero constant during construction, then handle
-        //   R3, R10 = temporaries
+        // Note: p84c ankad differs from the standard ankad in Phase 5:
+        // it uses SYS_WRITE to emit (tag, detail) before SYS_EXIT(0),
+        // rather than the standard MOV R10,R0 + SYS_EXIT(detail).
+        // However, both test paths verify the same invariants — the
+        // SYS_WRITE path is now redundant.  Use the canonical ankad.
         {
-            let mut asm = Asm64::new();
-
-            // ── Phase 1: base addresses ──
-            asm.subi(R4, SP, 0x300);          // grant_base
-            asm.subi(R6, SP, 0x200);          // map_base
-            asm.subi(R8, SP, 0x100);          // layout_base
-            asm.movi(R9, 0);                  // zero constant
-
-            // ── Phase 2a: Grant[0] — source = R ──
-            // [parent_vaddr, offset, size, perms, reserved]
-            asm.movi(R3, 0x07000);
-            asm.st(R3, R4, 0);               // parent_vaddr = 0x07000
-            asm.st(R9, R4, 8);               // offset = 0
-            asm.movi(R3, 0x5000);
-            asm.st(R3, R4, 16);              // size = SOURCE_SIZE
-            asm.movi(R3, 1);
-            asm.st(R3, R4, 24);              // perms = READ
-            asm.st(R9, R4, 32);              // reserved = 0
-
-            // ── Phase 2b: Grant[1] — output = RWS ──
-            asm.movi(R3, 0x9000);
-            asm.add(R3, R3, R3);             // R3 = 0x12000
-            asm.st(R3, R4, 40);              // parent_vaddr
-            asm.st(R9, R4, 48);              // offset = 0
-            asm.movi(R3, 0x8000);
-            asm.add(R3, R3, R3);             // R3 = 0x10000
-            asm.st(R3, R4, 56);              // size = OUTPUT_SIZE
-            asm.movi(R3, 0x13);
-            asm.st(R3, R4, 64);              // perms = RWS
-            asm.st(R9, R4, 72);              // reserved = 0
-
-            // ── Phase 2c: Grant[2] — workspace = RW ──
-            asm.movi(R3, 0x6000);
-            asm.add(R3, R3, R3);             // R3 = 0x0C000
-            asm.st(R3, R4, 80);              // parent_vaddr
-            asm.st(R9, R4, 88);              // offset = 0
-            asm.movi(R3, 0x6000);
-            asm.st(R3, R4, 96);              // size = WS_SIZE
-            asm.movi(R3, 3);
-            asm.st(R3, R4, 104);             // perms = RW
-            asm.st(R9, R4, 112);             // reserved = 0
-
-            // ── Phase 2d: Map[0] — source (identity mapping) ──
-            // [child_vaddr, parent_vaddr, offset, size, reserved]
-            asm.movi(R3, 0x07000);
-            asm.st(R3, R6, 0);               // child_vaddr = 0x07000
-            asm.st(R3, R6, 8);               // parent_vaddr = 0x07000
-            asm.st(R9, R6, 16);              // offset = 0
-            asm.movi(R3, 0x5000);
-            asm.st(R3, R6, 24);              // size = SOURCE_SIZE
-            asm.st(R9, R6, 32);              // reserved = 0
-
-            // ── Phase 2e: Map[1] — workspace (identity mapping) ──
-            asm.movi(R3, 0x6000);
-            asm.add(R3, R3, R3);             // R3 = 0x0C000
-            asm.st(R3, R6, 40);              // child_vaddr
-            asm.st(R3, R6, 48);              // parent_vaddr
-            asm.st(R9, R6, 56);              // offset = 0
-            asm.movi(R3, 0x6000);
-            asm.st(R3, R6, 64);              // size = WS_SIZE
-            asm.st(R9, R6, 72);              // reserved = 0
-
-            // ── Phase 2f: Map[2] — output (identity mapping) ──
-            asm.movi(R3, 0x9000);
-            asm.add(R3, R3, R3);             // R3 = 0x12000
-            asm.st(R3, R6, 80);              // child_vaddr
-            asm.st(R3, R6, 88);              // parent_vaddr
-            asm.st(R9, R6, 96);              // offset = 0
-            asm.movi(R3, 0x8000);
-            asm.add(R3, R3, R3);             // R3 = 0x10000
-            asm.st(R3, R6, 104);             // size = OUTPUT_SIZE
-            asm.st(R9, R6, 112);             // reserved = 0
-
-            // ── Phase 2g: SpawnLayout ──
-            // [code_vaddr, stack_vaddr, stack_size, trap_vaddr, reserved]
-            asm.movi(R3, 0x18000);
-            asm.add(R3, R3, R3);             // R3 = 0x30000
-            asm.st(R3, R8, 0);               // code_vaddr = CCB_CODE_BASE
-            asm.movi(R3, 0x11000);
-            asm.add(R3, R3, R3);             // R3 = 0x22000
-            asm.st(R3, R8, 8);               // stack_vaddr = LAYOUT_STACK
-            asm.movi(R3, 0x4000);
-            asm.st(R3, R8, 16);              // stack_size = 0x4000
-            asm.movi(R3, 0x13000);
-            asm.add(R3, R3, R3);             // R3 = 0x26000
-            asm.st(R3, R8, 24);              // trap_vaddr
-            asm.st(R9, R8, 32);              // reserved = 0
-
-            // ── Phase 3: SYS_SPAWN(R1-R8) ──
-            asm.movi(R1, 0x18000);
-            asm.add(R1, R1, R1);             // R1 = 0x30000 (CC_B code vaddr)
-            asm.movi(R2, ccb_len as i32);    // R2 = ccb code_size (fits MOVI)
-            asm.movi(R3, 0);                 // R3 = lit_start = 0
-            asm.movi(R5, 3);                 // R5 = grant_count
-            asm.movi(R7, 3);                 // R7 = map_count
-            // R4 = grant_base, R6 = map_base, R8 = layout_base (already set)
-            asm.movi(R0, SYS_SPAWN as i32);
-            asm.trap(0);
-
-            // ── Phase 4: SYS_WAIT ──
-            asm.mov(R9, R0);                 // R9 = handle
-            asm.mov(R1, R9);
-            asm.movi(R0, SYS_WAIT as i32);
-            asm.trap(0);
-            // R0 = tag, R1 = detail
-
-            // ── Phase 5: SYS_WRITE(tag, detail) ──
-            asm.subi(R10, SP, 0x4000);       // R10 = stack base (scratch area)
-            asm.st(R0, R10, 0);              // [base + 0] = tag
-            asm.st(R1, R10, 8);              // [base + 8] = detail
-            asm.mov(R1, R10);                // R1 = addr
-            asm.movi(R2, 16);                // R2 = len (2 × u64)
-            asm.movi(R3, 0);
-            asm.movi(R0, SYS_WRITE as i32);
-            asm.trap(0);
-
-            // ── Phase 6: SYS_EXIT(0) ──
-            asm.movi(R1, 0);
-            asm.movi(R0, SYS_EXIT as i32);
-            asm.trap(0);
-
-            let code_bytes = asm.to_bytes();
+            let code_bytes = crate::anka64::ankad::build_ankad_code(
+                ccb_len, CCB_CODE_BASE);
             assert!(code_bytes.len() < 0x2000,
                 "ankad code {} bytes exceeds 0x2000", code_bytes.len());
             fabric.initialize_object(ankad_obj, 0, &code_bytes);
@@ -9555,10 +9481,10 @@ mod tests {
                 BootGrant { obj: work_obj,   offset: 0, size: WS_SIZE as u64,      perms: Permissions::RW },
             ],
             maps: vec![
-                BootMap { vaddr: 0x07000, size: SOURCE_SIZE as u64, obj: source_obj, obj_offset: 0 },
-                BootMap { vaddr: 0x0C000, size: WS_SIZE as u64,     obj: work_obj,   obj_offset: 0 },
-                BootMap { vaddr: 0x12000, size: OUTPUT_SIZE as u64,  obj: output_obj, obj_offset: 0 },
-                BootMap { vaddr: 0x30000, size: ccb_size,            obj: ccb_obj,    obj_offset: 0 },
+                BootMap { vaddr: LAYOUT_SRC as u64, size: SOURCE_SIZE as u64, obj: source_obj, obj_offset: 0 },
+                BootMap { vaddr: LAYOUT_WS as u64,  size: WS_SIZE as u64,     obj: work_obj,   obj_offset: 0 },
+                BootMap { vaddr: LAYOUT_OUT as u64,  size: OUTPUT_SIZE as u64, obj: output_obj, obj_offset: 0 },
+                BootMap { vaddr: CCB_CODE_BASE,      size: ccb_size,           obj: ccb_obj,    obj_offset: 0 },
             ],
             code_vaddr: 0,
             stack_vaddr: 0x50000,
@@ -9580,17 +9506,11 @@ mod tests {
 
         // 1. ankad exited cleanly
         assert!(kernel.processes[0].exited(), "ankad should have exited");
-        assert_eq!(kernel.processes[0].exit_code, 0,
-            "ankad exits with 0 (compiler supervised successfully)");
 
-        // 2. byte_output: tag = 0 (Exited), detail = 42
-        assert_eq!(kernel.byte_output.len(), 16,
-            "ankad wrote 16 bytes (tag + detail)");
-        let read_u64 = |off: usize| -> u64 {
-            u64::from_le_bytes(kernel.byte_output[off..off+8].try_into().unwrap())
-        };
-        let tag    = read_u64(0);
-        let detail = read_u64(8);
+        // 2. Canonical ankad: R10 = wait tag, exit_code = detail
+        //    (uses MOV R10,R0 + SYS_EXIT(R1), not SYS_WRITE)
+        let tag = kernel.processes[0].core.r[R10 as usize];
+        let detail = kernel.processes[0].exit_code;
         assert_eq!(tag, 0, "CC_B result tag = Exited (0)");
         assert_eq!(detail, 42, "CC_B exit code = 42 (compiled child returned 42)");
 
@@ -9845,6 +9765,574 @@ mod tests {
             + image.boot.maps.len() * MAP_RECORD_SIZE;
         bytes[obj_start + 2] = 0xFF;
         assert_eq!(SystemImage::decode(&bytes).unwrap_err(), ImageError::InvalidUtf8Name);
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  Phase 9.3e.2 — ABI Witness Suite
+    //
+    //  Adversarial tests for the extended syscall ABI (R0..R5),
+    //  sysret(1) intrinsic, and compiler rejection semantics.
+    //
+    //  All positive witnesses use direct register observation:
+    //  syscall(250, ...) triggers ProtectionFault before the
+    //  compiler-generated MOV R4,R0 can execute, so R0..R5
+    //  reflect the exact ABI boundary state.
+    //
+    //  Both compiler generations (CC_A and CC_B) are exercised.
+    // ═══════════════════════════════════════════════════════════
+
+    // ─── Shared infrastructure ───────────────────────────────
+
+    /// Compilation result with full two-ended arena state.
+    struct CompileArtifact {
+        /// Complete output image [0, OUTPUT_SIZE): code↑ + literals↓.
+        image: Vec<u8>,
+        /// Code end position (bytes of machine code emitted).
+        out_pos: u64,
+        /// Literal start position (literals grow downward from OUTPUT_SIZE).
+        lit_pos: u64,
+        /// Number of functions compiled.
+        funcs: u64,
+        /// Compiler error flag (0 = success).
+        error: u64,
+    }
+
+    /// Compile `source` using CC_A (the host AST compiler) and extract
+    /// the full output image with arena diagnostics.
+    ///
+    /// Unconditionally asserts the two-ended arena headroom policy:
+    ///   out_pos < lit_pos
+    /// This is intentionally stronger than the bare geometric non-overlap
+    /// condition (out_pos <= lit_pos).  Equality means the arena is exactly
+    /// exhausted; we reject that as a deliberate exhaustion tripwire.
+    fn compile_and_extract(source: &[u8]) -> CompileArtifact {
+        let compiler_prog = build_6b4_compiler();
+        let asm = cc::compile(&compiler_prog);
+        let code_bytes = asm.to_bytes();
+
+        let r = run_supervised_compiler(&code_bytes, 0, source);
+        assert!(r.kernel.processes[0].exited(),
+            "ankad did not exit (compile_and_extract)");
+        assert_eq!(r.wait_tag, 0,
+            "CC_A faulted compiling source (tag={})", r.wait_tag);
+
+        let read_ws = |off: u64| -> u64 {
+            let bytes = r.kernel.fabric.read_physical(r.work_phys + off, 8);
+            u64::from_le_bytes(bytes.try_into().unwrap())
+        };
+
+        let error   = read_ws(0x18);
+        let out_pos = read_ws(0x48);
+        let funcs   = read_ws(0x58);
+        let lit_pos_off = (WS_LIT_POS - LAYOUT_WS) as u64;
+        let lit_pos = read_ws(lit_pos_off);
+        if error == 0 {
+            assert!(out_pos < lit_pos,
+                "CC_A arena headroom exhausted: out_pos={} >= lit_pos={} \
+                 (OUTPUT_SIZE={}). This is a deliberate exhaustion policy, \
+                 not merely a collision check.",
+                out_pos, lit_pos, OUTPUT_SIZE);
+        }
+
+        let image = r.kernel.fabric.read_physical(r.output_phys, OUTPUT_SIZE as u64).to_vec();
+        CompileArtifact { image, out_pos, lit_pos, funcs, error }
+    }
+
+    /// Compile `source` using CC_B (the canonical self-hosted compiler)
+    /// and extract the full output image with arena diagnostics.
+    ///
+    /// Same headroom policy as `compile_and_extract`.
+    fn compile_and_extract_ccb(ccb: &[u8], source: &[u8]) -> CompileArtifact {
+        let r = run_supervised_compiler(ccb, CCB_CODE_BASE, source);
+        assert!(r.kernel.processes[0].exited(),
+            "ankad did not exit (compile_and_extract_ccb)");
+
+        let read_ws = |off: u64| -> u64 {
+            let bytes = r.kernel.fabric.read_physical(r.work_phys + off, 8);
+            u64::from_le_bytes(bytes.try_into().unwrap())
+        };
+
+        let error   = read_ws(0x18);
+        let out_pos = read_ws(0x48);
+        let funcs   = read_ws(0x58);
+        let lit_pos_off = (WS_LIT_POS - LAYOUT_WS) as u64;
+        let lit_pos = read_ws(lit_pos_off);
+
+        if error == 0 {
+            assert!(out_pos < lit_pos,
+                "CC_B arena headroom exhausted: out_pos={} >= lit_pos={} \
+                 (OUTPUT_SIZE={}). This is a deliberate exhaustion policy, \
+                 not merely a collision check.",
+                out_pos, lit_pos, OUTPUT_SIZE);
+        }
+
+        let image = r.kernel.fabric.read_physical(r.output_phys, OUTPUT_SIZE as u64).to_vec();
+        CompileArtifact { image, out_pos, lit_pos, funcs, error }
+    }
+
+    /// Compile `source` with CC_A and assert it is rejected.
+    ///
+    /// Asserts the compiler error state directly (ws_error != 0),
+    /// not merely an exit-code convention.  This proves:
+    ///   Reject_CC(source)
+    /// rather than merely:
+    ///   ObservedExit(source) = -1.
+    fn compile_expect_error(source: &[u8], label: &str) {
+        let art = compile_and_extract(source);
+        assert_ne!(art.error, 0,
+            "CC_A must reject {:?}: ws_error should be nonzero", label);
+    }
+
+    /// Compile `source` with CC_B and assert it is rejected.
+    fn compile_expect_error_ccb(ccb: &[u8], source: &[u8], label: &str) {
+        let art = compile_and_extract_ccb(ccb, source);
+        assert_ne!(art.error, 0,
+            "CC_B must reject {:?}: ws_error should be nonzero", label);
+    }
+
+    /// Load a compiled program, execute until death on unknown syscall 250,
+    /// and return registers R0..R5.
+    ///
+    /// Asserts specifically that the process died with ProtectionFault
+    /// (proving it reached the unknown-syscall handler, not an unrelated
+    /// fault) and that the compiler-generated MOV R4,R0 never executed
+    /// (because the process is dead).
+    ///
+    /// Returns `[R0, R1, R2, R3, R4, R5]`.
+    fn register_probe(code: &[u8]) -> [u64; 6] {
+        let code_size = ((code.len() + 0xFFF) & !0xFFF) as u64;
+
+        let mut fabric = Fabric::new(0x200000);
+        let text = fabric.alloc_object("probe_text", code_size, ObjectKind::Memory);
+        let stack = fabric.alloc_object("probe_stack", STACK_SIZE as u64, ObjectKind::Memory);
+        assert!(fabric.place_object(text, 0x000000),
+            "physical placement overlap: probe text");
+        assert!(fabric.place_object(stack, 0x010000),
+            "physical placement overlap: probe stack");
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, stack, 0, STACK_SIZE as u64, Permissions::RW);
+
+        // Write code and trap handler, then seal.
+        fabric.write_physical(0x000000, code);
+        install_trap_handler(&mut fabric, 0x000000, code_size);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x00000, code_size, text);
+        core.address_map.add(OUTPUT_SIZE as u64, STACK_SIZE as u64, stack);
+        core.r[SP as usize] = OUTPUT_SIZE as u64 + STACK_SIZE as u64;
+        core.trap_vector = code_size - 0x10;
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x100000;
+        kernel.spawn(core);
+        kernel.run(100_000, 10_000);
+
+        // Assert definitive ProtectionFault — not Exited, not SupervisorFault.
+        assert_eq!(kernel.processes[0].state, ProcessState::Zombie,
+            "register_probe: process should be dead");
+        assert_eq!(kernel.processes[0].result,
+            Some(ProcessResult::ProtectionFault),
+            "register_probe: process must die on unknown syscall 250 \
+             with ProtectionFault, not {:?}",
+            kernel.processes[0].result);
+
+        [
+            kernel.processes[0].core.r[R0 as usize],
+            kernel.processes[0].core.r[R1 as usize],
+            kernel.processes[0].core.r[R2 as usize],
+            kernel.processes[0].core.r[R3 as usize],
+            kernel.processes[0].core.r[R4 as usize],
+            kernel.processes[0].core.r[R5 as usize],
+        ]
+    }
+
+    // ─── Test 1: Exact 5-expression register capture ─────────
+    //
+    //   syscall(250, 11, 22, 33, 44) → (R0..R4) = (250, 11, 22, 33, 44)
+    //
+    //   Exercises both CC_A and CC_B.  The invalid syscall 250 causes
+    //   ProtectionFault before MOV R4,R0 can execute, so R4 still
+    //   holds the fourth payload argument (d in syscall(n,a,b,c,d)).
+
+    #[test]
+    fn p93e2_register_5arg_cca() {
+        let art = compile_and_extract(
+            b"int main() { int x = syscall(250, 11, 22, 33, 44); return 0; }");
+        assert_eq!(art.error, 0, "CC_A rejected 5-arg syscall source");
+        let regs = register_probe(&art.image[..art.out_pos as usize]);
+        assert_eq!(regs[0], 250, "R0 = syscall number");
+        assert_eq!(regs[1], 11,  "R1 = arg 1");
+        assert_eq!(regs[2], 22,  "R2 = arg 2");
+        assert_eq!(regs[3], 33,  "R3 = arg 3");
+        assert_eq!(regs[4], 44,  "R4 = arg 4");
+        eprintln!("9.3e.2: 5-arg register capture via CC_A ✓");
+    }
+
+    #[test]
+    fn p93e2_register_5arg_ccb() {
+        let ccb = build_ccb();
+        let art = compile_and_extract_ccb(&ccb,
+            b"int main() { int x = syscall(250, 11, 22, 33, 44); return 0; }");
+        assert_eq!(art.error, 0, "CC_B rejected 5-arg syscall source");
+        let regs = register_probe(&art.image[..art.out_pos as usize]);
+        assert_eq!(regs[0], 250, "R0 = syscall number");
+        assert_eq!(regs[1], 11,  "R1 = arg 1");
+        assert_eq!(regs[2], 22,  "R2 = arg 2");
+        assert_eq!(regs[3], 33,  "R3 = arg 3");
+        assert_eq!(regs[4], 44,  "R4 = arg 4");
+        eprintln!("9.3e.2: 5-arg register capture via CC_B ✓");
+    }
+
+    // ─── Test 2: Exact 6-expression register capture ─────────
+    //
+    //   syscall(250, 11, 22, 33, 44, 55) → (R0..R5) = (250, 11, 22, 33, 44, 55)
+
+    #[test]
+    fn p93e2_register_6arg_cca() {
+        let art = compile_and_extract(
+            b"int main() { int x = syscall(250, 11, 22, 33, 44, 55); return 0; }");
+        assert_eq!(art.error, 0, "CC_A rejected 6-arg syscall source");
+        let regs = register_probe(&art.image[..art.out_pos as usize]);
+        assert_eq!(regs[0], 250, "R0 = syscall number");
+        assert_eq!(regs[1], 11,  "R1 = arg 1");
+        assert_eq!(regs[2], 22,  "R2 = arg 2");
+        assert_eq!(regs[3], 33,  "R3 = arg 3");
+        assert_eq!(regs[4], 44,  "R4 = arg 4");
+        assert_eq!(regs[5], 55,  "R5 = arg 5");
+        eprintln!("9.3e.2: 6-arg register capture via CC_A ✓");
+    }
+
+    #[test]
+    fn p93e2_register_6arg_ccb() {
+        let ccb = build_ccb();
+        let art = compile_and_extract_ccb(&ccb,
+            b"int main() { int x = syscall(250, 11, 22, 33, 44, 55); return 0; }");
+        assert_eq!(art.error, 0, "CC_B rejected 6-arg syscall source");
+        let regs = register_probe(&art.image[..art.out_pos as usize]);
+        assert_eq!(regs[0], 250, "R0 = syscall number");
+        assert_eq!(regs[1], 11,  "R1 = arg 1");
+        assert_eq!(regs[2], 22,  "R2 = arg 2");
+        assert_eq!(regs[3], 33,  "R3 = arg 3");
+        assert_eq!(regs[4], 44,  "R4 = arg 4");
+        assert_eq!(regs[5], 55,  "R5 = arg 5");
+        eprintln!("9.3e.2: 6-arg register capture via CC_B ✓");
+    }
+
+    // ─── Test 3: Evaluate-before-stage register capture ──────
+    //
+    //   int f() { return 7; }
+    //   int main() { syscall(250, f()+35, f(), f(), f(), f()); return 0; }
+    //
+    //   Expected: (R0..R5) = (250, 42, 7, 7, 7, 7)
+    //
+    //   This directly falsifies premature register staging.  If the
+    //   compiler evaluated arg1 into R1 before evaluating subsequent
+    //   arguments containing function calls, f() would clobber R1.
+    //   The EvaluateAll → Spill → ReloadRegisters → TRAP strategy
+    //   prevents this.
+
+    #[test]
+    fn p93e2_register_eval_before_stage_cca() {
+        let src = b"int f() { return 7; } int main() { int x = syscall(250, f() + 35, f(), f(), f(), f()); return 0; }";
+        let art = compile_and_extract(src);
+        assert_eq!(art.error, 0, "CC_A rejected eval-before-stage source");
+        let regs = register_probe(&art.image[..art.out_pos as usize]);
+        assert_eq!(regs[0], 250, "R0 = syscall number");
+        assert_eq!(regs[1], 42,  "R1 = f()+35 = 7+35 = 42");
+        assert_eq!(regs[2], 7,   "R2 = f() = 7");
+        assert_eq!(regs[3], 7,   "R3 = f() = 7");
+        assert_eq!(regs[4], 7,   "R4 = f() = 7");
+        assert_eq!(regs[5], 7,   "R5 = f() = 7");
+        eprintln!("9.3e.2: evaluate-before-stage register capture via CC_A ✓");
+    }
+
+    #[test]
+    fn p93e2_register_eval_before_stage_ccb() {
+        let ccb = build_ccb();
+        let src = b"int f() { return 7; } int main() { int x = syscall(250, f() + 35, f(), f(), f(), f()); return 0; }";
+        let art = compile_and_extract_ccb(&ccb, src);
+        assert_eq!(art.error, 0, "CC_B rejected eval-before-stage source");
+        let regs = register_probe(&art.image[..art.out_pos as usize]);
+        assert_eq!(regs[0], 250, "R0 = syscall number");
+        assert_eq!(regs[1], 42,  "R1 = f()+35 = 7+35 = 42");
+        assert_eq!(regs[2], 7,   "R2 = f() = 7");
+        assert_eq!(regs[3], 7,   "R3 = f() = 7");
+        assert_eq!(regs[4], 7,   "R4 = f() = 7");
+        assert_eq!(regs[5], 7,   "R5 = f() = 7");
+        eprintln!("9.3e.2: evaluate-before-stage register capture via CC_B ✓");
+    }
+
+    // ─── Test 4: Too-many-arguments rejection ────────────────
+    //
+    //   syscall(0, 2, 3, 4, 5, 6, 7) must be a compiler error.
+    //   Both CC_A and CC_B must reject this, not silently truncate.
+
+    #[test]
+    fn p93e2_reject_too_many_args() {
+        compile_expect_error(
+            b"int main() { int x = syscall(0, 2, 3, 4, 5, 6, 7); return 0; }",
+            "7-arg syscall (CC_A)");
+        let ccb = build_ccb();
+        compile_expect_error_ccb(&ccb,
+            b"int main() { int x = syscall(0, 2, 3, 4, 5, 6, 7); return 0; }",
+            "7-arg syscall (CC_B)");
+        eprintln!("9.3e.2: 7-arg syscall rejected by both CC_A and CC_B ✓");
+    }
+
+    // ─── Test 5: sysret(1) end-to-end via SYS_DEV_EVENT_WAIT ─
+    //
+    //   Guest source:
+    //     int main() { int s = syscall(17, 0, 0, 0); return sysret(1); }
+    //
+    //   The block device is pre-configured with epoch=1.  The guest's
+    //   observed epoch is 0, so SYS_DEV_EVENT_WAIT returns immediately
+    //   with R0=0 (success) and R1=1 (current epoch).
+    //
+    //   sysret(1) compiles to MOV R4,R1, capturing the epoch.
+    //   The program then exits with sysret(1) = 1.
+    //
+    //   This tests the complete chain:
+    //     GuestSource → Compiler → MachineCode → SYS_DEV_EVENT_WAIT
+    //       → R1=1 → sysret(1) → exit(1)
+    //
+    //   Device precondition: epoch advanced to 1, completion drained,
+    //   controller does not require attention.
+
+    /// Set up a kernel with a block device at epoch=1, boot the given code
+    /// as a process with EVENT_WAIT capability, run it, and return the
+    /// exit code.
+    ///
+    /// The epoch is advanced through the real production path:
+    ///   submit block read → tick until completion → consume completion
+    /// so the device arrives at:
+    ///   event_sequence=1 ∧ completion_count=0 ∧ ¬requires_attention
+    /// through an architecturally reachable transition, not a test backdoor.
+    ///
+    /// The compiled guest program uses `syscall(17, 0, 0, 0)`:
+    ///   cap_slot=0, cap_gen=0, observed_epoch=0.
+    /// Since current epoch (1) > observed (0), SYS_DEV_EVENT_WAIT
+    /// returns immediately with R0=0, R1=1.
+    fn run_sysret_device_witness(code: &[u8]) -> u64 {
+        let code_size = ((code.len() + 0xFFF) & !0xFFF) as u64;
+
+        let mut fabric = Fabric::new(0x400000);
+
+        let text = fabric.alloc_object("sysret_text", code_size, ObjectKind::Memory);
+        let stack = fabric.alloc_object("sysret_stack", STACK_SIZE as u64, ObjectKind::Memory);
+        let dma_buf = fabric.alloc_object("dma_buf", 512, ObjectKind::Memory);
+        assert!(fabric.place_object(text, 0x000000),
+            "physical placement overlap: sysret text");
+        assert!(fabric.place_object(stack, 0x100000),
+            "physical placement overlap: sysret stack");
+        assert!(fabric.place_object(dma_buf, 0x110000),
+            "physical placement overlap: DMA buffer");
+
+        let dom = fabric.create_domain();
+        fabric.grant(dom, stack, 0, STACK_SIZE as u64, Permissions::RW);
+        fabric.grant(dom, dma_buf, 0, 512, Permissions::WRITE);
+
+        fabric.write_physical(0x000000, code);
+        install_trap_handler(&mut fabric, 0x000000, code_size);
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut core = Anka64Core::new(AgentId(0), dom);
+        core.address_map.add(0x00000, code_size, text);
+        core.address_map.add(OUTPUT_SIZE as u64, STACK_SIZE as u64, stack);
+        core.r[SP as usize] = OUTPUT_SIZE as u64 + STACK_SIZE as u64;
+        core.trap_vector = code_size - 0x10;
+
+        // ── Real device transition: submit → tick → complete → drain ──
+        let storage = super::super::block::BlockStorage::new(4, 512);
+        let mut controller = super::super::block::BlockController::new(
+            storage, 1, AgentId(100),
+        );
+        assert_eq!(controller.event_sequence(), 0, "fresh controller at epoch 0");
+
+        let req = super::super::block::BlockRequest {
+            block_number: 0,
+            requester: RequesterKey { slot: 0, generation: 0 },
+            target_object: dma_buf,
+            target_offset: 0,
+            source_domain: dom,
+            source_authority_id: None,
+            delegation_id: None,
+        };
+        let result = controller.submit(req, &mut fabric);
+        assert!(matches!(result, super::super::block::SubmitResult::Accepted(_)),
+            "block read submission must succeed");
+
+        // Tick until the request completes (latency=1, so a few ticks suffice).
+        for _ in 0..20 {
+            controller.tick(&mut fabric);
+        }
+
+        // Consume the completion and verify clean state.
+        assert!(controller.requires_attention(),
+            "device must require attention after completion");
+        let completion = controller.consume_completion()
+            .expect("completed request must produce a completion");
+        assert_eq!(completion.status, DeviceCompletionStatus::Success,
+            "block read must succeed");
+        assert_eq!(controller.event_sequence(), 1,
+            "one completed request → epoch 1");
+        assert_eq!(controller.completion_count(), 0,
+            "no remaining completions after drain");
+        assert!(!controller.requires_attention(),
+            "device must not require attention after draining");
+
+        // ── Register device and boot the guest ──
+        let mut kernel = Kernel::new(fabric);
+        kernel.next_phys = 0x200000;
+        let pk = kernel.spawn(core);
+        let slot = pk.slot;
+
+        let binding = kernel.register_block_device(controller)
+            .expect("register block device");
+
+        // Install device capability with EVENT_WAIT right.
+        // First cap installed → slot=0, generation=0, matching the
+        // guest's syscall(17, 0, 0, 0) arguments.
+        let dev_handle = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::EVENT_WAIT,
+        ).expect("install EVENT_WAIT cap");
+        assert_eq!(dev_handle.slot, 0,
+            "device cap must land at slot 0 for guest syscall(17,0,0,0)");
+        assert_eq!(dev_handle.generation, 0,
+            "device cap must have gen 0 for guest syscall(17,0,0,0)");
+
+        // Run the guest.
+        kernel.run(100_000, 10_000);
+
+        assert!(kernel.processes[slot].exited(),
+            "sysret witness process should have exited");
+        kernel.processes[slot].exit_code
+    }
+
+    #[test]
+    fn p93e2_sysret1_device_witness_cca() {
+        let art = compile_and_extract(
+            b"int main() { int s = syscall(17, 0, 0, 0); return sysret(1); }");
+        assert_eq!(art.error, 0, "CC_A rejected sysret(1) source");
+        // No literals expected in this program.
+        assert_eq!(art.lit_pos, OUTPUT_SIZE as u64,
+            "sysret witness unexpectedly acquired a literal pool");
+
+        let exit_code = run_sysret_device_witness(
+            &art.image[..art.out_pos as usize]);
+        assert_eq!(exit_code, 1,
+            "sysret(1) must return device epoch=1, got {}", exit_code);
+        eprintln!("9.3e.2: sysret(1) end-to-end via CC_A ✓");
+    }
+
+    #[test]
+    fn p93e2_sysret1_device_witness_ccb() {
+        let ccb = build_ccb();
+        let art = compile_and_extract_ccb(&ccb,
+            b"int main() { int s = syscall(17, 0, 0, 0); return sysret(1); }");
+        assert_eq!(art.error, 0, "CC_B rejected sysret(1) source");
+        assert_eq!(art.lit_pos, OUTPUT_SIZE as u64,
+            "sysret witness unexpectedly acquired a literal pool");
+
+        let exit_code = run_sysret_device_witness(
+            &art.image[..art.out_pos as usize]);
+        assert_eq!(exit_code, 1,
+            "sysret(1) must return device epoch=1, got {}", exit_code);
+        eprintln!("9.3e.2: sysret(1) end-to-end via CC_B ✓");
+    }
+
+    // ─── Test 6: Malformed sysret forms rejected ─────────────
+    //
+    //   sysret(2)    — only sysret(1) is defined
+    //   sysret(x)    — must be literal 1, not a variable
+    //   sysret()     — missing argument
+    //   sysret(1, 2) — too many arguments
+    //
+    //   All forms must produce a compiler error (ws_error != 0).
+
+    #[test]
+    fn p93e2_reject_malformed_sysret() {
+        // CC_A
+        compile_expect_error(
+            b"int main() { return sysret(2); }",
+            "sysret(2) [CC_A]");
+        compile_expect_error(
+            b"int main() { int x = 1; return sysret(x); }",
+            "sysret(x) [CC_A]");
+        compile_expect_error(
+            b"int main() { return sysret(); }",
+            "sysret() [CC_A]");
+        compile_expect_error(
+            b"int main() { return sysret(1, 2); }",
+            "sysret(1,2) [CC_A]");
+
+        // CC_B
+        let ccb = build_ccb();
+        compile_expect_error_ccb(&ccb,
+            b"int main() { return sysret(2); }",
+            "sysret(2) [CC_B]");
+        compile_expect_error_ccb(&ccb,
+            b"int main() { int x = 1; return sysret(x); }",
+            "sysret(x) [CC_B]");
+        compile_expect_error_ccb(&ccb,
+            b"int main() { return sysret(); }",
+            "sysret() [CC_B]");
+        compile_expect_error_ccb(&ccb,
+            b"int main() { return sysret(1, 2); }",
+            "sysret(1,2) [CC_B]");
+
+        eprintln!("9.3e.2: malformed sysret rejected by both CC_A and CC_B ✓");
+    }
+
+    // ─── Test 7: Two-ended arena invariant ───────────────────
+    //
+    //   Assert out_pos < lit_pos after CC_A compiles the canonical
+    //   source (producing CC_B) and after CC_B compiles it again
+    //   (producing CC_C in the bootstrap closure).
+    //
+    //   This is the architectural exhaustion tripwire:
+    //     Do not enlarge OUTPUT_SIZE a second time casually.
+
+    #[test]
+    fn p93e2_arena_tripwire() {
+        // CC_A → CC_B: check the existing build path.
+        let compiler_prog = build_6b4_compiler();
+        let asm = cc::compile(&compiler_prog);
+        let code_bytes = asm.to_bytes();
+        let canon_src = canonical_compiler_source();
+
+        let r = run_supervised_compiler(&code_bytes, 0, canon_src.as_bytes());
+        assert!(r.kernel.processes[0].exited(), "ankad did not exit (arena tripwire)");
+        assert_eq!(r.wait_tag, 0, "CC_A faulted");
+
+        let read_ws = |off: u64| -> u64 {
+            let bytes = r.kernel.fabric.read_physical(r.work_phys + off, 8);
+            u64::from_le_bytes(bytes.try_into().unwrap())
+        };
+        let cca_out = read_ws(0x48);
+        let cca_lit = read_ws((WS_LIT_POS - LAYOUT_WS) as u64);
+        let cca_err = read_ws(0x18);
+        assert_eq!(cca_err, 0, "CC_A error compiling canonical source");
+        assert!(cca_out < cca_lit,
+            "CC_A→CC_B arena headroom exhausted: out_pos={} >= lit_pos={} \
+             (OUTPUT_SIZE={})", cca_out, cca_lit, OUTPUT_SIZE);
+        eprintln!("9.3e.2 arena: CC_A→CC_B  out_pos={} lit_pos={} ({:.1}% of {} arena)",
+            cca_out, cca_lit,
+            100.0 * cca_out as f64 / OUTPUT_SIZE as f64, OUTPUT_SIZE);
+
+        // CC_B → CC_C: check the bootstrap fixed-point path.
+        let ccb = build_ccb();
+        let art_c = compile_and_extract_ccb(&ccb, canon_src.as_bytes());
+        assert_eq!(art_c.error, 0, "CC_B error compiling canonical source");
+        assert!(art_c.out_pos < art_c.lit_pos,
+            "CC_B→CC_C arena headroom exhausted: out_pos={} >= lit_pos={} \
+             (OUTPUT_SIZE={})", art_c.out_pos, art_c.lit_pos, OUTPUT_SIZE);
+        eprintln!("9.3e.2 arena: CC_B→CC_C  out_pos={} lit_pos={} ({:.1}% of {} arena)",
+            art_c.out_pos, art_c.lit_pos,
+            100.0 * art_c.out_pos as f64 / OUTPUT_SIZE as f64, OUTPUT_SIZE);
+
+        eprintln!("9.3e.2: two-ended arena invariant (out_pos < lit_pos) holds ✓");
     }
 
 }

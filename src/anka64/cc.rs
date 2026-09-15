@@ -7,13 +7,19 @@
 //! If it needs an instruction that doesn't exist, the ISA
 //! must grow through the description — not the other way around.
 //!
-//! Calling convention (Anka64 ABI v0.1):
+//! Function-call convention (Anka64 ABI v0.1):
 //!   R0–R3   : arguments / return value (R0 = first arg, R0 = return)
 //!   R4–R11  : caller-saved temporaries
 //!   R12     : reserved
 //!   R13 (FP): frame pointer (callee-saved)
 //!   R14 (LR): link register (set by CALL)
 //!   R15 (SP): stack pointer (callee-saved, grows downward)
+//!
+//! Syscall convention (via TRAP #0):
+//!   R0      : syscall number (baked in by host compiler)
+//!   R1–R5   : payload arguments (up to 5)
+//!   R0      : primary return value
+//!   R1      : secondary return value (retrieved via sysret(1))
 
 use super::isa::*;
 
@@ -41,6 +47,7 @@ pub enum Expr {
     Assign(VarId, Box<Expr>),   // var = expr
     DerefAssign(Box<Expr>, Box<Expr>), // *ptr = expr
     Syscall(u8, Vec<Expr>),     // syscall(number, args) → result in R0
+    Sysret(u8),                 // sysret(k) → Rk (secondary syscall result)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -121,6 +128,7 @@ pub fn scratch_regs(expr: &Expr) -> usize {
         Expr::Syscall(_, args) => {
             args.iter().map(|a| scratch_regs(a)).max().unwrap_or(1)
         }
+        Expr::Sysret(_) => 1,
     }
 }
 
@@ -477,18 +485,39 @@ impl Compiler {
                 self.asm.st(dest, tmp, 0);
             }
             Expr::Syscall(num, args) => {
-                // Put arguments in R1, R2, R3 (syscall ABI)
-                for (i, arg) in args.iter().enumerate() {
-                    if i < 3 {
-                        self.compile_expr(arg, (i as u8) + 1);
-                    }
+                // Syscall ABI: R0 = number, R1..R5 = payload args.
+                // Max 5 payload arguments (reject > 5).
+                assert!(args.len() <= 5,
+                    "syscall accepts at most 5 payload arguments, got {}",
+                    args.len());
+                // Evaluate all args first and spill to stack to prevent
+                // later arguments from clobbering already-staged regs.
+                let argc = args.len();
+                for arg in args.iter() {
+                    self.compile_expr(arg, R4);
+                    self.asm.subi(SP, SP, 8);
+                    self.asm.st(R4, SP, 0);
                 }
+                // Pop into R1..R(argc) in order.
+                // Stack layout (top): arg[argc-1] .. arg[0]
+                for i in 0..argc {
+                    let reg = (i as u8) + 1; // R1, R2, ..., R5
+                    let offset = ((argc - 1 - i) * 8) as i32;
+                    self.asm.ld(reg, SP, offset);
+                }
+                self.asm.addi(SP, SP, (argc * 8) as i32);
                 self.asm.movi(R0, *num as i32);
                 self.asm.trap(0);
                 // After kernel handles the syscall, result is in R0
                 if dest != R0 {
                     self.asm.mov(dest, R0);
                 }
+            }
+            Expr::Sysret(k) => {
+                // Retrieve secondary syscall result register Rk.
+                // Only k=1 is accepted in 9.3e.
+                assert_eq!(*k, 1, "sysret only accepts register 1 in 9.3e");
+                self.asm.mov(dest, *k);
             }
         }
     }
