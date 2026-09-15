@@ -1,0 +1,61 @@
+// =============================================================================
+// Anka64 Phase 9.3e.3 NicController falsifiability probes.
+// Every example below is deliberately false and must be rejected.
+// =============================================================================
+
+import "anka93e3_nic_controller.kleis"
+
+example "FALSE-NIC93E3-1: successful unsolicited arrival writes guest memory" {
+    assert(nic93e3_success_guest_memory_changed(true))
+}
+
+example "FALSE-NIC93E3-2: successful unsolicited arrival creates request/delegation work" {
+    assert(nic93e3_success_request_created(true) ∨ nic93e3_success_delegation_created(true))
+}
+
+example "FALSE-NIC93E3-3: queued RX becomes pair-attributed work and delays quiescence" {
+    assert(nic93e3_pair_count(true)=bvconst(1,3))
+}
+
+example "FALSE-NIC93E3-4: queued RX alone counts as autonomous machine progress" {
+    assert(nic93e3_autonomous_work(true))
+}
+
+example "FALSE-NIC93E3-5: NIC A host injection may route distinct NIC B" {
+    assert(
+        nic93e3_host_inject_routes(
+            bvconst(40,64),bvconst(3,64),
+            bvconst(41,64),bvconst(3,64),
+            GENERIC_DEVICE_NIC
+        )
+    )
+}
+
+example "FALSE-NIC93E3-6: attention acknowledgement consumes one queued frame" {
+    assert(nic93e3_ack_queue_after(bvconst(3,5))=bvconst(2,5))
+}
+
+example "FALSE-NIC93E3-7: attention acknowledgement resets the event epoch" {
+    assert(nic93e3_ack_epoch_after(bvconst(11,64))=bvconst(0,64))
+}
+
+example "FALSE-NIC93E3-8: oversize rejection partially enqueues a frame" {
+    assert(
+        ¬nic93e3_frame_size_ok(bvconst(1515,16))
+        ∧ nic93e3_reject_queue_after(bvconst(4,5))=bvconst(5,5)
+    )
+}
+
+example "FALSE-NIC93E3-9: full-queue rejection increments the event epoch" {
+    assert(
+        ¬nic93e3_queue_has_capacity(bvconst(16,5))
+        ∧ nic93e3_reject_epoch_after(bvconst(9,64))=bvconst(10,64)
+    )
+}
+
+example "FALSE-NIC93E3-10: expanded ALL_BITS permits a Block capability with NIC_RX" {
+    assert(
+        nic93e3_device_rights_defined(bvconst(8,8))
+        ∧ nic93e3_block_rights_valid(bvconst(8,8))
+    )
+}

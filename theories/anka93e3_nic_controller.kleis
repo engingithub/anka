@@ -1,0 +1,290 @@
+// =============================================================================
+// Anka64 NicController Implementation Gate (Phase 9.3e.3)
+// =============================================================================
+//
+// Focused refinement of the broad Phase 9.3e user-space NIC theory.
+// No new axioms.
+//
+// This file freezes the concrete controller semantics that Rust must implement
+// before any NIC DMA/syscall work begins:
+//   * host RX injection first enters bounded device-private state,
+//   * successful admission appends exactly one frame and advances epoch once,
+//   * arrival alone cannot mutate guest memory or create request/delegation work,
+//   * queued RX is neither pair-attributed work nor autonomous machine progress,
+//   * attention is a latched notification, distinct from queue occupancy,
+//   * acknowledgement clears only the attention latch,
+//   * full/oversize/epoch-exhausted injection is an atomic no-op,
+//   * routing is exact DeviceBinding + device kind,
+//   * defined-right decoding is distinct from kind-valid capability minting,
+//   * Block remains confined to {SUBMIT_READ, EVENT_WAIT},
+//   * NIC is confined to {EVENT_WAIT, NIC_RX, NIC_TX},
+//   * generic event_sequence exposes the NIC epoch.
+//
+// Deliberately absent from 9.3e.3:
+//   SYS_NIC_RX, SYS_NIC_TX, guest DMA, NicCompletion, Ethernet parsing.
+// =============================================================================
+
+import "anka_userspace_nic.kleis"
+
+// -----------------------------------------------------------------------------
+// Concrete bounds and admission
+// -----------------------------------------------------------------------------
+
+// Untagged Ethernet frame excluding FCS: 14-byte header + 1500 payload.
+define NIC93E3_MAX_FRAME_SIZE = bvconst(1514,16)
+define NIC93E3_RX_QUEUE_CAPACITY = bvconst(16,5)
+
+// Decoder-level and kind-level masks.
+define NIC93E3_BLOCK_ALLOWED_RIGHTS = bvconst(5,8)   // 0x05
+define NIC93E3_NIC_ALLOWED_RIGHTS = bvconst(28,8)   // 0x1C
+
+define nic93e3_frame_size_ok(frame_size : BitVec16) =
+    bvule(frame_size,bvconst(1514,16))
+
+define nic93e3_queue_has_capacity(queue_len : BitVec5) =
+    bvult(queue_len,bvconst(16,5))
+
+define nic93e3_epoch_can_advance(epoch : BitVec64) =
+    bvult(epoch,bvsub(bvconst(0,64),bvconst(1,64)))
+
+define nic93e3_inject_admissible(
+    frame_size : BitVec16,
+    queue_len : BitVec5,
+    epoch : BitVec64
+) = bvule(frame_size,bvconst(1514,16))
+    ∧ bvult(queue_len,bvconst(16,5))
+    ∧ ¬(epoch=bvconst(18446744073709551615,64))
+
+// -----------------------------------------------------------------------------
+// Successful injection projections
+// -----------------------------------------------------------------------------
+
+// These selectors are the implementation contract for a successful inject_rx.
+define nic93e3_success_queue_after(queue_before : BitVec5) : BitVec5 =
+    bvadd(queue_before,bvconst(1,5))
+
+define nic93e3_success_epoch_after(epoch_before : BitVec64) : BitVec64 =
+    bvadd(epoch_before,bvconst(1,64))
+
+define nic93e3_success_attention_after(attention_before : Bool) = true
+
+define nic93e3_success_guest_memory_changed(success : Bool) = false
+define nic93e3_success_request_created(success : Bool) = false
+define nic93e3_success_delegation_created(success : Bool) = false
+
+// -----------------------------------------------------------------------------
+// Rejection and attention acknowledgement
+// -----------------------------------------------------------------------------
+
+// Any rejected injection is an atomic no-op over controller-observable state.
+define nic93e3_reject_queue_after(queue_before : BitVec5) : BitVec5 = queue_before
+define nic93e3_reject_epoch_after(epoch_before : BitVec64) : BitVec64 = epoch_before
+define nic93e3_reject_attention_after(attention_before : Bool) = attention_before
+
+// Acknowledgement is not dequeue and not epoch erasure.
+define nic93e3_ack_queue_after(queue_before : BitVec5) : BitVec5 = queue_before
+define nic93e3_ack_epoch_after(epoch_before : BitVec64) : BitVec64 = epoch_before
+define nic93e3_ack_attention_after(attention_before : Bool) = false
+
+// -----------------------------------------------------------------------------
+// Generic-substrate projections
+// -----------------------------------------------------------------------------
+
+// 9.3e.3 has no finite NIC DMA request model. Queued private RX is not pair
+// work and cannot autonomously advance machine state.
+define nic93e3_pair_count(rx_queue_nonempty : Bool) : BitVec3 = bvconst(0,3)
+
+define nic93e3_autonomous_work(rx_queue_nonempty : Bool) = false
+
+// Exact DeviceBinding + kind qualification for host packet injection.
+define nic93e3_host_inject_routes(
+    presented_object : BitVec64,
+    presented_generation : BitVec64,
+    binding_object : BitVec64,
+    binding_generation : BitVec64,
+    target_kind : BitVec2
+) = routes_to_device_binding(
+        presented_object,presented_generation,
+        binding_object,binding_generation,
+        bvconst(1,1)
+    )
+    ∧ target_kind=GENERIC_DEVICE_NIC
+
+// -----------------------------------------------------------------------------
+// Device-right decoding versus kind-valid minting
+// -----------------------------------------------------------------------------
+
+define nic93e3_device_rights_defined(rights : BitVec8) =
+    device_rights_subset(rights,bvconst(29,8))
+
+define nic93e3_block_rights_valid(rights : BitVec8) =
+    device_rights_subset(rights,bvconst(5,8))
+
+define nic93e3_nic_rights_valid(rights : BitVec8) =
+    device_rights_subset(rights,bvconst(28,8))
+
+// -----------------------------------------------------------------------------
+// Positive obligations
+// -----------------------------------------------------------------------------
+
+example "NIC93E3-1 ADMISSION: maximum ordinary frame size is accepted" {
+    assert(nic93e3_frame_size_ok(bvconst(1514,16)))
+}
+
+example "NIC93E3-1A ADMISSION: queue length 15 still has one slot" {
+    assert(nic93e3_queue_has_capacity(bvconst(15,5)))
+}
+
+example "NIC93E3-1B ADMISSION: live epoch below u64::MAX can advance" {
+    assert(nic93e3_epoch_can_advance(bvconst(9,64)))
+}
+
+example "NIC93E3-2 SUCCESS QUEUE: successful injection appends exactly one frame" {
+    assert(
+        ∀(q : BitVec5).
+            nic93e3_success_queue_after(q)=bvadd(q,bvconst(1,5))
+    )
+}
+
+example "NIC93E3-3 SUCCESS EPOCH: successful injection advances epoch exactly once" {
+    assert(
+        ∀(e : BitVec64).
+            nic93e3_success_epoch_after(e)=bvadd(e,bvconst(1,64))
+    )
+}
+
+example "NIC93E3-4 SUCCESS ATTENTION: successful injection latches attention from clear" {
+    assert(nic93e3_success_attention_after(false))
+}
+
+example "NIC93E3-5 SUCCESS ATTENTION: successful injection keeps attention latched" {
+    assert(nic93e3_success_attention_after(true))
+}
+
+example "NIC93E3-6 ARRIVAL SAFETY: successful injection has zero guest-memory mutation" {
+    assert(nic93e3_success_guest_memory_changed(true)=false)
+}
+
+example "NIC93E3-7 ARRIVAL IDENTITY: successful injection creates no DeviceRequestKey" {
+    assert(nic93e3_success_request_created(true)=false)
+}
+
+example "NIC93E3-8 ARRIVAL IDENTITY: successful injection creates no delegation" {
+    assert(nic93e3_success_delegation_created(true)=false)
+}
+
+example "NIC93E3-9 QUIESCENCE: queued RX contributes zero pair-attributed work" {
+    assert(∀(queued : Bool). nic93e3_pair_count(queued)=bvconst(0,3))
+}
+
+example "NIC93E3-10 PROGRESS: queued RX alone is not autonomous machine work" {
+    assert(∀(queued : Bool). nic93e3_autonomous_work(queued)=false)
+}
+
+example "NIC93E3-11 ROUTING: exact NIC binding routes" {
+    assert(
+        nic93e3_host_inject_routes(
+            bvconst(40,64),bvconst(3,64),
+            bvconst(40,64),bvconst(3,64),
+            GENERIC_DEVICE_NIC
+        )
+    )
+}
+
+example "NIC93E3-12 ROUTING: distinct NIC object cannot route" {
+    assert(
+        ¬nic93e3_host_inject_routes(
+            bvconst(40,64),bvconst(3,64),
+            bvconst(41,64),bvconst(3,64),
+            GENERIC_DEVICE_NIC
+        )
+    )
+}
+
+example "NIC93E3-13 ROUTING: stale NIC generation cannot route" {
+    assert(
+        ¬nic93e3_host_inject_routes(
+            bvconst(40,64),bvconst(2,64),
+            bvconst(40,64),bvconst(3,64),
+            GENERIC_DEVICE_NIC
+        )
+    )
+}
+
+example "NIC93E3-14 ROUTING: Block binding is not a NIC injection target" {
+    assert(
+        ¬nic93e3_host_inject_routes(
+            bvconst(40,64),bvconst(3,64),
+            bvconst(40,64),bvconst(3,64),
+            GENERIC_DEVICE_BLOCK
+        )
+    )
+}
+
+example "NIC93E3-15 ACK: acknowledgement preserves queued-frame count" {
+    assert(∀(q : BitVec5). nic93e3_ack_queue_after(q)=q)
+}
+
+example "NIC93E3-16 ACK: acknowledgement preserves event epoch" {
+    assert(∀(e : BitVec64). nic93e3_ack_epoch_after(e)=e)
+}
+
+example "NIC93E3-17 ACK: acknowledgement clears attention latch" {
+    assert(nic93e3_ack_attention_after(true)=false)
+}
+
+example "NIC93E3-18 FULL QUEUE: capacity boundary rejects queue length 16" {
+    assert(¬nic93e3_queue_has_capacity(bvconst(16,5)))
+}
+
+example "NIC93E3-19 REJECT NO-OP: rejected injection preserves queue" {
+    assert(∀(q : BitVec5). nic93e3_reject_queue_after(q)=q)
+}
+
+example "NIC93E3-20 REJECT NO-OP: rejected injection preserves epoch" {
+    assert(∀(e : BitVec64). nic93e3_reject_epoch_after(e)=e)
+}
+
+example "NIC93E3-21 REJECT NO-OP: rejected injection preserves attention" {
+    assert(∀(a : Bool). nic93e3_reject_attention_after(a)=a)
+}
+
+example "NIC93E3-22 OVERSIZE: 1515-byte frame is rejected" {
+    assert(¬nic93e3_frame_size_ok(bvconst(1515,16)))
+}
+
+example "NIC93E3-23 EPOCH EXHAUSTION: u64::MAX cannot advance" {
+    assert(¬nic93e3_epoch_can_advance(bvsub(bvconst(0,64),bvconst(1,64))))
+}
+
+example "NIC93E3-24 RIGHTS DECODER: ALL_BITS is 0x1D" {
+    assert(DEVICE_RIGHTS_ALL_93E=bvconst(29,8))
+}
+
+example "NIC93E3-25 RIGHTS DECODER: bit 0x02 remains undefined" {
+    assert(¬nic93e3_device_rights_defined(bvconst(2,8)))
+}
+
+example "NIC93E3-26 KIND RIGHTS: Block accepts exactly its current operation mask" {
+    assert(nic93e3_block_rights_valid(bvconst(5,8)))
+}
+
+example "NIC93E3-27 KIND RIGHTS: Block rejects NIC_RX" {
+    assert(¬nic93e3_block_rights_valid(bvconst(8,8)))
+}
+
+example "NIC93E3-28 KIND RIGHTS: Block rejects NIC_TX" {
+    assert(¬nic93e3_block_rights_valid(bvconst(16,8)))
+}
+
+example "NIC93E3-29 KIND RIGHTS: NIC accepts EVENT_WAIT|NIC_RX|NIC_TX" {
+    assert(nic93e3_nic_rights_valid(bvconst(28,8)))
+}
+
+example "NIC93E3-30 GENERIC EVENT: generic event_sequence exposes the NIC epoch" {
+    assert(
+        generic_event_sequence(
+            GENERIC_DEVICE_NIC,bvconst(3,64),bvconst(17,64)
+        )=bvconst(17,64)
+    )
+}

@@ -706,37 +706,46 @@ pub enum BootError {
 #[derive(Debug)]
 pub enum DeviceController {
     Block(BlockController),
+    Nic(super::nic::NicController),
 }
 
 impl DeviceController {
     /// Advance the device by one machine tick.
     /// GENDEV-1: Block wrapper preserves block transition result.
+    /// NIC tick is a no-op: unsolicited arrival is host-driven.
     pub fn tick(&mut self, fabric: &mut Fabric) {
         match self {
             DeviceController::Block(c) => c.tick(fabric),
+            DeviceController::Nic(_) => {}
         }
     }
 
     /// Does this device have autonomous (in-flight) work?
     /// GENDEV-2: Block wrapper preserves autonomous-work observable.
+    /// NIC: queued private RX is not autonomous work (NIC93E3-10).
     pub fn has_autonomous_work(&self) -> bool {
         match self {
             DeviceController::Block(c) => c.has_autonomous_work(),
+            DeviceController::Nic(c) => c.has_autonomous_work(),
         }
     }
 
     /// Does this device have serviceable completions?
     /// GENDEV-3: Block wrapper preserves attention observable.
+    /// NIC: attention is a latched notification (NIC93E3-4..5, 17).
     pub fn requires_attention(&self) -> bool {
         match self {
             DeviceController::Block(c) => c.requires_attention(),
+            DeviceController::Nic(c) => c.requires_attention(),
         }
     }
 
     /// Number of ready completions.
+    /// NIC has no completion model in 9.3e.3.
     pub fn completion_count(&self) -> usize {
         match self {
             DeviceController::Block(c) => c.completion_count(),
+            DeviceController::Nic(c) => c.completion_count(),
         }
     }
 
@@ -744,10 +753,12 @@ impl DeviceController {
     ///
     /// The inner device-specific completion is preserved intact:
     ///   Wrap_generic(Block) loses no block semantics.
+    /// NIC has no completion model in 9.3e.3; always returns None.
     pub fn consume_completion(&mut self) -> Option<DeviceCompletion> {
         match self {
             DeviceController::Block(c) =>
                 c.consume_completion().map(DeviceCompletion::Block),
+            DeviceController::Nic(_) => None,
         }
     }
 
@@ -760,6 +771,7 @@ impl DeviceController {
     pub fn event_sequence(&self) -> u64 {
         match self {
             DeviceController::Block(c) => c.event_sequence(),
+            DeviceController::Nic(c) => c.event_sequence(),
         }
     }
 
@@ -776,6 +788,7 @@ impl DeviceController {
     ) -> usize {
         match self {
             DeviceController::Block(c) => c.nonterminal_pair_request_count(client, peer),
+            DeviceController::Nic(c) => c.nonterminal_pair_request_count(client, peer),
         }
     }
 
@@ -794,6 +807,7 @@ impl DeviceController {
     pub fn as_block(&self) -> &BlockController {
         match self {
             DeviceController::Block(c) => c,
+            _ => panic!("as_block() called on non-Block device"),
         }
     }
 
@@ -802,6 +816,38 @@ impl DeviceController {
     pub fn as_block_mut(&mut self) -> &mut BlockController {
         match self {
             DeviceController::Block(c) => c,
+            _ => panic!("as_block_mut() called on non-Block device"),
+        }
+    }
+
+    /// Try to unwrap as NicController (shared reference).
+    /// Returns None if this is not a NIC device.
+    pub fn as_nic(&self) -> Option<&super::nic::NicController> {
+        match self {
+            DeviceController::Nic(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Try to unwrap as NicController (mutable reference).
+    /// Returns None if this is not a NIC device.
+    pub fn as_nic_mut(&mut self) -> Option<&mut super::nic::NicController> {
+        match self {
+            DeviceController::Nic(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Returns the kind-valid rights mask for this device controller.
+    ///
+    /// Block: SUBMIT_READ | EVENT_WAIT = 0x05
+    /// NIC:   EVENT_WAIT | NIC_RX | NIC_TX = 0x1C
+    ///
+    /// Formal basis: anka93e3_nic_controller.kleis NIC93E3-26..29.
+    pub fn allowed_rights(&self) -> DeviceRights {
+        match self {
+            DeviceController::Block(_) => DeviceRights::BLOCK_ALLOWED,
+            DeviceController::Nic(_) => DeviceRights::NIC_ALLOWED,
         }
     }
 }
@@ -1334,6 +1380,70 @@ impl Kernel {
         self.register_block_device(controller).map(|b| b.object)
     }
 
+    /// Register a NIC device and return its DeviceBinding.
+    ///
+    /// Like `register_block_device` but wraps in `DeviceController::Nic`.
+    pub fn register_nic_device(
+        &mut self,
+        controller: super::nic::NicController,
+    ) -> Option<DeviceBinding> {
+        let dev_obj = self.fabric.alloc_object("nic_device", 0, ObjectKind::Device);
+        let dev_gen = self.fabric.objects.get(&dev_obj)?.generation;
+
+        debug_assert_eq!(
+            self.fabric.objects.get(&dev_obj).unwrap().state,
+            ObjectState::Active,
+            "Device objects must be Active immediately after alloc_object"
+        );
+
+        let binding = DeviceBinding {
+            object: dev_obj,
+            generation: dev_gen,
+        };
+
+        if self.device_registry.lookup(binding).is_some() {
+            return None;
+        }
+
+        self.device_registry.devices.push(DeviceSlot {
+            binding,
+            controller: DeviceController::Nic(controller),
+        });
+
+        Some(binding)
+    }
+
+    /// Host-initiated NIC packet injection.
+    ///
+    /// Routes by exact DeviceBinding and kind (must be NIC).
+    /// On success: enqueues one private frame, advances the NIC's epoch,
+    /// latches attention, and reevaluates blocked event-waits.
+    ///
+    /// On failure (wrong binding, wrong kind, oversize, full queue,
+    /// epoch exhaustion): no state mutation.
+    ///
+    /// Formal basis: anka93e3_nic_controller.kleis NIC93E3-2..14.
+    pub fn inject_nic_rx(
+        &mut self,
+        binding: DeviceBinding,
+        frame: &[u8],
+    ) -> bool {
+        let slot = match self.device_registry.lookup_mut(binding) {
+            Some(s) => s,
+            None => return false,
+        };
+        let nic = match slot.controller.as_nic_mut() {
+            Some(c) => c,
+            None => return false,
+        };
+        if !nic.inject_rx(frame) {
+            return false;
+        }
+        // Successful injection advanced the epoch — wake eligible waiters.
+        self.reevaluate_event_waits();
+        true
+    }
+
     /// Install a device capability for a process.
     ///
     /// Kind boundary: requires ObjectKind::Device.
@@ -1351,6 +1461,28 @@ impl Kernel {
         if obj.kind != ObjectKind::Device { return None; }
         if obj.state != ObjectState::Active { return None; }
 
+        // Kind-sensitive rights enforcement (Phase 9.3e.3).
+        //
+        // When the device is registered in the device registry, the
+        // requested rights must be a subset of the device kind's
+        // allowed rights mask.  Expanding ALL_BITS to include NIC_RX/NIC_TX
+        // must never cause Block capabilities to acquire NIC rights.
+        //
+        // When the device object exists in the Fabric but has no
+        // registered controller, fall back to the decoder-level ALL_BITS
+        // mask (permits only defined bits).
+        //
+        // Formal basis: anka93e3_nic_controller.kleis NIC93E3-26..29.
+        let obj_gen = obj.generation;
+        let binding = DeviceBinding { object: device_object, generation: obj_gen };
+        let allowed = match self.device_registry.lookup(binding) {
+            Some(slot) => slot.controller.allowed_rights(),
+            None => DeviceRights(DeviceRights::ALL_BITS as u8),
+        };
+        if (rights.0 & !allowed.0) != 0 {
+            return None;
+        }
+
         // Preflight: table must have an allocatable slot
         let ct = self.processes[slot].cap_table.as_ref()?;
         if ct.allocatable_count() == 0 {
@@ -1363,8 +1495,6 @@ impl Kernel {
         self.fabric.grant_device_with_authority_id(
             domain, device_object, rights, auth_id,
         )?;
-
-        let obj_gen = self.fabric.objects.get(&device_object)?.generation;
 
         match self.processes[slot].cap_table.as_mut()
             .and_then(|ct| ct.install_device(device_object, obj_gen, rights, auth_id, None))
@@ -3461,7 +3591,11 @@ impl Kernel {
         // Legacy SYS_BLOCK_READ resolves through the registry.
         let block_size = match self.device_registry.lookup(dev_binding) {
             Some(slot) => {
-                let DeviceController::Block(ctrl) = &slot.controller;
+                let DeviceController::Block(ctrl) = &slot.controller else {
+                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.resume_from_trap(idx);
+                    return;
+                };
                 ctrl.storage_ref().block_size()
             }
             None => {
@@ -3501,7 +3635,9 @@ impl Kernel {
 
         let dev_slot = self.device_registry.lookup_mut(dev_binding)
             .expect("legacy_block_device binding must resolve");
-        let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+        let DeviceController::Block(ctrl) = &mut dev_slot.controller else {
+            panic!("legacy_block_device must reference a Block controller");
+        };
         let result = ctrl.submit(req, &mut self.fabric);
 
         match result {
@@ -4108,7 +4244,11 @@ impl Kernel {
         let dev_binding = prepared.device_binding;
         let dev_slot = self.device_registry.lookup_mut(dev_binding)
             .expect("preflight validated binding exists");
-        let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+        let DeviceController::Block(ctrl) = &mut dev_slot.controller else {
+            self.processes[idx].core.r[R0 as usize] = 5;
+            self.resume_from_trap(idx);
+            return;
+        };
         let result = ctrl.submit(req, &mut self.fabric);
 
         match result {
@@ -4165,7 +4305,10 @@ impl Kernel {
         {
             let dev_slot = self.device_registry.lookup(dev_binding)
                 .expect("preflight validated binding exists");
-            let DeviceController::Block(ctrl) = &dev_slot.controller;
+            let DeviceController::Block(ctrl) = &dev_slot.controller else {
+                self.fail_dev_submit(idx, 5);
+                return;
+            };
             if ctrl.free_slot_count() == 0 {
                 self.fail_dev_submit(idx, 9);
                 return;
@@ -4185,7 +4328,10 @@ impl Kernel {
 
         let dev_slot = self.device_registry.lookup_mut(dev_binding)
             .expect("preflight validated binding exists");
-        let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+        let DeviceController::Block(ctrl) = &mut dev_slot.controller else {
+            self.fail_dev_submit(idx, 5);
+            return;
+        };
         let result = ctrl.submit(req, &mut self.fabric);
 
         match result {
@@ -18583,7 +18729,9 @@ mod tests {
         // Instead, directly submit to the controller.
         {
             let dev_slot = kernel.device_registry.lookup_mut(binding).unwrap();
-            let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+            let DeviceController::Block(ctrl) = &mut dev_slot.controller else {
+                panic!("expected Block controller");
+            };
             let rk = super::super::state::RequesterKey { slot: 99, generation: 0 };
             // We need a buffer object. Use the data object.
             let data_obj = ObjectId(2); // data object from create_process
@@ -18818,7 +18966,9 @@ mod tests {
         // ── Advance epoch and wake ──
         {
             let dev_slot = kernel.device_registry.lookup_mut(binding).unwrap();
-            let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+            let DeviceController::Block(ctrl) = &mut dev_slot.controller else {
+                panic!("expected Block controller");
+            };
             let rk = super::super::state::RequesterKey { slot: 99, generation: 0 };
             let buf_obj = ObjectId(2);
             let req = super::super::block::BlockRequest {
@@ -18906,7 +19056,9 @@ mod tests {
         // Submit I/O directly to controller (no process syscall)
         {
             let dev_slot = kernel.device_registry.lookup_mut(binding).unwrap();
-            let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+            let DeviceController::Block(ctrl) = &mut dev_slot.controller else {
+                panic!("expected Block controller");
+            };
             let rk = super::super::state::RequesterKey { slot: 99, generation: 0 };
             let data_obj = ObjectId(2);
             let domain = kernel.processes[key_1.slot].core.domain;
@@ -19002,7 +19154,9 @@ mod tests {
         // Advance device B's epoch (not A)
         {
             let dev_slot = kernel.device_registry.lookup_mut(binding_b).unwrap();
-            let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+            let DeviceController::Block(ctrl) = &mut dev_slot.controller else {
+                panic!("expected Block controller");
+            };
             let rk = super::super::state::RequesterKey { slot: 99, generation: 0 };
             let data_obj = ObjectId(2);
             let domain = kernel.processes[slot].core.domain;
@@ -19117,7 +19271,9 @@ mod tests {
         // Advance epoch by submitting directly to controller
         {
             let dev_slot = kernel.device_registry.lookup_mut(binding).unwrap();
-            let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+            let DeviceController::Block(ctrl) = &mut dev_slot.controller else {
+                panic!("expected Block controller");
+            };
             let rk = super::super::state::RequesterKey { slot: 99, generation: 0 };
             let data_obj = ObjectId(2);
             let domain = kernel.processes[key_1.slot].core.domain;
@@ -19167,7 +19323,9 @@ mod tests {
             // Advance epoch by submitting directly
             {
                 let dev_slot = kernel.device_registry.lookup_mut(binding).unwrap();
-                let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+                let DeviceController::Block(ctrl) = &mut dev_slot.controller else {
+                panic!("expected Block controller");
+            };
                 let rk = super::super::state::RequesterKey { slot: 99, generation: 0 };
                 let data_obj = ObjectId(2);
                 let domain = kernel.processes[slot].core.domain;
@@ -19295,7 +19453,9 @@ mod tests {
         // and domain so the DMA has valid grants.
         {
             let dev_slot = kernel.device_registry.lookup_mut(binding).unwrap();
-            let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+            let DeviceController::Block(ctrl) = &mut dev_slot.controller else {
+                panic!("expected Block controller");
+            };
             let rk = super::super::state::RequesterKey { slot: 99, generation: 0 };
             let req = super::super::block::BlockRequest {
                 block_number: 0,
@@ -19336,5 +19496,611 @@ mod tests {
         eprintln!("  Wait(P_g, A, 0) does not imply Wake(P_(g+1), A, 1)");
         eprintln!("  finish_process clears event_wait before slot is recyclable");
         eprintln!("  ExactProcessKey enforced structurally via lifecycle erasure");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  Phase 9.3e.3 — NicController integration witnesses
+    //
+    //  Formal basis: anka93e3_nic_controller.kleis NIC93E3-1..32,
+    //                anka93e3_nic_controller_false_witnesses.kleis.
+    //
+    //  These tests exercise the Kernel-level integration: registration,
+    //  host injection, event-wait wake, kind-sensitive rights, and
+    //  cross-device isolation.
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Helper: create a kernel with one NIC device and one process
+    /// that has an EVENT_WAIT capability on the NIC.
+    fn nic_setup() -> (Kernel, usize, DeviceBinding) {
+        let mut fabric = Fabric::new(0x400000);
+
+        let (core, dom, text, _data, _stack) =
+            create_process(&mut fabric, CPU0, "nic_proc",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+
+        let mut asm = Asm64::new();
+        for _ in 0..100 { asm.nop(); }
+        asm.movi(R1, 0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let nic = super::super::nic::NicController::new();
+        let mut kernel = Kernel::new(fabric);
+        let pk = kernel.spawn(core);
+        let slot = pk.slot;
+
+        let binding = kernel.register_nic_device(nic)
+            .expect("register NIC");
+
+        (kernel, slot, binding)
+    }
+
+    // ─── 9.3e.3 test 1: NIC registration and basic identity ───
+
+    #[test]
+    fn p93e3_nic_registration() {
+        let (kernel, _slot, binding) = nic_setup();
+
+        let dev_slot = kernel.device_registry.lookup(binding)
+            .expect("NIC must be in registry");
+        assert!(dev_slot.controller.as_nic().is_some(),
+            "controller must be Nic variant");
+        assert!(dev_slot.controller.as_nic().unwrap().rx_queue_len() == 0,
+            "fresh NIC must have empty queue");
+        assert_eq!(dev_slot.controller.event_sequence(), 0,
+            "fresh NIC epoch must be 0");
+        assert!(!dev_slot.controller.requires_attention(),
+            "fresh NIC has no pending attention");
+        assert!(!dev_slot.controller.has_autonomous_work(),
+            "NIC never has autonomous work");
+        assert_eq!(dev_slot.controller.completion_count(), 0,
+            "NIC has no completion model");
+
+        eprintln!("9.3e.3-1: NIC registration and identity ✓");
+    }
+
+    // ─── 9.3e.3 test 2: Host injection enqueues and advances epoch ───
+
+    #[test]
+    fn p93e3_host_inject_success() {
+        let (mut kernel, _slot, binding) = nic_setup();
+
+        let frame = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        assert!(kernel.inject_nic_rx(binding, &frame),
+            "injection to valid NIC must succeed");
+
+        let nic = kernel.device_registry.lookup(binding)
+            .unwrap().controller.as_nic().unwrap();
+        assert_eq!(nic.rx_queue_len(), 1, "queue must have one frame");
+        assert_eq!(nic.event_sequence(), 1, "epoch must advance to 1");
+        assert!(nic.requires_attention(), "attention must be latched");
+        assert_eq!(nic.peek_rx(), Some(vec![0xDE, 0xAD, 0xBE, 0xEF].as_slice()),
+            "queued frame must match injected");
+
+        eprintln!("9.3e.3-2: host inject enqueues + epoch advance ✓");
+    }
+
+    // ─── 9.3e.3 test 3: Zero guest-memory mutation ───
+
+    #[test]
+    fn p93e3_inject_no_guest_memory_mutation() {
+        let (mut kernel, _slot, binding) = nic_setup();
+
+        // Snapshot all physical memory before injection
+        let phys_before = kernel.fabric.read_physical(0, 0x400000).to_vec();
+
+        assert!(kernel.inject_nic_rx(binding, &[0xFF; 100]));
+
+        let phys_after = kernel.fabric.read_physical(0, 0x400000).to_vec();
+
+        assert_eq!(phys_before, phys_after,
+            "NIC93E3-6: host injection must not mutate any physical memory");
+
+        eprintln!("9.3e.3-3: zero guest-memory mutation ✓");
+    }
+
+    // ─── 9.3e.3 test 4: Queue-full rejection is atomic no-op ───
+
+    #[test]
+    fn p93e3_queue_full_atomic_rejection() {
+        let (mut kernel, _slot, binding) = nic_setup();
+
+        // Fill the queue
+        for i in 0..super::super::nic::NIC_RX_QUEUE_CAPACITY {
+            assert!(kernel.inject_nic_rx(binding, &[i as u8; 64]),
+                "injection {} must succeed", i);
+        }
+
+        let nic = kernel.device_registry.lookup(binding)
+            .unwrap().controller.as_nic().unwrap();
+        let epoch_before = nic.event_sequence();
+        let len_before = nic.rx_queue_len();
+        let attn_before = nic.requires_attention();
+
+        // One more must fail
+        assert!(!kernel.inject_nic_rx(binding, &[0xFF; 64]),
+            "injection to full queue must fail");
+
+        let nic = kernel.device_registry.lookup(binding)
+            .unwrap().controller.as_nic().unwrap();
+        assert_eq!(nic.event_sequence(), epoch_before,
+            "NIC93E3-20: epoch must not change on rejection");
+        assert_eq!(nic.rx_queue_len(), len_before,
+            "NIC93E3-19: queue length must not change on rejection");
+        assert_eq!(nic.requires_attention(), attn_before,
+            "NIC93E3-21: attention must not change on rejection");
+
+        eprintln!("9.3e.3-4: queue-full rejection is atomic no-op ✓");
+    }
+
+    // ─── 9.3e.3 test 5: Oversize frame rejection is atomic no-op ───
+
+    #[test]
+    fn p93e3_oversize_frame_rejection() {
+        let (mut kernel, _slot, binding) = nic_setup();
+
+        let oversize = vec![0u8; super::super::nic::NIC_MAX_FRAME_SIZE + 1]; // 1515 bytes
+        assert!(!kernel.inject_nic_rx(binding, &oversize),
+            "oversize frame must be rejected");
+
+        let nic = kernel.device_registry.lookup(binding)
+            .unwrap().controller.as_nic().unwrap();
+        assert_eq!(nic.event_sequence(), 0, "epoch unchanged");
+        assert_eq!(nic.rx_queue_len(), 0, "queue unchanged");
+        assert!(!nic.requires_attention(), "attention unchanged");
+
+        eprintln!("9.3e.3-5: oversize frame rejection ✓");
+    }
+
+    // ─── 9.3e.3 test 6: Attention ack preserves queue and epoch ───
+
+    #[test]
+    fn p93e3_attention_ack_preserves_state() {
+        let (mut kernel, _slot, binding) = nic_setup();
+
+        assert!(kernel.inject_nic_rx(binding, &[1, 2, 3]));
+
+        let nic = kernel.device_registry.lookup_mut(binding)
+            .unwrap().controller.as_nic_mut().unwrap();
+        let epoch = nic.event_sequence();
+        let len = nic.rx_queue_len();
+
+        nic.acknowledge_attention();
+
+        assert!(!nic.requires_attention(),
+            "NIC93E3-17: ack must clear attention");
+        assert_eq!(nic.event_sequence(), epoch,
+            "NIC93E3-16: ack must preserve epoch");
+        assert_eq!(nic.rx_queue_len(), len,
+            "NIC93E3-15: ack must preserve queue");
+        assert_eq!(nic.peek_rx(), Some([1u8, 2, 3].as_slice()),
+            "ack must not consume the queued frame");
+
+        eprintln!("9.3e.3-6: attention ack preserves queue/epoch ✓");
+    }
+
+    // ─── 9.3e.3 test 7: Exact routing — wrong binding ───
+
+    #[test]
+    fn p93e3_wrong_binding_rejected() {
+        let (mut kernel, _slot, binding) = nic_setup();
+
+        // Fabricate a bogus binding with wrong ObjectId
+        let bogus = DeviceBinding {
+            object: ObjectId(binding.object.0 + 999),
+            generation: binding.generation,
+        };
+        assert!(!kernel.inject_nic_rx(bogus, &[0xFF; 64]),
+            "injection to nonexistent binding must fail");
+
+        // Original NIC unaffected
+        let nic = kernel.device_registry.lookup(binding)
+            .unwrap().controller.as_nic().unwrap();
+        assert_eq!(nic.event_sequence(), 0, "original NIC epoch unchanged");
+        assert_eq!(nic.rx_queue_len(), 0, "original NIC queue unchanged");
+
+        eprintln!("9.3e.3-7: wrong binding rejected ✓");
+    }
+
+    // ─── 9.3e.3 test 8: Stale generation routing ───
+
+    #[test]
+    fn p93e3_stale_generation_rejected() {
+        let (mut kernel, _slot, binding) = nic_setup();
+
+        // Fabricate a binding with stale generation
+        let stale = DeviceBinding {
+            object: binding.object,
+            generation: Generation(binding.generation.0 + 1),
+        };
+        assert!(!kernel.inject_nic_rx(stale, &[0xFF; 64]),
+            "injection with stale generation must fail");
+
+        // Original NIC unaffected
+        let nic = kernel.device_registry.lookup(binding)
+            .unwrap().controller.as_nic().unwrap();
+        assert_eq!(nic.event_sequence(), 0);
+        assert_eq!(nic.rx_queue_len(), 0);
+
+        eprintln!("9.3e.3-8: stale generation rejected ✓");
+    }
+
+    // ─── 9.3e.3 test 9: Wrong device kind — Block vs NIC ───
+
+    #[test]
+    fn p93e3_block_binding_not_nic_target() {
+        let (mut kernel, _slot, _nic_binding) = nic_setup();
+
+        // Register a Block device
+        let storage = super::super::block::BlockStorage::new(4, 512);
+        let ctrl = super::super::block::BlockController::new(storage, 1, AgentId(42));
+        let block_binding = kernel.register_block_device(ctrl)
+            .expect("register block");
+
+        // Inject to the Block binding must fail (wrong kind)
+        assert!(!kernel.inject_nic_rx(block_binding, &[0xAA; 64]),
+            "injection to Block device must fail");
+
+        // Block controller unaffected
+        let block = kernel.device_registry.lookup(block_binding)
+            .unwrap().controller.as_block();
+        assert_eq!(block.event_sequence(), 0,
+            "Block epoch must not be changed by NIC injection attempt");
+
+        eprintln!("9.3e.3-9: Block binding is not a NIC injection target ✓");
+    }
+
+    // ─── 9.3e.3 test 10: Cross-NIC isolation ───
+
+    #[test]
+    fn p93e3_cross_nic_isolation() {
+        let (mut kernel, _slot, nic_a_binding) = nic_setup();
+
+        // Register a second NIC
+        let nic_b = super::super::nic::NicController::new();
+        let nic_b_binding = kernel.register_nic_device(nic_b)
+            .expect("register NIC B");
+
+        assert_ne!(nic_a_binding, nic_b_binding,
+            "distinct NICs must have distinct bindings");
+
+        // Inject only to NIC A
+        assert!(kernel.inject_nic_rx(nic_a_binding, &[0xAA; 64]));
+
+        // NIC A advanced
+        let nic_a = kernel.device_registry.lookup(nic_a_binding)
+            .unwrap().controller.as_nic().unwrap();
+        assert_eq!(nic_a.event_sequence(), 1);
+        assert_eq!(nic_a.rx_queue_len(), 1);
+
+        // NIC B untouched
+        let nic_b = kernel.device_registry.lookup(nic_b_binding)
+            .unwrap().controller.as_nic().unwrap();
+        assert_eq!(nic_b.event_sequence(), 0,
+            "NIC A injection must not affect NIC B epoch");
+        assert_eq!(nic_b.rx_queue_len(), 0,
+            "NIC A injection must not enqueue in NIC B");
+        assert!(!nic_b.requires_attention(),
+            "NIC A injection must not latch NIC B attention");
+
+        eprintln!("9.3e.3-10: cross-NIC isolation ✓");
+    }
+
+    // ─── 9.3e.3 test 11: NIC event-wait wake on injection ───
+
+    #[test]
+    fn p93e3_event_wait_wake_on_injection() {
+        let mut fabric = Fabric::new(0x400000);
+
+        let (core, dom, text, _data, _stack) =
+            create_process(&mut fabric, CPU0, "waiter",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm = Asm64::new();
+        for _ in 0..100 { asm.nop(); }
+        asm.movi(R1, 0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let nic = super::super::nic::NicController::new();
+        let mut kernel = Kernel::new(fabric);
+        let pk = kernel.spawn(core);
+        let slot = pk.slot;
+
+        let binding = kernel.register_nic_device(nic)
+            .expect("register NIC");
+
+        // Install EVENT_WAIT capability on the NIC
+        let dev_handle = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::EVENT_WAIT,
+        ).expect("install NIC EVENT_WAIT cap");
+
+        // Set up event-wait: process observes epoch 0
+        push_event_wait_frame(&mut kernel, slot, dev_handle, 0);
+        kernel.handle_syscall(slot);
+
+        // Process should now be blocked
+        assert!(kernel.processes[slot].event_wait.is_some(),
+            "process must be waiting on device event");
+        assert!(kernel.processes[slot].core.halted,
+            "waiting process must be halted");
+
+        // Inject a packet — this should wake the waiter
+        assert!(kernel.inject_nic_rx(binding, &[0xBE, 0xEF]));
+
+        // Process should be woken
+        assert!(kernel.processes[slot].event_wait.is_none(),
+            "process must be woken after epoch change");
+        assert!(!kernel.processes[slot].core.halted,
+            "woken process must not be halted");
+
+        // R0 = 0 (success), R1 = new epoch
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 0,
+            "event-wait success code");
+        assert_eq!(kernel.processes[slot].core.r[R1 as usize], 1,
+            "returned epoch must be 1 (NIC epoch after injection)");
+
+        eprintln!("9.3e.3-11: NIC event-wait wake on injection ✓");
+    }
+
+    // ─── 9.3e.3 test 12: Event-wait does NOT wake waiter on wrong NIC ───
+
+    #[test]
+    fn p93e3_event_wait_no_cross_nic_wake() {
+        let mut fabric = Fabric::new(0x400000);
+
+        let (core, dom, text, _data, _stack) =
+            create_process(&mut fabric, CPU0, "waiter",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm = Asm64::new();
+        for _ in 0..100 { asm.nop(); }
+        asm.movi(R1, 0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let nic_a = super::super::nic::NicController::new();
+        let nic_b = super::super::nic::NicController::new();
+        let mut kernel = Kernel::new(fabric);
+        let pk = kernel.spawn(core);
+        let slot = pk.slot;
+
+        let binding_a = kernel.register_nic_device(nic_a)
+            .expect("register NIC A");
+        let binding_b = kernel.register_nic_device(nic_b)
+            .expect("register NIC B");
+
+        // Process waits on NIC A
+        let dev_handle_a = kernel.install_device_capability(
+            slot, binding_a.object, DeviceRights::EVENT_WAIT,
+        ).expect("install NIC A cap");
+
+        push_event_wait_frame(&mut kernel, slot, dev_handle_a, 0);
+        kernel.handle_syscall(slot);
+
+        assert!(kernel.processes[slot].event_wait.is_some(),
+            "process must be waiting");
+
+        // Inject packet to NIC *B* — must NOT wake the waiter on A
+        assert!(kernel.inject_nic_rx(binding_b, &[0xFF; 64]));
+
+        assert!(kernel.processes[slot].event_wait.is_some(),
+            "process must still be waiting — NIC B injection cannot wake NIC A waiter");
+        assert!(kernel.processes[slot].core.halted,
+            "process must still be halted");
+
+        eprintln!("9.3e.3-12: no cross-NIC event-wait wake ✓");
+    }
+
+    // ─── 9.3e.3 test 13: Kind-sensitive rights — Block cannot get NIC_RX ───
+
+    #[test]
+    fn p93e3_block_cannot_get_nic_rx() {
+        let (mut kernel, slot, _nic_binding) = nic_setup();
+
+        // Register a Block device
+        let storage = super::super::block::BlockStorage::new(4, 512);
+        let ctrl = super::super::block::BlockController::new(storage, 1, AgentId(42));
+        let block_binding = kernel.register_block_device(ctrl)
+            .expect("register block");
+
+        // Attempt to install NIC_RX on a Block device
+        let result = kernel.install_device_capability(
+            slot, block_binding.object, DeviceRights::NIC_RX,
+        );
+        assert!(result.is_none(),
+            "NIC93E3-27: Block device must not accept NIC_RX right");
+
+        // Also NIC_TX
+        let result = kernel.install_device_capability(
+            slot, block_binding.object, DeviceRights::NIC_TX,
+        );
+        assert!(result.is_none(),
+            "NIC93E3-28: Block device must not accept NIC_TX right");
+
+        // But SUBMIT_READ | EVENT_WAIT on Block is fine
+        let result = kernel.install_device_capability(
+            slot, block_binding.object,
+            DeviceRights(DeviceRights::SUBMIT_READ.0 | DeviceRights::EVENT_WAIT.0),
+        );
+        assert!(result.is_some(),
+            "NIC93E3-26: Block must accept its own operation mask");
+
+        eprintln!("9.3e.3-13: kind-sensitive rights — Block rejects NIC_RX/NIC_TX ✓");
+    }
+
+    // ─── 9.3e.3 test 14: Kind-sensitive rights — NIC cannot get SUBMIT_READ ───
+
+    #[test]
+    fn p93e3_nic_cannot_get_submit_read() {
+        let (mut kernel, slot, nic_binding) = nic_setup();
+
+        // Attempt to install SUBMIT_READ on a NIC device
+        let result = kernel.install_device_capability(
+            slot, nic_binding.object, DeviceRights::SUBMIT_READ,
+        );
+        assert!(result.is_none(),
+            "NIC must not accept SUBMIT_READ right");
+
+        // But EVENT_WAIT | NIC_RX | NIC_TX on NIC is fine
+        let result = kernel.install_device_capability(
+            slot, nic_binding.object,
+            DeviceRights(
+                DeviceRights::EVENT_WAIT.0
+                | DeviceRights::NIC_RX.0
+                | DeviceRights::NIC_TX.0
+            ),
+        );
+        assert!(result.is_some(),
+            "NIC93E3-29: NIC must accept EVENT_WAIT|NIC_RX|NIC_TX");
+
+        eprintln!("9.3e.3-14: kind-sensitive rights — NIC rejects SUBMIT_READ ✓");
+    }
+
+    // ─── 9.3e.3 test 15: Undefined bit 0x02 rejected for both kinds ───
+
+    #[test]
+    fn p93e3_undefined_bit_rejected() {
+        let (mut kernel, slot, nic_binding) = nic_setup();
+
+        // Register a Block too
+        let storage = super::super::block::BlockStorage::new(4, 512);
+        let ctrl = super::super::block::BlockController::new(storage, 1, AgentId(42));
+        let block_binding = kernel.register_block_device(ctrl)
+            .expect("register block");
+
+        // Bit 0x02 is undefined — must be rejected for Block
+        let result = kernel.install_device_capability(
+            slot, block_binding.object, DeviceRights(0x02),
+        );
+        assert!(result.is_none(),
+            "NIC93E3-25: undefined bit 0x02 rejected for Block");
+
+        // And for NIC
+        let result = kernel.install_device_capability(
+            slot, nic_binding.object, DeviceRights(0x02),
+        );
+        assert!(result.is_none(),
+            "NIC93E3-25: undefined bit 0x02 rejected for NIC");
+
+        eprintln!("9.3e.3-15: undefined bit 0x02 rejected for both kinds ✓");
+    }
+
+    // ─── 9.3e.3 test 16: as_nic on Block returns None ───
+
+    #[test]
+    fn p93e3_wrong_kind_accessor_returns_none() {
+        let (mut kernel, _slot, nic_binding) = nic_setup();
+
+        // Register a Block device
+        let storage = super::super::block::BlockStorage::new(4, 512);
+        let ctrl = super::super::block::BlockController::new(storage, 1, AgentId(42));
+        let block_binding = kernel.register_block_device(ctrl)
+            .expect("register block");
+
+        // as_nic on Block must return None, not panic
+        let block_slot = kernel.device_registry.lookup(block_binding).unwrap();
+        assert!(block_slot.controller.as_nic().is_none(),
+            "as_nic() on Block must return None");
+
+        // as_block on NIC: tests the panic path conceptually,
+        // but we verify as_nic/as_nic_mut return Some for NIC
+        let nic_slot = kernel.device_registry.lookup(nic_binding).unwrap();
+        assert!(nic_slot.controller.as_nic().is_some(),
+            "as_nic() on NIC must return Some");
+
+        eprintln!("9.3e.3-16: wrong-kind accessor returns None ✓");
+    }
+
+    // ─── 9.3e.3 test 17: NIC pair-count is always zero ───
+
+    #[test]
+    fn p93e3_nic_pair_count_zero() {
+        let (mut kernel, _slot, binding) = nic_setup();
+
+        let pk = ProcessKey { slot: 0, generation: 0 };
+
+        // Before injection
+        let nic_slot = kernel.device_registry.lookup(binding).unwrap();
+        assert_eq!(nic_slot.controller.nonterminal_pair_request_count(&pk, &pk), 0,
+            "NIC93E3-9: pair count must be zero before injection");
+
+        // After injection
+        assert!(kernel.inject_nic_rx(binding, &[0xAA; 64]));
+        let nic_slot = kernel.device_registry.lookup(binding).unwrap();
+        assert_eq!(nic_slot.controller.nonterminal_pair_request_count(&pk, &pk), 0,
+            "NIC93E3-9: pair count must be zero after injection");
+
+        eprintln!("9.3e.3-17: NIC pair count always zero ✓");
+    }
+
+    // ─── 9.3e.3 test 18: NIC tick is a no-op ───
+
+    #[test]
+    fn p93e3_nic_tick_noop() {
+        let (mut kernel, _slot, binding) = nic_setup();
+
+        assert!(kernel.inject_nic_rx(binding, &[1, 2, 3]));
+        let epoch_before = kernel.device_registry.lookup(binding)
+            .unwrap().controller.event_sequence();
+        let len_before = kernel.device_registry.lookup(binding)
+            .unwrap().controller.as_nic().unwrap().rx_queue_len();
+
+        // Tick should change nothing
+        kernel.device_registry.lookup_mut(binding)
+            .unwrap().controller.tick(&mut kernel.fabric);
+
+        let epoch_after = kernel.device_registry.lookup(binding)
+            .unwrap().controller.event_sequence();
+        let len_after = kernel.device_registry.lookup(binding)
+            .unwrap().controller.as_nic().unwrap().rx_queue_len();
+
+        assert_eq!(epoch_before, epoch_after, "tick must not change NIC epoch");
+        assert_eq!(len_before, len_after, "tick must not change NIC queue");
+
+        eprintln!("9.3e.3-18: NIC tick is a no-op ✓");
+    }
+
+    // ─── 9.3e.3 test 19: consume_completion always None ───
+
+    #[test]
+    fn p93e3_nic_consume_completion_none() {
+        let (mut kernel, _slot, binding) = nic_setup();
+
+        assert!(kernel.inject_nic_rx(binding, &[1, 2, 3]));
+
+        let comp = kernel.device_registry.lookup_mut(binding)
+            .unwrap().controller.consume_completion();
+        assert!(comp.is_none(),
+            "NIC has no completion model in 9.3e.3");
+
+        eprintln!("9.3e.3-19: NIC consume_completion always None ✓");
+    }
+
+    // ─── 9.3e.3 test 20: generic event_sequence exposes NIC epoch ───
+
+    #[test]
+    fn p93e3_generic_event_sequence() {
+        let (mut kernel, _slot, binding) = nic_setup();
+
+        assert_eq!(kernel.device_registry.lookup(binding)
+            .unwrap().controller.event_sequence(), 0);
+
+        assert!(kernel.inject_nic_rx(binding, &[1]));
+        assert_eq!(kernel.device_registry.lookup(binding)
+            .unwrap().controller.event_sequence(), 1);
+
+        assert!(kernel.inject_nic_rx(binding, &[2]));
+        assert_eq!(kernel.device_registry.lookup(binding)
+            .unwrap().controller.event_sequence(), 2);
+
+        eprintln!("9.3e.3-20: generic event_sequence exposes NIC epoch ✓");
     }
 }
