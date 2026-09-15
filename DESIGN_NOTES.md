@@ -2735,3 +2735,140 @@ reevaluate_event_waits()  — broadcast delivery (all service paths)
 ```
 
 744/744 tests; 30 instructions.  Phase 9.3d is complete.
+
+---
+
+## DN-25: User-Space NIC — Unsolicited Arrival Semantics (Phase 9.3e.3)
+
+**Date:** 2026-09-15
+
+**Context:**
+
+The block device produces completions in response to guest-initiated
+requests.  A NIC produces unsolicited packet arrivals that have no
+guest-side antecedent.  This is the first architectural occurrence of
+host-initiated device-private state change.
+
+**The decisive separation:**
+
+```text
+PacketArrival ≠ DeviceRequest
+```
+
+An arriving packet enters a bounded device-private queue.  It does not
+create a `DeviceRequestKey`, does not produce a delegation, does not
+mutate guest memory, and does not count as pair-attributed work or
+autonomous machine progress.
+
+This means:
+
+1. **No DMA on arrival.**  The packet sits in controller-private storage
+   until a future authorized `SYS_NIC_RX` operation (9.3e.4) moves it
+   into guest memory.  The driver must present both NIC_RX authority and
+   a writable memory capability.
+
+2. **No request model.**  `inject_rx` is host-to-controller, not
+   guest-to-controller.  There is no `RequestHandle`, no slot lifecycle,
+   no completion.  The NIC's only observable state change from the
+   guest's perspective is the epoch advancing and attention latching.
+
+3. **No quiescence impact.**  Queued private RX does not contribute to
+   `nonterminal_pair_request_count`, so it cannot delay `PeerDied`.
+   The causal barrier from 9.2e is unaffected.
+
+**Attention latch:**
+
+Attention is a latched boolean, distinct from queue occupancy.
+`inject_rx` sets it; `acknowledge_attention` clears it.  After
+acknowledgement the queue may still be non-empty but
+`requires_attention` returns false.  The law:
+
+```text
+Ack(Q, e, true)  = (Q, e, false)
+Ack(Q, e, false) = (Q, e, false)
+```
+
+Neither the queue nor the epoch is modified.
+
+**Checked epoch advancement:**
+
+`inject_rx` uses `checked_add(1)`.  If `event_sequence == u64::MAX`,
+the injection is atomically rejected — no queue mutation, no attention
+change.  Silent wraparound is a forbidden state transition.
+
+**Kind-sensitive rights:**
+
+`DeviceRights::ALL_BITS` expanded to 0x1D to decode the new NIC_RX
+(0x08) and NIC_TX (0x10) bits.  But "defined encoding" does not mean
+"valid for every device kind."  `install_device_capability` enforces
+kind-valid subsets at install time:
+
+```text
+Allowed(Block) = SUBMIT_READ | EVENT_WAIT           = 0x05
+Allowed(NIC)   = EVENT_WAIT  | NIC_RX    | NIC_TX   = 0x1C
+```
+
+`install_device_capability(Block, NIC_RX)` fails.  The enforcement is
+at the kernel provisioning gate, not deferred to the syscall handler.
+
+**Injection ordering:**
+
+```text
+1. frame.len() > NIC_MAX_FRAME_SIZE? → reject
+2. rx_queue.len() >= NIC_RX_QUEUE_CAPACITY? → reject
+3. event_sequence.checked_add(1) → None? → reject
+4. [mutation zone]
+   rx_queue.push_back(frame.to_vec());
+   event_sequence = next_epoch;
+   attention_pending = true;
+```
+
+All semantic failure checks precede architectural mutation.  A rejected
+injection is an atomic no-op over controller-observable state.
+
+**Host injection and event wake:**
+
+`Kernel::inject_nic_rx(binding, frame)` routes by exact `DeviceBinding`
+and requires the NIC kind.  After successful `inject_rx`, it calls
+`reevaluate_event_waits()`, which wakes any process blocked in
+`SYS_DEV_EVENT_WAIT` on this NIC with an older epoch.  This is the
+same broadcast mechanism that Block completions use.
+
+Wrong binding, wrong kind (Block), stale generation, oversize frame,
+full queue, and epoch exhaustion all produce zero state mutation.
+
+**What 9.3e.3 does not do:**
+
+- No `SYS_NIC_RX` or `SYS_NIC_TX` syscall.
+- No guest DMA (no movement of bytes into guest memory).
+- No `NicCompletion` type (no completion model).
+- No `pop_rx()` (dequeue deferred to 9.3e.4 authorized operation).
+- No finite DMA admission for NIC.
+- No Ethernet parsing, ARP, or protocol awareness.
+
+**Formal basis:**
+
+```text
+anka93e3_nic_controller.kleis              — 32/32 positive
+anka93e3_nic_controller_false_witnesses.kleis — 0/10 false claims pass
+anka_userspace_nic.kleis                   — 24/24 positive (broad 9.3e)
+```
+
+No new axioms.  The false theory rejects: arrival mutating guest memory,
+queued RX delaying quiescence, cross-NIC routing, ACK consuming/resetting
+state, partial mutation on failed injection, and expanded ALL_BITS making
+NIC rights valid for Block.
+
+**Future direction (9.3e.4):**
+
+```text
+PrivateFrame + NIC_RX + MemoryWRITE → FiniteDMA
+MemoryREAD   + NIC_TX               → FiniteDMA → TXSink
+```
+
+The driver will present three authorities: NIC capability (for the
+operation), the queued private frame (via the NIC), and a writable
+memory target (for placement).  Only the conjunction of all three
+produces guest-visible state change.
+
+786/786 tests; 29 instructions.  Phase 9.3e.3 is complete.

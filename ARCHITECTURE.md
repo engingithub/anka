@@ -1451,9 +1451,9 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | ISA instructions | 29 |
 | Self-hosted compiler | Fixed point (CC_B == CC_C) |
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
-| CC_B = CC_C | 46 functions, 63,808 bytes |
+| CC_B = CC_C | 46 functions, 67,824 bytes |
 | Canonical source | ~17 KB |
-| Tests | 648 |
+| Tests | 786 |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -1959,13 +1959,134 @@ anka_user_device_events_false_witnesses.kleis — 0/8 false claims pass
 9.4  — Networking: Ethernet → ARP → ICMP → UDP → TCP → Socket → HTTP
 ```
 
+### Stage 32: User-Space NIC — ABI groundwork and NicController (Phase 9.3e.1--9.3e.3)
+
+Phase 9.3e introduces the second device type: a NIC (network interface
+controller).  The NIC is the first genuinely unsolicited-event producer
+in the architecture.  Block I/O completions are responses to guest-initiated
+requests; packet arrival has no guest-side antecedent.
+
+**Phase 9.3e.1** (generic request/completion cleanup) extracted
+`RequestHandle` and `DeviceCompletionStatus` from block-specific
+namespaces into `state.rs`, making the types available to future device
+kinds without block namespace contamination.  Pure representational
+refactoring with zero semantic change.
+
+**Phase 9.3e.2** (guest compiler syscall extension) widened the syscall
+ABI from four registers to six:
+
+```text
+syscall(n, a, b, c)       → R0..R3   (existing)
+syscall(n, a, b, c, d)    → R0..R4   (new)
+syscall(n, a, b, c, d, e) → R0..R5   (new)
+```
+
+and added `sysret(1)` for retrieving secondary return values (`R1`).
+Both compiler generations (CC_A and CC_B) were updated together;
+CC_B = CC_C = 67,824 bytes with the extended syntax.  The ABI was
+directly witnessed via invalid-syscall register probes that observe
+`(R0..R5)` at the TRAP boundary.  The evaluate-spill-load strategy
+prevents function-call arguments from clobbering previously staged
+registers.  A two-ended arena invariant (`out_pos < lit_pos`) was
+added to catch compiler-output exhaustion.
+
+**Phase 9.3e.3** (NicController) introduced `nic.rs` with a bounded
+device-private RX queue and unsolicited-arrival semantics.
+
+**Central theorem:**
+
+```text
+PacketArrival → DevicePrivateQueue + EpochAdvance + AttentionLatch
+ΔGuestMemory = ΔDeviceRequests = ΔDelegations = 0
+```
+
+This separates "the world has delivered a packet" from "the driver has
+authorized movement of that packet into guest memory."
+
+**Architecture changes (9.3e.3):**
+
+| Component | Change |
+|-----------|--------|
+| `NicController` | Bounded RX queue, checked epoch, attention latch |
+| `DeviceController::Nic` | Second enum variant; generic dispatch extended |
+| `DeviceRights::NIC_RX` | 0x08 — authority to copy queued RX into guest memory |
+| `DeviceRights::NIC_TX` | 0x10 — authority to transmit from guest memory |
+| `DeviceRights::ALL_BITS` | 0x05 → 0x1D (decoder-level mask, not kind-valid mask) |
+| `install_device_capability` | Kind-sensitive rights enforcement at install time |
+| `register_nic_device` | Kernel method — allocates Device object and registers |
+| `inject_nic_rx` | Host-initiated packet injection with `reevaluate_event_waits()` |
+
+**Kind-sensitive rights:**
+
+```text
+Allowed(Block) = SUBMIT_READ | EVENT_WAIT           = 0x05
+Allowed(NIC)   = EVENT_WAIT  | NIC_RX    | NIC_TX   = 0x1C
+Defined        = ALL_BITS                            = 0x1D
+```
+
+Bit 0x02 remains deliberately undefined.  Expanding `ALL_BITS` does not
+cause Block capabilities to acquire NIC rights.
+
+**NicController semantics:**
+
+| Method | Behavior |
+|--------|----------|
+| `inject_rx(frame)` | All checks precede mutation; success: Q' = Q+[frame], epoch' = epoch+1, attention = true |
+| `tick()` | No-op (host-driven arrival, not autonomous) |
+| `has_autonomous_work()` | Always false |
+| `completion_count()` | Always 0 (no completion model in 9.3e.3) |
+| `consume_completion()` | Always None |
+| `nonterminal_pair_request_count()` | Always 0 |
+| `requires_attention()` | Returns attention latch |
+| `acknowledge_attention()` | Ack(Q, e, true) = (Q, e, false) |
+
+**Formal basis:**
+
+```text
+anka93e3_nic_controller.kleis              — 32/32 positive
+anka93e3_nic_controller_false_witnesses.kleis — 0/10 false claims pass
+anka_userspace_nic.kleis                   — 24/24 positive (broad 9.3e)
+```
+
+No new axioms.
+
+**Hostile suite (20 integration + 11 unit tests):**
+
+| Test | Property |
+|------|----------|
+| `nic_registration` | Fresh NIC: epoch=0, queue=0, no attention |
+| `host_inject_success` | inject enqueues, advances epoch, latches attention |
+| `inject_no_guest_memory_mutation` | Physical memory snapshot unchanged |
+| `queue_full_atomic_rejection` | Δepoch = Δqueue = Δattention = 0 on full |
+| `oversize_frame_rejection` | 1515-byte frame rejected, no mutation |
+| `attention_ack_preserves_state` | Ack preserves queue and epoch, clears latch |
+| `wrong_binding_rejected` | Nonexistent binding → false, original NIC unchanged |
+| `stale_generation_rejected` | Stale generation → false, original NIC unchanged |
+| `block_binding_not_nic_target` | Block device → false on inject_nic_rx |
+| `cross_nic_isolation` | NIC A injection does not affect NIC B |
+| `event_wait_wake_on_injection` | inject → reevaluate → process wakes, R1 = new epoch |
+| `event_wait_no_cross_nic_wake` | NIC B injection → waiter on A stays blocked |
+| `block_cannot_get_nic_rx` | install_device_capability(Block, NIC_RX) → None |
+| `nic_cannot_get_submit_read` | install_device_capability(NIC, SUBMIT_READ) → None |
+| `undefined_bit_rejected` | Bit 0x02 rejected for both Block and NIC |
+| `wrong_kind_accessor_returns_none` | as_nic() on Block → None (no panic) |
+| `nic_pair_count_zero` | Pair count zero before and after injection |
+| `nic_tick_noop` | tick() changes nothing |
+| `nic_consume_completion_none` | consume_completion() → None |
+| `generic_event_sequence` | Generic accessor exposes NIC epoch |
+
+786/786 tests; 29 instructions; CC_B = CC_C = 67,824 bytes.
+
+Deferred to 9.3e.4: `SYS_NIC_RX`, `SYS_NIC_TX`, guest DMA, `NicCompletion`,
+`pop_rx()`, finite DMA admission for NIC, protocol parsing.
+
 The target remains:
 
 ```text
 GET /alive HTTP/1.1 → "Anka64 is alive."
 ```
 
-The NIC will be the first genuinely unsolicited-event producer.
+The NIC is now the first genuinely unsolicited-event producer.
 The event mechanism it inherits was designed for devices generally,
 rather than a block-completion mechanism wearing a generic name.
 

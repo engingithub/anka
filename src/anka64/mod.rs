@@ -32,3 +32,4 @@ pub mod multicore;
 pub mod ankad;
 pub mod system_image;
 pub mod block;
+pub mod nic;

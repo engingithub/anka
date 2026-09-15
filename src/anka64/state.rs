@@ -661,9 +661,26 @@ impl DeviceRights {
     /// without being able to submit I/O.  Formal basis:
     /// anka_user_device_events.kleis DEVEVENT-3, DEVEVENT-4.
     pub const EVENT_WAIT: Self = Self(0x04);
+    /// Authority to copy a queued RX frame into guest memory (Phase 9.3e.3).
+    pub const NIC_RX: Self = Self(0x08);
+    /// Authority to transmit bytes read from guest memory (Phase 9.3e.3).
+    pub const NIC_TX: Self = Self(0x10);
 
     /// Mask of all defined device right bits.
-    pub const ALL_BITS: u64 = 0x05;
+    ///
+    /// "Defined encoding" means the bit pattern is a valid DeviceRights
+    /// value at the decoder level.  It does NOT mean every defined right
+    /// is valid for every device kind.  Kind-valid subsets:
+    ///   Block: SUBMIT_READ | EVENT_WAIT = 0x05
+    ///   NIC:   EVENT_WAIT | NIC_RX | NIC_TX = 0x1C
+    ///
+    /// Formal basis: anka93e3_nic_controller.kleis NIC93E3-24..29.
+    pub const ALL_BITS: u64 = 0x1D;
+
+    /// Kind-valid rights for Block devices.
+    pub const BLOCK_ALLOWED: Self = Self(0x05);
+    /// Kind-valid rights for NIC devices.
+    pub const NIC_ALLOWED: Self = Self(0x1C);
 
     /// Checked decoder — rejects undefined bits.
     pub fn from_bits_checked(bits: u64) -> Option<Self> {
