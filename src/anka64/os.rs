@@ -62,6 +62,12 @@ pub struct Process {
     /// or PeerDied notification (Phase 9.2e).  The process remains
     /// `ProcessState::Running` but is not schedulable.
     pub recv_wait: Option<RecvWait>,
+    /// If Some, process is blocked waiting for a device activity-epoch
+    /// advance (Phase 9.3d).  The process remains `ProcessState::Running`
+    /// but is not schedulable.
+    ///
+    /// Invariant: `IoWait + RecvWait + DeviceEventWait ≤ 1`.
+    pub event_wait: Option<DeviceEventWait>,
     /// Per-process async request ledger (Phase 9.2f).
     ///
     /// Tracks outstanding SYS_DEV_SUBMIT_ASYNC requests and their
@@ -101,6 +107,7 @@ impl Process {
             && self.waiting_on.is_none()
             && self.io_wait.is_none()
             && self.recv_wait.is_none()
+            && self.event_wait.is_none()
     }
 }
 
@@ -336,6 +343,25 @@ struct PreparedDevSubmit {
 #[derive(Debug, Clone)]
 pub struct RecvWait {
     pub peer: ProcessKey,
+}
+
+/// Device event wait — process blocked on a device activity epoch (Phase 9.3d).
+///
+/// The process has called SYS_DEV_EVENT_WAIT with sequence `e_o` and the
+/// device's current sequence equaled `e_o` at the atomic check point.
+/// The process remains `ProcessState::Running` but unschedulable until
+/// the device's event_sequence differs from `observed_sequence`.
+///
+/// Lifecycle invariant:
+///   `IoWait + RecvWait + DeviceEventWait ≤ 1` for any process.
+/// Process death/recycling clears the wait.  An accepted wait belongs
+/// to the exact old ProcessKey; a recycled incarnation can never inherit it.
+///
+/// Formal basis: anka_user_device_events.kleis DEVEVENT-6, DEVEVENT-9.
+#[derive(Debug, Clone)]
+pub struct DeviceEventWait {
+    pub device: DeviceBinding,
+    pub observed_sequence: u64,
 }
 
 /// Receive completion outcome — single authoritative encoder input.
@@ -715,6 +741,18 @@ impl DeviceController {
         match self {
             DeviceController::Block(c) =>
                 c.consume_completion().map(DeviceCompletion::Block),
+        }
+    }
+
+    /// Current activity-epoch sequence (Phase 9.3d).
+    ///
+    /// Generic surface: every device kind exposes a monotonic event
+    /// sequence.  "This device's activity epoch has advanced since e_o."
+    ///
+    /// Formal basis: anka_user_device_events.kleis DEVEVENT-5..8.
+    pub fn event_sequence(&self) -> u64 {
+        match self {
+            DeviceController::Block(c) => c.event_sequence(),
         }
     }
 
@@ -1143,6 +1181,7 @@ impl Kernel {
                 waiting_on: None,
                 io_wait: None,
                 recv_wait: None,
+                event_wait: None,
                 async_requests: Vec::new(),
                 parent: None,
                 generation: reuse_gen,
@@ -1165,6 +1204,7 @@ impl Kernel {
             waiting_on: None,
             io_wait: None,
             recv_wait: None,
+            event_wait: None,
             async_requests: Vec::new(),
             parent: None,
             generation: 0,
@@ -1513,6 +1553,7 @@ impl Kernel {
         self.processes[slot].waiting_on = None;
         self.processes[slot].io_wait = None;
         self.processes[slot].recv_wait = None;
+        self.processes[slot].event_wait = None;
         self.processes[slot].async_requests.clear();
         self.processes[slot].result = None;
         self.processes[slot].exit_code = 0;

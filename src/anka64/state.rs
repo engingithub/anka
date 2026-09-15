@@ -654,9 +654,16 @@ pub struct DeviceRights(pub u8);
 impl DeviceRights {
     pub const NONE: Self = Self(0);
     pub const SUBMIT_READ: Self = Self(0x01);
+    // 0x02 is deliberately undefined — preserved hostile witness.
+    /// Authority to subscribe to device activity-epoch notifications.
+    ///
+    /// Independent of SUBMIT_READ: a process may wait for events
+    /// without being able to submit I/O.  Formal basis:
+    /// anka_user_device_events.kleis DEVEVENT-3, DEVEVENT-4.
+    pub const EVENT_WAIT: Self = Self(0x04);
 
     /// Mask of all defined device right bits.
-    pub const ALL_BITS: u64 = 0x01;
+    pub const ALL_BITS: u64 = 0x05;
 
     /// Checked decoder — rejects undefined bits.
     pub fn from_bits_checked(bits: u64) -> Option<Self> {

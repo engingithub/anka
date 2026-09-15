@@ -256,6 +256,15 @@ pub struct BlockController {
     latency: u32,
     /// Stable agent identity for storage DMA transactions.
     pub storage_agent: AgentId,
+    /// Activity-epoch counter (Phase 9.3d).
+    ///
+    /// Increments exactly once per `Nonterminal → CompletionReady`
+    /// transition — never per-tick while a completion remains ready.
+    /// Uses `checked_add`; exhaustion is a kernel invariant failure
+    /// (no silent wrapping — prevents ABA across device recycling).
+    ///
+    /// Formal basis: anka_user_device_events.kleis DEVEVENT-8.
+    event_sequence: u64,
 }
 
 impl BlockController {
@@ -267,6 +276,7 @@ impl BlockController {
             storage,
             latency,
             storage_agent,
+            event_sequence: 0,
         }
     }
 
@@ -434,6 +444,12 @@ impl BlockController {
                         };
                         self.slots[i] = SlotState::Completed { completion };
                         self.completion_order.push_back(i as u8);
+                        // Nonterminal → CompletionReady: advance activity epoch.
+                        // Exactly once per transition, never per tick.
+                        // No silent wrapping — ABA prevention for device recycling.
+                        self.event_sequence = self.event_sequence
+                            .checked_add(1)
+                            .expect("device event sequence exhausted");
                     }
                 }
             }
@@ -496,6 +512,14 @@ impl BlockController {
     /// Mutable access to the backing storage (for test setup).
     pub fn storage_mut(&mut self) -> &mut BlockStorage {
         &mut self.storage
+    }
+
+    /// Current activity-epoch sequence (Phase 9.3d).
+    ///
+    /// Monotonic: only advances on `Nonterminal → CompletionReady`.
+    /// "This device's activity epoch has advanced since e_o."
+    pub fn event_sequence(&self) -> u64 {
+        self.event_sequence
     }
 
     /// True if any slot is in a nonterminal accepted state:
