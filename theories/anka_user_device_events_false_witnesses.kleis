@@ -1,0 +1,65 @@
+// =============================================================================
+// Anka64 Phase 9.3d falsifiability probes.
+// Every example below is deliberately false and must be rejected.
+// =============================================================================
+
+import "anka_user_device_events.kleis"
+
+example "FALSE-DEVEVENT-1: SUBMIT_READ alone authorizes generic device-event wait" {
+    assert(
+        device_event_wait_authorized(
+            bvconst(10,64),bvconst(2,64),
+            bvconst(10,64),bvconst(2,64),
+            DEVICE_RIGHT_SUBMIT_READ,DEVICE_RIGHTS_NONE
+        )
+    )
+}
+
+example "FALSE-DEVEVENT-2: ambient EVENT_WAIT rescues insufficient presented authority" {
+    assert(
+        device_event_wait_authorized(
+            bvconst(10,64),bvconst(2,64),
+            bvconst(10,64),bvconst(2,64),
+            DEVICE_RIGHT_SUBMIT_READ,DEVICE_RIGHT_EVENT_WAIT
+        )
+    )
+}
+
+example "FALSE-DEVEVENT-3: accepted event delivery may depend on capability still being present" {
+    assert(
+        ∀(a : Bool). ∀(c : Bool). ∀(p : Bool). ∀(d : Bool). ∀(s : Bool). ∀(i : Bool).
+            accepted_event_delivery(a,c,p,d,s,i) = (a ∧ c ∧ p ∧ d ∧ s)
+    )
+}
+
+example "FALSE-DEVEVENT-4: interrupt target may become part of event ownership" {
+    assert(
+        ∀(a : Bool). ∀(c : Bool). ∀(p : Bool). ∀(d : Bool). ∀(s : Bool). ∀(i : Bool).
+            accepted_event_delivery(a,c,p,d,s,i) = (a ∧ p ∧ d ∧ s ∧ i)
+    )
+}
+
+example "FALSE-DEVEVENT-5: accepted delivery may ignore exact DeviceBinding" {
+    assert(
+        ∀(a : Bool). ∀(c : Bool). ∀(p : Bool). ∀(d : Bool). ∀(s : Bool). ∀(i : Bool).
+            accepted_event_delivery(a,c,p,d,s,i) = (a ∧ p ∧ s)
+    )
+}
+
+example "FALSE-DEVEVENT-6: accepted delivery may ignore exact ProcessKey" {
+    assert(
+        ∀(a : Bool). ∀(c : Bool). ∀(p : Bool). ∀(d : Bool). ∀(s : Bool). ∀(i : Bool).
+            accepted_event_delivery(a,c,p,d,s,i) = (a ∧ d ∧ s)
+    )
+}
+
+example "FALSE-DEVEVENT-7: accepted delivery may ignore sequence change" {
+    assert(
+        ∀(a : Bool). ∀(c : Bool). ∀(p : Bool). ∀(d : Bool). ∀(s : Bool). ∀(i : Bool).
+            accepted_event_delivery(a,c,p,d,s,i) = (a ∧ p ∧ d)
+    )
+}
+
+example "FALSE-DEVEVENT-8: DeviceRights bit 0x02 becomes defined in 9.3d" {
+    assert(device_rights_subset(bvconst(2,8),DEVICE_RIGHTS_ALL_93D))
+}
