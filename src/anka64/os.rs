@@ -18405,4 +18405,781 @@ mod tests {
         eprintln!("  handle, requester, status, block_number, delegation_id all intact");
         eprintln!("  Wrap_generic(Block) loses no block semantics");
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.3d — User-Space Device Event Delivery
+    //
+    //   DeviceEventIdentity = (DeviceBinding, EventSequence)
+    //   Delivery = AcceptedWait ∧ ExactProcessKey ∧ ExactBinding ∧ SeqChanged
+    //
+    //   CapabilityPossession ∉ delivery
+    //   InterruptTarget ∉ delivery
+    //   CompletionExistence ∉ delivery
+    //
+    //   Formal basis: anka_user_device_events.kleis (16/16 + 0/8).
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Minimal one-process, one-device setup for event-wait tests.
+    ///
+    /// Returns (kernel, slot, dev_obj, dev_handle, buf_handle, binding).
+    /// The device cap carries SUBMIT_READ | EVENT_WAIT (0x05).
+    fn event_wait_setup() -> (Kernel, usize, ObjectId, CapabilityHandle, CapabilityHandle, DeviceBinding) {
+        let mut fabric = Fabric::new(0x400000);
+
+        let (core, dom, text, data, _stack) =
+            create_process(&mut fabric, CPU0, "proc",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+
+        let mut asm = Asm64::new();
+        for _ in 0..100 { asm.nop(); }
+        asm.movi(R1, 0);
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let mut storage = super::super::block::BlockStorage::new(4, 512);
+        storage.write_block(0, &(0..512).map(|i| (i % 256) as u8).collect::<Vec<_>>());
+        storage.write_block(1, &vec![0xAA; 512]);
+        let controller = super::super::block::BlockController::new(
+            storage, 1, AgentId(100),
+        );
+
+        let mut kernel = Kernel::new(fabric);
+        let pk = kernel.spawn(core);
+        let slot = pk.slot;
+
+        let binding = kernel.register_block_device(controller)
+            .expect("register device");
+
+        // Device cap: SUBMIT_READ | EVENT_WAIT = 0x05
+        let dev_rights = DeviceRights(0x05);
+        let dev_handle = kernel.install_device_capability(
+            slot, binding.object, dev_rights,
+        ).expect("install device cap");
+
+        // Buffer cap for WRITE (for I/O submission tests)
+        let buf_handle = kernel.install_capability(
+            slot, data, 0, 512, Permissions::WRITE,
+        ).expect("install buffer cap");
+
+        (kernel, slot, binding.object, dev_handle, buf_handle, binding)
+    }
+
+    /// Push a syscall EventFrame and set registers for SYS_DEV_EVENT_WAIT.
+    fn push_event_wait_frame(kernel: &mut Kernel, slot: usize, dev_handle: CapabilityHandle, epoch: u64) {
+        let return_pc = kernel.processes[slot].core.pc + 4;
+        kernel.processes[slot].core.event_frames.push(EventFrame {
+            return_pc,
+            return_privilege: Privilege::User,
+            interrupts_were_enabled: true,
+            cause: EventCause::Syscall,
+        });
+        kernel.processes[slot].core.r[R0 as usize] = SYS_DEV_EVENT_WAIT;
+        kernel.processes[slot].core.r[R1 as usize] = dev_handle.slot as u64;
+        kernel.processes[slot].core.r[R2 as usize] = dev_handle.generation as u64;
+        kernel.processes[slot].core.r[R3 as usize] = epoch;
+        kernel.processes[slot].core.halted = true;
+    }
+
+    // ─── 9.3d test 1: Epoch changed → immediate return ───
+
+    #[test]
+    fn p93d_event_wait_immediate_return() {
+        let (mut kernel, slot, _dev_obj, dev_handle, buf_handle, binding) = event_wait_setup();
+
+        // Submit a block read and complete it to advance epoch to 1.
+        {
+            let return_pc = kernel.processes[slot].core.pc + 4;
+            kernel.processes[slot].core.event_frames.push(EventFrame {
+                return_pc,
+                return_privilege: Privilege::User,
+                interrupts_were_enabled: true,
+                cause: EventCause::Syscall,
+            });
+            kernel.processes[slot].core.r[R0 as usize] = SYS_DEV_SUBMIT;
+            kernel.processes[slot].core.r[R1 as usize] = dev_handle.slot as u64;
+            kernel.processes[slot].core.r[R2 as usize] = dev_handle.generation as u64;
+            kernel.processes[slot].core.r[R3 as usize] = 0; // block 0
+            kernel.processes[slot].core.r[R4 as usize] = buf_handle.slot as u64;
+            kernel.processes[slot].core.r[R5 as usize] = buf_handle.generation as u64;
+            kernel.processes[slot].core.halted = true;
+            kernel.handle_syscall(slot);
+        }
+        // Complete the I/O
+        for _ in 0..20 { kernel.tick_devices(slot); }
+        kernel.drain_completions();
+
+        // Device epoch should be 1 now
+        let epoch = kernel.device_registry.lookup(binding).unwrap()
+            .controller.event_sequence();
+        assert_eq!(epoch, 1, "one completion → epoch 1");
+
+        // DEV_EVENT_WAIT with observed=0 (stale) → immediate return
+        push_event_wait_frame(&mut kernel, slot, dev_handle, 0);
+        kernel.handle_syscall(slot);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 0,
+            "DEVEVENT-5: epoch changed → status 0");
+        assert_eq!(kernel.processes[slot].core.r[R1 as usize], 1,
+            "DEVEVENT-5: R1 = current epoch");
+        assert!(kernel.processes[slot].event_wait.is_none(),
+            "immediate return must not install event_wait");
+        assert!(!kernel.processes[slot].core.halted,
+            "immediate return must resume");
+
+        eprintln!("9.3d-1: epoch changed → immediate R0=0, R1=current ✓");
+    }
+
+    // ─── 9.3d test 2: Epoch unchanged → blocks ───
+
+    #[test]
+    fn p93d_event_wait_blocks_on_same_epoch() {
+        let (mut kernel, slot, _dev_obj, dev_handle, _buf_handle, binding) = event_wait_setup();
+
+        let epoch = kernel.device_registry.lookup(binding).unwrap()
+            .controller.event_sequence();
+        assert_eq!(epoch, 0, "no completions → epoch 0");
+
+        // DEV_EVENT_WAIT with observed=0 (current) → block
+        push_event_wait_frame(&mut kernel, slot, dev_handle, 0);
+        kernel.handle_syscall(slot);
+
+        assert!(kernel.processes[slot].event_wait.is_some(),
+            "DEVEVENT-6: epoch unchanged → must block");
+        assert!(kernel.processes[slot].core.halted,
+            "blocked process must remain halted");
+        assert_eq!(kernel.processes[slot].core.event_frames.len(), 1,
+            "EventFrame must remain outstanding");
+        assert!(!kernel.processes[slot].is_schedulable(),
+            "event_wait process is not schedulable");
+
+        eprintln!("9.3d-2: epoch unchanged → blocks ✓");
+    }
+
+    // ─── 9.3d test 3: Completion advances epoch → waiter wakes ───
+
+    #[test]
+    fn p93d_event_wait_wakes_on_completion() {
+        let (mut kernel, slot, _dev_obj, dev_handle, buf_handle, binding) = event_wait_setup();
+
+        // Install event wait at epoch 0
+        push_event_wait_frame(&mut kernel, slot, dev_handle, 0);
+        kernel.handle_syscall(slot);
+        assert!(kernel.processes[slot].event_wait.is_some());
+
+        // Now submit a block read from a second process to advance epoch.
+        // We need a second process for the I/O (first is blocked).
+        // Instead, directly submit to the controller.
+        {
+            let dev_slot = kernel.device_registry.lookup_mut(binding).unwrap();
+            let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+            let rk = super::super::state::RequesterKey { slot: 99, generation: 0 };
+            // We need a buffer object. Use the data object.
+            let data_obj = ObjectId(2); // data object from create_process
+            let domain = kernel.processes[slot].core.domain;
+            let req = super::super::block::BlockRequest {
+                block_number: 0,
+                requester: rk,
+                target_object: data_obj,
+                target_offset: 0,
+                source_domain: domain,
+                source_authority_id: None,
+                delegation_id: None,
+            };
+            let result = ctrl.submit(req, &mut kernel.fabric);
+            assert!(matches!(result, super::super::block::SubmitResult::Accepted(_)));
+        }
+
+        // Tick until completion
+        for _ in 0..20 {
+            for dev in &mut kernel.device_registry.devices {
+                dev.controller.tick(&mut kernel.fabric);
+            }
+        }
+
+        // Epoch should have advanced
+        let epoch = kernel.device_registry.lookup(binding).unwrap()
+            .controller.event_sequence();
+        assert_eq!(epoch, 1, "completion advanced epoch");
+
+        // Run reevaluate_event_waits to wake
+        kernel.reevaluate_event_waits();
+
+        assert!(kernel.processes[slot].event_wait.is_none(),
+            "DEVEVENT-8: waiter must wake");
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 0,
+            "R0 = 0 (success)");
+        assert_eq!(kernel.processes[slot].core.r[R1 as usize], 1,
+            "R1 = new epoch");
+        assert!(!kernel.processes[slot].core.halted,
+            "woken process must not be halted");
+
+        eprintln!("9.3d-3: Nonterminal→Ready ⇒ e++ ⇒ waiter wakes ✓");
+    }
+
+    // ─── 9.3d test 4: SUBMIT_READ alone → error 4 ───
+
+    #[test]
+    fn p93d_event_wait_requires_event_wait_right() {
+        let mut fabric = Fabric::new(0x400000);
+        let (core, dom, text, _data, _stack) =
+            create_process(&mut fabric, CPU0, "proc",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm = Asm64::new();
+        asm.movi(R0, SYS_EXIT as i32); asm.movi(R1, 0); asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let storage = super::super::block::BlockStorage::new(4, 512);
+        let controller = super::super::block::BlockController::new(
+            storage, 1, AgentId(100),
+        );
+        let mut kernel = Kernel::new(fabric);
+        let pk = kernel.spawn(core);
+        let slot = pk.slot;
+        let binding = kernel.register_block_device(controller).unwrap();
+
+        // Install with SUBMIT_READ only (0x01) — no EVENT_WAIT
+        let dev_handle = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::SUBMIT_READ,
+        ).expect("install device cap");
+
+        push_event_wait_frame(&mut kernel, slot, dev_handle, 0);
+        kernel.handle_syscall(slot);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 4,
+            "DEVEVENT-3: SUBMIT_READ alone → error 4");
+        assert!(kernel.processes[slot].event_wait.is_none(),
+            "error path must not install event_wait");
+
+        eprintln!("9.3d-4: SUBMIT_READ alone → error 4 ✓");
+    }
+
+    // ─── 9.3d test 5: Ambient EVENT_WAIT cannot rescue ───
+
+    #[test]
+    fn p93d_event_wait_no_ambient_rescue() {
+        let mut fabric = Fabric::new(0x400000);
+        let (core, dom, text, _data, _stack) =
+            create_process(&mut fabric, CPU0, "proc",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm = Asm64::new();
+        asm.movi(R0, SYS_EXIT as i32); asm.movi(R1, 0); asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let storage = super::super::block::BlockStorage::new(4, 512);
+        let ctrl = super::super::block::BlockController::new(storage, 1, AgentId(100));
+        let mut kernel = Kernel::new(fabric);
+        let pk = kernel.spawn(core);
+        let slot = pk.slot;
+        let binding = kernel.register_block_device(ctrl).unwrap();
+
+        // Handle A: SUBMIT_READ only (0x01)
+        let handle_a = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::SUBMIT_READ,
+        ).expect("cap A");
+
+        // Handle B: EVENT_WAIT only (0x04) — ambient authority elsewhere
+        let _handle_b = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::EVENT_WAIT,
+        ).expect("cap B");
+
+        // Present handle_a (SUBMIT_READ) to DEV_EVENT_WAIT
+        push_event_wait_frame(&mut kernel, slot, handle_a, 0);
+        kernel.handle_syscall(slot);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 4,
+            "DEVEVENT-4: ambient EVENT_WAIT elsewhere cannot rescue presented SUBMIT_READ");
+        assert!(kernel.processes[slot].event_wait.is_none());
+
+        eprintln!("9.3d-5: ambient EVENT_WAIT cannot rescue ✓");
+    }
+
+    // ─── 9.3d test 6: Transfer 0x05→0x04, drop, event wakes ───
+
+    #[test]
+    fn p93d_event_wait_transfer_drop_wake() {
+        let mut fabric = Fabric::new(0x800000);
+
+        // Parent (slot 0)
+        let (core_p, dom_p, text_p, _data_p, _stack_p) =
+            create_process(&mut fabric, CPU0, "parent",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm_p = Asm64::new();
+        for _ in 0..100 { asm_p.nop(); }
+        asm_p.movi(R1, 0); asm_p.movi(R0, SYS_EXIT as i32); asm_p.trap(0);
+        fabric.write_physical(0x000000, &asm_p.to_bytes());
+        seal_code_object(&mut fabric, text_p, dom_p);
+
+        // Child (slot 1)
+        let (core_c, dom_c, text_c, _data_c, _stack_c) =
+            create_process(&mut fabric, AgentId(1), "child",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm_c = Asm64::new();
+        for _ in 0..100 { asm_c.nop(); }
+        asm_c.movi(R1, 0); asm_c.movi(R0, SYS_EXIT as i32); asm_c.trap(0);
+        fabric.write_physical(0x100000, &asm_c.to_bytes());
+        seal_code_object(&mut fabric, text_c, dom_c);
+
+        let storage = super::super::block::BlockStorage::new(4, 512);
+        let ctrl = super::super::block::BlockController::new(storage, 1, AgentId(100));
+
+        let mut kernel = Kernel::new(fabric);
+        let key_p = kernel.spawn(core_p);
+        let key_c = kernel.spawn(core_c);
+
+        let binding = kernel.register_block_device(ctrl).unwrap();
+
+        // Parent cap: 0x05 (SUBMIT_READ | EVENT_WAIT)
+        let parent_handle = kernel.install_device_capability(
+            key_p.slot, binding.object, DeviceRights(0x05),
+        ).expect("parent device cap");
+
+        // Transfer parent → child: EVENT_WAIT only (0x04)
+        // Use derive_device_from_authority_id through Fabric.
+        let parent_resolved = kernel.resolve_capability(key_p.slot, parent_handle).unwrap();
+        let parent_aid = parent_resolved.authority_id();
+        let child_aid = kernel.fabric.alloc_authority_id().expect("alloc AID");
+        kernel.fabric.derive_device_from_authority_id(
+            kernel.processes[key_p.slot].core.domain,
+            parent_aid,
+            binding.object,
+            binding.generation,
+            DeviceRights(0x05),
+            kernel.processes[key_c.slot].core.domain,
+            DeviceRights::EVENT_WAIT,
+            child_aid,
+        ).expect("device transfer");
+
+        // Install in child's cap table
+        let child_handle = kernel.processes[key_c.slot].cap_table.as_mut().unwrap()
+            .install_device(
+                binding.object, binding.generation,
+                DeviceRights::EVENT_WAIT, child_aid, None,
+            ).expect("install child device cap");
+
+        // Child installs event wait at epoch 0
+        push_event_wait_frame(&mut kernel, key_c.slot, child_handle, 0);
+        kernel.handle_syscall(key_c.slot);
+        assert!(kernel.processes[key_c.slot].event_wait.is_some(),
+            "child must be in event_wait");
+
+        // Drop child's capability — post-admission possession ∉ delivery
+        {
+            let return_pc = kernel.processes[key_c.slot].core.pc + 4;
+            kernel.processes[key_c.slot].core.event_frames.push(EventFrame {
+                return_pc,
+                return_privilege: Privilege::User,
+                interrupts_were_enabled: true,
+                cause: EventCause::Syscall,
+            });
+            kernel.processes[key_c.slot].core.r[R0 as usize] = SYS_CAP_DROP;
+            kernel.processes[key_c.slot].core.r[R1 as usize] = child_handle.slot as u64;
+            kernel.processes[key_c.slot].core.r[R2 as usize] = child_handle.generation as u64;
+            kernel.processes[key_c.slot].core.halted = true;
+            kernel.handle_syscall(key_c.slot);
+        }
+
+        // Advance epoch: submit block read directly to controller
+        {
+            let dev_slot = kernel.device_registry.lookup_mut(binding).unwrap();
+            let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+            let rk = super::super::state::RequesterKey { slot: 99, generation: 0 };
+            let buf_obj = ObjectId(2);
+            let req = super::super::block::BlockRequest {
+                block_number: 0,
+                requester: rk,
+                target_object: buf_obj,
+                target_offset: 0,
+                source_domain: kernel.processes[key_p.slot].core.domain,
+                source_authority_id: None,
+                delegation_id: None,
+            };
+            ctrl.submit(req, &mut kernel.fabric);
+        }
+        for _ in 0..20 {
+            for dev in &mut kernel.device_registry.devices {
+                dev.controller.tick(&mut kernel.fabric);
+            }
+        }
+
+        // Reevaluate — child must wake despite dropped cap
+        kernel.reevaluate_event_waits();
+
+        assert!(kernel.processes[key_c.slot].event_wait.is_none(),
+            "DEVEVENT-9+11: accepted wait must wake despite dropped capability");
+        assert_eq!(kernel.processes[key_c.slot].core.r[R0 as usize], 0);
+        assert_eq!(kernel.processes[key_c.slot].core.r[R1 as usize], 1);
+
+        eprintln!("9.3d-6: transfer 0x05→0x04, drop child, event wakes ✓");
+        eprintln!("  Transfer preserves EVENT_WAIT");
+        eprintln!("  Post-admission possession ∉ delivery");
+    }
+
+    // ─── 9.3d test 7: IRQ target ≠ event owner ───
+
+    #[test]
+    fn p93d_event_wait_irq_target_not_owner() {
+        let mut fabric = Fabric::new(0x800000);
+
+        // P1 (slot 0) — will wait on event
+        let (core_1, dom_1, text_1, _data_1, _stack_1) =
+            create_process(&mut fabric, CPU0, "p1",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm1 = Asm64::new();
+        for _ in 0..100 { asm1.nop(); }
+        asm1.movi(R1, 0); asm1.movi(R0, SYS_EXIT as i32); asm1.trap(0);
+        fabric.write_physical(0x000000, &asm1.to_bytes());
+        seal_code_object(&mut fabric, text_1, dom_1);
+
+        // P2 (slot 1) — will take the IRQ
+        let (core_2, dom_2, text_2, _data_2, _stack_2) =
+            create_process(&mut fabric, AgentId(1), "p2",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm2 = Asm64::new();
+        for _ in 0..100 { asm2.nop(); }
+        asm2.movi(R1, 0); asm2.movi(R0, SYS_EXIT as i32); asm2.trap(0);
+        fabric.write_physical(0x100000, &asm2.to_bytes());
+        seal_code_object(&mut fabric, text_2, dom_2);
+
+        let mut storage = super::super::block::BlockStorage::new(4, 512);
+        storage.write_block(0, &(0..512).map(|i| (i % 256) as u8).collect::<Vec<_>>());
+        let ctrl = super::super::block::BlockController::new(storage, 1, AgentId(100));
+
+        let mut kernel = Kernel::new(fabric);
+        let key_1 = kernel.spawn(core_1);
+        let key_2 = kernel.spawn(core_2);
+
+        let binding = kernel.register_block_device(ctrl).unwrap();
+
+        // P1 gets EVENT_WAIT cap
+        let dev_handle = kernel.install_device_capability(
+            key_1.slot, binding.object, DeviceRights::EVENT_WAIT,
+        ).expect("P1 device cap");
+
+        // P1 installs event wait at epoch 0
+        push_event_wait_frame(&mut kernel, key_1.slot, dev_handle, 0);
+        kernel.handle_syscall(key_1.slot);
+        assert!(kernel.processes[key_1.slot].event_wait.is_some(),
+            "P1 must be in event_wait");
+
+        // Submit I/O directly to controller (no process syscall)
+        {
+            let dev_slot = kernel.device_registry.lookup_mut(binding).unwrap();
+            let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+            let rk = super::super::state::RequesterKey { slot: 99, generation: 0 };
+            let data_obj = ObjectId(2);
+            let domain = kernel.processes[key_1.slot].core.domain;
+            let req = super::super::block::BlockRequest {
+                block_number: 0,
+                requester: rk,
+                target_object: data_obj,
+                target_offset: 0,
+                source_domain: domain,
+                source_authority_id: None,
+                delegation_id: None,
+            };
+            ctrl.submit(req, &mut kernel.fabric);
+        }
+
+        // Tick devices through P2 (IRQ target ≠ event owner P1).
+        // tick_devices posts DeviceInterrupt to P2's pending bits.
+        for _ in 0..20 {
+            kernel.tick_devices(key_2.slot);
+        }
+
+        // Simulate P2 receiving the interrupt: deliver_pending pushes
+        // an EventFrame, then handle_async_interrupt processes it.
+        // This exercises the full interrupt → drain → reevaluate path
+        // through P2, proving that InterruptTarget ∉ delivery.
+        if kernel.processes[key_2.slot].core.deliver_pending() {
+            kernel.processes[key_2.slot].core.halted = true;
+            kernel.handle_async_interrupt(key_2.slot);
+        }
+
+        // P1 should wake from event_wait despite P2 taking the IRQ
+        assert!(kernel.processes[key_1.slot].event_wait.is_none(),
+            "DEVEVENT-10: P1 must wake even though P2 took the IRQ");
+        assert_eq!(kernel.processes[key_1.slot].core.r[R0 as usize], 0);
+        assert_eq!(kernel.processes[key_1.slot].core.r[R1 as usize], 1,
+            "R1 = new epoch 1");
+
+        eprintln!("9.3d-7: IRQ target (P2) ≠ event owner (P1) ✓");
+        eprintln!("  InterruptTarget ∉ delivery");
+    }
+
+    // ─── 9.3d test 8: Cross-device isolation ───
+
+    #[test]
+    fn p93d_event_wait_cross_device_isolation() {
+        let mut fabric = Fabric::new(0x800000);
+
+        let (core, dom, text, data, _stack) =
+            create_process(&mut fabric, CPU0, "proc",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm = Asm64::new();
+        for _ in 0..100 { asm.nop(); }
+        asm.movi(R1, 0); asm.movi(R0, SYS_EXIT as i32); asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        // Device A
+        let mut storage_a = super::super::block::BlockStorage::new(4, 512);
+        storage_a.write_block(0, &vec![0xAA; 512]);
+        let ctrl_a = super::super::block::BlockController::new(storage_a, 1, AgentId(100));
+
+        // Device B
+        let mut storage_b = super::super::block::BlockStorage::new(4, 512);
+        storage_b.write_block(0, &vec![0xBB; 512]);
+        let ctrl_b = super::super::block::BlockController::new(storage_b, 1, AgentId(101));
+
+        let mut kernel = Kernel::new(fabric);
+        let pk = kernel.spawn(core);
+        let slot = pk.slot;
+
+        let binding_a = kernel.register_block_device(ctrl_a).unwrap();
+        let binding_b = kernel.register_block_device(ctrl_b).unwrap();
+
+        // Device A cap: EVENT_WAIT
+        let dev_a_handle = kernel.install_device_capability(
+            slot, binding_a.object, DeviceRights::EVENT_WAIT,
+        ).expect("cap A");
+
+        // Wait on device A at epoch 0
+        push_event_wait_frame(&mut kernel, slot, dev_a_handle, 0);
+        kernel.handle_syscall(slot);
+        assert!(kernel.processes[slot].event_wait.is_some());
+
+        // Advance device B's epoch (not A)
+        {
+            let dev_slot = kernel.device_registry.lookup_mut(binding_b).unwrap();
+            let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+            let rk = super::super::state::RequesterKey { slot: 99, generation: 0 };
+            let data_obj = ObjectId(2);
+            let domain = kernel.processes[slot].core.domain;
+            let req = super::super::block::BlockRequest {
+                block_number: 0,
+                requester: rk,
+                target_object: data_obj,
+                target_offset: 0,
+                source_domain: domain,
+                source_authority_id: None,
+                delegation_id: None,
+            };
+            ctrl.submit(req, &mut kernel.fabric);
+        }
+        for _ in 0..20 {
+            for dev in &mut kernel.device_registry.devices {
+                dev.controller.tick(&mut kernel.fabric);
+            }
+        }
+
+        // Device B epoch advanced, A unchanged
+        assert_eq!(kernel.device_registry.lookup(binding_b).unwrap()
+            .controller.event_sequence(), 1);
+        assert_eq!(kernel.device_registry.lookup(binding_a).unwrap()
+            .controller.event_sequence(), 0);
+
+        // Reevaluate — wait on A must NOT wake
+        kernel.reevaluate_event_waits();
+
+        assert!(kernel.processes[slot].event_wait.is_some(),
+            "DEVEVENT-14: event on B must not wake wait on A");
+
+        eprintln!("9.3d-8: cross-device isolation ✓");
+    }
+
+    // ─── 9.3d test 9: 0x02 remains invalid DeviceRights ───
+
+    #[test]
+    fn p93d_event_wait_0x02_remains_invalid() {
+        assert!(DeviceRights::from_bits_checked(0x02).is_none(),
+            "DEVEVENT-13: 0x02 must remain invalid DeviceRights");
+        assert!(DeviceRights::from_bits_checked(0x03).is_none(),
+            "0x03 must be invalid (contains undefined bit 0x02)");
+        assert!(DeviceRights::from_bits_checked(0x06).is_none(),
+            "0x06 must be invalid (contains undefined bit 0x02)");
+        assert!(DeviceRights::from_bits_checked(0x07).is_none(),
+            "0x07 must be invalid (contains undefined bit 0x02)");
+
+        // Valid encodings
+        assert!(DeviceRights::from_bits_checked(0x00).is_some(), "NONE");
+        assert!(DeviceRights::from_bits_checked(0x01).is_some(), "SUBMIT_READ");
+        assert!(DeviceRights::from_bits_checked(0x04).is_some(), "EVENT_WAIT");
+        assert!(DeviceRights::from_bits_checked(0x05).is_some(), "SUBMIT_READ|EVENT_WAIT");
+
+        eprintln!("9.3d-9: 0x02 remains invalid DeviceRights ✓");
+    }
+
+    // ─── 9.3d test 10: Broadcast — two waiters on same (A,e) ───
+
+    #[test]
+    fn p93d_event_wait_broadcast_two_waiters() {
+        let mut fabric = Fabric::new(0x800000);
+
+        // P1 (slot 0)
+        let (core_1, dom_1, text_1, _data_1, _stack_1) =
+            create_process(&mut fabric, CPU0, "p1",
+                0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm1 = Asm64::new();
+        for _ in 0..100 { asm1.nop(); }
+        asm1.movi(R1, 0); asm1.movi(R0, SYS_EXIT as i32); asm1.trap(0);
+        fabric.write_physical(0x000000, &asm1.to_bytes());
+        seal_code_object(&mut fabric, text_1, dom_1);
+
+        // P2 (slot 1)
+        let (core_2, dom_2, text_2, _data_2, _stack_2) =
+            create_process(&mut fabric, AgentId(1), "p2",
+                0x100000, 0x110000, 0x120000);
+        install_trap_handler(&mut fabric, 0x100000, 0x4000);
+        let mut asm2 = Asm64::new();
+        for _ in 0..100 { asm2.nop(); }
+        asm2.movi(R1, 0); asm2.movi(R0, SYS_EXIT as i32); asm2.trap(0);
+        fabric.write_physical(0x100000, &asm2.to_bytes());
+        seal_code_object(&mut fabric, text_2, dom_2);
+
+        let storage = super::super::block::BlockStorage::new(4, 512);
+        let ctrl = super::super::block::BlockController::new(storage, 1, AgentId(100));
+
+        let mut kernel = Kernel::new(fabric);
+        let key_1 = kernel.spawn(core_1);
+        let key_2 = kernel.spawn(core_2);
+
+        let binding = kernel.register_block_device(ctrl).unwrap();
+
+        // Both processes get EVENT_WAIT caps on the same device
+        let dev_handle_1 = kernel.install_device_capability(
+            key_1.slot, binding.object, DeviceRights::EVENT_WAIT,
+        ).expect("cap P1");
+        let dev_handle_2 = kernel.install_device_capability(
+            key_2.slot, binding.object, DeviceRights::EVENT_WAIT,
+        ).expect("cap P2");
+
+        // Both install event wait at epoch 0
+        push_event_wait_frame(&mut kernel, key_1.slot, dev_handle_1, 0);
+        kernel.handle_syscall(key_1.slot);
+        assert!(kernel.processes[key_1.slot].event_wait.is_some());
+
+        push_event_wait_frame(&mut kernel, key_2.slot, dev_handle_2, 0);
+        kernel.handle_syscall(key_2.slot);
+        assert!(kernel.processes[key_2.slot].event_wait.is_some());
+
+        // Advance epoch by submitting directly to controller
+        {
+            let dev_slot = kernel.device_registry.lookup_mut(binding).unwrap();
+            let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+            let rk = super::super::state::RequesterKey { slot: 99, generation: 0 };
+            let data_obj = ObjectId(2);
+            let domain = kernel.processes[key_1.slot].core.domain;
+            let req = super::super::block::BlockRequest {
+                block_number: 0,
+                requester: rk,
+                target_object: data_obj,
+                target_offset: 0,
+                source_domain: domain,
+                source_authority_id: None,
+                delegation_id: None,
+            };
+            ctrl.submit(req, &mut kernel.fabric);
+        }
+        for _ in 0..20 {
+            for dev in &mut kernel.device_registry.devices {
+                dev.controller.tick(&mut kernel.fabric);
+            }
+        }
+
+        // Reevaluate — both must wake
+        kernel.reevaluate_event_waits();
+
+        assert!(kernel.processes[key_1.slot].event_wait.is_none(),
+            "broadcast: P1 must wake");
+        assert!(kernel.processes[key_2.slot].event_wait.is_none(),
+            "broadcast: P2 must wake");
+        assert_eq!(kernel.processes[key_1.slot].core.r[R0 as usize], 0);
+        assert_eq!(kernel.processes[key_1.slot].core.r[R1 as usize], 1);
+        assert_eq!(kernel.processes[key_2.slot].core.r[R0 as usize], 0);
+        assert_eq!(kernel.processes[key_2.slot].core.r[R1 as usize], 1);
+
+        eprintln!("9.3d-10: broadcast — two waiters on (A, e=0) both wake ✓");
+        eprintln!("  One waiter waking does not consume anything");
+    }
+
+    // ─── 9.3d test 11: Cursor loop — monotone epoch ───
+
+    #[test]
+    fn p93d_event_wait_cursor_loop() {
+        let (mut kernel, slot, _dev_obj, dev_handle, _buf_handle, binding) = event_wait_setup();
+
+        let mut cursor: u64 = 0;
+        let mut epochs_seen: Vec<u64> = vec![cursor];
+
+        for round in 0..3 {
+            // Advance epoch by submitting directly
+            {
+                let dev_slot = kernel.device_registry.lookup_mut(binding).unwrap();
+                let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+                let rk = super::super::state::RequesterKey { slot: 99, generation: 0 };
+                let data_obj = ObjectId(2);
+                let domain = kernel.processes[slot].core.domain;
+                let req = super::super::block::BlockRequest {
+                    block_number: 0,
+                    requester: rk,
+                    target_object: data_obj,
+                    target_offset: 0,
+                    source_domain: domain,
+                    source_authority_id: None,
+                    delegation_id: None,
+                };
+                let result = ctrl.submit(req, &mut kernel.fabric);
+                assert!(matches!(result, super::super::block::SubmitResult::Accepted(_)),
+                    "round {}: submission must succeed", round);
+            }
+            for _ in 0..20 {
+                for dev in &mut kernel.device_registry.devices {
+                    dev.controller.tick(&mut kernel.fabric);
+                }
+            }
+            // Consume the completion so the slot is free for the next round.
+            {
+                let dev_slot = kernel.device_registry.lookup_mut(binding).unwrap();
+                while dev_slot.controller.completion_count() > 0 {
+                    dev_slot.controller.consume_completion();
+                }
+            }
+
+            // DEV_EVENT_WAIT with current cursor
+            push_event_wait_frame(&mut kernel, slot, dev_handle, cursor);
+            kernel.handle_syscall(slot);
+
+            // Should return immediately (epoch advanced)
+            assert!(kernel.processes[slot].event_wait.is_none(),
+                "round {}: epoch should have advanced", round);
+            assert_eq!(kernel.processes[slot].core.r[R0 as usize], 0);
+
+            let new_epoch = kernel.processes[slot].core.r[R1 as usize];
+            assert!(new_epoch > cursor,
+                "round {}: epoch must be monotone ({} > {})", round, new_epoch, cursor);
+            cursor = new_epoch;
+            epochs_seen.push(cursor);
+        }
+
+        // Verify strict monotonicity
+        for w in epochs_seen.windows(2) {
+            assert!(w[1] > w[0], "epoch sequence must be strictly monotone");
+        }
+
+        eprintln!("9.3d-11: cursor loop — monotone epoch ✓");
+        eprintln!("  epochs: {:?}", epochs_seen);
+    }
 }
