@@ -18700,10 +18700,26 @@ mod tests {
         eprintln!("9.3d-5: ambient EVENT_WAIT cannot rescue ✓");
     }
 
-    // ─── 9.3d test 6: Transfer 0x05→0x04, drop, event wakes ───
+    // ─── 9.3d test 6: Transfer 0x05→0x04, child DEV_EVENT_WAIT ───
+    //
+    // Reachable witness for:
+    //   Transfer(EVENT_WAIT) ⇒ TransferredCapUsableForEventWait
+    //
+    // Parent owns 0x05 (SUBMIT_READ | EVENT_WAIT).  Transfer derives
+    // a child cap with EVENT_WAIT only (0x04).  Child invokes
+    // SYS_DEV_EVENT_WAIT through the transferred cap — the exact
+    // authority validation succeeds — and child blocks on (binding, e).
+    // Epoch advance then wakes the child normally.
+    //
+    // The post-admission non-reauthorization property
+    //   (CapabilityPossession ∉ Delivery)
+    // is a Kleis theorem + implementation invariant: reevaluate_event_waits
+    // never re-resolves the capability.  It is not exercised as a
+    // reachable witness here because a blocked single-threaded process
+    // has no scheduler-reachable path to voluntarily drop its own cap.
 
     #[test]
-    fn p93d_event_wait_transfer_drop_wake() {
+    fn p93d_event_wait_transfer_blocks_and_wakes() {
         let mut fabric = Fabric::new(0x800000);
 
         // Parent (slot 0)
@@ -18743,7 +18759,6 @@ mod tests {
         ).expect("parent device cap");
 
         // Transfer parent → child: EVENT_WAIT only (0x04)
-        // Use derive_device_from_authority_id through Fabric.
         let parent_resolved = kernel.resolve_capability(key_p.slot, parent_handle).unwrap();
         let parent_aid = parent_resolved.authority_id();
         let child_aid = kernel.fabric.alloc_authority_id().expect("alloc AID");
@@ -18756,38 +18771,33 @@ mod tests {
             kernel.processes[key_c.slot].core.domain,
             DeviceRights::EVENT_WAIT,
             child_aid,
-        ).expect("device transfer");
+        ).expect("device transfer 0x05→0x04");
 
-        // Install in child's cap table
         let child_handle = kernel.processes[key_c.slot].cap_table.as_mut().unwrap()
             .install_device(
                 binding.object, binding.generation,
                 DeviceRights::EVENT_WAIT, child_aid, None,
             ).expect("install child device cap");
 
-        // Child installs event wait at epoch 0
+        // ── Child invokes SYS_DEV_EVENT_WAIT through transferred cap ──
         push_event_wait_frame(&mut kernel, key_c.slot, child_handle, 0);
         kernel.handle_syscall(key_c.slot);
+
+        // Authority validation must succeed — child blocks
         assert!(kernel.processes[key_c.slot].event_wait.is_some(),
-            "child must be in event_wait");
+            "transferred EVENT_WAIT cap must pass authority validation");
+        assert!(kernel.processes[key_c.slot].core.halted,
+            "child must remain halted (syscall outstanding)");
+        assert!(!kernel.processes[key_c.slot].is_schedulable(),
+            "child must be unschedulable");
 
-        // Drop child's capability — post-admission possession ∉ delivery
-        {
-            let return_pc = kernel.processes[key_c.slot].core.pc + 4;
-            kernel.processes[key_c.slot].core.event_frames.push(EventFrame {
-                return_pc,
-                return_privilege: Privilege::User,
-                interrupts_were_enabled: true,
-                cause: EventCause::Syscall,
-            });
-            kernel.processes[key_c.slot].core.r[R0 as usize] = SYS_CAP_DROP;
-            kernel.processes[key_c.slot].core.r[R1 as usize] = child_handle.slot as u64;
-            kernel.processes[key_c.slot].core.r[R2 as usize] = child_handle.generation as u64;
-            kernel.processes[key_c.slot].core.halted = true;
-            kernel.handle_syscall(key_c.slot);
-        }
+        let ew = kernel.processes[key_c.slot].event_wait.as_ref().unwrap();
+        assert_eq!(ew.device, binding,
+            "wait record must reference exact DeviceBinding");
+        assert_eq!(ew.observed_sequence, 0,
+            "wait record must store caller's observed epoch");
 
-        // Advance epoch: submit block read directly to controller
+        // ── Advance epoch and wake ──
         {
             let dev_slot = kernel.device_registry.lookup_mut(binding).unwrap();
             let DeviceController::Block(ctrl) = &mut dev_slot.controller;
@@ -18809,18 +18819,21 @@ mod tests {
                 dev.controller.tick(&mut kernel.fabric);
             }
         }
-
-        // Reevaluate — child must wake despite dropped cap
         kernel.reevaluate_event_waits();
 
         assert!(kernel.processes[key_c.slot].event_wait.is_none(),
-            "DEVEVENT-9+11: accepted wait must wake despite dropped capability");
-        assert_eq!(kernel.processes[key_c.slot].core.r[R0 as usize], 0);
-        assert_eq!(kernel.processes[key_c.slot].core.r[R1 as usize], 1);
+            "child must wake after epoch advance");
+        assert_eq!(kernel.processes[key_c.slot].core.r[R0 as usize], 0,
+            "R0 = 0 (success)");
+        assert_eq!(kernel.processes[key_c.slot].core.r[R1 as usize], 1,
+            "R1 = new epoch");
+        assert!(!kernel.processes[key_c.slot].core.halted,
+            "woken child must not be halted");
 
-        eprintln!("9.3d-6: transfer 0x05→0x04, drop child, event wakes ✓");
-        eprintln!("  Transfer preserves EVENT_WAIT");
-        eprintln!("  Post-admission possession ∉ delivery");
+        eprintln!("9.3d-6: transfer 0x05→0x04 → child DEV_EVENT_WAIT ✓");
+        eprintln!("  Transfer(EVENT_WAIT) ⇒ TransferredCapUsableForEventWait");
+        eprintln!("  Exact authority validation succeeds on derived cap");
+        eprintln!("  Child blocks on (DeviceBinding, epoch) and wakes normally");
     }
 
     // ─── 9.3d test 7: IRQ target ≠ event owner ───
@@ -18897,14 +18910,22 @@ mod tests {
             kernel.tick_devices(key_2.slot);
         }
 
-        // Simulate P2 receiving the interrupt: deliver_pending pushes
-        // an EventFrame, then handle_async_interrupt processes it.
-        // This exercises the full interrupt → drain → reevaluate path
-        // through P2, proving that InterruptTarget ∉ delivery.
-        if kernel.processes[key_2.slot].core.deliver_pending() {
-            kernel.processes[key_2.slot].core.halted = true;
-            kernel.handle_async_interrupt(key_2.slot);
-        }
+        // P2 must actually receive the generic device interrupt.
+        // Making this an assertion turns the intended path into part
+        // of the witness rather than an incidental condition.
+        assert!(
+            kernel.processes[key_2.slot].core.deliver_pending(),
+            "P2 must actually receive the generic device interrupt"
+        );
+        // Verify the top frame is a DeviceInterrupt before handling.
+        assert_eq!(
+            kernel.processes[key_2.slot].core.event_frames.last()
+                .expect("deliver_pending must push an EventFrame").cause,
+            EventCause::DeviceInterrupt,
+            "P2's interrupt must be DeviceInterrupt, not timer or syscall"
+        );
+        kernel.processes[key_2.slot].core.halted = true;
+        kernel.handle_async_interrupt(key_2.slot);
 
         // P1 should wake from event_wait despite P2 taking the IRQ
         assert!(kernel.processes[key_1.slot].event_wait.is_none(),
@@ -19181,5 +19202,121 @@ mod tests {
 
         eprintln!("9.3d-11: cursor loop — monotone epoch ✓");
         eprintln!("  epochs: {:?}", epochs_seen);
+    }
+
+    // ─── 9.3d test 12: Incarnation isolation ───
+    //
+    // Reachable hostile witness for:
+    //   Wait(P_g, A, e) ≠> Wake(P_{g+1}, A, e')
+    //
+    // P_g installs DeviceEventWait(A, 0).
+    // finish_process(P_g) → Zombie → event_wait cleared.
+    // reclaim(P_g) → Free(g+1).
+    // spawn() reuses the slot as P_{g+1}.
+    // A epoch advances.
+    // reevaluate_event_waits() → P_{g+1} completely untouched.
+    //
+    // This guards against incarnation leaks: the wait record lives
+    // inside the Process, but finish_process/reclaim erase it before
+    // the slot can be recycled.  ExactProcessKey is enforced
+    // structurally rather than by redundant key comparison.
+
+    #[test]
+    fn p93d_event_wait_incarnation_isolation() {
+        let (mut kernel, slot, _dev_obj, dev_handle, _buf_handle, binding) = event_wait_setup();
+
+        let gen_original = kernel.processes[slot].generation;
+
+        // P_g installs DeviceEventWait(A, 0)
+        push_event_wait_frame(&mut kernel, slot, dev_handle, 0);
+        kernel.handle_syscall(slot);
+        assert!(kernel.processes[slot].event_wait.is_some(),
+            "P_g must be in event_wait");
+
+        // Kill P_g → Zombie
+        kernel.finish_process(slot, ProcessResult::Exited(0));
+        assert_eq!(kernel.processes[slot].state, ProcessState::Zombie);
+        assert!(kernel.processes[slot].event_wait.is_none(),
+            "finish_process must clear event_wait");
+
+        // Reclaim P_g → Free(g+1)
+        kernel.reclaim_process(slot);
+        assert_eq!(kernel.processes[slot].state, ProcessState::Free);
+        let gen_recycled = kernel.processes[slot].generation;
+        assert_eq!(gen_recycled, gen_original + 1,
+            "generation must advance on reclaim");
+        assert!(kernel.processes[slot].event_wait.is_none(),
+            "reclaim must also clear event_wait");
+
+        // Spawn P_(g+1) reusing the same slot
+        let (core2, dom2, text2, data2, _stack2) =
+            create_process(&mut kernel.fabric, AgentId(50), "p_new",
+                0x300000, 0x310000, 0x320000);
+        install_trap_handler(&mut kernel.fabric, 0x300000, 0x4000);
+        let mut asm2 = Asm64::new();
+        for _ in 0..100 { asm2.nop(); }
+        asm2.movi(R1, 0); asm2.movi(R0, SYS_EXIT as i32); asm2.trap(0);
+        kernel.fabric.write_physical(0x300000, &asm2.to_bytes());
+        seal_code_object(&mut kernel.fabric, text2, dom2);
+
+        let key_new = kernel.spawn(core2);
+        assert_eq!(key_new.slot, slot,
+            "spawn must reuse the free slot");
+        assert_eq!(key_new.generation, gen_recycled,
+            "new incarnation generation must match recycled generation");
+
+        // Snapshot P_(g+1) state before epoch advance
+        assert!(kernel.processes[slot].event_wait.is_none(),
+            "new incarnation must have no event_wait from old");
+        assert_eq!(kernel.processes[slot].state, ProcessState::Running);
+        let r0_before = kernel.processes[slot].core.r[R0 as usize];
+        let r1_before = kernel.processes[slot].core.r[R1 as usize];
+        let halted_before = kernel.processes[slot].core.halted;
+
+        // Advance device A epoch — use new incarnation's data object
+        // and domain so the DMA has valid grants.
+        {
+            let dev_slot = kernel.device_registry.lookup_mut(binding).unwrap();
+            let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+            let rk = super::super::state::RequesterKey { slot: 99, generation: 0 };
+            let req = super::super::block::BlockRequest {
+                block_number: 0,
+                requester: rk,
+                target_object: data2,
+                target_offset: 0,
+                source_domain: dom2,
+                source_authority_id: None,
+                delegation_id: None,
+            };
+            ctrl.submit(req, &mut kernel.fabric);
+        }
+        for _ in 0..20 {
+            for dev in &mut kernel.device_registry.devices {
+                dev.controller.tick(&mut kernel.fabric);
+            }
+        }
+        let new_epoch = kernel.device_registry.lookup(binding).unwrap()
+            .controller.event_sequence();
+        assert_eq!(new_epoch, 1, "epoch must have advanced");
+
+        // ── The decisive reevaluation ──
+        kernel.reevaluate_event_waits();
+
+        // New incarnation must be completely untouched
+        assert!(kernel.processes[slot].event_wait.is_none(),
+            "recycled incarnation must still have no event_wait");
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], r0_before,
+            "recycled incarnation R0 must be untouched");
+        assert_eq!(kernel.processes[slot].core.r[R1 as usize], r1_before,
+            "recycled incarnation R1 must be untouched");
+        assert_eq!(kernel.processes[slot].core.halted, halted_before,
+            "recycled incarnation halted state must be untouched");
+        assert_eq!(kernel.processes[slot].state, ProcessState::Running,
+            "recycled incarnation must remain Running (no spurious wake)");
+
+        eprintln!("9.3d-12: incarnation isolation ✓");
+        eprintln!("  Wait(P_g, A, 0) does not imply Wake(P_(g+1), A, 1)");
+        eprintln!("  finish_process clears event_wait before slot is recyclable");
+        eprintln!("  ExactProcessKey enforced structurally via lifecycle erasure");
     }
 }
