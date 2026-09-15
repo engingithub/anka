@@ -2790,6 +2790,29 @@ Ack(Q, e, false) = (Q, e, false)
 
 Neither the queue nor the epoch is modified.
 
+**Production acknowledgement path (9.3e.3 closure fix):**
+
+The initial implementation exposed `acknowledge_attention()` only to controller
+clients and tests; the kernel never called it. After the first RX arrival,
+`tick_devices()` therefore reposted a device interrupt on every committed
+instruction, even after the interrupt handler had serviced the event.
+
+The generic `DeviceController::acknowledge_attention()` now delegates to the
+NIC latch operation and is a no-op for Block, whose attention is level-derived
+from its completion queue. The device interrupt handler follows this ordering:
+
+```text
+drain_completions → reevaluate_recv_waits → reevaluate_event_waits
+→ acknowledge sources still requiring attention → resume interrupted process
+```
+
+Acknowledgement follows service. It neither consumes an RX frame nor resets the
+epoch. The machine-level regression witness fails on the original implementation
+and passes with this path: guest NOP → pending device interrupt → actual delivery
+and service → unchanged queue/epoch with attention cleared. Eight further guest
+instructions produce no new device interrupt. A second injection repeats the
+notification cycle, and the guest exits with both frames still queued.
+
 **Checked epoch advancement:**
 
 `inject_rx` uses `checked_add(1)`.  If `event_sequence == u64::MAX`,
@@ -2808,8 +2831,17 @@ Allowed(Block) = SUBMIT_READ | EVENT_WAIT           = 0x05
 Allowed(NIC)   = EVENT_WAIT  | NIC_RX    | NIC_TX   = 0x1C
 ```
 
-`install_device_capability(Block, NIC_RX)` fails.  The enforcement is
-at the kernel provisioning gate, not deferred to the syscall handler.
+`install_device_capability(Block, NIC_RX)` fails for a registered Block.
+The enforcement is at the kernel provisioning gate. Precisely:
+
+```text
+RegisteredDevice(d, k) ⇒ Rights(d) ⊆ Allowed(k)
+```
+
+An unregistered generic `ObjectKind::Device` uses `ALL_BITS` for compatibility
+with generic device-capability transfer fixtures. It has no controller kind
+and cannot route an operation until registered; the kind-mask theorem applies
+to registered devices.
 
 **Injection ordering:**
 
@@ -2871,4 +2903,4 @@ operation), the queued private frame (via the NIC), and a writable
 memory target (for placement).  Only the conjunction of all three
 produces guest-visible state change.
 
-786/786 tests; 29 instructions.  Phase 9.3e.3 is complete.
+787/787 tests; 29 instructions.  Phase 9.3e.3 is complete.

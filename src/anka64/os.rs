@@ -730,13 +730,23 @@ impl DeviceController {
         }
     }
 
-    /// Does this device have serviceable completions?
+    /// Does this device require interrupt service?
     /// GENDEV-3: Block wrapper preserves attention observable.
     /// NIC: attention is a latched notification (NIC93E3-4..5, 17).
     pub fn requires_attention(&self) -> bool {
         match self {
             DeviceController::Block(c) => c.requires_attention(),
             DeviceController::Nic(c) => c.requires_attention(),
+        }
+    }
+
+    /// Acknowledge a source after its associated state has been serviced.
+    /// Block attention deasserts by draining completions; NIC acknowledgement
+    /// clears only its notification latch, preserving queued frames and epoch.
+    pub fn acknowledge_attention(&mut self) {
+        match self {
+            DeviceController::Block(_) => {}
+            DeviceController::Nic(c) => c.acknowledge_attention(),
         }
     }
 
@@ -2330,9 +2340,9 @@ impl Kernel {
     /// For timer interrupts: resume the interrupted process and yield
     /// to the round-robin scheduler (scheduling preemption).
     ///
-    /// For device interrupts: drain the block controller's completion
-    /// queue, wake any processes blocked on I/O whose RequesterKey
-    /// matches a completion, then resume the interrupted process.
+    /// For device interrupts: drain registered controllers' completions,
+    /// reevaluate receive and event waits, then acknowledge source attention
+    /// before resuming the interrupted process.
     ///
     /// The generation-qualified RequesterKey prevents stale completions
     /// from waking a recycled process slot.
@@ -2346,6 +2356,13 @@ impl Kernel {
             self.drain_completions();
             self.reevaluate_recv_waits();
             self.reevaluate_event_waits();
+            // Service state before clearing notification. Block sources have
+            // deasserted through draining; NIC latches need an explicit ACK.
+            for slot in &mut self.device_registry.devices {
+                if slot.controller.requires_attention() {
+                    slot.controller.acknowledge_attention();
+                }
+            }
         }
 
         self.resume_from_trap(idx);
@@ -19536,6 +19553,64 @@ mod tests {
             .expect("register NIC");
 
         (kernel, slot, binding)
+    }
+
+    /// Reachable machine witness for NIC93E3-15..17: actual interrupt
+    /// service acknowledges the latch without consuming private RX state.
+    #[test]
+    fn p93e3_device_interrupt_acknowledges_nic_attention() {
+        let (mut kernel, slot, binding) = nic_setup();
+        let frame = [0xBE, 0xEF];
+
+        // A later arrival must ring again even while the first frame is queued.
+        for epoch in 1..=2 {
+            assert!(kernel.inject_nic_rx(binding, &frame));
+            let nic = kernel.device_registry.lookup(binding).unwrap()
+                .controller.as_nic().unwrap();
+            assert_eq!(nic.rx_queue_len(), epoch as usize);
+            assert_eq!(nic.event_sequence(), epoch);
+            assert!(nic.requires_attention());
+
+            // Commit a real NOP: tick_devices posts the generic interrupt.
+            let pc = kernel.processes[slot].core.pc;
+            kernel.run_process(slot, 1);
+            assert_eq!(kernel.processes[slot].core.pc, pc + 4);
+            assert!(kernel.processes[slot].core.pending.device);
+
+            // The next machine boundary delivers and services that interrupt
+            // before fetching another instruction, then returns through ERET's
+            // shared EventFrame primitive. No manual controller ACK here.
+            kernel.run_process(slot, 1);
+            let core = &kernel.processes[slot].core;
+            assert_eq!(core.pc, pc + 4);
+            assert!(!core.pending.device);
+            assert!(core.event_frames.is_empty());
+            assert!(core.interrupts_enabled);
+            let nic = kernel.device_registry.lookup(binding).unwrap()
+                .controller.as_nic().unwrap();
+            assert_eq!(nic.rx_queue_len(), epoch as usize);
+            assert_eq!(nic.peek_rx(), Some(frame.as_slice()));
+            assert_eq!(nic.event_sequence(), epoch);
+            assert!(!nic.requires_attention(), "device service must clear the latch");
+
+            // A nonempty RX queue must not repost interrupts on later commits.
+            for _ in 0..8 {
+                let pc = kernel.processes[slot].core.pc;
+                kernel.run_process(slot, 1);
+                let core = &kernel.processes[slot].core;
+                assert_eq!(core.pc, pc + 4);
+                assert!(!core.pending.device, "serviced arrival must not ring again");
+                assert!(core.event_frames.is_empty());
+            }
+        }
+
+        kernel.run(1000, 10);
+        assert_eq!(kernel.processes[slot].result, Some(ProcessResult::Exited(0)));
+        let nic = kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap();
+        assert_eq!(nic.rx_queue_len(), 2);
+        assert_eq!(nic.event_sequence(), 2);
+        assert!(!nic.requires_attention());
     }
 
     // ─── 9.3e.3 test 1: NIC registration and basic identity ───

@@ -1453,7 +1453,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions, 67,824 bytes |
 | Canonical source | ~17 KB |
-| Tests | 786 |
+| Tests | 787 |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -2025,7 +2025,10 @@ Defined        = ALL_BITS                            = 0x1D
 ```
 
 Bit 0x02 remains deliberately undefined.  Expanding `ALL_BITS` does not
-cause Block capabilities to acquire NIC rights.
+cause registered Block capabilities to acquire NIC rights. Precisely,
+`RegisteredDevice(d, k) ⇒ Rights(d) ⊆ Allowed(k)`. Unregistered generic Device
+objects retain the `ALL_BITS` encoding mask for generic capability transfer;
+they cannot route an operation without a registered controller.
 
 **NicController semantics:**
 
@@ -2040,6 +2043,21 @@ cause Block capabilities to acquire NIC rights.
 | `requires_attention()` | Returns attention latch |
 | `acknowledge_attention()` | Ack(Q, e, true) = (Q, e, false) |
 
+**Reachable interrupt acknowledgement:**
+
+The generic device interrupt handler drains completions, reevaluates receive
+and event waits, then calls `DeviceController::acknowledge_attention()` for
+sources still requiring attention. Block attention deasserts through completion
+draining; the generic Block acknowledgement is a no-op. NIC acknowledgement
+clears its latch while preserving the private RX queue and event epoch.
+
+The machine witness `p93e3_device_interrupt_acknowledges_nic_attention`
+executes guest instructions to post and deliver the interrupt. Service preserves
+the frame and epoch, clears attention, and subsequent instructions do not repost
+the interrupt. A second arrival raises a fresh notification; the guest exits
+with both frames still queued. This closes the missing production ACK path that
+previously left NIC attention asserted after every committed instruction.
+
 **Formal basis:**
 
 ```text
@@ -2050,7 +2068,7 @@ anka_userspace_nic.kleis                   — 24/24 positive (broad 9.3e)
 
 No new axioms.
 
-**Hostile suite (20 integration + 11 unit tests):**
+**Hostile suite (21 integration + 11 unit tests):**
 
 | Test | Property |
 |------|----------|
@@ -2074,8 +2092,9 @@ No new axioms.
 | `nic_tick_noop` | tick() changes nothing |
 | `nic_consume_completion_none` | consume_completion() → None |
 | `generic_event_sequence` | Generic accessor exposes NIC epoch |
+| `device_interrupt_acknowledges_nic_attention` | Real interrupt service clears latch; later commits stay quiet; new arrival rings again |
 
-786/786 tests; 29 instructions; CC_B = CC_C = 67,824 bytes.
+787/787 tests; 29 instructions; CC_B = CC_C = 67,824 bytes.
 
 Deferred to 9.3e.4: `SYS_NIC_RX`, `SYS_NIC_TX`, guest DMA, `NicCompletion`,
 `pop_rx()`, finite DMA admission for NIC, protocol parsing.
