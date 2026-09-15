@@ -532,11 +532,17 @@ struct ProcessLayout {
 }
 
 /// Default layout used by SYS_EXEC children.
+///
+/// The child's code+literal image is mapped at vaddr 0 and can extend
+/// up to OUTPUT_SIZE bytes.  Stack must be above the image to avoid
+/// overlap.  Derived from OUTPUT_SIZE so that enlarging the output
+/// arena does not silently collide with the stack.
 const EXEC_DEFAULT_LAYOUT: ProcessLayout = ProcessLayout {
     code_vaddr: 0,
-    stack_vaddr: 0x10000,
-    stack_size: 0x4000,
-    trap_vaddr: 0x20000,
+    stack_vaddr: super::guest_compiler::OUTPUT_SIZE as u64,
+    stack_size: super::guest_compiler::STACK_SIZE as u64,
+    trap_vaddr: (super::guest_compiler::OUTPUT_SIZE
+                + super::guest_compiler::STACK_SIZE) as u64,
 };
 
 // ───────────────────────────────────────────────────────────────────
@@ -6154,9 +6160,9 @@ mod tests {
     //   Stack       : virt 0x0C000, phys 0x030000, size 0x4000 (RW)
     //   Kernel alloc starts at 0x080000.
     //
-    // Child virtual layout (EXEC_DEFAULT_LAYOUT):
-    //   code:  0x00000   stack: 0x10000   trap: 0x20000
-    //   Data object mapped at child_vaddr 0x14000 (between stack end and trap).
+    // Child virtual layout (EXEC_DEFAULT_LAYOUT, derived from OUTPUT_SIZE):
+    //   code:  0x00000   stack: OUTPUT_SIZE (0x14000)   trap: OUTPUT_SIZE+STACK_SIZE (0x18000)
+    //   Data object mapped at child_vaddr 0x1C000 (above trap).
 
     /// Set up an extended-spawn test: parent with child-code buffer (RWS),
     /// a data object (RW), and a stack.
@@ -6219,11 +6225,11 @@ mod tests {
         let mut fabric = Fabric::new(0x800000);
         let (core, dom, text, child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
 
-        // Write child code: LD R1, [0x14000+0]; EXIT(R1)
-        // Child will have data_obj mapped at 0x14000 via SpawnMap.
+        // Write child code: LD R1, [0x1C000+0]; EXIT(R1)
+        // Child will have data_obj mapped at 0x1C000 via SpawnMap.
         let mut child_asm = Asm64::new();
-        child_asm.movi(R1, 0x14000_u32 as i32);
-        child_asm.ld(R1, R1, 0);       // R1 = [0x14000]
+        child_asm.movi(R1, 0x1C000_u32 as i32);
+        child_asm.ld(R1, R1, 0);       // R1 = [0x1C000]
         child_asm.movi(R0, SYS_EXIT as i32);
         child_asm.trap(0);
         let child_code = child_asm.to_bytes();
@@ -6238,8 +6244,8 @@ mod tests {
         write_spawn_grant(&mut fabric, 0x030000, 0x08000, 0, 0x4000, 0x01);
 
         // Write map descriptor at phys 0x030000 + 40 = 0x030028
-        // Map: child_vaddr=0x14000, parent_vaddr=0x08000, offset=0, size=0x4000
-        write_spawn_map(&mut fabric, 0x030028, 0x14000, 0x08000, 0, 0x4000);
+        // Map: child_vaddr=0x1C000, parent_vaddr=0x08000, offset=0, size=0x4000
+        write_spawn_map(&mut fabric, 0x030028, 0x1C000, 0x08000, 0, 0x4000);
 
         // Parent code: SEAL child_buf → extended SPAWN with 1 grant + 1 map → WAIT → EXIT
         let mut asm = Asm64::new();
@@ -6293,9 +6299,9 @@ mod tests {
         // Parent needs SEAL to delegate it.
         fabric.grant(dom, data, 0, 0x4000, Permissions::RWS);
 
-        // Child: seal data obj at child_vaddr 0x14000, exit(99) on success
+        // Child: seal data obj at child_vaddr 0x1C000, exit(99) on success
         let mut child_asm = Asm64::new();
-        child_asm.movi(R1, 0x14000_u32 as i32);
+        child_asm.movi(R1, 0x1C000_u32 as i32);
         child_asm.movi(R0, SYS_SEAL as i32);
         child_asm.trap(0);
         child_asm.cmpi(R0, -1);
@@ -6312,8 +6318,8 @@ mod tests {
 
         // Grant descriptor: RWS (0x13) on data_obj at parent_vaddr 0x08000
         write_spawn_grant(&mut fabric, 0x030000, 0x08000, 0, 0x4000, 0x13);
-        // Map descriptor: data_obj at child vaddr 0x14000
-        write_spawn_map(&mut fabric, 0x030028, 0x14000, 0x08000, 0, 0x4000);
+        // Map descriptor: data_obj at child vaddr 0x1C000
+        write_spawn_map(&mut fabric, 0x030028, 0x1C000, 0x08000, 0, 0x4000);
 
         // Parent code
         let mut asm = Asm64::new();
@@ -6358,10 +6364,10 @@ mod tests {
         let mut fabric = Fabric::new(0x800000);
         let (core, dom, text, child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
 
-        // Child: try to write to data_obj at 0x14000 (should fault — only has R)
+        // Child: try to write to data_obj at 0x1C000 (should fault — only has R)
         let mut child_asm = Asm64::new();
         child_asm.movi(R1, 42);
-        child_asm.movi(R2, 0x14000_u32 as i32);
+        child_asm.movi(R2, 0x1C000_u32 as i32);
         child_asm.st(R1, R2, 0);  // write → should cause ProtectionFault
         child_asm.movi(R1, 0);
         child_asm.movi(R0, SYS_EXIT as i32);
@@ -6374,7 +6380,7 @@ mod tests {
 
         // Grant: READ only (0x01) — parent has RW, child gets R (attenuation)
         write_spawn_grant(&mut fabric, 0x030000, 0x08000, 0, 0x4000, 0x01);
-        write_spawn_map(&mut fabric, 0x030028, 0x14000, 0x08000, 0, 0x4000);
+        write_spawn_map(&mut fabric, 0x030028, 0x1C000, 0x08000, 0, 0x4000);
 
         let mut asm = Asm64::new();
         asm.movi(R1, 0x04000_u32 as i32);
@@ -6428,7 +6434,7 @@ mod tests {
 
         // Grant: RWS (0x13) on data_obj — but parent only has RW → escalation
         write_spawn_grant(&mut fabric, 0x030000, 0x08000, 0, 0x4000, 0x13);
-        write_spawn_map(&mut fabric, 0x030028, 0x14000, 0x08000, 0, 0x4000);
+        write_spawn_map(&mut fabric, 0x030028, 0x1C000, 0x08000, 0, 0x4000);
 
         let mut asm = Asm64::new();
         asm.movi(R1, 0x04000_u32 as i32);
@@ -6476,7 +6482,7 @@ mod tests {
         fabric.write_physical(0x010000, &child_code);
 
         // No grants — only a map
-        write_spawn_map(&mut fabric, 0x030000, 0x14000, 0x08000, 0, 0x4000);
+        write_spawn_map(&mut fabric, 0x030000, 0x1C000, 0x08000, 0, 0x4000);
 
         let mut asm = Asm64::new();
         asm.movi(R1, 0x04000_u32 as i32);
@@ -6670,7 +6676,7 @@ mod tests {
 
         // Grant with invalid perms 0x20
         write_spawn_grant(&mut fabric, 0x030000, 0x08000, 0, 0x4000, 0x20);
-        write_spawn_map(&mut fabric, 0x030028, 0x14000, 0x08000, 0, 0x4000);
+        write_spawn_map(&mut fabric, 0x030028, 0x1C000, 0x08000, 0, 0x4000);
 
         let mut asm = Asm64::new();
         asm.movi(R1, 0x04000_u32 as i32);
@@ -6797,7 +6803,7 @@ mod tests {
         fabric.write_physical(0x030000 + 24,  &0x01u64.to_le_bytes());    // perms = READ
         fabric.write_physical(0x030000 + 32,  &1u64.to_le_bytes());       // reserved = 1 (bad)
 
-        write_spawn_map(&mut fabric, 0x030028, 0x14000, 0x08000, 0, 0x4000);
+        write_spawn_map(&mut fabric, 0x030028, 0x1C000, 0x08000, 0, 0x4000);
 
         let mut asm = Asm64::new();
         asm.movi(R1, 0x04000_u32 as i32);
@@ -7054,7 +7060,7 @@ mod tests {
         // This crosses the entry boundary at 0x0C000.
         // The exact-one-entry check must reject it.
         write_spawn_grant(&mut fabric, 0x030000, 0x08000, 0, 0x8000, 0x01);
-        write_spawn_map(&mut fabric, 0x030028, 0x14000, 0x08000, 0, 0x4000);
+        write_spawn_map(&mut fabric, 0x030028, 0x1C000, 0x08000, 0, 0x4000);
 
         let mut asm = Asm64::new();
         asm.movi(R1, 0x04000_u32 as i32);

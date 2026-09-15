@@ -503,6 +503,7 @@ impl BlockController {
         self.event_sequence
     }
 
+
     /// True if any slot is in a nonterminal accepted state:
     /// Waiting, DmaReady, or DmaInFlight.
     ///
