@@ -1842,6 +1842,7 @@ impl Kernel {
             // (correctly) excluded from has_autonomous_io().
             self.drain_completions();
             self.reevaluate_recv_waits();
+            self.reevaluate_event_waits();
             self.wake_waiters();
 
             // ── Run phase: try every schedulable process ──
@@ -1909,6 +1910,7 @@ impl Kernel {
         // Drain completions from all devices, then reevaluate.
         self.drain_completions();
         self.reevaluate_recv_waits();
+        self.reevaluate_event_waits();
     }
 
     /// Reevaluate all outstanding RecvWait blocks after a completion
@@ -1982,6 +1984,50 @@ impl Kernel {
         }
         for (slot, peer) in to_complete {
             self.complete_recv_wait(slot, RecvOutcome::PeerDied(peer));
+        }
+    }
+
+    /// Reevaluate all outstanding DeviceEventWait blocks (Phase 9.3d).
+    ///
+    /// Called after any path capable of advancing a device's event
+    /// sequence: after drain_completions in the main loop, in
+    /// idle_progress_once, and in handle_async_interrupt.
+    ///
+    /// Must run even if drain_completions drained zero completions —
+    /// a future NIC could advance its epoch for unsolicited RX
+    /// without producing a DeviceCompletion.
+    ///
+    /// Delivery is broadcast: if N processes wait on the same
+    /// (device, epoch) and the epoch has advanced, all N wake.
+    /// The sequence is device state, not a queued event token —
+    /// one waiter waking does not consume anything.
+    ///
+    /// Formal basis: anka_user_device_events.kleis DEVEVENT-8..11.
+    fn reevaluate_event_waits(&mut self) {
+        let mut to_wake: Vec<(usize, u64)> = Vec::new();
+        for i in 0..self.processes.len() {
+            if self.processes[i].state != ProcessState::Running {
+                continue;
+            }
+            if let Some(ref ew) = self.processes[i].event_wait {
+                let binding = ew.device;
+                let observed = ew.observed_sequence;
+                if let Some(slot) = self.device_registry.lookup(binding) {
+                    let current = slot.controller.event_sequence();
+                    if current != observed {
+                        to_wake.push((i, current));
+                    }
+                }
+                // Unregistered device: leave event_wait intact.
+                // The process cannot be woken — this is a bug-resistant
+                // liveness choice, not a correctness gap.
+            }
+        }
+        for (slot, current_epoch) in to_wake {
+            self.processes[slot].event_wait = None;
+            self.processes[slot].core.r[R0 as usize] = 0;
+            self.processes[slot].core.r[R1 as usize] = current_epoch;
+            self.resume_from_trap(slot);
         }
     }
 
@@ -2163,6 +2209,7 @@ impl Kernel {
         if is_device {
             self.drain_completions();
             self.reevaluate_recv_waits();
+            self.reevaluate_event_waits();
         }
 
         self.resume_from_trap(idx);
