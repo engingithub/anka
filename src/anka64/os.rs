@@ -36,6 +36,7 @@ pub const SYS_DEV_SUBMIT: u64 = 13; // dev_submit(device_handle, block_num, buff
 pub const SYS_RECV_WAIT: u64 = 14; // recv_wait(peer_slot, peer_gen) → blocking exact-peer receive
 pub const SYS_DEV_SUBMIT_ASYNC: u64 = 15; // dev_submit_async(same args) → R0=0,R1=slot,R2=gen
 pub const SYS_DEV_WAIT: u64 = 16; // dev_wait(slot, gen) → completion status
+pub const SYS_DEV_EVENT_WAIT: u64 = 17; // dev_event_wait(cap_slot, cap_gen, epoch) → status, epoch
 
 /// Maximum messages per mailbox.  Enforced by all producers:
 /// SYS_SEND, SYS_SEND_KEY, and SYS_SEND_CAP.
@@ -2386,6 +2387,9 @@ impl Kernel {
             SYS_DEV_WAIT => {
                 self.handle_dev_wait(idx);
             }
+            SYS_DEV_EVENT_WAIT => {
+                self.handle_dev_event_wait(idx);
+            }
             _ => {
                 eprintln!("Unknown syscall {} from pid {}",
                     syscall, self.processes[idx].pid);
@@ -4238,6 +4242,113 @@ impl Kernel {
                     self.processes[idx].io_wait = Some(IoWait { request: dev_key });
                 }
             }
+        }
+    }
+
+    /// SYS_DEV_EVENT_WAIT (17) — check-or-block on device activity epoch.
+    ///
+    /// ABI (3-register input):
+    ///   R1 = device capability slot
+    ///   R2 = device capability generation
+    ///   R3 = observed activity epoch (e_o)
+    ///
+    /// Returns:
+    ///   e_c ≠ e_o → R0 = 0, R1 = current epoch, resume immediately
+    ///   e_c = e_o → install DeviceEventWait, remain in syscall
+    ///   Error 1: malformed/stale/wrong-kind/unregistered handle
+    ///   Error 4: insufficient rights (EVENT_WAIT not present)
+    ///
+    /// The check-or-block decision is atomic: no scheduler-visible
+    /// point between ReadSeq and InstallWait.
+    ///
+    /// Formal basis: anka_user_device_events.kleis DEVEVENT-3..9.
+    fn handle_dev_event_wait(&mut self, idx: usize) {
+        let r1 = self.processes[idx].core.r[R1 as usize];
+        let r2 = self.processes[idx].core.r[R2 as usize];
+        let observed_sequence = self.processes[idx].core.r[R3 as usize];
+
+        // ── Gate 0: Checked ABI decode (u32 handle components) ──
+        let cap_slot = match u32::try_from(r1) {
+            Ok(v) => v,
+            Err(_) => {
+                self.processes[idx].core.r[R0 as usize] = 1;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+        let cap_gen = match u32::try_from(r2) {
+            Ok(v) => v,
+            Err(_) => {
+                self.processes[idx].core.r[R0 as usize] = 1;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+
+        let handle = CapabilityHandle { slot: cap_slot, generation: cap_gen };
+
+        // ── Gate 1: Resolve as exact Device capability ──
+        let resolved = match self.resolve_capability(idx, handle) {
+            Some(r) => r,
+            None => {
+                self.processes[idx].core.r[R0 as usize] = 1;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+        let (dev_object, dev_gen, dev_rights, dev_authority_id) = match &resolved {
+            ResolvedCapability::Device {
+                object, object_generation, rights, authority_id, ..
+            } => (*object, *object_generation, *rights, *authority_id),
+            ResolvedCapability::Memory { .. } => {
+                self.processes[idx].core.r[R0 as usize] = 1;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+
+        // ── Gate 2: Validate exact backing authority with EVENT_WAIT ──
+        let domain = self.processes[idx].core.domain;
+        if !self.fabric.validate_device_authority(
+            domain,
+            dev_authority_id,
+            dev_object,
+            dev_gen,
+            dev_rights,
+            DeviceRights::EVENT_WAIT,
+        ) {
+            self.processes[idx].core.r[R0 as usize] = 4;
+            self.resume_from_trap(idx);
+            return;
+        }
+
+        // ── Gate 3: Device binding routes to a registered controller ──
+        let binding = DeviceBinding {
+            object: dev_object,
+            generation: dev_gen,
+        };
+        let current_epoch = match self.device_registry.lookup(binding) {
+            Some(slot) => slot.controller.event_sequence(),
+            None => {
+                self.processes[idx].core.r[R0 as usize] = 1;
+                self.resume_from_trap(idx);
+                return;
+            }
+        };
+
+        // ── Atomic check-or-block ──
+        if current_epoch != observed_sequence {
+            // Epoch already advanced → return immediately
+            self.processes[idx].core.r[R0 as usize] = 0;
+            self.processes[idx].core.r[R1 as usize] = current_epoch;
+            self.resume_from_trap(idx);
+        } else {
+            // Epoch unchanged → install DeviceEventWait, remain in syscall.
+            // Do NOT call resume_from_trap — leave EventFrame outstanding.
+            self.processes[idx].event_wait = Some(DeviceEventWait {
+                device: binding,
+                observed_sequence,
+            });
         }
     }
 
