@@ -269,7 +269,7 @@ struct WaitState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceRequestKey {
     pub device: DeviceBinding,
-    pub request: super::block::RequestHandle,
+    pub request: super::state::RequestHandle,
 }
 
 /// Suspended I/O wait — the process has an outstanding device
@@ -308,7 +308,7 @@ pub const MAX_ASYNC_REQUESTS: usize = 16;
 #[derive(Debug, Clone)]
 pub struct AsyncDeviceRequest {
     pub key: DeviceRequestKey,
-    pub completion: Option<super::block::CompletionStatus>,
+    pub completion: Option<super::state::DeviceCompletionStatus>,
 }
 
 /// Side-effect-free validation result from preflight_dev_submit().
@@ -818,7 +818,7 @@ pub enum DeviceCompletion {
 
 impl DeviceCompletion {
     /// The controller-local request handle for this completion.
-    pub fn handle(&self) -> super::block::RequestHandle {
+    pub fn handle(&self) -> super::state::RequestHandle {
         match self {
             DeviceCompletion::Block(c) => c.handle,
         }
@@ -832,7 +832,7 @@ impl DeviceCompletion {
     }
 
     /// Success or fault status.
-    pub fn status(&self) -> super::block::CompletionStatus {
+    pub fn status(&self) -> super::state::DeviceCompletionStatus {
         match self {
             DeviceCompletion::Block(c) => c.status,
         }
@@ -2317,8 +2317,8 @@ impl Kernel {
 
                     let proc = &mut self.processes[slot];
                     proc.core.r[R0 as usize] = match completion.status() {
-                        super::block::CompletionStatus::Success => 0,
-                        super::block::CompletionStatus::DmaFault(_) => u64::MAX,
+                        super::state::DeviceCompletionStatus::Success => 0,
+                        super::state::DeviceCompletionStatus::DmaFault(_) => u64::MAX,
                     };
                     let pc = proc.core.event_return()
                         .expect("matched I/O completion requires outstanding syscall EventFrame");
@@ -4226,7 +4226,7 @@ impl Kernel {
     ///
     /// Error 1 with zero side effects for malformed R3/R4.
     fn handle_dev_wait(&mut self, idx: usize) {
-        use super::block::RequestHandle;
+        use super::state::RequestHandle;
 
         let r1 = self.processes[idx].core.r[R1 as usize];
         let r2 = self.processes[idx].core.r[R2 as usize];
@@ -4279,8 +4279,8 @@ impl Kernel {
                 let entry = &self.processes[idx].async_requests[p];
                 if let Some(status) = entry.completion {
                     self.processes[idx].core.r[R0 as usize] = match status {
-                        super::block::CompletionStatus::Success => 0,
-                        super::block::CompletionStatus::DmaFault(_) => u64::MAX,
+                        super::state::DeviceCompletionStatus::Success => 0,
+                        super::state::DeviceCompletionStatus::DmaFault(_) => u64::MAX,
                     };
                     self.processes[idx].async_requests.remove(p);
                     self.resume_from_trap(idx);
@@ -7591,7 +7591,8 @@ mod tests {
     /// the process is unblocked with R0 = 0 and EventFrame consumed.
     #[test]
     fn p91d_drain_wake_success() {
-        use super::super::block::{BlockRequest, SubmitResult, RequestHandle};
+        use super::super::block::{BlockRequest, SubmitResult};
+        use super::super::state::RequestHandle;
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
 
@@ -7670,7 +7671,8 @@ mod tests {
     /// that drain_completions() does NOT unblock the recycled slot.
     #[test]
     fn p91d_stale_requester_no_wake() {
-        use super::super::block::{BlockRequest, SubmitResult, RequestHandle};
+        use super::super::block::{BlockRequest, SubmitResult};
+        use super::super::state::RequestHandle;
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
 
@@ -8144,7 +8146,8 @@ mod tests {
     /// must not wake; the second (matching handle) must.
     #[test]
     fn p91e_stale_request_handle_no_wake() {
-        use super::super::block::{BlockRequest, SubmitResult, RequestHandle};
+        use super::super::block::{BlockRequest, SubmitResult};
+        use super::super::state::RequestHandle;
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
         kernel.device_registry.devices[0].controller.as_block_mut()
@@ -11760,7 +11763,7 @@ mod tests {
         let comp = kernel.device_registry.devices[0].controller
             .consume_completion().unwrap();
         let DeviceCompletion::Block(block_comp) = &comp;
-        assert_eq!(block_comp.status, super::super::block::CompletionStatus::Success);
+        assert_eq!(block_comp.status, super::super::state::DeviceCompletionStatus::Success);
         assert!(block_comp.delegation_id.is_none(),
             "legacy path must carry no delegation_id");
 
@@ -13890,7 +13893,7 @@ mod tests {
                     object: ObjectId(0),
                     generation: Generation(0),
                 },
-                request: crate::anka64::block::RequestHandle { slot: 0, generation: 0 },
+                request: crate::anka64::state::RequestHandle { slot: 0, generation: 0 },
             },
         });
         assert!(!kernel.processes[a].is_schedulable());
@@ -18387,7 +18390,7 @@ mod tests {
         assert_eq!(generic_comp.handle(), handle, "handle preserved");
         assert_eq!(generic_comp.requester(), rk, "requester preserved");
         assert!(matches!(generic_comp.status(),
-            super::super::block::CompletionStatus::Success),
+            super::super::state::DeviceCompletionStatus::Success),
             "status preserved");
 
         // Unwrap the lossless envelope — block-specific fields intact
@@ -18398,7 +18401,7 @@ mod tests {
         assert_eq!(block_comp.delegation_id, Some(tid),
             "delegation_id preserved — provenance is architectural");
         assert!(matches!(block_comp.status,
-            super::super::block::CompletionStatus::Success),
+            super::super::state::DeviceCompletionStatus::Success),
             "inner status");
 
         eprintln!("9.3c-5: block completion round-trip preserves payload ✓");

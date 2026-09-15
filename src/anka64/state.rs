@@ -703,6 +703,44 @@ pub struct DeviceBinding {
 }
 
 // ───────────────────────────────────────────────────────────────────
+// Generic device request/completion primitives (Phase 9.3e)
+//
+// Controller-local request identity and finite-DMA transaction
+// outcome.  Shared by all device controller types (Block, NIC, …).
+// ───────────────────────────────────────────────────────────────────
+
+/// Opaque handle identifying a specific request submission.
+///
+/// Controller-local: two controllers may independently issue
+/// `(slot=0, gen=0)`.  Global uniqueness requires pairing with
+/// a `DeviceBinding` (see `DeviceRequestKey` in `os.rs`).
+///
+/// Generation is u64 to match the formal model (anka_block_device.kleis
+/// uses BitVec64 for request-slot generations).
+///
+/// Formal basis: anka_block_device.kleis GEN-1..GEN-4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestHandle {
+    pub slot: u8,
+    pub generation: u64,
+}
+
+/// Outcome of an accepted finite device/DMA transaction.
+///
+/// Semantically narrow: this covers only the transaction commit
+/// result, not device-type-specific payload (block number, frame
+/// length, etc.).  Device-specific information belongs in the
+/// respective completion type (`BlockCompletion`, future
+/// `NicCompletion`, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceCompletionStatus {
+    /// DMA transaction committed — data is in guest buffer.
+    Success,
+    /// DMA transaction faulted — guest buffer unchanged.
+    DmaFault(FaultReason),
+}
+
+// ───────────────────────────────────────────────────────────────────
 // Device authority entry (Phase 9.2c)
 // ───────────────────────────────────────────────────────────────────
 
