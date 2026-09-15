@@ -1817,12 +1817,69 @@ ledger with independent reaping.
 With the multi-device registry in place, the architecture can now support
 distinct device types without special-casing.  The NIC will be the next
 device to register, and it will inherit the same identity, routing,
-completion, and quiescence machinery.  The path forward:
+completion, and quiescence machinery.
+
+### Stage 30: Generic Device Substrate (Phase 9.3c)
+
+Phase 9.3c extracts the generic asynchronous device machinery from
+the block-specific implementation, creating a substrate that any
+device type can inhabit.
+
+**Central theorem:** `Generic(Block) = Block` — genericization may
+change representation, but not semantics.
+
+**Architecture changes:**
+
+| Component | Change |
+|-----------|--------|
+| `DeviceController` | `enum { Block(BlockController) }` — generic dispatch surface |
+| `DeviceCompletion` | `enum { Block(BlockCompletion) }` — lossless completion envelope |
+| `DeviceSlot.controller` | `BlockController` → `DeviceController` |
+| `drain_completions` | Renamed from `drain_block_completions`; uses generic accessors |
+
+**Generic surface (device-type-agnostic):**
 
 ```text
-9.3c — Extract generic async device machinery
+tick, has_autonomous_work, requires_attention,
+completion_count, consume_completion,
+nonterminal_pair_request_count, has_nonterminal_pair_request,
+free_slot_count
+```
+
+**Block-specific surface (explicit unwrap via `as_block()`):**
+
+```text
+submit, storage_ref, storage_mut, in_flight_requests
+```
+
+**Key properties:**
+
+- `HasNonterminal(C,D) <=> Count(C,D) != 0` — derived, not independent
+- Lossless completion: `block_number` and `delegation_id` preserved
+- No information destroyed at the abstraction boundary
+
+**Formal basis:**
+
+```text
+anka_generic_device_refinement.kleis              — 13/13 positive
+anka_generic_device_refinement_false_witnesses.kleis — 0/5 false claims pass
+```
+
+**Refinement-hostile suite (5 tests):**
+
+| Test | GENDEV | Property |
+|------|--------|----------|
+| generic_block_observables_preserved | 1–4 | tick/autonomous/attention/pair-count identical |
+| generic_binding_identity_preserved | 5 | DeviceBinding unchanged |
+| generic_registry_pair_count_equals_block | 6 | Count_registry = Count_A + Count_B |
+| generic_registry_order_independent | 13 | Count([A,B]) = Count([B,A]) |
+| block_completion_round_trip_preserves_payload | — | handle, requester, status, block_number, delegation_id intact |
+
+732/732 tests.  The path forward:
+
+```text
 9.3d — User-space device event delivery
-9.3e — First NIC model
+9.3e — First NIC model (second DeviceController variant)
 9.4  — Networking: Ethernet → ARP → ICMP → UDP → TCP → Socket → HTTP
 ```
 

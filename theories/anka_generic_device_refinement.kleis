@@ -1,0 +1,296 @@
+// =============================================================================
+// Anka64 Generic Device Substrate Refinement (Phase 9.3c-formal)
+// =============================================================================
+//
+// Conservative refinement of Phase 9.3b multiple-device routing.
+// No new axioms.
+//
+// Purpose:
+//   The generic device layer is mechanism, not new authority.  Wrapping the
+//   existing BlockController behind a generic controller surface must preserve:
+//     * DeviceBinding identity and exact routing,
+//     * DeviceRequestKey identity and cross-device isolation,
+//     * block-controller tick/attention/autonomous observables,
+//     * registry-wide pair counts and PeerDied semantics,
+//     * completion ownership by stored requester rather than interrupt target,
+//     * exact-presented-authority enforcement.
+//
+// Phase 9.3c therefore changes representation, not observable block semantics.
+// =============================================================================
+
+import "anka_multi_device_routing.kleis"
+
+// -----------------------------------------------------------------------------
+// Generic controller tag and conservative Block adapter
+// -----------------------------------------------------------------------------
+
+define GENERIC_DEVICE_BLOCK = bvconst(0,2)
+define GENERIC_DEVICE_OTHER = bvconst(1,2)
+
+// Generic adapter selectors.  "other" represents a future non-Block device
+// implementation (e.g. NIC).  The Block branch must reproduce Block behavior
+// exactly; no axiom is needed because this is definitional refinement.
+define generic_tick_after(
+    kind : BitVec2,
+    block_after : BitVec64,
+    other_after : BitVec64
+) : BitVec64 =
+    if kind=GENERIC_DEVICE_BLOCK then block_after else other_after
+
+define generic_autonomous(
+    kind : BitVec2,
+    block_autonomous : Bool,
+    other_autonomous : Bool
+) : Bool =
+    if kind=GENERIC_DEVICE_BLOCK then block_autonomous else other_autonomous
+
+define generic_attention(
+    kind : BitVec2,
+    block_attention : Bool,
+    other_attention : Bool
+) : Bool =
+    if kind=GENERIC_DEVICE_BLOCK then block_attention else other_attention
+
+define generic_pair_count(
+    kind : BitVec2,
+    block_count : BitVec3,
+    other_count : BitVec3
+) : BitVec3 =
+    if kind=GENERIC_DEVICE_BLOCK then block_count else other_count
+
+// DeviceBinding remains semantic identity across the generic wrapper.
+define generic_binding_preserved(
+    before_object : BitVec64,
+    before_generation : BitVec64,
+    after_object : BitVec64,
+    after_generation : BitVec64
+) = before_object=after_object ∧ before_generation=after_generation
+
+// -----------------------------------------------------------------------------
+// Registry folds through the generic surface
+// -----------------------------------------------------------------------------
+
+define generic_registry_pair_count_two(
+    kind_a : BitVec2, block_a : BitVec3, other_a : BitVec3,
+    kind_b : BitVec2, block_b : BitVec3, other_b : BitVec3
+) = bvadd(
+        generic_pair_count(kind_a,block_a,other_a),
+        generic_pair_count(kind_b,block_b,other_b)
+    )
+
+define generic_registry_autonomous_two(
+    kind_a : BitVec2, block_a : Bool, other_a : Bool,
+    kind_b : BitVec2, block_b : Bool, other_b : Bool
+) = generic_autonomous(kind_a,block_a,other_a)
+    ∨ generic_autonomous(kind_b,block_b,other_b)
+
+define generic_registry_attention_two(
+    kind_a : BitVec2, block_a : Bool, other_a : Bool,
+    kind_b : BitVec2, block_b : Bool, other_b : Bool
+) = generic_attention(kind_a,block_a,other_a)
+    ∨ generic_attention(kind_b,block_b,other_b)
+
+define generic_peer_died_two(
+    peer_dead : BitVec1,
+    kind_a : BitVec2, block_a : BitVec3, other_a : BitVec3,
+    kind_b : BitVec2, block_b : BitVec3, other_b : BitVec3
+) = peer_dead=bvconst(1,1)
+    ∧ generic_registry_pair_count_two(
+        kind_a,block_a,other_a,
+        kind_b,block_b,other_b
+      )=bvconst(0,3)
+
+// -----------------------------------------------------------------------------
+// Generic completion delivery
+// -----------------------------------------------------------------------------
+
+// Completion ownership is determined by the stored requester ProcessKey and
+// the exact device-qualified request key.  interrupt_target_* is deliberately
+// not consulted: the process taking a generic device interrupt is only the
+// kernel-entry vehicle, never the owner of the completion.
+define generic_completion_delivers(
+    requester_slot : BitVec32,
+    requester_generation : BitVec64,
+    recipient_slot : BitVec32,
+    recipient_generation : BitVec64,
+    interrupt_target_slot : BitVec32,
+    interrupt_target_generation : BitVec64,
+    completion_device_object : BitVec64,
+    completion_device_generation : BitVec64,
+    completion_request_slot : BitVec8,
+    completion_request_generation : BitVec64,
+    wait_device_object : BitVec64,
+    wait_device_generation : BitVec64,
+    wait_request_slot : BitVec8,
+    wait_request_generation : BitVec64
+) = requester_slot=recipient_slot
+    ∧ requester_generation=recipient_generation
+    ∧ device_request_key_equal(
+        completion_device_object,
+        completion_device_generation,
+        completion_request_slot,
+        completion_request_generation,
+        wait_device_object,
+        wait_device_generation,
+        wait_request_slot,
+        wait_request_generation
+      )
+
+// -----------------------------------------------------------------------------
+// Generic submission remains exact-presented-authority mediated
+// -----------------------------------------------------------------------------
+
+// ambient_rights is deliberately not used.  Generic routing selects the exact
+// DeviceBinding, but authorization still comes only from the rights presented
+// by the capability for this operation.
+define generic_submit_allowed(
+    presented_object : BitVec64,
+    presented_generation : BitVec64,
+    binding_object : BitVec64,
+    binding_generation : BitVec64,
+    presented_rights : BitVec8,
+    ambient_rights : BitVec8,
+    required_rights : BitVec8
+) = routes_to_device_binding(
+        presented_object,presented_generation,
+        binding_object,binding_generation,
+        bvconst(1,1)
+    )
+    ∧ device_request_allowed(presented_rights,required_rights)
+
+// -----------------------------------------------------------------------------
+// Positive refinement obligations
+// -----------------------------------------------------------------------------
+
+example "GENDEV-1 CENTRAL TICK: Block wrapper preserves block transition result" {
+    assert(
+        ∀(after : BitVec64). ∀(other : BitVec64).
+            generic_tick_after(GENERIC_DEVICE_BLOCK,after,other)=after
+    )
+}
+
+example "GENDEV-2 AUTONOMY: Block wrapper preserves autonomous-work observable" {
+    assert(
+        ∀(b : Bool). ∀(o : Bool).
+            generic_autonomous(GENERIC_DEVICE_BLOCK,b,o)=b
+    )
+}
+
+example "GENDEV-3 ATTENTION: Block wrapper preserves attention observable" {
+    assert(
+        ∀(b : Bool). ∀(o : Bool).
+            generic_attention(GENERIC_DEVICE_BLOCK,b,o)=b
+    )
+}
+
+example "GENDEV-4 PAIR COUNT: Block wrapper preserves pair-attributed request count" {
+    assert(
+        ∀(b : BitVec3). ∀(o : BitVec3).
+            generic_pair_count(GENERIC_DEVICE_BLOCK,b,o)=b
+    )
+}
+
+example "GENDEV-5 IDENTITY: generic wrapping preserves DeviceBinding exactly" {
+    assert(
+        ∀(obj : BitVec64). ∀(gen : BitVec64).
+            generic_binding_preserved(obj,gen,obj,gen)
+    )
+}
+
+example "GENDEV-6 REGISTRY COUNT: all-Block generic registry equals 9.3b block aggregate" {
+    assert(
+        ∀(a : BitVec3). ∀(b : BitVec3).
+            generic_registry_pair_count_two(
+                GENERIC_DEVICE_BLOCK,a,bvconst(0,3),
+                GENERIC_DEVICE_BLOCK,b,bvconst(0,3)
+            ) = multi_device_pair_count(a,b)
+    )
+}
+
+example "GENDEV-7 PEERDIED CONSERVATIVE: all-Block generic layer preserves 9.3b PeerDied" {
+    assert(
+        ∀(dead : BitVec1). ∀(a : BitVec3). ∀(b : BitVec3).
+            generic_peer_died_two(
+                dead,
+                GENERIC_DEVICE_BLOCK,a,bvconst(0,3),
+                GENERIC_DEVICE_BLOCK,b,bvconst(0,3)
+            ) = peer_died_multi_device(dead,a,b)
+    )
+}
+
+example "GENDEV-8 REQUEST IDENTITY: generic layer retains device-qualified collision isolation" {
+    assert(
+        local_request_handle_equal(
+            bvconst(0,8),bvconst(0,64),
+            bvconst(0,8),bvconst(0,64)
+        )
+        ∧ ¬device_request_key_equal(
+            bvconst(10,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),
+            bvconst(20,64),bvconst(0,64),bvconst(0,8),bvconst(0,64)
+        )
+    )
+}
+
+example "GENDEV-9 COMPLETION OWNER: interrupt target cannot substitute for stored requester" {
+    assert(
+        ¬generic_completion_delivers(
+            bvconst(1,32),bvconst(7,64),
+            bvconst(3,32),bvconst(9,64),
+            bvconst(3,32),bvconst(9,64),
+            bvconst(10,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),
+            bvconst(10,64),bvconst(0,64),bvconst(0,8),bvconst(0,64)
+        )
+    )
+}
+
+example "GENDEV-10 COMPLETION EXACT: exact requester plus exact DeviceRequestKey delivers regardless of interrupt target" {
+    assert(
+        ∀(it_slot : BitVec32). ∀(it_gen : BitVec64).
+            generic_completion_delivers(
+                bvconst(1,32),bvconst(7,64),
+                bvconst(1,32),bvconst(7,64),
+                it_slot,it_gen,
+                bvconst(10,64),bvconst(2,64),bvconst(0,8),bvconst(5,64),
+                bvconst(10,64),bvconst(2,64),bvconst(0,8),bvconst(5,64)
+            )
+    )
+}
+
+example "GENDEV-11 AUTHORITY: ambient rights cannot rescue insufficient presented authority" {
+    assert(
+        ∀(ambient : BitVec8). ∀(required : BitVec8).
+            (
+                ¬(required=DEVICE_RIGHTS_NONE)
+                ∧ ¬device_request_allowed(DEVICE_RIGHTS_NONE,required)
+            )
+            ⇒ ¬generic_submit_allowed(
+                bvconst(10,64),bvconst(0,64),
+                bvconst(10,64),bvconst(0,64),
+                DEVICE_RIGHTS_NONE,ambient,required
+            )
+    )
+}
+
+example "GENDEV-12 ROUTING: generic layer preserves exact generation-qualified device selection" {
+    assert(
+        ∀(o : BitVec64). ∀(g : BitVec64).
+            generic_submit_allowed(
+                o,g,o,g,
+                bvconst(1,8),bvconst(255,8),bvconst(1,8)
+            )
+    )
+}
+
+example "GENDEV-13 REGISTRY ORDER: all-Block pair quiescence count is independent of registry order" {
+    assert(
+        ∀(a : BitVec3). ∀(b : BitVec3).
+            generic_registry_pair_count_two(
+                GENERIC_DEVICE_BLOCK,a,bvconst(0,3),
+                GENERIC_DEVICE_BLOCK,b,bvconst(0,3)
+            )
+            = generic_registry_pair_count_two(
+                GENERIC_DEVICE_BLOCK,b,bvconst(0,3),
+                GENERIC_DEVICE_BLOCK,a,bvconst(0,3)
+            )
+    )
+}

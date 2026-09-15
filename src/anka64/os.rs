@@ -9,7 +9,7 @@
 //!   R1–R3 = arguments
 //!   R0 = return value
 
-use super::block::BlockController;
+use super::block::{BlockController, BlockCompletion};
 use super::core::Anka64Core;
 use super::fabric::Fabric;
 use super::isa::*;
@@ -290,7 +290,7 @@ pub const MAX_ASYNC_REQUESTS: usize = 16;
 ///
 /// Lifecycle:
 ///   SYS_DEV_SUBMIT_ASYNC → push { handle, completion: None }
-///   drain_block_completions() → fill completion = Some(status)
+///   drain_completions() → fill completion = Some(status)
 ///   SYS_DEV_WAIT on completed → return status, remove entry
 ///   SYS_DEV_WAIT on pending → install IoWait, completion drain
 ///     will later wake + remove entry
@@ -658,6 +658,148 @@ pub enum BootError {
 
 /// A registered device instance in the kernel (Phase 9.3b).
 ///
+/// Generic device controller (Phase 9.3c).
+///
+/// Wraps device-type-specific controllers behind a common surface for
+/// the kernel's device-agnostic machinery (tick, attention, autonomy,
+/// completion, pair quiescence).
+///
+/// The generic surface delegates directly to the inner controller.
+/// Block-specific operations (submit, storage access) require an
+/// explicit pattern match to unwrap the inner `BlockController`.
+///
+/// Formal basis: anka_generic_device_refinement.kleis GENDEV-1..13.
+///   Generic(Block) = Block for all observables.
+#[derive(Debug)]
+pub enum DeviceController {
+    Block(BlockController),
+}
+
+impl DeviceController {
+    /// Advance the device by one machine tick.
+    /// GENDEV-1: Block wrapper preserves block transition result.
+    pub fn tick(&mut self, fabric: &mut Fabric) {
+        match self {
+            DeviceController::Block(c) => c.tick(fabric),
+        }
+    }
+
+    /// Does this device have autonomous (in-flight) work?
+    /// GENDEV-2: Block wrapper preserves autonomous-work observable.
+    pub fn has_autonomous_work(&self) -> bool {
+        match self {
+            DeviceController::Block(c) => c.has_autonomous_work(),
+        }
+    }
+
+    /// Does this device have serviceable completions?
+    /// GENDEV-3: Block wrapper preserves attention observable.
+    pub fn requires_attention(&self) -> bool {
+        match self {
+            DeviceController::Block(c) => c.requires_attention(),
+        }
+    }
+
+    /// Number of ready completions.
+    pub fn completion_count(&self) -> usize {
+        match self {
+            DeviceController::Block(c) => c.completion_count(),
+        }
+    }
+
+    /// Pop the next ready completion as a lossless generic envelope.
+    ///
+    /// The inner device-specific completion is preserved intact:
+    ///   Wrap_generic(Block) loses no block semantics.
+    pub fn consume_completion(&mut self) -> Option<DeviceCompletion> {
+        match self {
+            DeviceController::Block(c) =>
+                c.consume_completion().map(DeviceCompletion::Block),
+        }
+    }
+
+    /// Quantitative nonterminal pair request count.
+    /// GENDEV-4: Block wrapper preserves pair-attributed request count.
+    ///
+    /// This is the primitive; `has_nonterminal_pair_request` is derived
+    /// from it so the Boolean can never diverge from the count:
+    ///   HasNonterminal(C,D) <=> Count(C,D) != 0.
+    pub fn nonterminal_pair_request_count(
+        &self,
+        client: &ProcessKey,
+        peer: &ProcessKey,
+    ) -> usize {
+        match self {
+            DeviceController::Block(c) => c.nonterminal_pair_request_count(client, peer),
+        }
+    }
+
+    /// Boolean projection of `nonterminal_pair_request_count`.
+    /// Derived, not independently dispatched.
+    pub fn has_nonterminal_pair_request(
+        &self,
+        client: &ProcessKey,
+        peer: &ProcessKey,
+    ) -> bool {
+        self.nonterminal_pair_request_count(client, peer) != 0
+    }
+
+    /// Unwrap the inner BlockController (shared reference).
+    /// Panics if this is not a Block device.
+    pub fn as_block(&self) -> &BlockController {
+        match self {
+            DeviceController::Block(c) => c,
+        }
+    }
+
+    /// Unwrap the inner BlockController (mutable reference).
+    /// Panics if this is not a Block device.
+    pub fn as_block_mut(&mut self) -> &mut BlockController {
+        match self {
+            DeviceController::Block(c) => c,
+        }
+    }
+}
+
+/// Lossless generic completion envelope (Phase 9.3c).
+///
+/// Wraps device-type-specific completions without projecting away
+/// any information.  Generic kernel machinery accesses only the
+/// common observations (handle, requester, status) through accessor
+/// methods; device-specific payload (block_number, delegation_id,
+/// future NIC fields, etc.) is preserved intact inside the envelope.
+///
+/// This satisfies the formal conservation law:
+///   Generic(Block) = Block — genericization changes the view of a
+///   completion, not the information retained by it.
+#[derive(Debug, Clone)]
+pub enum DeviceCompletion {
+    Block(BlockCompletion),
+}
+
+impl DeviceCompletion {
+    /// The controller-local request handle for this completion.
+    pub fn handle(&self) -> super::block::RequestHandle {
+        match self {
+            DeviceCompletion::Block(c) => c.handle,
+        }
+    }
+
+    /// The process incarnation that submitted this request.
+    pub fn requester(&self) -> RequesterKey {
+        match self {
+            DeviceCompletion::Block(c) => c.requester,
+        }
+    }
+
+    /// Success or fault status.
+    pub fn status(&self) -> super::block::CompletionStatus {
+        match self {
+            DeviceCompletion::Block(c) => c.status,
+        }
+    }
+}
+
 /// Registry membership means active: there is no DeviceState enum
 /// because 9.3b does not support unregister/recycling.
 ///
@@ -666,7 +808,7 @@ pub enum BootError {
 #[derive(Debug)]
 pub struct DeviceSlot {
     pub binding: DeviceBinding,
-    pub controller: BlockController,
+    pub controller: DeviceController,
 }
 
 /// Registry of all device instances (Phase 9.3b).
@@ -723,7 +865,6 @@ impl DeviceRegistry {
         peer: &ProcessKey,
     ) -> usize {
         self.devices.iter()
-            .filter(|d| d.controller.has_nonterminal_pair_request(client, peer))
             .map(|d| d.controller.nonterminal_pair_request_count(client, peer))
             .sum()
     }
@@ -1128,7 +1269,7 @@ impl Kernel {
 
         self.device_registry.devices.push(DeviceSlot {
             binding,
-            controller,
+            controller: DeviceController::Block(controller),
         });
 
         // First registered block device becomes the legacy default
@@ -1654,7 +1795,7 @@ impl Kernel {
             //   D=IoWait, request=Completed, ¬AutonomousIO
             // would be misclassified as Stop because Completed is
             // (correctly) excluded from has_autonomous_io().
-            self.drain_block_completions();
+            self.drain_completions();
             self.reevaluate_recv_waits();
             self.wake_waiters();
 
@@ -1721,7 +1862,7 @@ impl Kernel {
             slot.controller.tick(&mut self.fabric);
         }
         // Drain completions from all devices, then reevaluate.
-        self.drain_block_completions();
+        self.drain_completions();
         self.reevaluate_recv_waits();
     }
 
@@ -1975,7 +2116,7 @@ impl Kernel {
             .unwrap_or(false);
 
         if is_device {
-            self.drain_block_completions();
+            self.drain_completions();
             self.reevaluate_recv_waits();
         }
 
@@ -2022,7 +2163,8 @@ impl Kernel {
     ///     completion status for later SYS_DEV_WAIT.
     ///
     /// Formal basis: anka_multi_request_quiescence.kleis MULTI92F-*.
-    fn drain_block_completions(&mut self) {
+    /// Phase 9.3c: operates through generic DeviceCompletion accessors.
+    fn drain_completions(&mut self) {
         // Drain completions from ALL registered devices (Phase 9.3b).
         // Each completion is qualified with the device's binding to form
         // a DeviceRequestKey before matching against process state.
@@ -2030,6 +2172,10 @@ impl Kernel {
         // InterruptTarget != CompletionRequester: the process that took
         // the interrupt does NOT select whose I/O completed.  Delivery
         // uses exclusively (Completion.requester, DeviceBinding, RequestHandle).
+        //
+        // Phase 9.3c: the completion is a lossless DeviceCompletion
+        // envelope.  Only generic accessors (handle, requester, status)
+        // are used for routing; device-specific payload is preserved.
         for dev_idx in 0..self.device_registry.devices.len() {
             loop {
                 let ctrl = &mut self.device_registry.devices[dev_idx].controller;
@@ -2046,10 +2192,10 @@ impl Kernel {
                 // Qualify the controller-local handle with device identity.
                 let dev_key = DeviceRequestKey {
                     device: self.device_registry.devices[dev_idx].binding,
-                    request: completion.handle,
+                    request: completion.handle(),
                 };
 
-                let rk = &completion.requester;
+                let rk = completion.requester();
                 let slot = rk.slot as usize;
 
                 // Guard 1: slot in range and exact-incarnation match.
@@ -2078,7 +2224,7 @@ impl Kernel {
                     }
 
                     let proc = &mut self.processes[slot];
-                    proc.core.r[R0 as usize] = match completion.status {
+                    proc.core.r[R0 as usize] = match completion.status() {
                         super::block::CompletionStatus::Success => 0,
                         super::block::CompletionStatus::DmaFault(_) => u64::MAX,
                     };
@@ -2090,7 +2236,7 @@ impl Kernel {
                 } else if let Some(entry) = self.processes[slot].async_requests.iter_mut()
                     .find(|r| r.key == dev_key)
                 {
-                    entry.completion = Some(completion.status);
+                    entry.completion = Some(completion.status());
                 }
             }
         }
@@ -3182,7 +3328,7 @@ impl Kernel {
     /// On success: the process blocks with its syscall EventFrame
     /// outstanding.  The block controller is given a request with
     /// RequesterKey = (process_slot, process_generation).  When the
-    /// DMA completes, drain_block_completions() performs event_return()
+    /// DMA completes, drain_completions() performs event_return()
     /// and resumes the caller at user PC with R0 = 0.
     ///
     /// On failure (no block controller, invalid block, bad buffer,
@@ -3213,7 +3359,10 @@ impl Kernel {
 
         // Legacy SYS_BLOCK_READ resolves through the registry.
         let block_size = match self.device_registry.lookup(dev_binding) {
-            Some(slot) => slot.controller.storage_ref().block_size(),
+            Some(slot) => {
+                let DeviceController::Block(ctrl) = &slot.controller;
+                ctrl.storage_ref().block_size()
+            }
             None => {
                 self.processes[idx].core.r[R0 as usize] = u64::MAX;
                 self.resume_from_trap(idx);
@@ -3249,10 +3398,10 @@ impl Kernel {
             delegation_id: None,
         };
 
-        let result = self.device_registry.lookup_mut(dev_binding)
-            .expect("legacy_block_device binding must resolve")
-            .controller
-            .submit(req, &mut self.fabric);
+        let dev_slot = self.device_registry.lookup_mut(dev_binding)
+            .expect("legacy_block_device binding must resolve");
+        let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+        let result = ctrl.submit(req, &mut self.fabric);
 
         match result {
             SubmitResult::Accepted(handle) => {
@@ -3856,10 +4005,10 @@ impl Kernel {
         };
 
         let dev_binding = prepared.device_binding;
-        let result = self.device_registry.lookup_mut(dev_binding)
-            .expect("preflight validated binding exists")
-            .controller
-            .submit(req, &mut self.fabric);
+        let dev_slot = self.device_registry.lookup_mut(dev_binding)
+            .expect("preflight validated binding exists");
+        let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+        let result = ctrl.submit(req, &mut self.fabric);
 
         match result {
             SubmitResult::Accepted(handle) => {
@@ -3915,7 +4064,8 @@ impl Kernel {
         {
             let dev_slot = self.device_registry.lookup(dev_binding)
                 .expect("preflight validated binding exists");
-            if dev_slot.controller.free_slot_count() == 0 {
+            let DeviceController::Block(ctrl) = &dev_slot.controller;
+            if ctrl.free_slot_count() == 0 {
                 self.fail_dev_submit(idx, 9);
                 return;
             }
@@ -3932,10 +4082,10 @@ impl Kernel {
             delegation_id: prepared.delegation_id,
         };
 
-        let result = self.device_registry.lookup_mut(dev_binding)
-            .expect("preflight validated binding exists")
-            .controller
-            .submit(req, &mut self.fabric);
+        let dev_slot = self.device_registry.lookup_mut(dev_binding)
+            .expect("preflight validated binding exists");
+        let DeviceController::Block(ctrl) = &mut dev_slot.controller;
+        let result = ctrl.submit(req, &mut self.fabric);
 
         match result {
             SubmitResult::Accepted(handle) => {
@@ -7080,7 +7230,7 @@ mod tests {
     //
     // Tests the composition:
     //   tick_devices() → level-triggered L_dev → post_device_interrupt()
-    //   → deliver_pending() → handle_async_interrupt() → drain_block_completions()
+    //   → deliver_pending() → handle_async_interrupt() → drain_completions()
     //   → generation-qualified wake
     //
     // The block controller is attached to the kernel and ticked
@@ -7142,7 +7292,7 @@ mod tests {
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
 
         // Pre-populate block 0 with known data.
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(0, &[0xAA; 512]);
 
         let rk = RequesterKey { slot: 0, generation: 0 };
@@ -7156,7 +7306,7 @@ mod tests {
             delegation_id: None,
         };
 
-        let result = kernel.device_registry.devices[0].controller
+        let result = kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req, &mut kernel.fabric);
         assert!(matches!(result, SubmitResult::Accepted(_)));
 
@@ -7183,9 +7333,9 @@ mod tests {
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
 
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(0, &[0xBB; 512]);
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(1, &[0xCC; 512]);
 
         // Submit two requests — both slots occupied.
@@ -7200,7 +7350,7 @@ mod tests {
             source_authority_id: None,
             delegation_id: None,
             };
-            let result = kernel.device_registry.devices[0].controller
+            let result = kernel.device_registry.devices[0].controller.as_block_mut()
                 .submit(req, &mut kernel.fabric);
             assert!(matches!(result, SubmitResult::Accepted(_)));
         }
@@ -7235,7 +7385,7 @@ mod tests {
     ///
     /// Manually submit a request with the process's RequesterKey,
     /// push a synthetic syscall EventFrame, set io_wait, complete
-    /// the request, then invoke drain_block_completions() and verify
+    /// the request, then invoke drain_completions() and verify
     /// the process is unblocked with R0 = 0 and EventFrame consumed.
     #[test]
     fn p91d_drain_wake_success() {
@@ -7243,7 +7393,7 @@ mod tests {
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
 
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(0, &[0xDD; 512]);
 
         let rk = RequesterKey {
@@ -7260,7 +7410,7 @@ mod tests {
             delegation_id: None,
         };
 
-        let result = kernel.device_registry.devices[0].controller
+        let result = kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req, &mut kernel.fabric);
         let handle = match result {
             SubmitResult::Accepted(h) => h,
@@ -7290,7 +7440,7 @@ mod tests {
         assert!(kernel.device_registry.devices[0].controller.requires_attention());
 
         // Drain — should wake the process via event_return().
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         assert!(kernel.processes[0].io_wait.is_none(),
             "process must be unblocked after completion drain");
@@ -7315,14 +7465,14 @@ mod tests {
     ///
     /// Submit a request with generation 0, then recycle the process
     /// slot (increment generation), complete the request, and verify
-    /// that drain_block_completions() does NOT unblock the recycled slot.
+    /// that drain_completions() does NOT unblock the recycled slot.
     #[test]
     fn p91d_stale_requester_no_wake() {
         use super::super::block::{BlockRequest, SubmitResult, RequestHandle};
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
 
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(0, &[0xEE; 512]);
 
         // Submit with generation 0 (the current incarnation).
@@ -7340,7 +7490,7 @@ mod tests {
             delegation_id: None,
         };
 
-        let result = kernel.device_registry.devices[0].controller
+        let result = kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req, &mut kernel.fabric);
         let handle = match result {
             SubmitResult::Accepted(h) => h,
@@ -7362,7 +7512,7 @@ mod tests {
         }
 
         // Drain — should NOT wake because generation doesn't match.
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         assert!(kernel.processes[0].io_wait.is_some(),
             "stale RequesterKey must not wake a recycled process slot");
@@ -7379,7 +7529,7 @@ mod tests {
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
 
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(0, &[0xFF; 512]);
 
         let rk = RequesterKey {
@@ -7396,7 +7546,7 @@ mod tests {
             delegation_id: None,
         };
 
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req, &mut kernel.fabric);
 
         // Process is NOT io_wait.
@@ -7408,7 +7558,7 @@ mod tests {
                 .tick(&mut kernel.fabric);
         }
 
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // R0 should be untouched — process was not waiting.
         assert_eq!(kernel.processes[0].core.r[R0 as usize], 0xDEAD,
@@ -7467,7 +7617,7 @@ mod tests {
             source_authority_id: None,
             delegation_id: None,
         };
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req, &mut kernel.fabric);
 
         // Tick the block controller until completed.
@@ -7515,11 +7665,11 @@ mod tests {
         eprintln!("9.1d: no controller → harmless ✓");
     }
 
-    /// Empty completion queue: drain_block_completions is harmless.
+    /// Empty completion queue: drain_completions is harmless.
     #[test]
     fn p91d_drain_empty_harmless() {
         let (mut kernel, _buf, _dom) = block_kernel_setup(10, 42, 4);
-        kernel.drain_block_completions();
+        kernel.drain_completions();
         assert!(kernel.processes[0].io_wait.is_none());
         eprintln!("9.1d: drain empty → harmless ✓");
     }
@@ -7795,9 +7945,9 @@ mod tests {
         use super::super::block::{BlockRequest, SubmitResult, RequestHandle};
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(0, &[0xAA; 512]);
-        kernel.device_registry.devices[0].controller
+        kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(1, &[0xBB; 512]);
 
         let rk = RequesterKey {
@@ -7815,7 +7965,7 @@ mod tests {
             source_authority_id: None,
             delegation_id: None,
         };
-        let handle0 = match kernel.device_registry.devices[0].controller
+        let handle0 = match kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req0, &mut kernel.fabric)
         {
             SubmitResult::Accepted(h) => h,
@@ -7832,7 +7982,7 @@ mod tests {
             source_authority_id: None,
             delegation_id: None,
         };
-        let handle1 = match kernel.device_registry.devices[0].controller
+        let handle1 = match kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req1, &mut kernel.fabric)
         {
             SubmitResult::Accepted(h) => h,
@@ -7864,7 +8014,7 @@ mod tests {
 
         // Drain: the first completion (handle0) must NOT wake.
         // The second completion (handle1) MUST wake.
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         assert!(kernel.processes[0].io_wait.is_none(),
             "process must be woken by matching handle1");
@@ -9533,7 +9683,7 @@ mod tests {
 
         // Controller must have no in-flight requests
         assert!(kernel.device_registry.devices[0].controller
-            .in_flight_requests().is_empty(),
+            .as_block().in_flight_requests().is_empty(),
             "controller must not have accepted a request");
 
         eprintln!("9.3a.3.3: SUBMIT_READ → NONE succeeds; NONE child → SYS_DEV_SUBMIT error 4 ✓");
@@ -10999,7 +11149,7 @@ mod tests {
         for _ in 0..20 {
             kernel.tick_devices(slot);
         }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // Process should have woken up with success
         assert!(kernel.processes[slot].io_wait.is_none());
@@ -11254,10 +11404,11 @@ mod tests {
             kernel.tick_devices(slot);
         }
 
-        // Peek at the completion before drain
+        // Peek at the completion before drain — unwrap the lossless envelope
         let comp = kernel.device_registry.devices[0].controller
             .consume_completion().unwrap();
-        assert_eq!(comp.delegation_id, Some(tid),
+        let DeviceCompletion::Block(block_comp) = &comp;
+        assert_eq!(block_comp.delegation_id, Some(tid),
             "delegation_id must propagate unchanged through controller");
 
         eprintln!("9.2c: delegation_id reaches completion ✓");
@@ -11397,7 +11548,7 @@ mod tests {
             delegation_id: None,
         };
 
-        let result = kernel.device_registry.devices[0].controller
+        let result = kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req, &mut kernel.fabric);
         assert!(matches!(result, super::super::block::SubmitResult::Accepted(_)));
 
@@ -11406,8 +11557,9 @@ mod tests {
         }
         let comp = kernel.device_registry.devices[0].controller
             .consume_completion().unwrap();
-        assert_eq!(comp.status, super::super::block::CompletionStatus::Success);
-        assert!(comp.delegation_id.is_none(),
+        let DeviceCompletion::Block(block_comp) = &comp;
+        assert_eq!(block_comp.status, super::super::block::CompletionStatus::Success);
+        assert!(block_comp.delegation_id.is_none(),
             "legacy path must carry no delegation_id");
 
         eprintln!("9.2c: legacy SYS_BLOCK_READ path unchanged ✓");
@@ -12099,7 +12251,7 @@ mod tests {
             "driver must be in IoWait after successful DEV_SUBMIT");
 
         // Step 4: Verify the request metadata in the controller
-        let ctrl = &kernel.device_registry.devices[0].controller;
+        let ctrl = kernel.device_registry.devices[0].controller.as_block();
         let req_delegation = ctrl.in_flight_requests().iter()
             .find_map(|r| r.delegation_id.clone());
         let request_delegation = req_delegation
@@ -13275,7 +13427,7 @@ mod tests {
             source_authority_id: Some(src_aid),
             delegation_id: Some(tid),
         };
-        let result = kernel.device_registry.devices[0].controller
+        let result = kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(request, &mut kernel.fabric);
         match &result {
             SubmitResult::Accepted(_) => {}
@@ -14591,7 +14743,7 @@ mod tests {
             source_authority_id: Some(src_aid),
             delegation_id: Some(tid),
         };
-        let result = kernel.device_registry.devices[0].controller
+        let result = kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(request, &mut kernel.fabric);
         match &result {
             SubmitResult::Accepted(_) => {}
@@ -14633,7 +14785,7 @@ mod tests {
         // ── Idle progress: advance until request becomes terminal ──
         // With latency 3: tick 1 = Waiting→DmaReady→DmaInFlight+advance(1),
         // tick 2 = advance(2), tick 3 = advance(3)→Committed→Completed.
-        // Then drain_block_completions() consumes the completion.
+        // Then drain_completions() consumes the completion.
         for tick in 0..20 {
             if !kernel.device_registry.devices[0].controller
                 .has_nonterminal_pair_request(&key_c, &key_d)
@@ -15622,7 +15774,7 @@ mod tests {
         // A needs DMA phases.  B needs 2 more latency ticks + DMA phases.
         // Tick one more for A's DMA:
         kernel.tick_devices(d);
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // Check: is A terminal and B still nonterminal?
         // A had a 2-tick head start.  If A is completed, its entry has
@@ -15640,7 +15792,7 @@ mod tests {
             .unwrap_or(false)
         {
             kernel.tick_devices(d);
-            kernel.drain_block_completions();
+            kernel.drain_completions();
             ticks += 1;
             assert!(ticks < 20, "A should complete within 20 ticks");
         }
@@ -15676,7 +15828,7 @@ mod tests {
         for _ in 0..20 {
             kernel.tick_devices(d);
         }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         assert!(kernel.processes[d].io_wait.is_none(),
             "B's completion must wake IoWait(B)");
@@ -15722,7 +15874,7 @@ mod tests {
         for _ in 0..10 {
             kernel.tick_devices(d);
         }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // A's completion is now in the ledger (no IoWait was installed)
         assert_eq!(kernel.processes[d].async_requests.len(), 1);
@@ -15730,7 +15882,7 @@ mod tests {
             "A must have completion in ledger");
 
         // Controller slot should be free now
-        assert_eq!(kernel.device_registry.devices[0].controller.free_slot_count(), 2);
+        assert_eq!(kernel.device_registry.devices[0].controller.as_block().free_slot_count(), 2);
 
         // Submit B on what was A's slot — will get a higher generation
         let r0_b = do_async_submit(&mut kernel, d, &dev_h, 1, &buf_h);
@@ -15784,7 +15936,7 @@ mod tests {
         let dev_gen = kernel.processes[d].core.r[R4 as usize];
 
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // Reap A
         let r0_reap = do_dev_wait(&mut kernel, d, h_a_slot, h_a_gen, dev_obj, dev_gen);
@@ -15835,7 +15987,7 @@ mod tests {
 
         // Tick to completion — completion drains into ledger
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
         assert!(kernel.processes[d].async_requests[0].completion.is_some(),
             "A must have completion in D_g's ledger");
 
@@ -15917,7 +16069,7 @@ mod tests {
 
         // Tick to complete A at the hardware level
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // Dead requester must not receive any software mutation
         assert_eq!(kernel.processes[d].core.r.to_vec(), regs_before,
@@ -15949,14 +16101,14 @@ mod tests {
         let r0_b = do_async_submit(&mut kernel, d, &dev_h, 1, &buf_h);
         assert_eq!(r0_b, 0);
 
-        assert_eq!(kernel.device_registry.devices[0].controller.free_slot_count(), 0,
+        assert_eq!(kernel.device_registry.devices[0].controller.as_block().free_slot_count(), 0,
             "both controller slots must be occupied");
 
         // Snapshot all quantities that must not change
         let domain_count_before = kernel.fabric.domain_count();
         let authority_id_before = kernel.fabric.next_authority_id();
         let ledger_len_before = kernel.processes[d].async_requests.len();
-        let controller_free_before = kernel.device_registry.devices[0].controller.free_slot_count();
+        let controller_free_before = kernel.device_registry.devices[0].controller.as_block().free_slot_count();
 
         // Third async submission — must fail (controller busy)
         let r0_c = do_async_submit(&mut kernel, d, &dev_h, 2, &buf_h);
@@ -15970,7 +16122,7 @@ mod tests {
             "ΔAuthorityIds must be 0 on rejected submission");
         assert_eq!(kernel.processes[d].async_requests.len(), ledger_len_before,
             "ΔLedger must be 0 on rejected submission");
-        assert_eq!(kernel.device_registry.devices[0].controller.free_slot_count(),
+        assert_eq!(kernel.device_registry.devices[0].controller.as_block().free_slot_count(),
             controller_free_before,
             "ΔController must be 0 on rejected submission");
 
@@ -16053,7 +16205,7 @@ mod tests {
 
             // Tick to completion
             for _ in 0..10 { kernel.tick_devices(d); }
-            kernel.drain_block_completions();
+            kernel.drain_completions();
         }
 
         // Verify ledger is full
@@ -16066,7 +16218,7 @@ mod tests {
         // Snapshot quantities
         let domain_count_before = kernel.fabric.domain_count();
         let authority_id_before = kernel.fabric.next_authority_id();
-        let controller_free_before = kernel.device_registry.devices[0].controller.free_slot_count();
+        let controller_free_before = kernel.device_registry.devices[0].controller.as_block().free_slot_count();
 
         // 17th submit must fail
         let r0_overflow = do_async_submit(&mut kernel, d, &dev_handle, 0, &buf_handle);
@@ -16078,7 +16230,7 @@ mod tests {
             "ΔDomainCount must be 0");
         assert_eq!(kernel.fabric.next_authority_id(), authority_id_before,
             "ΔAuthorityIds must be 0");
-        assert_eq!(kernel.device_registry.devices[0].controller.free_slot_count(),
+        assert_eq!(kernel.device_registry.devices[0].controller.as_block().free_slot_count(),
             controller_free_before,
             "controller slots must not change");
         assert_eq!(kernel.processes[d].async_requests.len(), MAX_ASYNC_REQUESTS,
@@ -16787,12 +16939,12 @@ mod tests {
             "R4 must be A's Generation");
 
         // B's controller must be completely untouched
-        assert_eq!(kernel.device_registry.devices[1].controller.free_slot_count(), 2,
+        assert_eq!(kernel.device_registry.devices[1].controller.as_block().free_slot_count(), 2,
             "ΔController_B = 0 after submit to A");
 
         // Complete A
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // Verify A read 0xAA into the buffer
         let buf_data = kernel.fabric.read_physical(0x010000, 512);
@@ -16814,12 +16966,12 @@ mod tests {
         assert_eq!(rb_dev_gen, binding_b.generation.0);
 
         // A's controller must now be untouched (only B active)
-        assert_eq!(kernel.device_registry.devices[0].controller.free_slot_count(), 2,
+        assert_eq!(kernel.device_registry.devices[0].controller.as_block().free_slot_count(), 2,
             "ΔController_A = 0 after submit to B");
 
         // Complete B
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         let buf_data2 = kernel.fabric.read_physical(0x010000, 512);
         assert!(buf_data2.iter().all(|&b| b == 0xBB),
@@ -16875,7 +17027,7 @@ mod tests {
         assert_eq!(r4, binding_a.generation.0);
 
         // B untouched
-        assert_eq!(kernel.device_registry.devices[1].controller.free_slot_count(), 2,
+        assert_eq!(kernel.device_registry.devices[1].controller.as_block().free_slot_count(), 2,
             "transfer of A must not touch B");
 
         eprintln!("9.3b.4-2: transferred capability routes to same device ✓");
@@ -16922,8 +17074,8 @@ mod tests {
         assert_ne!(r0, 0, "stale generation must fail submission");
 
         // Both controllers untouched
-        assert_eq!(kernel.device_registry.devices[0].controller.free_slot_count(), 2);
-        assert_eq!(kernel.device_registry.devices[1].controller.free_slot_count(), 2);
+        assert_eq!(kernel.device_registry.devices[0].controller.as_block().free_slot_count(), 2);
+        assert_eq!(kernel.device_registry.devices[1].controller.as_block().free_slot_count(), 2);
 
         eprintln!("9.3b.4-3: stale binding rejected ✓");
     }
@@ -17062,7 +17214,7 @@ mod tests {
         }
 
         // Drain — B's completion arrives, A is still nonterminal
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // DECISIVE ASSERTION: IoWait(A,0,0) must NOT be woken by
         // Completion(B,0,0) even though the local handles are identical.
@@ -17088,7 +17240,7 @@ mod tests {
         for _ in 0..10 {
             kernel.tick_devices(d);
         }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // NOW IoWait(A) must be woken by A's own completion
         assert!(kernel.processes[d].io_wait.is_none(),
@@ -17150,7 +17302,7 @@ mod tests {
 
         // Complete both
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // Both retained in ledger with completions
         assert_eq!(kernel.processes[d].async_requests.len(), 2);
@@ -17245,7 +17397,7 @@ mod tests {
 
         // Complete and reap A — A is now quiescent for (C,D)
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
         let r0_reap_a = do_dev_wait(
             &mut kernel, d, ha_slot, ha_gen, dev_a_obj, dev_a_gen,
         );
@@ -17494,7 +17646,7 @@ mod tests {
             target_offset: 0, source_domain: dom_p1,
             source_authority_id: None, delegation_id: None,
         };
-        let handle_a = match kernel.device_registry.devices[0].controller
+        let handle_a = match kernel.device_registry.devices[0].controller.as_block_mut()
             .submit(req_a, &mut kernel.fabric)
         {
             SubmitResult::Accepted(h) => h,
@@ -17506,7 +17658,7 @@ mod tests {
             target_offset: 0, source_domain: dom_p2,
             source_authority_id: None, delegation_id: None,
         };
-        let handle_b = match kernel.device_registry.devices[1].controller
+        let handle_b = match kernel.device_registry.devices[1].controller.as_block_mut()
             .submit(req_b, &mut kernel.fabric)
         {
             SubmitResult::Accepted(h) => h,
@@ -17610,7 +17762,7 @@ mod tests {
         eprintln!("9.3b.4-9: aggregate interrupt, three-process routing ✓");
         eprintln!("  tick_devices(P3) → pending.device = true");
         eprintln!("  deliver_pending(P3) → EventCause::DeviceInterrupt");
-        eprintln!("  handle_async_interrupt(P3) → drain_block_completions()");
+        eprintln!("  handle_async_interrupt(P3) → drain_completions()");
         eprintln!("  Completion_A → P1, Completion_B → P2, ΔP3 = 0");
         eprintln!("  InterruptTarget ≠ CompletionOwner ✓");
     }
@@ -17640,7 +17792,7 @@ mod tests {
 
         // Complete the request
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
 
         // DEV_WAIT must still work — namespace qualification, not authority
         let r0_wait = do_dev_wait(
@@ -17723,7 +17875,7 @@ mod tests {
 
         // ── Verify the real entry is still reapable ──
         for _ in 0..10 { kernel.tick_devices(d); }
-        kernel.drain_block_completions();
+        kernel.drain_completions();
         let r0_valid = do_dev_wait(
             &mut kernel, d, ha_slot, ha_gen, dev_a_obj, dev_a_gen,
         );
@@ -17733,5 +17885,322 @@ mod tests {
         eprintln!("9.3b.4-11: DEV_WAIT ticket hardening ✓");
         eprintln!("  R1 overflow → error 1, Δ=0");
         eprintln!("  Unknown (R3,R4) → error 1, Δ=0");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 9.3c — Generic Device Substrate refinement witnesses
+    // ═══════════════════════════════════════════════════════════════
+    //
+    // Formal basis: anka_generic_device_refinement.kleis GENDEV-1..13.
+    //
+    // These tests witness that wrapping BlockController in
+    // DeviceController::Block preserves all observable behavior.
+    //
+    // GENDEV-9/10 (InterruptTarget ≠ CompletionOwner) is already
+    // witnessed by p93b4_9_aggregate_interrupt_three_process.
+    // GENDEV-11 (ambient rights cannot rescue) is already witnessed
+    // by the 9.3a exact-presented-authority hostile suite.
+
+    // ─── 9.3c test 1: Generic Block observables preserved ───
+    //
+    // GENDEV-1..4: tick, autonomous, attention, pair-count through
+    // the DeviceController enum produce identical results to direct
+    // BlockController access.
+
+    #[test]
+    fn p93c_generic_block_observables_preserved() {
+        use super::super::block::{BlockStorage, BlockController, BlockRequest, SubmitResult};
+
+        let mut fabric = Fabric::new(0x100000);
+        let (core, dom, text, _data, _stack) =
+            create_process(&mut fabric, CPU0, "obs", 0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0); asm.movi(R0, SYS_EXIT as i32); asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let buf = fabric.alloc_object("buf", 0x1000, ObjectKind::Memory);
+        fabric.place_object(buf, 0x080000);
+        fabric.grant(dom, buf, 0, 0x1000, Permissions::WRITE);
+
+        let mut storage = BlockStorage::new(4, 512);
+        storage.write_block(0, &[0xAA; 512]);
+        let ctrl = BlockController::new(storage, 3, AgentId(50));
+
+        let mut kernel = Kernel::new(fabric);
+        let key = kernel.spawn(core);
+        let binding = kernel.register_block_device(ctrl).expect("register");
+
+        // Initial: no autonomous work, no attention
+        assert!(!kernel.device_registry.devices[0].controller.has_autonomous_work(),
+            "GENDEV-2: no work initially");
+        assert!(!kernel.device_registry.devices[0].controller.requires_attention(),
+            "GENDEV-3: no attention initially");
+        assert_eq!(kernel.device_registry.devices[0].controller.completion_count(), 0);
+
+        // Submit a request through the controller
+        let rk = RequesterKey { slot: 0, generation: kernel.processes[0].generation };
+        let req = BlockRequest {
+            block_number: 0, requester: rk, target_object: buf,
+            target_offset: 0, source_domain: dom,
+            source_authority_id: None, delegation_id: None,
+        };
+        let handle = match kernel.device_registry.devices[0].controller
+            .as_block_mut().submit(req, &mut kernel.fabric)
+        {
+            SubmitResult::Accepted(h) => h,
+            other => panic!("submit failed: {:?}", other),
+        };
+
+        // GENDEV-2: autonomous work present after submit
+        assert!(kernel.device_registry.devices[0].controller.has_autonomous_work(),
+            "GENDEV-2: autonomous after submit");
+
+        // GENDEV-4: pair count through generic surface
+        let pair_key = ProcessKey { slot: 0, generation: kernel.processes[0].generation };
+        let pair_peer = ProcessKey { slot: 1, generation: 0 };
+        assert_eq!(
+            kernel.device_registry.devices[0].controller
+                .nonterminal_pair_request_count(&pair_key, &pair_peer), 0,
+            "GENDEV-4: unrelated pair has count 0"
+        );
+
+        // GENDEV-1: tick through generic surface advances to completion
+        for _ in 0..10 {
+            kernel.device_registry.devices[0].controller.tick(&mut kernel.fabric);
+        }
+
+        // GENDEV-3: attention after completion
+        assert!(kernel.device_registry.devices[0].controller.requires_attention(),
+            "GENDEV-3: attention after completion");
+        assert_eq!(kernel.device_registry.devices[0].controller.completion_count(), 1);
+
+        // Consume and verify
+        let comp = kernel.device_registry.devices[0].controller.consume_completion().unwrap();
+        assert_eq!(comp.handle(), handle);
+        assert_eq!(comp.requester(), rk);
+
+        eprintln!("9.3c-1: generic Block observables preserved ✓");
+        eprintln!("  GENDEV-1: tick, GENDEV-2: autonomous, GENDEV-3: attention, GENDEV-4: pair count");
+    }
+
+    // ─── 9.3c test 2: Generic binding identity preserved ───
+    //
+    // GENDEV-5: DeviceBinding is unchanged after wrapping in
+    // DeviceController::Block.
+
+    #[test]
+    fn p93c_generic_binding_identity_preserved() {
+        use super::super::block::{BlockStorage, BlockController};
+
+        let mut fabric = Fabric::new(0x100000);
+        let (core, _dom, text, _data, _stack) =
+            create_process(&mut fabric, CPU0, "bind", 0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0); asm.movi(R0, SYS_EXIT as i32); asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, _dom);
+
+        let storage = BlockStorage::new(4, 512);
+        let ctrl = BlockController::new(storage, 1, AgentId(50));
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+
+        let binding = kernel.register_block_device(ctrl).expect("register");
+
+        // GENDEV-5: the binding stored in the DeviceSlot matches exactly
+        let slot = &kernel.device_registry.devices[0];
+        assert_eq!(slot.binding, binding,
+            "GENDEV-5: DeviceBinding must be preserved exactly");
+
+        // The binding's object is a real Fabric object at the right generation
+        let obj = kernel.fabric.objects.get(&binding.object).unwrap();
+        assert_eq!(obj.generation, binding.generation,
+            "GENDEV-5: generation must match Fabric object");
+        assert_eq!(obj.kind, ObjectKind::Device,
+            "GENDEV-5: must be a Device object");
+
+        // Registry lookup by binding succeeds
+        assert!(kernel.device_registry.lookup(binding).is_some(),
+            "GENDEV-5: lookup by exact binding must succeed");
+
+        eprintln!("9.3c-2: generic binding identity preserved ✓");
+    }
+
+    // ─── 9.3c test 3: Generic registry pair count = block aggregate ───
+    //
+    // GENDEV-6: with two all-Block devices, the registry-wide pair
+    // count equals the sum of the individual block controller counts.
+
+    #[test]
+    fn p93c_generic_registry_pair_count_equals_block() {
+        use super::super::block::{BlockStorage, BlockController, BlockRequest, SubmitResult};
+
+        let (mut kernel, key_c, key_d, dev_a_h, dev_b_h, buf_h,
+             binding_a, binding_b) = two_device_setup();
+        let d = key_d.slot;
+
+        // Submit one request to each device
+        let r0_a = do_async_submit(&mut kernel, d, &dev_a_h, 0, &buf_h);
+        assert_eq!(r0_a, 0, "submit to A");
+        let r0_b = do_async_submit(&mut kernel, d, &dev_b_h, 0, &buf_h);
+        assert_eq!(r0_b, 0, "submit to B");
+
+        // GENDEV-6: registry pair count = sum of individual counts
+        let count_a = kernel.device_registry.devices[0].controller
+            .nonterminal_pair_request_count(&key_c, &key_d);
+        let count_b = kernel.device_registry.devices[1].controller
+            .nonterminal_pair_request_count(&key_c, &key_d);
+        let count_registry = kernel.device_registry
+            .nonterminal_pair_request_count(&key_c, &key_d);
+
+        assert_eq!(count_a + count_b, count_registry,
+            "GENDEV-6: Count_registry = Count_A + Count_B");
+        assert_eq!(count_registry, 2,
+            "GENDEV-6: one request per device = 2 total");
+
+        eprintln!("9.3c-3: registry pair count = block aggregate ✓");
+        eprintln!("  Count_A={}, Count_B={}, Count_registry={}",
+            count_a, count_b, count_registry);
+    }
+
+    // ─── 9.3c test 4: Registry order independence ───
+    //
+    // GENDEV-13: pair quiescence count is independent of the order
+    // devices appear in the registry vector.
+
+    #[test]
+    fn p93c_generic_registry_order_independent() {
+        use super::super::block::{BlockStorage, BlockController, BlockRequest, SubmitResult};
+
+        let (mut kernel, key_c, key_d, dev_a_h, dev_b_h, buf_h,
+             binding_a, binding_b) = two_device_setup();
+        let d = key_d.slot;
+
+        // Submit one request to each device
+        let r0_a = do_async_submit(&mut kernel, d, &dev_a_h, 0, &buf_h);
+        assert_eq!(r0_a, 0);
+        let r0_b = do_async_submit(&mut kernel, d, &dev_b_h, 0, &buf_h);
+        assert_eq!(r0_b, 0);
+
+        // Count in current order [A, B]
+        let count_forward = kernel.device_registry
+            .nonterminal_pair_request_count(&key_c, &key_d);
+
+        // Swap the devices in the registry
+        kernel.device_registry.devices.swap(0, 1);
+
+        // Count in reversed order [B, A]
+        let count_reversed = kernel.device_registry
+            .nonterminal_pair_request_count(&key_c, &key_d);
+
+        assert_eq!(count_forward, count_reversed,
+            "GENDEV-13: Count([A,B]) = Count([B,A])");
+        assert_eq!(count_forward, 2);
+
+        // Restore order for cleanliness
+        kernel.device_registry.devices.swap(0, 1);
+
+        eprintln!("9.3c-4: registry order independent ✓");
+        eprintln!("  Count([A,B])={}, Count([B,A])={}", count_forward, count_reversed);
+    }
+
+    // ─── 9.3c test 5: Block completion round-trip preserves payload ───
+    //
+    // Construct a real BlockCompletion, pass it through
+    // DeviceController::consume_completion(), and prove the resulting
+    // DeviceCompletion::Block(c) contains the exact original payload:
+    //   requester, handle, status, block_number, delegation_id.
+    //
+    // Wrap_generic(Block) loses no block semantics.
+
+    #[test]
+    fn p93c_block_completion_round_trip_preserves_payload() {
+        use super::super::block::{BlockStorage, BlockController, BlockRequest, SubmitResult};
+
+        let mut fabric = Fabric::new(0x100000);
+        let (core, dom, text, _data, _stack) =
+            create_process(&mut fabric, CPU0, "rt", 0x000000, 0x010000, 0x020000);
+        install_trap_handler(&mut fabric, 0x000000, 0x4000);
+        let mut asm = Asm64::new();
+        asm.movi(R1, 0); asm.movi(R0, SYS_EXIT as i32); asm.trap(0);
+        fabric.write_physical(0x000000, &asm.to_bytes());
+        seal_code_object(&mut fabric, text, dom);
+
+        let buf = fabric.alloc_object("buf", 0x1000, ObjectKind::Memory);
+        fabric.place_object(buf, 0x080000);
+        fabric.grant(dom, buf, 0, 0x1000, Permissions::WRITE);
+
+        let mut storage = BlockStorage::new(4, 512);
+        storage.write_block(2, &[0xCC; 512]);
+        let ctrl = BlockController::new(storage, 1, AgentId(50));
+
+        let mut kernel = Kernel::new(fabric);
+        let key = kernel.spawn(core);
+
+        // Create a delegation for provenance tracking
+        let tid = kernel.alloc_delegation_id(
+            ProcessKey { slot: 0, generation: kernel.processes[0].generation },
+            ProcessKey { slot: 0, generation: kernel.processes[0].generation },
+        ).expect("alloc delegation");
+        let src_aid = kernel.fabric.alloc_authority_id().expect("alloc authority");
+        kernel.fabric.grant_with_authority_id(
+            dom, buf, 0, 512, Permissions::WRITE, src_aid,
+        ).expect("grant tagged authority");
+
+        let binding = kernel.register_block_device(ctrl).expect("register");
+
+        // Submit with explicit delegation_id and authority
+        let rk = RequesterKey { slot: 0, generation: kernel.processes[0].generation };
+        let req = BlockRequest {
+            block_number: 2,
+            requester: rk,
+            target_object: buf,
+            target_offset: 0,
+            source_domain: dom,
+            source_authority_id: Some(src_aid),
+            delegation_id: Some(tid),
+        };
+        let handle = match kernel.device_registry.devices[0].controller
+            .as_block_mut().submit(req, &mut kernel.fabric)
+        {
+            SubmitResult::Accepted(h) => h,
+            other => panic!("submit failed: {:?}", other),
+        };
+
+        // Tick to completion
+        for _ in 0..10 {
+            kernel.device_registry.devices[0].controller.tick(&mut kernel.fabric);
+        }
+
+        // Consume through the generic DeviceController surface
+        let generic_comp = kernel.device_registry.devices[0].controller
+            .consume_completion()
+            .expect("must have a completion");
+
+        // Generic accessors work
+        assert_eq!(generic_comp.handle(), handle, "handle preserved");
+        assert_eq!(generic_comp.requester(), rk, "requester preserved");
+        assert!(matches!(generic_comp.status(),
+            super::super::block::CompletionStatus::Success),
+            "status preserved");
+
+        // Unwrap the lossless envelope — block-specific fields intact
+        let DeviceCompletion::Block(block_comp) = generic_comp;
+        assert_eq!(block_comp.handle, handle, "inner handle");
+        assert_eq!(block_comp.requester, rk, "inner requester");
+        assert_eq!(block_comp.block_number, 2, "block_number preserved");
+        assert_eq!(block_comp.delegation_id, Some(tid),
+            "delegation_id preserved — provenance is architectural");
+        assert!(matches!(block_comp.status,
+            super::super::block::CompletionStatus::Success),
+            "inner status");
+
+        eprintln!("9.3c-5: block completion round-trip preserves payload ✓");
+        eprintln!("  handle, requester, status, block_number, delegation_id all intact");
+        eprintln!("  Wrap_generic(Block) loses no block semantics");
     }
 }
