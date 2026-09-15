@@ -18700,23 +18700,22 @@ mod tests {
         eprintln!("9.3d-5: ambient EVENT_WAIT cannot rescue ✓");
     }
 
-    // ─── 9.3d test 6: Transfer 0x05→0x04, child DEV_EVENT_WAIT ───
+    // ─── 9.3d test 6: SYS_SEND_CAP(0x05→0x04) → child DEV_EVENT_WAIT ───
     //
-    // Reachable witness for:
-    //   Transfer(EVENT_WAIT) ⇒ TransferredCapUsableForEventWait
+    // End-to-end reachable witness for:
+    //   Parent(0x05) →[SYS_SEND_CAP]→ Child(0x04) →[SYS_DEV_EVENT_WAIT]→ Blocked →[Event_A]→ Awake
     //
-    // Parent owns 0x05 (SUBMIT_READ | EVENT_WAIT).  Transfer derives
-    // a child cap with EVENT_WAIT only (0x04).  Child invokes
-    // SYS_DEV_EVENT_WAIT through the transferred cap — the exact
-    // authority validation succeeds — and child blocks on (binding, e).
-    // Epoch advance then wakes the child normally.
+    // The transfer goes through the actual guest-visible SYS_SEND_CAP
+    // syscall path, not internal fabric primitives.  This proves that
+    // adding EVENT_WAIT=0x04 to the rights encoding is correctly
+    // accepted by the capability-transfer machinery.
     //
     // The post-admission non-reauthorization property
     //   (CapabilityPossession ∉ Delivery)
     // is a Kleis theorem + implementation invariant: reevaluate_event_waits
     // never re-resolves the capability.  It is not exercised as a
-    // reachable witness here because a blocked single-threaded process
-    // has no scheduler-reachable path to voluntarily drop its own cap.
+    // reachable witness because a blocked single-threaded process has
+    // no scheduler-reachable path to voluntarily drop its own cap.
 
     #[test]
     fn p93d_event_wait_transfer_blocks_and_wakes() {
@@ -18758,26 +18757,36 @@ mod tests {
             key_p.slot, binding.object, DeviceRights(0x05),
         ).expect("parent device cap");
 
-        // Transfer parent → child: EVENT_WAIT only (0x04)
-        let parent_resolved = kernel.resolve_capability(key_p.slot, parent_handle).unwrap();
-        let parent_aid = parent_resolved.authority_id();
-        let child_aid = kernel.fabric.alloc_authority_id().expect("alloc AID");
-        kernel.fabric.derive_device_from_authority_id(
-            kernel.processes[key_p.slot].core.domain,
-            parent_aid,
-            binding.object,
-            binding.generation,
-            DeviceRights(0x05),
-            kernel.processes[key_c.slot].core.domain,
-            DeviceRights::EVENT_WAIT,
-            child_aid,
-        ).expect("device transfer 0x05→0x04");
+        // ── SYS_SEND_CAP: parent(0x05) → child(EVENT_WAIT=0x04) ──
+        let r0 = do_dev_send_cap(
+            &mut kernel,
+            key_p.slot,
+            key_c.slot,
+            key_c.generation,
+            &parent_handle,
+            0,                                  // R5 (unused for device)
+            0,                                  // R6 (unused for device)
+            DeviceRights::EVENT_WAIT.0 as u64,  // R7 = 0x04
+            42,                                 // value
+        );
+        assert_eq!(r0, 0, "SYS_SEND_CAP 0x05 -> 0x04 must succeed");
 
-        let child_handle = kernel.processes[key_c.slot].cap_table.as_mut().unwrap()
-            .install_device(
-                binding.object, binding.generation,
-                DeviceRights::EVENT_WAIT, child_aid, None,
-            ).expect("install child device cap");
+        // Receive the transferred capability from child's mailbox
+        let msg = kernel.mailboxes[key_c.slot]
+            .pop()
+            .expect("child must receive transferred device capability");
+        assert_eq!(msg.value, 42, "message value preserved");
+        let child_handle = msg.cap
+            .expect("transferred message must carry capability");
+
+        // Verify the transferred cap resolves as EVENT_WAIT device
+        let resolved = kernel.resolve_capability(key_c.slot, child_handle)
+            .expect("transferred EVENT_WAIT capability must resolve");
+        assert!(resolved.is_device(), "child cap must be Device");
+        assert_eq!(resolved.as_device_rights(), DeviceRights::EVENT_WAIT,
+            "child rights must be exactly EVENT_WAIT (0x04)");
+        assert_eq!(resolved.object(), binding.object,
+            "child cap must reference the correct device object");
 
         // ── Child invokes SYS_DEV_EVENT_WAIT through transferred cap ──
         push_event_wait_frame(&mut kernel, key_c.slot, child_handle, 0);
@@ -18830,10 +18839,10 @@ mod tests {
         assert!(!kernel.processes[key_c.slot].core.halted,
             "woken child must not be halted");
 
-        eprintln!("9.3d-6: transfer 0x05→0x04 → child DEV_EVENT_WAIT ✓");
-        eprintln!("  Transfer(EVENT_WAIT) ⇒ TransferredCapUsableForEventWait");
-        eprintln!("  Exact authority validation succeeds on derived cap");
-        eprintln!("  Child blocks on (DeviceBinding, epoch) and wakes normally");
+        eprintln!("9.3d-6: SYS_SEND_CAP(0x05->0x04) -> child DEV_EVENT_WAIT ✓");
+        eprintln!("  Parent(0x05) ->[SYS_SEND_CAP]-> Child(0x04)");
+        eprintln!("  ->[SYS_DEV_EVENT_WAIT]-> Blocked ->[Event_A]-> Awake");
+        eprintln!("  Guest-visible transfer path produces EVENT_WAIT-usable cap");
     }
 
     // ─── 9.3d test 7: IRQ target ≠ event owner ───
