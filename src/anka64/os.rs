@@ -744,14 +744,6 @@ impl DeviceController {
         self.nonterminal_pair_request_count(client, peer) != 0
     }
 
-    /// Number of free request slots (block-specific but useful for
-    /// capacity checks before submission).
-    pub fn free_slot_count(&self) -> usize {
-        match self {
-            DeviceController::Block(c) => c.free_slot_count(),
-        }
-    }
-
     /// Unwrap the inner BlockController (shared reference).
     /// Panics if this is not a Block device.
     pub fn as_block(&self) -> &BlockController {
@@ -873,7 +865,6 @@ impl DeviceRegistry {
         peer: &ProcessKey,
     ) -> usize {
         self.devices.iter()
-            .filter(|d| d.controller.has_nonterminal_pair_request(client, peer))
             .map(|d| d.controller.nonterminal_pair_request_count(client, peer))
             .sum()
     }
@@ -4073,7 +4064,8 @@ impl Kernel {
         {
             let dev_slot = self.device_registry.lookup(dev_binding)
                 .expect("preflight validated binding exists");
-            if dev_slot.controller.free_slot_count() == 0 {
+            let DeviceController::Block(ctrl) = &dev_slot.controller;
+            if ctrl.free_slot_count() == 0 {
                 self.fail_dev_submit(idx, 9);
                 return;
             }
@@ -15890,7 +15882,7 @@ mod tests {
             "A must have completion in ledger");
 
         // Controller slot should be free now
-        assert_eq!(kernel.device_registry.devices[0].controller.free_slot_count(), 2);
+        assert_eq!(kernel.device_registry.devices[0].controller.as_block().free_slot_count(), 2);
 
         // Submit B on what was A's slot — will get a higher generation
         let r0_b = do_async_submit(&mut kernel, d, &dev_h, 1, &buf_h);
@@ -16109,14 +16101,14 @@ mod tests {
         let r0_b = do_async_submit(&mut kernel, d, &dev_h, 1, &buf_h);
         assert_eq!(r0_b, 0);
 
-        assert_eq!(kernel.device_registry.devices[0].controller.free_slot_count(), 0,
+        assert_eq!(kernel.device_registry.devices[0].controller.as_block().free_slot_count(), 0,
             "both controller slots must be occupied");
 
         // Snapshot all quantities that must not change
         let domain_count_before = kernel.fabric.domain_count();
         let authority_id_before = kernel.fabric.next_authority_id();
         let ledger_len_before = kernel.processes[d].async_requests.len();
-        let controller_free_before = kernel.device_registry.devices[0].controller.free_slot_count();
+        let controller_free_before = kernel.device_registry.devices[0].controller.as_block().free_slot_count();
 
         // Third async submission — must fail (controller busy)
         let r0_c = do_async_submit(&mut kernel, d, &dev_h, 2, &buf_h);
@@ -16130,7 +16122,7 @@ mod tests {
             "ΔAuthorityIds must be 0 on rejected submission");
         assert_eq!(kernel.processes[d].async_requests.len(), ledger_len_before,
             "ΔLedger must be 0 on rejected submission");
-        assert_eq!(kernel.device_registry.devices[0].controller.free_slot_count(),
+        assert_eq!(kernel.device_registry.devices[0].controller.as_block().free_slot_count(),
             controller_free_before,
             "ΔController must be 0 on rejected submission");
 
@@ -16226,7 +16218,7 @@ mod tests {
         // Snapshot quantities
         let domain_count_before = kernel.fabric.domain_count();
         let authority_id_before = kernel.fabric.next_authority_id();
-        let controller_free_before = kernel.device_registry.devices[0].controller.free_slot_count();
+        let controller_free_before = kernel.device_registry.devices[0].controller.as_block().free_slot_count();
 
         // 17th submit must fail
         let r0_overflow = do_async_submit(&mut kernel, d, &dev_handle, 0, &buf_handle);
@@ -16238,7 +16230,7 @@ mod tests {
             "ΔDomainCount must be 0");
         assert_eq!(kernel.fabric.next_authority_id(), authority_id_before,
             "ΔAuthorityIds must be 0");
-        assert_eq!(kernel.device_registry.devices[0].controller.free_slot_count(),
+        assert_eq!(kernel.device_registry.devices[0].controller.as_block().free_slot_count(),
             controller_free_before,
             "controller slots must not change");
         assert_eq!(kernel.processes[d].async_requests.len(), MAX_ASYNC_REQUESTS,
@@ -16947,7 +16939,7 @@ mod tests {
             "R4 must be A's Generation");
 
         // B's controller must be completely untouched
-        assert_eq!(kernel.device_registry.devices[1].controller.free_slot_count(), 2,
+        assert_eq!(kernel.device_registry.devices[1].controller.as_block().free_slot_count(), 2,
             "ΔController_B = 0 after submit to A");
 
         // Complete A
@@ -16974,7 +16966,7 @@ mod tests {
         assert_eq!(rb_dev_gen, binding_b.generation.0);
 
         // A's controller must now be untouched (only B active)
-        assert_eq!(kernel.device_registry.devices[0].controller.free_slot_count(), 2,
+        assert_eq!(kernel.device_registry.devices[0].controller.as_block().free_slot_count(), 2,
             "ΔController_A = 0 after submit to B");
 
         // Complete B
@@ -17035,7 +17027,7 @@ mod tests {
         assert_eq!(r4, binding_a.generation.0);
 
         // B untouched
-        assert_eq!(kernel.device_registry.devices[1].controller.free_slot_count(), 2,
+        assert_eq!(kernel.device_registry.devices[1].controller.as_block().free_slot_count(), 2,
             "transfer of A must not touch B");
 
         eprintln!("9.3b.4-2: transferred capability routes to same device ✓");
@@ -17082,8 +17074,8 @@ mod tests {
         assert_ne!(r0, 0, "stale generation must fail submission");
 
         // Both controllers untouched
-        assert_eq!(kernel.device_registry.devices[0].controller.free_slot_count(), 2);
-        assert_eq!(kernel.device_registry.devices[1].controller.free_slot_count(), 2);
+        assert_eq!(kernel.device_registry.devices[0].controller.as_block().free_slot_count(), 2);
+        assert_eq!(kernel.device_registry.devices[1].controller.as_block().free_slot_count(), 2);
 
         eprintln!("9.3b.4-3: stale binding rejected ✓");
     }
