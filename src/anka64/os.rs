@@ -1587,6 +1587,9 @@ impl Kernel {
         self.processes[slot].exit_code = exit_code;
         self.processes[slot].result = Some(result);
         self.processes[slot].state = ProcessState::Zombie;
+        // Death clears the event wait — an accepted I/O may outlive
+        // process death, but a sleeping event subscription need not.
+        self.processes[slot].event_wait = None;
 
         let key = ProcessKey {
             slot,
