@@ -1,0 +1,335 @@
+// =============================================================================
+// Anka64 User-Space NIC (Phase 9.3e-formal)
+// =============================================================================
+//
+// Extension of Phase 9.3d user-space device events. No new axioms.
+//
+// The first NIC is intentionally minimal.  Its new semantics are:
+//   * RX packet arrival is unsolicited: no pre-existing request is required,
+//   * admitted RX packets first enter bounded device-private state,
+//   * arrival advances the NIC activity epoch but does NOT mutate guest memory,
+//   * the guest driver later presents an exact NIC capability + exact buffer
+//     authority to copy one queued RX frame by DMA,
+//   * TX is an explicit request using exact NIC_TX authority + READ authority,
+//   * RX DMA requires WRITE authority; TX DMA requires READ authority,
+//   * all routing remains exact DeviceBinding-qualified,
+//   * generic event delivery remains ProcessKey/DeviceBinding/epoch based and
+//     independent of IRQ target and request existence,
+//   * block and NIC instances remain isolated through the common substrate.
+//
+// This deliberately does NOT formalize Ethernet parsing, MAC addresses,
+// EtherTypes, ARP, IPv4, descriptor layout, or network-stack policy.
+// =============================================================================
+
+import "anka_user_device_events.kleis"
+
+// -----------------------------------------------------------------------------
+// NIC kind + rights
+// -----------------------------------------------------------------------------
+
+// Phase 9.3c reserved GENERIC_DEVICE_OTHER for the first non-Block device.
+define GENERIC_DEVICE_NIC = GENERIC_DEVICE_OTHER
+
+// Existing bits:
+//   0x01 SUBMIT_READ (Block)
+//   0x02 undefined
+//   0x04 EVENT_WAIT
+// New NIC operation rights:
+//   0x08 NIC_RX  -- copy a queued RX frame into guest memory
+//   0x10 NIC_TX  -- transmit bytes read from guest memory
+
+define DEVICE_RIGHT_NIC_RX = bvconst(8,8)
+define DEVICE_RIGHT_NIC_TX = bvconst(16,8)
+define DEVICE_RIGHTS_ALL_93E = bvconst(29,8) // 0x1D
+
+// Exact-presented NIC operation authority. ambient_rights is deliberately
+// ignored, preserving the exact-presented-authority law.
+define nic_operation_authorized(
+    presented_object : BitVec64,
+    presented_generation : BitVec64,
+    binding_object : BitVec64,
+    binding_generation : BitVec64,
+    presented_rights : BitVec8,
+    ambient_rights : BitVec8,
+    required_right : BitVec8
+) = routes_to_device_binding(
+        presented_object,presented_generation,
+        binding_object,binding_generation,
+        bvconst(1,1)
+    )
+    ∧ device_request_allowed(presented_rights,required_right)
+
+// -----------------------------------------------------------------------------
+// Unsolicited RX event semantics
+// -----------------------------------------------------------------------------
+
+// A packet accepted into the bounded NIC-private RX queue is serviceable
+// activity. submitted_request is intentionally ignored: RX arrival is not a
+// completion of a guest request.
+define nic_rx_activity(
+    packet_arrived : Bool,
+    rx_queue_has_capacity : Bool,
+    submitted_request : Bool
+) = packet_arrived ∧ rx_queue_has_capacity
+
+// The generic activity epoch advances exactly when a packet is admitted to the
+// NIC-private RX queue.  Runtime uses checked_add on u64; this Boolean relation
+// models the semantic transition without introducing modular-wrap claims.
+define nic_rx_epoch_changed(rx_activity : Bool) = rx_activity
+
+// Event delivery reuses the 9.3d accepted-wait refinement.  request_exists is
+// deliberately not consulted; interrupt_target_is_waiter is already ignored by
+// accepted_event_delivery.
+define nic_rx_event_delivers(
+    accepted_wait : Bool,
+    process_matches : Bool,
+    device_matches : Bool,
+    epoch_changed : Bool,
+    request_exists : Bool,
+    interrupt_target_is_waiter : Bool
+) = accepted_wait
+    ∧ process_matches
+    ∧ device_matches
+    ∧ epoch_changed
+
+// Unsolicited arrival itself has no guest-memory side effect.  Guest memory can
+// change only through a separately admitted RX-copy DMA transaction.
+define nic_arrival_mutates_guest_memory(
+    rx_activity : Bool,
+    rx_copy_accepted : Bool
+) = rx_activity ∧ rx_copy_accepted
+
+// -----------------------------------------------------------------------------
+// NIC-specific DMA admission
+// -----------------------------------------------------------------------------
+
+// RX copies device-private queued bytes INTO guest memory, hence WRITE authority.
+// cap_still_present is intentionally ignored after acceptance: the controller
+// owns the finite accepted DMA operation. Generation/span are revalidated at
+// commit just as in the existing Fabric DMA model.
+define nic_rx_dma_allowed(
+    packet_available : Bool,
+    exact_nic_binding : Bool,
+    presented_nic_rx_right : Bool,
+    buffer_generation_current : Bool,
+    buffer_write_authority : Bool,
+    delegated_span_ok : Bool,
+    cap_still_present : Bool
+) = packet_available
+    ∧ exact_nic_binding
+    ∧ presented_nic_rx_right
+    ∧ buffer_generation_current
+    ∧ buffer_write_authority
+    ∧ delegated_span_ok
+
+// TX reads bytes FROM guest memory, hence READ authority.
+define nic_tx_dma_allowed(
+    exact_nic_binding : Bool,
+    presented_nic_tx_right : Bool,
+    buffer_generation_current : Bool,
+    buffer_read_authority : Bool,
+    delegated_span_ok : Bool,
+    cap_still_present : Bool
+) = exact_nic_binding
+    ∧ presented_nic_tx_right
+    ∧ buffer_generation_current
+    ∧ buffer_read_authority
+    ∧ delegated_span_ok
+
+
+// -----------------------------------------------------------------------------
+// Pair quiescence + autonomous-progress separation
+// -----------------------------------------------------------------------------
+
+// Queued device-private RX frames are serviceable state, not pair-attributed
+// accepted DMA requests.  Only finite accepted DMA work contributes to the
+// client/driver pair count used by PeerDied.
+define nic_pair_request_count(
+    finite_dma_count : BitVec3,
+    rx_queue_nonempty : Bool
+) : BitVec3 = finite_dma_count
+
+// Likewise a queued frame by itself is not autonomous machine work: no state
+// will advance without a driver action.  Only active finite DMA is autonomous.
+define nic_autonomous_work(
+    active_dma : Bool,
+    rx_queue_nonempty : Bool
+) = active_dma
+
+// -----------------------------------------------------------------------------
+// Positive obligations
+// -----------------------------------------------------------------------------
+
+example "NIC93E-1 GENERIC EVENT: NIC wrapper exposes NIC activity epoch" {
+    assert(
+        ∀(b : BitVec64). ∀(n : BitVec64).
+            generic_event_sequence(GENERIC_DEVICE_NIC,b,n)=n
+    )
+}
+
+example "NIC93E-2 UNSOLICITED RX: request existence cannot change RX admission" {
+    assert(
+        nic_rx_activity(true,true,false)
+        = nic_rx_activity(true,true,true)
+    )
+}
+
+example "NIC93E-3 RX BACKPRESSURE: admitted RX activity implies private queue capacity" {
+    assert(
+        ∀(a : Bool). ∀(cap : Bool). ∀(req : Bool).
+            nic_rx_activity(a,cap,req) ⇒ cap
+    )
+}
+
+example "NIC93E-4 RX EPOCH: admitted RX activity advances the activity epoch" {
+    assert(
+        ∀(a : Bool). nic_rx_epoch_changed(a)=a
+    )
+}
+
+example "NIC93E-5 EVENT DELIVERY: request existence cannot change exact NIC event delivery" {
+    assert(
+        nic_rx_event_delivers(true,true,true,true,false,false)
+        = nic_rx_event_delivers(true,true,true,true,true,false)
+    )
+}
+
+example "NIC93E-6 IRQ SEPARATION: IRQ target relation cannot change NIC event ownership" {
+    assert(
+        nic_rx_event_delivers(true,true,true,true,false,false)
+        = nic_rx_event_delivers(true,true,true,true,false,true)
+    )
+}
+
+example "NIC93E-7 ARRIVAL SAFETY: guest mutation implies separately accepted RX copy" {
+    assert(
+        ∀(a : Bool). ∀(copy : Bool).
+            nic_arrival_mutates_guest_memory(a,copy) ⇒ copy
+    )
+}
+
+example "NIC93E-8 RX AUTHORITY: exact NIC_RX right authorizes exact NIC binding" {
+    assert(
+        nic_operation_authorized(
+            bvconst(40,64),bvconst(3,64),
+            bvconst(40,64),bvconst(3,64),
+            DEVICE_RIGHT_NIC_RX,DEVICE_RIGHTS_NONE,
+            DEVICE_RIGHT_NIC_RX
+        )
+    )
+}
+
+example "NIC93E-9 TX AUTHORITY: exact NIC_TX right authorizes exact NIC binding" {
+    assert(
+        nic_operation_authorized(
+            bvconst(40,64),bvconst(3,64),
+            bvconst(40,64),bvconst(3,64),
+            DEVICE_RIGHT_NIC_TX,DEVICE_RIGHTS_NONE,
+            DEVICE_RIGHT_NIC_TX
+        )
+    )
+}
+
+example "NIC93E-10 RIGHT SEPARATION: NIC_RX alone cannot authorize TX" {
+    assert(¬device_request_allowed(DEVICE_RIGHT_NIC_RX,DEVICE_RIGHT_NIC_TX))
+}
+
+example "NIC93E-11 RIGHT SEPARATION: NIC_TX alone cannot authorize RX" {
+    assert(¬device_request_allowed(DEVICE_RIGHT_NIC_TX,DEVICE_RIGHT_NIC_RX))
+}
+
+example "NIC93E-12 NO AMBIENT RESCUE: ambient NIC_RX cannot rescue presented EVENT_WAIT" {
+    assert(
+        ¬nic_operation_authorized(
+            bvconst(40,64),bvconst(3,64),
+            bvconst(40,64),bvconst(3,64),
+            DEVICE_RIGHT_EVENT_WAIT,DEVICE_RIGHT_NIC_RX,
+            DEVICE_RIGHT_NIC_RX
+        )
+    )
+}
+
+example "NIC93E-13 EXACT ROUTING: NIC A capability cannot operate NIC B" {
+    assert(
+        ¬nic_operation_authorized(
+            bvconst(40,64),bvconst(3,64),
+            bvconst(41,64),bvconst(3,64),
+            DEVICE_RIGHT_NIC_RX,DEVICE_RIGHTS_NONE,
+            DEVICE_RIGHT_NIC_RX
+        )
+    )
+}
+
+example "NIC93E-14 RX DMA: successful RX copy requires guest WRITE authority" {
+    assert(
+        ∀(p : Bool). ∀(b : Bool). ∀(r : Bool). ∀(g : Bool). ∀(w : Bool). ∀(s : Bool). ∀(c : Bool).
+            nic_rx_dma_allowed(p,b,r,g,w,s,c) ⇒ w
+    )
+}
+
+example "NIC93E-15 TX DMA: successful TX requires guest READ authority" {
+    assert(
+        ∀(b : Bool). ∀(r : Bool). ∀(g : Bool). ∀(rd : Bool). ∀(s : Bool). ∀(c : Bool).
+            nic_tx_dma_allowed(b,r,g,rd,s,c) ⇒ rd
+    )
+}
+
+example "NIC93E-16 RX DMA CONFINEMENT: RX commit implies delegated span is sufficient" {
+    assert(
+        ∀(p : Bool). ∀(b : Bool). ∀(r : Bool). ∀(g : Bool). ∀(w : Bool). ∀(s : Bool). ∀(c : Bool).
+            nic_rx_dma_allowed(p,b,r,g,w,s,c) ⇒ s
+    )
+}
+
+example "NIC93E-17 TX DMA CONFINEMENT: TX commit implies delegated span is sufficient" {
+    assert(
+        ∀(b : Bool). ∀(r : Bool). ∀(g : Bool). ∀(rd : Bool). ∀(s : Bool). ∀(c : Bool).
+            nic_tx_dma_allowed(b,r,g,rd,s,c) ⇒ s
+    )
+}
+
+example "NIC93E-18 ACCEPTED DMA LIFETIME: post-admission cap possession does not change RX commit eligibility" {
+    assert(
+        nic_rx_dma_allowed(true,true,true,true,true,true,false)
+        = nic_rx_dma_allowed(true,true,true,true,true,true,true)
+    )
+}
+
+example "NIC93E-19 ACCEPTED DMA LIFETIME: post-admission cap possession does not change TX commit eligibility" {
+    assert(
+        nic_tx_dma_allowed(true,true,true,true,true,false)
+        = nic_tx_dma_allowed(true,true,true,true,true,true)
+    )
+}
+
+example "NIC93E-20 BLOCK/NIC ISOLATION: same epoch on distinct bindings is not same device event" {
+    assert(
+        ¬device_event_identity_equal(
+            bvconst(10,64),bvconst(1,64),bvconst(9,64),
+            bvconst(40,64),bvconst(1,64),bvconst(9,64)
+        )
+    )
+}
+
+example "NIC93E-21 RIGHTS LATTICE: full NIC driver authority may attenuate to event-only child" {
+    assert(device_rights_subset(DEVICE_RIGHT_EVENT_WAIT,DEVICE_RIGHTS_ALL_93E))
+}
+
+example "NIC93E-22 DECODER COMPATIBILITY: bit 0x02 remains undefined after NIC rights are added" {
+    assert(¬device_rights_subset(bvconst(2,8),DEVICE_RIGHTS_ALL_93E))
+}
+
+
+example "NIC93E-23 QUIESCENCE: queued unsolicited RX does not become pair-attributed work" {
+    assert(
+        nic_pair_request_count(bvconst(0,3),false)
+        = nic_pair_request_count(bvconst(0,3),true)
+    )
+}
+
+example "NIC93E-24 PROGRESS: queued RX alone is not autonomous machine work" {
+    assert(
+        nic_autonomous_work(false,false)
+        = nic_autonomous_work(false,true)
+    )
+}
