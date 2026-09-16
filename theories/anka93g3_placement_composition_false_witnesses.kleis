@@ -61,3 +61,11 @@ example "FALSE-PMC93G3-9 committed placement creates authority" {
 example "FALSE-PMC93G3-10 committed placement creates delegation" {
     assert(pmc93g_creates_delegation(true)=true)
 }
+
+example "FALSE-PMC93G3-11 checked release may free bytes under a live Fabric placement" {
+    assert(pmc93g_checked_release_allowed(true,true))
+}
+
+example "FALSE-PMC93G3-12 checked release may succeed without allocator ownership" {
+    assert(pmc93g_checked_release_allowed(false,false))
+}

@@ -2246,3 +2246,159 @@ contracts; protocol parsing is deliberately not moved into the kernel.
 
 The 9.3e.4b/9.3f candidate source contains **822 Rust tests**.  Closure requires
 a local Rust run; the prior closed runtime baseline remains 802/802.
+
+### Stage 34: Dynamic Object and Process Placement (Phase 9.3g)
+
+Phase 9.3g removes per-object hexadecimal placement from the path that will
+construct the user-space network stack.  It is deliberately a placement layer,
+not a general VM subsystem, guest heap, pager, or filesystem.
+
+The trigger is the first multi-object user-space service composition:
+
+```text
+multiple dynamic objects / NIC-driver complexity -> extent allocator
+```
+
+The phase has two independent mechanisms.
+
+**PhysicalPlacementManager** owns one bounded page-aligned physical pool.  It
+uses deterministic first fit over a sorted/coalesced free list and keys live
+reservations by `ObjectId`:
+
+```text
+ObjectId -> PhysicalExtent
+```
+
+Generation is deliberately not a placement coordinate.  Sealing may advance an
+object generation while the same object remains at the same physical location.
+The allocator knows nothing about domains, permissions, capabilities,
+AuthorityIds, DelegationIds, or DMA.
+
+**VirtualLayoutBuilder** is a monotonic per-process region allocator.  Starting
+at the first page boundary after an executable image, it reserves page-rounded,
+non-overlapping virtual extents for later process structure such as stack, trap,
+and protocol buffers:
+
+```text
+image end -> stack -> trap -> future buffers/services
+```
+
+The architectural separation remains:
+
+```text
+object identity != authority != virtual placement != physical placement
+```
+
+#### Allocator/Fabric composition
+
+`PhysicalPlacementManager::allocate_and_place_object()` is the commit boundary
+between convenience policy and architectural enforcement:
+
+```text
+reserve extent
+  -> Fabric::place_object
+     -> accept: allocator and Fabric agree on exact base
+     -> reject: allocator reservation rolls back completely
+```
+
+Fabric remains the final overlap/provenance firewall.  Allocator success alone
+cannot create an architectural placement.
+
+Teardown now has the symmetric checked boundary.  The Fabric-blind reservation
+release primitive is internal; committed reservations must use the public
+Fabric-aware path:
+
+```text
+Fabric still places O -> release_unplaced(O) = reject, no mutation
+Fabric placement removed -> release_unplaced(O) may return extent to free pool
+```
+
+This prevents an extent from becoming allocatable to a new owner while an old
+Fabric translation still names the same bytes.  A manager pool is exclusive to
+manager-mediated placement; unmanaged direct `Fabric::place_object()` calls do
+not allocate from that pool.
+
+#### Runtime security witnesses
+
+The Rust suite contains direct witnesses for the two placement laws that matter
+most once physical bytes begin to be reused:
+
+```text
+P8: placement creates no authority
+    PM place O + empty domain -> NoCapability
+
+P5: physical-byte reuse does not revive stale authority
+    O_old @ P -> destroy/release -> O_new @ P
+    old ObjectId/generation capability -> StaleGeneration
+    old domain has no authority over O_new
+```
+
+The decisive 9.3g.3 integration witness is
+`p93g3_ccb_program_runs_with_managed_physical_and_virtual_placement`:
+
+```text
+CC_A -> CC_B
+CC_B("int main() { return 42; }") -> executable artifact
+
+PhysicalPlacementManager
+  -> places supervisor object
+  -> places CC_B-produced child object
+
+VirtualLayoutBuilder
+  -> derives supervisor child-map/stack/trap regions
+  -> derives child stack/trap regions
+
+boot supervisor
+  -> ordinary SYS_SPAWN with generated SpawnLayout
+  -> ordinary SYS_WAIT
+  -> child returns 42
+```
+
+The witness supplies a physical *pool* and a virtual *limit*, but no individual
+object physical base and no hand-calculated stack/trap address.  The returned
+PM extents remain exactly equal to Fabric's translations after real software has
+executed.
+
+The Phase 9.3g formal package now contains:
+
+```text
+anka93g1_physical_placement.kleis                   18 positive examples
+anka93g1_physical_placement_false_witnesses.kleis   12 deliberate false claims
+anka93g2_virtual_layout.kleis                       15 positive examples
+anka93g2_virtual_layout_false_witnesses.kleis       10 deliberate false claims
+anka93g3_placement_composition.kleis                14 positive examples
+anka93g3_placement_composition_false_witnesses.kleis 12 deliberate false claims
+```
+
+No new axioms.  The two new 9.3g.3 claims freeze checked teardown: live Fabric
+placement forbids allocator release; allocator ownership is required for a
+successful checked release.
+
+The candidate tree contains **842 Rust `#[test]` witnesses**, including 19 local
+placement tests and the CC_B end-to-end closure witness.  A normal local Rust
+and Kleis gate is required before declaring the branch closed.
+
+#### Deliberate non-goals
+
+Phase 9.3g does not add guest `malloc`, paging, swapping, demand allocation,
+physical compaction, or a general-purpose VM system.  It also does not replace
+the kernel's existing process stack/trap recycling allocator or change
+`SystemImage` relocation semantics.  Those are separate lifecycle concerns.
+
+The next development phase is intentionally outside this branch:
+
+```text
+9.3g  placement manager
+  -> 9.3h  Anka Development Shell / host artifact loader
+  -> 9.4a  Ethernet
+  -> 9.4b  ARP
+  -> 9.4c  IPv4/ICMP
+  -> ...
+  -> HTTP
+```
+
+The end-to-end target remains literal:
+
+```text
+GET /alive HTTP/1.1 -> "Anka64 is alive."
+```

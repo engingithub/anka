@@ -3191,3 +3191,177 @@ The next runtime witness after the finite-TX/host-backend Rust gate is green is
 not a kernel Ethernet parser.  It is a CC_B-compiled user-space driver/stack
 that uses the frozen boundary to construct and parse Ethernet, beginning with a
 deterministic synthetic/loopback peer and ARP.
+
+---
+
+## DN-28: Placement Manager Closure Before the User-Space Network Stack (Phase 9.3g)
+
+**Date:** 2026-09-16
+
+**Decision:**
+
+Stop assigning physical and per-process structural addresses by hand before
+writing Ethernet/ARP/IPv4 guest programs.  The first network stack will create
+enough independently sized objects that manual hexadecimal placement would
+recreate the same class of overlap/layout failures encountered while growing
+the guest compiler.
+
+The threshold is:
+
+```text
+multiple dynamic objects / NIC-driver complexity -> placement management
+```
+
+This is intentionally smaller than a conventional memory manager.
+
+### Two layers, two different questions
+
+The physical manager answers only:
+
+```text
+where may this ObjectId occupy physical memory?
+```
+
+`PhysicalPlacementManager` therefore owns a bounded page-aligned pool and uses
+first-fit allocation.  Its owner key is `ObjectId`, not generation, because a
+seal transition changes authority generation without changing physical
+location.
+
+The virtual builder answers only:
+
+```text
+where should this process region appear in its virtual address space?
+```
+
+`VirtualLayoutBuilder` monotonically appends page-rounded extents after the
+image.  It has no capability, domain, DMA, or physical-memory semantics.
+
+Thus:
+
+```text
+authority != virtual layout != physical placement
+```
+
+### Fabric remains the correctness firewall
+
+Normal allocation is a two-party transaction:
+
+```text
+PM reserve -> Fabric place -> commit
+                         -> reject -> PM rollback
+```
+
+The manager makes normal placement convenient; Fabric remains the final
+non-overlap/provenance enforcement boundary.
+
+The teardown side must have the same discipline.  The Fabric-blind reservation
+release primitive is internal, so architectural callers cannot bypass the
+composition check.  A placement created by `allocate_and_place_object()` must
+not return to the free pool while Fabric still carries a translation.
+`release_unplaced()` therefore rejects that state without mutation:
+
+```text
+FabricPlaced(O) -> CheckedRelease(O) = reject
+!FabricPlaced(O) && PMOwns(O) -> CheckedRelease(O) = success
+```
+
+This is the teardown analogue of allocation rollback and prevents
+allocator/Fabric ownership drift.  The manager's physical pool is correspondingly
+exclusive to manager-mediated placement; direct unmanaged Fabric placements
+inside that pool are outside the placement-manager contract.
+
+### Runtime P5/P8 witnesses
+
+The formal composition theory already stated that placement creates no
+authority and that physical reuse cannot resurrect stale authority.  9.3g now
+has direct Rust witnesses for both.
+
+**P8:** after PM places a Memory object, an empty domain still receives
+`NoCapability`.  Placement does not mint a Fabric capability, AuthorityId, or
+delegation.
+
+**P5:** an old object is granted READ authority and placed at extent `P`; the
+object is destroyed, the composed reservation is checked-released, and a fresh
+ObjectId receives the same first-fit physical extent `P`.  The old request is
+still rejected as `StaleGeneration`, and the old domain has `NoCapability` for
+the new owner.
+
+Physical byte identity therefore never becomes object authority.
+
+### Decisive closure witness: real CC_B output
+
+A placement manager that passes only allocator unit tests is not enough.  The
+project method requires running real software.
+
+The closure test compiles:
+
+```c
+int main() { return 42; }
+```
+
+with the canonical self-hosted `CC_B`, then constructs a fresh machine in which:
+
+```text
+PM chooses supervisor physical placement
+PM chooses child physical placement
+VLB chooses supervisor child-map/stack/trap regions
+VLB chooses child stack/trap regions
+```
+
+A tiny supervisor writes the VLB-generated `SpawnLayout` on its own stack and
+uses the ordinary `SYS_SPAWN` + `SYS_WAIT` path.  The CC_B-produced child exits
+42.  The test supplies only allocator pool/virtual-limit policy; it does not
+supply per-object physical bases or stack/trap addresses.
+
+This is the 9.3g constructive witness:
+
+```text
+CC_B artifact
+ -> automatic physical placement
+ -> automatic virtual structure
+ -> ordinary Anka spawn
+ -> 42
+```
+
+### Formal delta
+
+`anka93g3_placement_composition.kleis` gains two teardown laws, bringing the
+9.3g.3 source to 14 positive examples.  Its false-witness companion gains the
+opposite two claims, bringing it to 12 deliberate false examples.  No new
+axioms are introduced.
+
+The complete 9.3g source set is now 47 positive examples and 34 deliberate
+false witnesses.  These counts describe the candidate sources; they must pass
+the normal local Kleis gate before branch closure.
+
+### Scope boundary
+
+Do not use this phase as an excuse to build:
+
+- guest `malloc`;
+- paging or swapping;
+- demand allocation;
+- general VM machinery;
+- physical compaction;
+- a guest filesystem;
+- replacement of the kernel's existing stack/trap lifecycle recycler.
+
+The next consumer is a separate phase, **9.3h — Anka Development Shell**.  Its
+job is to keep C/assembly/bytecode artifacts on the host filesystem while using
+Anka mechanisms to load, place, compile, and spawn them.  The shell is a
+development bridge, not a guest filesystem and not an authority bypass.
+
+That keeps the route to the project acceptance witness clean:
+
+```text
+9.3g placement
+ -> 9.3h development shell
+ -> Ethernet
+ -> ARP
+ -> IPv4/ICMP
+ -> UDP/TCP
+ -> Socket
+ -> HTTP
+ -> GET /alive HTTP/1.1
+ -> "Anka64 is alive."
+```

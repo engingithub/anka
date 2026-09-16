@@ -8,6 +8,9 @@ mod tests {
     use super::super::core::{Anka64Core, StepResult};
     use super::super::fabric::Fabric;
     use super::super::isa::*;
+    use super::super::placement::{
+        PhysicalPlacementManager, VirtualLayoutBuilder, PLACEMENT_PAGE_SIZE,
+    };
     use super::super::state::*;
 
     // ─── Bootstrap function counts ────────────────────────────
@@ -10333,6 +10336,198 @@ mod tests {
             100.0 * art_c.out_pos as f64 / OUTPUT_SIZE as f64, OUTPUT_SIZE);
 
         eprintln!("9.3e.2: two-ended arena invariant (out_pos < lit_pos) holds ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  Phase 9.3g.3 — placement closure witness
+    //
+    //  CC_B creates the program.  PhysicalPlacementManager chooses
+    //  physical placement for both executable objects.
+    //  VirtualLayoutBuilder chooses both process layouts.
+    //  The host supplies no per-object physical address and no
+    //  hand-calculated stack/trap virtual address.
+    // ═══════════════════════════════════════════════════════════
+
+    /// Tiny supervisor used only by the 9.3g closure witness.
+    ///
+    /// It receives layout values produced by VirtualLayoutBuilder, writes a
+    /// SpawnLayout descriptor on its own stack, spawns the already-sealed
+    /// CC_B-produced child, waits for it, and exits with the child's detail.
+    fn build_p93g_spawn_supervisor(
+        child_parent_vaddr: u64,
+        child_code_size: u64,
+        child_stack_vaddr: u64,
+        child_stack_size: u64,
+        child_trap_vaddr: u64,
+    ) -> Vec<u8> {
+        for (name, value) in [
+            ("child_parent_vaddr", child_parent_vaddr),
+            ("child_code_size", child_code_size),
+            ("child_stack_vaddr", child_stack_vaddr),
+            ("child_stack_size", child_stack_size),
+            ("child_trap_vaddr", child_trap_vaddr),
+        ] {
+            assert!(value <= 0x1FFFF,
+                "9.3g closure {}={:#x} exceeds MOVI range", name, value);
+        }
+
+        let mut asm = Asm64::new();
+
+        // SpawnLayout lives in the supervisor's own stack.
+        asm.subi(R8, SP, 0x100);
+        asm.movi(R9, 0);
+        asm.st(R9, R8, 0); // code_vaddr = 0
+        asm.movi(R3, child_stack_vaddr as i32);
+        asm.st(R3, R8, 8);
+        asm.movi(R3, child_stack_size as i32);
+        asm.st(R3, R8, 16);
+        asm.movi(R3, child_trap_vaddr as i32);
+        asm.st(R3, R8, 24);
+        asm.st(R9, R8, 32); // reserved = 0
+
+        // SYS_SPAWN: no extra grants/maps, but an explicit generated layout.
+        asm.movi(R1, child_parent_vaddr as i32);
+        asm.movi(R2, child_code_size as i32);
+        asm.movi(R3, 0); // no literal segment in the return-42 witness
+        asm.movi(R4, 0);
+        asm.movi(R5, 0);
+        asm.movi(R6, 0);
+        asm.movi(R7, 0);
+        asm.movi(R0, SYS_SPAWN as i32);
+        asm.trap(0);
+
+        // Wait for the exact lifecycle handle returned by SYS_SPAWN.
+        asm.mov(R9, R0);
+        asm.mov(R1, R9);
+        asm.movi(R0, SYS_WAIT as i32);
+        asm.trap(0);
+
+        // SYS_WAIT leaves detail in R1.  Propagate it as supervisor exit.
+        asm.movi(R0, SYS_EXIT as i32);
+        asm.trap(0);
+
+        asm.to_bytes()
+    }
+
+    #[test]
+    fn p93g3_ccb_program_runs_with_managed_physical_and_virtual_placement() {
+        // First prove the artifact is genuinely produced by the canonical
+        // self-hosted compiler rather than by the host assembler.
+        let ccb = build_ccb();
+        let (program, funcs, error) = compile_with_ccb(
+            &ccb, b"int main() { return 42; }",
+        );
+        assert_eq!(error, 0, "CC_B rejected the 9.3g closure program");
+        assert_eq!(funcs, 1, "closure program should contain exactly main");
+        assert!(!program.is_empty(), "CC_B produced an empty program");
+
+        // Child virtual structure: image -> stack -> trap.  No hexadecimal
+        // region addresses are supplied to SpawnLayout.
+        let virtual_limit = 0x20000;
+        let mut child_layout = VirtualLayoutBuilder::after_image(
+            0, program.len() as u64, virtual_limit,
+        ).unwrap();
+        let child_stack = child_layout.reserve(STACK_SIZE as u64).unwrap();
+        let child_trap = child_layout.reserve(PLACEMENT_PAGE_SIZE).unwrap();
+
+        // Supervisor virtual structure: supervisor image -> child mapping ->
+        // supervisor stack -> trap.  The child mapping address is therefore
+        // generated rather than chosen by the test.
+        let supervisor_image_size = PLACEMENT_PAGE_SIZE;
+        let mut supervisor_layout = VirtualLayoutBuilder::after_image(
+            0, supervisor_image_size, virtual_limit,
+        ).unwrap();
+        let child_parent_map = supervisor_layout.reserve(program.len() as u64).unwrap();
+        let supervisor_stack = supervisor_layout.reserve(STACK_SIZE as u64).unwrap();
+        let supervisor_trap = supervisor_layout.reserve(PLACEMENT_PAGE_SIZE).unwrap();
+
+        let supervisor_code = build_p93g_spawn_supervisor(
+            child_parent_map.base,
+            program.len() as u64,
+            child_stack.base,
+            child_stack.size,
+            child_trap.base,
+        );
+        assert!(supervisor_code.len() as u64 <= supervisor_image_size);
+
+        // PM owns the only physical-address policy in this witness.  The pool
+        // location is machine configuration; individual object bases are
+        // outputs of first-fit allocation and are never supplied to Fabric by
+        // the test itself.
+        let mut fabric = Fabric::new(0x400000);
+        let mut pm = PhysicalPlacementManager::new(0x20000, 0x40000).unwrap();
+
+        let supervisor_obj = fabric.alloc_object(
+            "p93g_supervisor", supervisor_image_size, ObjectKind::Memory,
+        );
+        let child_obj = fabric.alloc_object(
+            "p93g_ccb_child", program.len() as u64, ObjectKind::Memory,
+        );
+
+        let supervisor_phys = pm.allocate_and_place_object(
+            &mut fabric, supervisor_obj,
+        ).unwrap();
+        let child_phys = pm.allocate_and_place_object(
+            &mut fabric, child_obj,
+        ).unwrap();
+
+        assert_ne!(supervisor_phys.base, child_phys.base);
+        assert_eq!(fabric.physical_base(supervisor_obj), Some(supervisor_phys.base));
+        assert_eq!(fabric.physical_base(child_obj), Some(child_phys.base));
+
+        assert!(fabric.initialize_object(supervisor_obj, 0, &supervisor_code));
+        assert!(fabric.initialize_object(child_obj, 0, &program));
+        assert!(fabric.seal_object(supervisor_obj));
+        assert!(fabric.seal_object(child_obj));
+
+        let info = BootInfo {
+            image: BootImage {
+                obj: supervisor_obj,
+                code_offset: 0,
+                code_size: supervisor_code.len() as u64,
+                entry: 0,
+                lit_start: 0,
+            },
+            grants: vec![
+                BootGrant {
+                    obj: child_obj,
+                    offset: 0,
+                    size: program.len() as u64,
+                    perms: Permissions::RX,
+                },
+            ],
+            maps: vec![
+                BootMap {
+                    vaddr: child_parent_map.base,
+                    size: program.len() as u64,
+                    obj: child_obj,
+                    obj_offset: 0,
+                },
+            ],
+            code_vaddr: 0,
+            stack_vaddr: supervisor_stack.base,
+            stack_size: supervisor_stack.size,
+            trap_vaddr: supervisor_trap.base,
+        };
+
+        let mut kernel = Kernel::new(fabric);
+        kernel.boot(&info).expect("9.3g managed-placement supervisor boot");
+        kernel.run(200_000, 10_000);
+
+        assert!(kernel.processes[0].exited(),
+            "9.3g placement supervisor should exit after collecting child");
+        assert_eq!(kernel.processes[0].exit_code, 42,
+            "automatically placed CC_B program must execute to return 42");
+
+        // PM/Fabric agreement remains exact after the program has actually run.
+        assert_eq!(pm.allocated_extent(supervisor_obj), Some(supervisor_phys));
+        assert_eq!(pm.allocated_extent(child_obj), Some(child_phys));
+        assert_eq!(kernel.fabric.physical_base(supervisor_obj), Some(supervisor_phys.base));
+        assert_eq!(kernel.fabric.physical_base(child_obj), Some(child_phys.base));
+
+        eprintln!(
+            "9.3g.3: CC_B program -> PM physical placement -> VLB layout -> SYS_SPAWN -> 42 ✓"
+        );
     }
 
 }

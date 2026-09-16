@@ -10,7 +10,7 @@
 //! allocation uses first-fit over a sorted/coalesced free list.  The policy is
 //! not architectural; the invariants are.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::fabric::Fabric;
 use super::state::ObjectId;
@@ -58,6 +58,14 @@ pub enum PlacementError {
     OwnerAlreadyAllocated,
     /// The requested ObjectId has no live reservation to release.
     UnknownOwner,
+    /// This reservation was committed through Fabric and therefore may not
+    /// be released through the allocator-only primitive.  Call
+    /// `release_unplaced()` so current Fabric state is checked.
+    ComposedReleaseRequiresFabricCheck,
+    /// Fabric still has a physical placement for this owner.  Composed
+    /// placement must be removed from Fabric before its allocator extent
+    /// can re-enter the free pool.
+    ObjectStillPlaced,
     /// No free extent can satisfy the request.
     OutOfMemory,
     /// Fabric has no such object.
@@ -102,6 +110,9 @@ pub struct PhysicalPlacementManager {
     pool: PhysicalExtent,
     free: Vec<PhysicalExtent>,
     allocated: BTreeMap<ObjectId, PhysicalExtent>,
+    /// Owners whose reservation has been accepted by Fabric.  These may not
+    /// be released through the allocator-only `release_reservation()` primitive.
+    committed: BTreeSet<ObjectId>,
 }
 
 impl PhysicalPlacementManager {
@@ -115,6 +126,7 @@ impl PhysicalPlacementManager {
             pool,
             free: vec![pool],
             allocated: BTreeMap::new(),
+            committed: BTreeSet::new(),
         })
     }
 
@@ -176,12 +188,40 @@ impl PhysicalPlacementManager {
         Ok(candidate)
     }
 
-    /// Release the extent owned by exactly `owner` and coalesce free space.
-    pub fn release(&mut self, owner: ObjectId) -> Result<PhysicalExtent, PlacementError> {
+    /// Release an allocator reservation without consulting Fabric.
+    ///
+    /// This primitive is intentionally private.  It is used for failed-place
+    /// rollback and allocator unit tests; architectural teardown goes through
+    /// `release_unplaced()` so a live Fabric translation can never be bypassed.
+    fn release_reservation(&mut self, owner: ObjectId) -> Result<PhysicalExtent, PlacementError> {
+        if self.committed.contains(&owner) {
+            return Err(PlacementError::ComposedReleaseRequiresFabricCheck);
+        }
         let extent = self.allocated.remove(&owner)
             .ok_or(PlacementError::UnknownOwner)?;
         self.insert_free_and_coalesce(extent);
         Ok(extent)
+    }
+
+    /// Release a composed reservation only after Fabric no longer places it.
+    ///
+    /// This is the teardown-side companion to `allocate_and_place_object()`.
+    /// Releasing while Fabric still translates the object would make the same
+    /// physical bytes allocatable to another owner while the old translation
+    /// remains live, so that transition is rejected without mutation.
+    pub fn release_unplaced(
+        &mut self,
+        fabric: &Fabric,
+        owner: ObjectId,
+    ) -> Result<PhysicalExtent, PlacementError> {
+        if fabric.physical_base(owner).is_some() {
+            return Err(PlacementError::ObjectStillPlaced);
+        }
+        if !self.allocated.contains_key(&owner) {
+            return Err(PlacementError::UnknownOwner);
+        }
+        self.committed.remove(&owner);
+        self.release_reservation(owner)
     }
 
     /// Reserve an extent and ask Fabric to commit the object's physical
@@ -202,12 +242,14 @@ impl PhysicalPlacementManager {
 
         let extent = self.allocate(owner, object_size)?;
         if !fabric.place_object(owner, extent.base) {
-            // Exact owner was just inserted above; rollback must succeed.
-            let rolled_back = self.release(owner)
+            // Exact owner was just inserted above and has not been marked
+            // committed; allocator-only rollback must succeed.
+            let rolled_back = self.release_reservation(owner)
                 .expect("fresh placement reservation must be releasable");
             debug_assert_eq!(rolled_back, extent);
             return Err(PlacementError::FabricRejected);
         }
+        self.committed.insert(owner);
         Ok(extent)
     }
 
@@ -310,7 +352,10 @@ impl VirtualLayoutBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::anka64::state::ObjectKind;
+    use crate::anka64::fabric::{request, AuthResult};
+    use crate::anka64::state::{
+        AccessKind, AgentId, FaultReason, ObjectKind, Permissions, Width,
+    };
 
     #[test]
     fn p93g1_page_rounding_is_minimal() {
@@ -367,9 +412,9 @@ mod tests {
         let mut pm = PhysicalPlacementManager::new(0x30000, 0x4000).unwrap();
         let a = pm.allocate(ObjectId(1), 0x1000).unwrap();
         let _b = pm.allocate(ObjectId(2), 0x1000).unwrap();
-        assert_eq!(pm.release(ObjectId(99)), Err(PlacementError::UnknownOwner));
-        assert_eq!(pm.release(ObjectId(1)), Ok(a));
-        pm.release(ObjectId(2)).unwrap();
+        assert_eq!(pm.release_reservation(ObjectId(99)), Err(PlacementError::UnknownOwner));
+        assert_eq!(pm.release_reservation(ObjectId(1)), Ok(a));
+        pm.release_reservation(ObjectId(2)).unwrap();
         assert_eq!(pm.free_extents(), &[PhysicalExtent { base: 0x30000, size: 0x4000 }]);
     }
 
@@ -378,7 +423,7 @@ mod tests {
         let mut pm = PhysicalPlacementManager::new(0x40000, 0x5000).unwrap();
         let a = pm.allocate(ObjectId(1), 0x1000).unwrap();
         pm.allocate(ObjectId(2), 0x1000).unwrap();
-        pm.release(ObjectId(1)).unwrap();
+        pm.release_reservation(ObjectId(1)).unwrap();
         let c = pm.allocate(ObjectId(3), 0x800).unwrap();
         assert_eq!(c.base, a.base);
     }
@@ -393,7 +438,12 @@ mod tests {
         assert_eq!(pm.allocated_extent(obj), Some(ext),
             "generation transition must not orphan placement ownership");
         fabric.destroy_object(obj);
-        assert_eq!(pm.release(obj), Ok(ext));
+        assert_eq!(
+            pm.release_reservation(obj),
+            Err(PlacementError::ComposedReleaseRequiresFabricCheck),
+            "even after Fabric removal, a composed reservation must use the checked path",
+        );
+        assert_eq!(pm.release_unplaced(&fabric, obj), Ok(ext));
     }
 
     #[test]
@@ -423,6 +473,86 @@ mod tests {
         assert_eq!(ext.size, 0x2000);
         assert_eq!(fabric.physical_base(obj), Some(ext.base));
         assert_eq!(pm.allocated_extent(obj), Some(ext));
+    }
+
+    #[test]
+    fn p93g3_checked_release_rejects_live_fabric_placement_without_mutation() {
+        let mut fabric = Fabric::new(0x80000);
+        let obj = fabric.alloc_object("checked-release", 0x1000, ObjectKind::Memory);
+        let mut pm = PhysicalPlacementManager::new(0x20000, 0x4000).unwrap();
+        let ext = pm.allocate_and_place_object(&mut fabric, obj).unwrap();
+        let free_before = pm.free_extents().to_vec();
+
+        assert_eq!(
+            pm.release_reservation(obj),
+            Err(PlacementError::ComposedReleaseRequiresFabricCheck),
+            "allocator-only release must not bypass composed teardown",
+        );
+        assert_eq!(
+            pm.release_unplaced(&fabric, obj),
+            Err(PlacementError::ObjectStillPlaced)
+        );
+        assert_eq!(pm.allocated_extent(obj), Some(ext));
+        assert_eq!(pm.free_extents(), free_before.as_slice());
+
+        fabric.destroy_object(obj);
+        assert_eq!(pm.release_unplaced(&fabric, obj), Ok(ext));
+    }
+
+    #[test]
+    fn p93g3_placement_creates_no_authority() {
+        let mut fabric = Fabric::new(0x80000);
+        let obj = fabric.alloc_object("authority-free-placement", 0x1000, ObjectKind::Memory);
+        let mut pm = PhysicalPlacementManager::new(0x20000, 0x4000).unwrap();
+        pm.allocate_and_place_object(&mut fabric, obj).unwrap();
+
+        let dom = fabric.create_domain();
+        assert!(fabric.domains.get(&dom).unwrap().capabilities.is_empty());
+        let req = request(
+            AgentId(0), dom, obj, 0, Width::Word, AccessKind::Read,
+        );
+        assert!(matches!(
+            fabric.authorize(&req),
+            AuthResult::Denied(FaultReason::NoCapability)
+        ));
+    }
+
+    #[test]
+    fn p93g3_reused_physical_bytes_do_not_revive_stale_authority() {
+        let mut fabric = Fabric::new(0x80000);
+        let mut pm = PhysicalPlacementManager::new(0x20000, 0x4000).unwrap();
+
+        let old_obj = fabric.alloc_object("old-owner", 0x1000, ObjectKind::Memory);
+        let old_ext = pm.allocate_and_place_object(&mut fabric, old_obj).unwrap();
+        let old_dom = fabric.create_domain();
+        assert!(fabric.grant(
+            old_dom, old_obj, 0, 0x1000, Permissions::READ,
+        ).is_some());
+        let old_req = request(
+            AgentId(0), old_dom, old_obj, 0, Width::Word, AccessKind::Read,
+        );
+        assert!(matches!(fabric.authorize(&old_req), AuthResult::Authorized(_)));
+
+        fabric.destroy_object(old_obj);
+        assert_eq!(pm.release_unplaced(&fabric, old_obj), Ok(old_ext));
+
+        let new_obj = fabric.alloc_object("new-owner", 0x1000, ObjectKind::Memory);
+        let new_ext = pm.allocate_and_place_object(&mut fabric, new_obj).unwrap();
+        assert_eq!(new_ext.base, old_ext.base,
+            "first-fit should reuse the released physical bytes");
+
+        assert!(matches!(
+            fabric.authorize(&old_req),
+            AuthResult::Denied(FaultReason::StaleGeneration)
+        ), "reused bytes must not revive old ObjectId/generation authority");
+
+        let new_req = request(
+            AgentId(0), old_dom, new_obj, 0, Width::Word, AccessKind::Read,
+        );
+        assert!(matches!(
+            fabric.authorize(&new_req),
+            AuthResult::Denied(FaultReason::NoCapability)
+        ), "authority over the old owner must not transfer to the new owner");
     }
 
     #[test]
