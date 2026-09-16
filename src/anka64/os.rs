@@ -10,7 +10,10 @@
 //!   R0 = primary return value; selected syscalls also return R1
 
 use super::block::{BlockController, BlockCompletion};
-use super::nic::{NicCompletion, NicRxRequest, NicRxSubmitResult};
+use super::nic::{
+    NicCompletion, NicRxRequest, NicRxSubmitResult, NicTxRequest, NicTxSubmitResult,
+    NIC_MAX_FRAME_SIZE,
+};
 use super::core::Anka64Core;
 use super::fabric::Fabric;
 use super::isa::*;
@@ -39,6 +42,7 @@ pub const SYS_DEV_SUBMIT_ASYNC: u64 = 15; // dev_submit_async(same args) → R0=
 pub const SYS_DEV_WAIT: u64 = 16; // dev_wait(slot, gen) → completion status
 pub const SYS_DEV_EVENT_WAIT: u64 = 17; // dev_event_wait(cap_slot, cap_gen, epoch) → status, epoch
 pub const SYS_NIC_RX: u64 = 18; // nic_rx(dev_slot, dev_gen, buf_slot, buf_gen) → status, len
+pub const SYS_NIC_TX: u64 = 19; // nic_tx(dev_slot, dev_gen, buf_slot, buf_gen, len) → status, len
 
 /// Maximum messages per mailbox.  Enforced by all producers:
 /// SYS_SEND, SYS_SEND_KEY, and SYS_SEND_CAP.
@@ -346,6 +350,23 @@ struct PreparedNicRx {
     target_offset: u64,
     source_domain: DomainId,
     source_authority_id: AuthorityId,
+    delegation_id: Option<DelegationId>,
+}
+
+
+/// Side-effect-free validation result for SYS_NIC_TX.
+///
+/// All authority, kind, provenance, frame-length and capacity checks complete
+/// before the controller derives an exact READ DMA span.
+#[derive(Debug)]
+struct PreparedNicTx {
+    device_binding: DeviceBinding,
+    requester: RequesterKey,
+    source_object: ObjectId,
+    source_offset: u64,
+    source_domain: DomainId,
+    source_authority_id: AuthorityId,
+    frame_len: u64,
     delegation_id: Option<DelegationId>,
 }
 
@@ -715,7 +736,7 @@ pub enum BootError {
 /// completion, pair quiescence).
 ///
 /// The generic surface delegates directly to the inner controller.
-/// Device-specific operations (Block submission/storage, NIC RX submission)
+/// Device-specific operations (Block submission/storage, NIC RX/TX submission)
 /// require an explicit kind check/unwrap before entering that controller.
 ///
 /// Formal basis: anka_generic_device_refinement.kleis GENDEV-1..13.
@@ -924,7 +945,7 @@ impl DeviceCompletion {
 
     /// Optional secondary syscall result carried by this device kind.
     ///
-    /// Block's historical ABI has no secondary result.  NIC RX returns
+    /// Block's historical ABI has no secondary result.  NIC RX and TX return
     /// committed byte count in R1 (zero on DMA fault).
     pub fn secondary_result(&self) -> Option<u64> {
         match self {
@@ -1485,6 +1506,20 @@ impl Kernel {
         // Successful injection advanced the epoch — wake eligible waiters.
         self.reevaluate_event_waits();
         true
+    }
+
+
+    /// Host-side extraction of one successfully transmitted NIC frame.
+    ///
+    /// This crosses from Anka's virtual NIC into emulator/environment state.
+    /// It performs no guest authorization: NIC_TX authority was already
+    /// consumed by the finite DMA request that produced this committed frame.
+    /// Exact DeviceBinding still qualifies routing, and a non-NIC binding is
+    /// rejected without mutation.
+    pub fn take_nic_tx(&mut self, binding: DeviceBinding) -> Option<Vec<u8>> {
+        let slot = self.device_registry.lookup_mut(binding)?;
+        let nic = slot.controller.as_nic_mut()?;
+        nic.take_tx()
     }
 
     /// Install a device capability for a process.
@@ -2628,6 +2663,9 @@ impl Kernel {
             }
             SYS_NIC_RX => {
                 self.handle_nic_rx(idx);
+            }
+            SYS_NIC_TX => {
+                self.handle_nic_tx(idx);
             }
             _ => {
                 eprintln!("Unknown syscall {} from pid {}",
@@ -4799,6 +4837,191 @@ impl Kernel {
             NicRxSubmitResult::DeviceBusy => self.fail_nic_rx(idx, 11),
             NicRxSubmitResult::DelegationFailed => self.fail_nic_rx(idx, 12),
         }
+    }
+
+
+    /// Side-effect-free preflight for SYS_NIC_TX (19).
+    ///
+    /// ABI:
+    ///   R1 = NIC capability slot
+    ///   R2 = NIC capability generation
+    ///   R3 = buffer capability slot
+    ///   R4 = buffer capability generation
+    ///   R5 = frame length
+    ///
+    /// Error codes mirror SYS_NIC_RX where possible:
+    ///   1 malformed ABI fields
+    ///   2 caller already has IoWait
+    ///   3 stale/wrong-kind NIC handle
+    ///   4 exact presented NIC authority lacks NIC_TX / backing mismatch
+    ///   5 exact binding is unregistered or not a NIC
+    ///   6 stale/wrong-kind buffer handle
+    ///   7 presented buffer lacks READ
+    ///   8 buffer provenance names another driver incarnation
+    ///   9 invalid frame length (zero or > NIC_MAX_FRAME_SIZE)
+    ///  10 frame length exceeds exact presented buffer span
+    ///  11 no finite NIC request slot is free
+    ///  12 exact DMA delegation failed after preflight
+    fn preflight_nic_tx(&self, idx: usize) -> Result<PreparedNicTx, u64> {
+        let r1 = self.processes[idx].core.r[R1 as usize];
+        let r2 = self.processes[idx].core.r[R2 as usize];
+        let r3 = self.processes[idx].core.r[R3 as usize];
+        let r4 = self.processes[idx].core.r[R4 as usize];
+        let frame_len = self.processes[idx].core.r[R5 as usize];
+
+        // Gate 0: exact checked ABI decode for generation-qualified handles.
+        let dev_slot = u32::try_from(r1).map_err(|_| 1u64)?;
+        let dev_gen = u32::try_from(r2).map_err(|_| 1u64)?;
+        let buf_slot = u32::try_from(r3).map_err(|_| 1u64)?;
+        let buf_gen = u32::try_from(r4).map_err(|_| 1u64)?;
+
+        let dev_handle = CapabilityHandle { slot: dev_slot, generation: dev_gen };
+        let buf_handle = CapabilityHandle { slot: buf_slot, generation: buf_gen };
+
+        // Gate 1: presented device handle must resolve as Device.
+        let dev_resolved = self.resolve_capability(idx, dev_handle).ok_or(3u64)?;
+        let (dev_object, dev_object_gen, dev_rights, dev_authority_id) =
+            match &dev_resolved {
+                ResolvedCapability::Device {
+                    object, object_generation, rights, authority_id, ..
+                } => (*object, *object_generation, *rights, *authority_id),
+                ResolvedCapability::Memory { .. } => return Err(3),
+            };
+
+        // Gate 2: exact presented/backing device authority must contain NIC_TX.
+        let domain = self.processes[idx].core.domain;
+        if !self.fabric.validate_device_authority(
+            domain,
+            dev_authority_id,
+            dev_object,
+            dev_object_gen,
+            dev_rights,
+            DeviceRights::NIC_TX,
+        ) {
+            return Err(4);
+        }
+
+        // Gate 3: exact DeviceBinding must route to a NIC controller.
+        let binding = DeviceBinding {
+            object: dev_object,
+            generation: dev_object_gen,
+        };
+        let nic = self.device_registry.lookup(binding)
+            .and_then(|slot| slot.controller.as_nic())
+            .ok_or(5u64)?;
+
+        // Gate 4: presented buffer handle must resolve as Memory.
+        let buf_resolved = self.resolve_capability(idx, buf_handle).ok_or(6u64)?;
+        let (buf_object, buf_offset, buf_length, buf_perms, buf_authority_id, delegation_id) =
+            match &buf_resolved {
+                ResolvedCapability::Memory {
+                    object, offset, length, perms, authority_id, delegation_id, ..
+                } => (*object, *offset, *length, *perms, *authority_id, *delegation_id),
+                ResolvedCapability::Device { .. } => return Err(6),
+            };
+
+        // Gate 5: TX reads bytes from guest memory.
+        if !buf_perms.contains(Permissions::READ) {
+            return Err(7);
+        }
+
+        // Gate 6: delegated memory must name this exact driver incarnation.
+        if let Some(tid) = delegation_id {
+            let current = ProcessKey {
+                slot: idx,
+                generation: self.processes[idx].generation,
+            };
+            if tid.driver != current {
+                return Err(8);
+            }
+        }
+
+        // Gate 7: NIC raw-frame contract is finite, nonzero and bounded.
+        if frame_len == 0 || frame_len > NIC_MAX_FRAME_SIZE as u64 {
+            return Err(9);
+        }
+
+        // Gate 8: no capability stitching and no partial source span.
+        if frame_len > buf_length || buf_offset.checked_add(frame_len).is_none() {
+            return Err(10);
+        }
+
+        // Gate 9: capacity before exact delegation mints a DMA domain.
+        if nic.free_slot_count() == 0 {
+            return Err(11);
+        }
+
+        let requester = RequesterKey {
+            slot: idx as u32,
+            generation: self.processes[idx].generation,
+        };
+
+        Ok(PreparedNicTx {
+            device_binding: binding,
+            requester,
+            source_object: buf_object,
+            source_offset: buf_offset,
+            source_domain: domain,
+            source_authority_id: buf_authority_id,
+            frame_len,
+            delegation_id,
+        })
+    }
+
+    /// SYS_NIC_TX (19) — read one finite frame from guest memory and expose it
+    /// to the host-controlled NIC backend only after Fabric READ commit.
+    fn handle_nic_tx(&mut self, idx: usize) {
+        if self.processes[idx].io_wait.is_some() {
+            self.fail_nic_tx(idx, 2);
+            return;
+        }
+
+        let prepared = match self.preflight_nic_tx(idx) {
+            Ok(p) => p,
+            Err(code) => {
+                self.fail_nic_tx(idx, code);
+                return;
+            }
+        };
+
+        let request = NicTxRequest {
+            requester: prepared.requester,
+            source_object: prepared.source_object,
+            source_offset: prepared.source_offset,
+            source_domain: prepared.source_domain,
+            source_authority_id: prepared.source_authority_id,
+            frame_len: prepared.frame_len,
+            delegation_id: prepared.delegation_id,
+        };
+
+        let binding = prepared.device_binding;
+        let result = {
+            let slot = self.device_registry.lookup_mut(binding)
+                .expect("NIC TX preflight validated exact binding");
+            let nic = slot.controller.as_nic_mut()
+                .expect("NIC TX preflight validated controller kind");
+            nic.submit_tx(request, &mut self.fabric)
+        };
+
+        match result {
+            NicTxSubmitResult::Accepted(handle) => {
+                self.processes[idx].io_wait = Some(IoWait {
+                    request: DeviceRequestKey {
+                        device: binding,
+                        request: handle,
+                    },
+                });
+                // Completion drain writes R0/R1 and returns from the syscall.
+            }
+            NicTxSubmitResult::DeviceBusy => self.fail_nic_tx(idx, 11),
+            NicTxSubmitResult::DelegationFailed => self.fail_nic_tx(idx, 12),
+        }
+    }
+
+    fn fail_nic_tx(&mut self, idx: usize, code: u64) {
+        self.processes[idx].core.r[R0 as usize] = code;
+        self.processes[idx].core.r[R1 as usize] = 0;
+        self.resume_from_trap(idx);
     }
 
     fn fail_nic_rx(&mut self, idx: usize, code: u64) {
@@ -20863,6 +21086,330 @@ mod tests {
         assert_eq!(kernel.processes[slot].core.r[R1 as usize], frame.len() as u64);
         let phys = kernel.fabric.translate(data, 0).unwrap();
         assert_eq!(kernel.fabric.read_physical(phys, frame.len() as u64), frame.as_slice());
+    }
+
+
+    // ═══════════════════════════════════════════════════════════════
+    //  Phase 9.3e.4b — finite NIC TX DMA witnesses
+    // ═══════════════════════════════════════════════════════════════
+
+    fn issue_nic_tx(
+        kernel: &mut Kernel,
+        slot: usize,
+        dev_handle: CapabilityHandle,
+        buf_handle: CapabilityHandle,
+        frame_len: u64,
+    ) {
+        let return_pc = kernel.processes[slot].core.pc + 4;
+        kernel.processes[slot].core.event_frames.push(EventFrame {
+            return_pc,
+            return_privilege: Privilege::User,
+            interrupts_were_enabled: true,
+            cause: EventCause::Syscall,
+        });
+        kernel.processes[slot].core.r[R0 as usize] = SYS_NIC_TX;
+        kernel.processes[slot].core.r[R1 as usize] = dev_handle.slot as u64;
+        kernel.processes[slot].core.r[R2 as usize] = dev_handle.generation as u64;
+        kernel.processes[slot].core.r[R3 as usize] = buf_handle.slot as u64;
+        kernel.processes[slot].core.r[R4 as usize] = buf_handle.generation as u64;
+        kernel.processes[slot].core.r[R5 as usize] = frame_len;
+        kernel.processes[slot].core.halted = true;
+        kernel.handle_syscall(slot);
+    }
+
+    #[test]
+    fn p93e4b_nic_tx_success_uses_committed_fabric_read() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_TX,
+        ).unwrap();
+        let buf = kernel.install_capability(
+            slot, data, 0, 512, Permissions::READ,
+        ).unwrap();
+        let frame: Vec<u8> = (0..96).map(|i| (i as u8).wrapping_mul(7)).collect();
+        assert!(kernel.fabric.initialize_object(data, 0, &frame));
+
+        issue_nic_tx(&mut kernel, slot, dev, buf, frame.len() as u64);
+        assert!(kernel.processes[slot].io_wait.is_some());
+        assert_eq!(kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap().tx_frame_count(), 0,
+            "accepted TX must not be host-visible before commit");
+
+        for _ in 0..3 { kernel.idle_progress_once(); }
+
+        assert!(kernel.processes[slot].io_wait.is_none());
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 0);
+        assert_eq!(kernel.processes[slot].core.r[R1 as usize], frame.len() as u64);
+        let nic = kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap();
+        assert_eq!(nic.peek_tx(), Some(frame.as_slice()));
+        assert_eq!(nic.event_sequence(), 0,
+            "guest TX completion must not fabricate unsolicited RX activity");
+        assert_eq!(kernel.take_nic_tx(binding), Some(frame));
+        assert!(kernel.take_nic_tx(binding).is_none());
+    }
+
+    #[test]
+    fn p93e4b_nic_rx_right_cannot_authorize_tx() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_RX,
+        ).unwrap();
+        let buf = kernel.install_capability(slot, data, 0, 64, Permissions::READ).unwrap();
+        assert!(kernel.fabric.initialize_object(data, 0, &[0xA1; 32]));
+        let domains_before = kernel.fabric.domain_count();
+
+        issue_nic_tx(&mut kernel, slot, dev, buf, 32);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 4);
+        assert_eq!(kernel.fabric.domain_count(), domains_before);
+        assert_eq!(kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap().tx_frame_count(), 0);
+    }
+
+    #[test]
+    fn p93e4b_write_only_buffer_cannot_be_rescued_by_ambient_read() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_TX,
+        ).unwrap();
+        let buf = kernel.install_capability(slot, data, 0, 64, Permissions::WRITE).unwrap();
+        assert!(kernel.fabric.initialize_object(data, 0, &[0xB2; 32]));
+        let domains_before = kernel.fabric.domain_count();
+
+        issue_nic_tx(&mut kernel, slot, dev, buf, 32);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 7,
+            "presented WRITE authority must not be rescued by ambient READ");
+        assert_eq!(kernel.fabric.domain_count(), domains_before);
+        assert_eq!(kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap().tx_frame_count(), 0);
+    }
+
+    #[test]
+    fn p93e4b_buffer_backing_authority_must_supply_read() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_TX,
+        ).unwrap();
+        assert!(kernel.fabric.initialize_object(data, 0, &[0xC3; 32]));
+
+        let domain = kernel.processes[slot].core.domain;
+        let aid = kernel.fabric.alloc_authority_id().unwrap();
+        kernel.fabric.grant_with_authority_id(
+            domain, data, 0, 64, Permissions::WRITE, aid,
+        ).unwrap();
+        let obj_gen = kernel.fabric.objects.get(&data).unwrap().generation;
+        let forged_read = kernel.processes[slot].cap_table.as_mut().unwrap()
+            .install_memory(data, obj_gen, 0, 64, Permissions::READ, aid, None)
+            .expect("hostile cap-table READ slot");
+        let domains_before = kernel.fabric.domain_count();
+
+        issue_nic_tx(&mut kernel, slot, dev, forged_read, 32);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 12,
+            "slot READ must not amplify exact backing WRITE authority");
+        assert_eq!(kernel.fabric.domain_count(), domains_before,
+            "failed exact delegation must not leak a DMA domain");
+        assert_eq!(kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap().tx_frame_count(), 0);
+    }
+
+    #[test]
+    fn p93e4b_buffer_provenance_must_name_current_driver() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_TX,
+        ).unwrap();
+
+        let domain = kernel.processes[slot].core.domain;
+        let aid = kernel.fabric.alloc_authority_id().unwrap();
+        kernel.fabric.grant_with_authority_id(
+            domain, data, 0, 128, Permissions::READ, aid,
+        ).unwrap();
+        let obj_gen = kernel.fabric.objects.get(&data).unwrap().generation;
+        let bad_tid = DelegationId {
+            client: ProcessKey { slot: 44, generation: 1 },
+            driver: ProcessKey { slot: slot + 1, generation: 0 },
+            incarnation: 125,
+        };
+        let delegated = kernel.processes[slot].cap_table.as_mut().unwrap()
+            .install_memory(
+                data, obj_gen, 0, 128, Permissions::READ, aid, Some(bad_tid),
+            )
+            .expect("delegated TX buffer capability");
+        assert!(kernel.fabric.initialize_object(data, 0, &[0xC8; 32]));
+        let domains_before = kernel.fabric.domain_count();
+
+        issue_nic_tx(&mut kernel, slot, dev, delegated, 32);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 8,
+            "delegated TX buffer must name the exact current driver incarnation");
+        assert_eq!(kernel.processes[slot].core.r[R1 as usize], 0);
+        assert_eq!(kernel.fabric.domain_count(), domains_before,
+            "provenance rejection must precede DMA-domain creation");
+        let nic = kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap();
+        assert_eq!(nic.tx_frame_count(), 0);
+        assert!(!nic.has_autonomous_work());
+    }
+
+    #[test]
+    fn p93e4b_tx_length_must_be_nonzero_bounded_and_within_span() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_TX,
+        ).unwrap();
+        let buf = kernel.install_capability(slot, data, 0, 32, Permissions::READ).unwrap();
+        let domains_before = kernel.fabric.domain_count();
+
+        issue_nic_tx(&mut kernel, slot, dev, buf, 0);
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 9);
+
+        issue_nic_tx(&mut kernel, slot, dev, buf, (NIC_MAX_FRAME_SIZE + 1) as u64);
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 9);
+
+        issue_nic_tx(&mut kernel, slot, dev, buf, 33);
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 10);
+        assert_eq!(kernel.fabric.domain_count(), domains_before,
+            "all length failures precede DMA-domain creation");
+    }
+
+    #[test]
+    fn p93e4b_exact_device_binding_prevents_cross_nic_tx() {
+        let (mut kernel, slot, binding_a, data) = nic_rx_base();
+        let binding_b = kernel.register_nic_device(
+            super::super::nic::NicController::new(AgentId(306)),
+        ).unwrap();
+        let dev_b = kernel.install_device_capability(
+            slot, binding_b.object, DeviceRights::NIC_TX,
+        ).unwrap();
+        let buf = kernel.install_capability(slot, data, 0, 64, Permissions::READ).unwrap();
+        let frame = [0xD4; 32];
+        assert!(kernel.fabric.initialize_object(data, 0, &frame));
+
+        issue_nic_tx(&mut kernel, slot, dev_b, buf, frame.len() as u64);
+        for _ in 0..3 { kernel.idle_progress_once(); }
+
+        assert_eq!(kernel.device_registry.lookup(binding_a).unwrap()
+            .controller.as_nic().unwrap().tx_frame_count(), 0);
+        assert_eq!(kernel.device_registry.lookup(binding_b).unwrap()
+            .controller.as_nic().unwrap().peek_tx(), Some(frame.as_slice()));
+    }
+
+    #[test]
+    fn p93e4b_accepted_delegated_tx_counts_for_pair_until_terminal() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_TX,
+        ).unwrap();
+        let driver = ProcessKey { slot, generation: kernel.processes[slot].generation };
+        let client = ProcessKey { slot: 43, generation: 8 };
+        let tid = DelegationId { client, driver, incarnation: 124 };
+
+        let domain = kernel.processes[slot].core.domain;
+        let aid = kernel.fabric.alloc_authority_id().unwrap();
+        kernel.fabric.grant_with_authority_id(
+            domain, data, 0, 128, Permissions::READ, aid,
+        ).unwrap();
+        let obj_gen = kernel.fabric.objects.get(&data).unwrap().generation;
+        let buf = kernel.processes[slot].cap_table.as_mut().unwrap()
+            .install_memory(data, obj_gen, 0, 128, Permissions::READ, aid, Some(tid))
+            .unwrap();
+        assert!(kernel.fabric.initialize_object(data, 0, &[0xE5; 64]));
+
+        issue_nic_tx(&mut kernel, slot, dev, buf, 64);
+        assert_eq!(kernel.device_registry.nonterminal_pair_request_count(&client, &driver), 1);
+        for _ in 0..3 { kernel.idle_progress_once(); }
+        assert_eq!(kernel.device_registry.nonterminal_pair_request_count(&client, &driver), 0);
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 0);
+        assert_eq!(kernel.processes[slot].core.r[R1 as usize], 64);
+    }
+
+    #[test]
+    fn p93e4b_commit_time_revocation_faults_without_tx_sink_mutation() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_TX,
+        ).unwrap();
+        let buf = kernel.install_capability(slot, data, 0, 128, Permissions::READ).unwrap();
+        assert!(kernel.fabric.initialize_object(data, 0, &[0xF6; 64]));
+
+        issue_nic_tx(&mut kernel, slot, dev, buf, 64);
+        assert!(kernel.processes[slot].io_wait.is_some());
+        kernel.fabric.revoke(data);
+        for _ in 0..3 { kernel.idle_progress_once(); }
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], u64::MAX);
+        assert_eq!(kernel.processes[slot].core.r[R1 as usize], 0);
+        assert_eq!(kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap().tx_frame_count(), 0,
+            "faulted committed READ must expose no host frame");
+    }
+
+    #[test]
+    fn p93e4b_source_cap_drop_after_acceptance_does_not_cancel_tx() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_TX,
+        ).unwrap();
+        let buf = kernel.install_capability(slot, data, 0, 128, Permissions::READ).unwrap();
+        let frame = [0x71; 48];
+        assert!(kernel.fabric.initialize_object(data, 0, &frame));
+        let source_aid = kernel.resolve_capability(slot, buf).unwrap().authority_id();
+        let source_domain = kernel.processes[slot].core.domain;
+
+        issue_nic_tx(&mut kernel, slot, dev, buf, frame.len() as u64);
+        assert!(kernel.fabric.remove_by_authority_id(source_domain, source_aid));
+        for _ in 0..3 { kernel.idle_progress_once(); }
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 0);
+        assert_eq!(kernel.take_nic_tx(binding), Some(frame.to_vec()));
+    }
+
+
+    #[test]
+    fn p93f_loopback_backend_requires_explicit_host_reinjection() {
+        use super::super::host_net::{HostNicBackend, HostNicFrame, LoopbackBackend};
+
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_TX,
+        ).unwrap();
+        let buf = kernel.install_capability(slot, data, 0, 128, Permissions::READ).unwrap();
+        let frame = vec![0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC];
+        assert!(kernel.fabric.initialize_object(data, 0, &frame));
+
+        issue_nic_tx(&mut kernel, slot, dev, buf, frame.len() as u64);
+        for _ in 0..3 { kernel.idle_progress_once(); }
+        let exported = kernel.take_nic_tx(binding).expect("committed guest TX");
+        assert_eq!(exported, frame);
+
+        let before_phys = kernel.fabric.translate(data, 0).unwrap();
+        let before_memory = kernel.fabric.read_physical(before_phys, frame.len() as u64).to_vec();
+        let mut backend = LoopbackBackend::new();
+        backend.accept_guest_tx(HostNicFrame::new(binding, exported));
+
+        // Merely handing bytes to the host policy does not inject anything.
+        let nic = kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap();
+        assert_eq!(nic.rx_queue_len(), 0);
+        assert_eq!(nic.event_sequence(), 0);
+        assert_eq!(kernel.fabric.read_physical(before_phys, frame.len() as u64), before_memory.as_slice());
+
+        // The host explicitly chooses to reinject the offered frame.
+        let offered = backend.poll_rx().expect("loopback RX offer");
+        assert_eq!(offered.device, binding);
+        assert_eq!(offered.bytes, frame);
+        assert!(kernel.inject_nic_rx(offered.device, &offered.bytes));
+
+        let nic = kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap();
+        assert_eq!(nic.rx_queue_len(), 1);
+        assert_eq!(nic.event_sequence(), 1);
+        assert_eq!(nic.peek_rx(), Some(frame.as_slice()));
+        assert_eq!(kernel.fabric.read_physical(before_phys, frame.len() as u64), before_memory.as_slice(),
+            "host RX injection enters NIC-private state, not guest memory");
     }
 
 }

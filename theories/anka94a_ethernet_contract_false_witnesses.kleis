@@ -1,0 +1,24 @@
+// Every example is deliberately false and must be rejected.
+import "anka94a_ethernet_contract.kleis"
+
+example "FALSE-ETH94A-1 parser may read a 13-byte Ethernet header" {
+    assert(ethernet94a_header_access_safe(bvconst(13,16)))
+}
+
+example "FALSE-ETH94A-2 1515-byte ordinary frame is accepted" {
+    assert(ethernet94a_length_valid(bvconst(1515,16)))
+}
+
+example "FALSE-ETH94A-3 EtherType bytes are little endian" {
+    assert(
+        ethernet94a_ethertype(bvconst(8,16),bvconst(6,16))
+        = bvconst(1544,16)
+    )
+}
+
+example "FALSE-ETH94A-4 unknown EtherType makes Ethernet syntax invalid" {
+    assert(
+        ethernet94a_parse_accepts(bvconst(64,16),false)
+        != ethernet94a_parse_accepts(bvconst(64,16),true)
+    )
+}

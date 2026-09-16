@@ -970,6 +970,7 @@ impl Fabric {
             auth_generation: None,
             physical_address: None,
             write_data,
+            read_data: None,
             fault: None,
         };
         self.transactions.push(tx);
@@ -1106,7 +1107,10 @@ impl Fabric {
                 self.memory[base..end].copy_from_slice(data);
             }
             AccessKind::Read | AccessKind::Fetch => {
-                // Read data from physical memory — no mutation.
+                // Capture the authorized committed observation.  This must
+                // happen inside the commit phase so an asynchronous bus master
+                // never has to bypass Fabric and peek at physical memory later.
+                self.transactions[idx].read_data = Some(self.memory[base..end].to_vec());
             }
         }
 
@@ -1164,8 +1168,10 @@ impl Fabric {
         self.advance(idx); // commit
         match self.transactions[idx].state {
             TxState::Committed => {
-                let phys = self.transactions[idx].physical_address.unwrap() as usize;
-                Ok(self.memory[phys..phys + length].to_vec())
+                let data = self.transactions[idx].read_data.clone()
+                    .expect("committed read transaction must retain read_data");
+                debug_assert_eq!(data.len(), length);
+                Ok(data)
             }
             TxState::Faulted => {
                 Err(self.transactions[idx].fault.clone().unwrap())
@@ -2408,4 +2414,51 @@ mod tests {
         assert_eq!(f.memory, snapshot,
             "atomic on invalid span must produce zero memory mutation");
     }
+
+    /// Phase 9.3e.4b: a committed asynchronous READ retains the exact bytes
+    /// observed at commit so a bus master can consume them without bypassing
+    /// Fabric with a later physical-memory peek.
+    #[test]
+    fn p93e4b_async_read_retains_committed_observation() {
+        let mut f = Fabric::new(0x20000);
+        let obj = f.alloc_object("async_read", 0x1000, ObjectKind::Memory);
+        assert!(f.place_object(obj, 0x4000));
+        let data: Vec<u8> = (0..64).map(|i| (i as u8).wrapping_mul(5)).collect();
+        assert!(f.initialize_object(obj, 0x20, &data));
+        let dom = f.create_domain();
+        f.grant(dom, obj, 0x20, data.len() as u64, Permissions::READ);
+
+        let req = dma_request(DMA0, dom, obj, 0x20, data.len() as u64, AccessKind::Read);
+        let idx = f.submit(req, None);
+        f.advance(idx);
+        f.advance(idx);
+        assert!(f.transaction(idx).read_data.is_none(),
+            "READ bytes must not be exposed before commit");
+        f.advance(idx);
+
+        assert_eq!(f.transaction(idx).state, TxState::Committed);
+        assert_eq!(f.transaction(idx).read_data.as_deref(), Some(data.as_slice()));
+    }
+
+    #[test]
+    fn p93e4b_faulted_async_read_retains_no_bytes() {
+        let mut f = Fabric::new(0x20000);
+        let obj = f.alloc_object("faulted_async_read", 0x1000, ObjectKind::Memory);
+        assert!(f.place_object(obj, 0x5000));
+        assert!(f.initialize_object(obj, 0, &[0xAB; 32]));
+        let dom = f.create_domain();
+        f.grant(dom, obj, 0, 32, Permissions::READ);
+
+        let req = dma_request(DMA0, dom, obj, 0, 32, AccessKind::Read);
+        let idx = f.submit(req, None);
+        f.advance(idx); // Authorized
+        f.advance(idx); // Prepared
+        f.revoke(obj);
+        f.advance(idx); // commit-time revalidation -> Faulted
+
+        assert_eq!(f.transaction(idx).state, TxState::Faulted);
+        assert!(f.transaction(idx).read_data.is_none(),
+            "faulted READ must reveal no committed observation");
+    }
+
 }

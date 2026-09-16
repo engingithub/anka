@@ -1,0 +1,36 @@
+// Every example is deliberately false and must be rejected.
+import "anka93f_host_nic_backend.kleis"
+
+example "FALSE-HOSTNIC-1 uncommitted TX is visible to backend" {
+    assert(host_backend_tx_visible(false,true)=true)
+}
+
+example "FALSE-HOSTNIC-2 wrong NIC binding routes host RX" {
+    assert(host_backend_rx_offer_routes(
+        bvconst(40,64),bvconst(3,64),bvconst(41,64),bvconst(3,64)))
+}
+
+example "FALSE-HOSTNIC-3 stale NIC generation routes host RX" {
+    assert(host_backend_rx_offer_routes(
+        bvconst(40,64),bvconst(2,64),bvconst(40,64),bvconst(3,64)))
+}
+
+example "FALSE-HOSTNIC-4 host injection directly changes guest memory" {
+    assert(host_injection_direct_guest_memory_changed(true)=true)
+}
+
+example "FALSE-HOSTNIC-5 host injection creates guest capability" {
+    assert(host_injection_creates_capability(true)=true)
+}
+
+example "FALSE-HOSTNIC-6 host injection creates DMA delegation" {
+    assert(host_injection_creates_delegation(true)=true)
+}
+
+example "FALSE-HOSTNIC-7 every guest TX reaches external network" {
+    assert(external_network_transmitted(true,false)=true)
+}
+
+example "FALSE-HOSTNIC-8 loopback is mandatory NIC semantics" {
+    assert(loopback_rx_offer(true,false)=true)
+}

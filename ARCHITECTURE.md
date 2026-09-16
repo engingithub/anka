@@ -1453,7 +1453,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions, 67,824 bytes |
 | Canonical source | ~17 KB |
-| Tests | 787 |
+| Tests | 802 passing at 9.3e.4a closure; 822 in 9.3e.4b/9.3f candidate |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -1952,11 +1952,12 @@ anka_user_device_events_false_witnesses.kleis — 0/8 false claims pass
 | `cursor_loop` | 3-round strictly monotone epoch progression |
 | `incarnation_isolation` | Wait(P_g) → kill → reclaim → spawn P_(g+1) → epoch++ → untouched |
 
-744/744 tests.  The path forward:
+802/802 tests at the closed 9.3e.4a baseline.  The path forward:
 
 ```text
-9.3e — First NIC model (second DeviceController variant)
-9.4  — Networking: Ethernet → ARP → ICMP → UDP → TCP → Socket → HTTP
+9.3e.4b — finite NIC TX
+9.3f    — host-controlled NIC backend / loopback
+9.4     — user-space networking: Ethernet → ARP → ICMP → UDP/TCP → Socket → HTTP
 ```
 
 ### Stage 32: User-Space NIC — ABI groundwork and NicController (Phase 9.3e.1--9.3e.3)
@@ -2123,3 +2124,125 @@ design
 ```
 
 That process is the Anka design method.
+
+### Stage 33: Finite NIC DMA and Host-Controlled Ethernet Boundary (Phase 9.3e.4--9.3f)
+
+Phase 9.3e.4 turns the NIC from an unsolicited-event source into a bidirectional
+finite-DMA device without weakening the exact-presented-authority model.
+
+**9.3e.4a — RX (closed):**
+
+```text
+PrivateRxFrame
+  + exact NIC_RX authority
+  + exact Memory.WRITE authority
+  + exact DeviceBinding
+  -> narrow DMA delegation
+  -> Fabric WRITE
+  -> NicCompletion(status, transferred_len)
+```
+
+Pre-admission rejection preserves the private RX queue and creates no DMA
+domain.  Once accepted, the frame belongs to the finite request; commit-time
+fault consumes the request without requeueing.  Private queued RX is neither
+autonomous work nor pair-attributed work, while accepted nonterminal DMA is
+pair-attributed when DelegationId provenance names the exact client/driver
+pair.  RX completion does not advance the unsolicited-arrival epoch.
+
+9.3e.4a closed locally at **802/802 Rust tests**.
+
+**9.3e.4b — TX (implementation candidate):**
+
+```text
+exact NIC_TX authority
+  + exact Memory.READ authority
+  + exact DeviceBinding
+  + finite frame length (1..1514)
+  -> narrow DMA delegation
+  -> Fabric READ
+  -> committed read_data
+  -> host-visible TX sink
+  -> NicCompletion(status, transferred_len)
+```
+
+`Transaction::read_data` is populated only inside Fabric's commit phase after
+commit-time generation/authority/span revalidation.  Asynchronous NIC TX never
+peeks at physical memory after authorization.  Therefore:
+
+```text
+Committed Fabric READ -> TXSink += exact committed bytes
+Faulted Fabric READ   -> Delta TXSink = 0
+```
+
+The source capability may disappear after acceptance because the controller
+owns the narrow derived DMA authority.  Revocation of the underlying object is
+still detected by Fabric commit-time revalidation.
+
+`SYS_NIC_TX = 19` uses the six-register syscall ABI introduced in 9.3e.2:
+
+```text
+R1 = NIC capability slot
+R2 = NIC capability generation
+R3 = buffer capability slot
+R4 = buffer capability generation
+R5 = frame length
+R0 = completion status
+R1 = committed byte count
+```
+
+**9.3f — host NIC backend boundary:**
+
+The host/emulator owns connectivity policy.  Anka owns only authorized frame
+production and consumption:
+
+```text
+Anka userspace -> NicController -> host backend -> {loopback, synthetic LAN,
+                                                    future external bridge}
+```
+
+The first backend is deterministic Ethernet-level loopback.  It preserves exact
+`DeviceBinding` and frame bytes, but does not inject anything automatically.
+The host must explicitly extract a committed TX frame and explicitly call
+`inject_nic_rx` on a backend RX offer.  Thus:
+
+```text
+GuestTx(frame) != permission to transmit on a physical host network
+HostRxOffer(frame) != guest-memory mutation
+Loopback policy    != NicController semantics
+```
+
+`host_net.rs` contains the host-only `HostNicBackend`, `HostNicFrame`, and
+`LoopbackBackend` abstractions.  They carry no Anka AuthorityId or DelegationId;
+the backend is machine-environment policy, not an Anka principal.
+
+**Formal-first networking contracts added before guest protocol code:**
+
+```text
+anka93e4_finite_nic_dma.kleis                  19/19 positive
+anka93e4_finite_nic_dma_false_witnesses.kleis  0/11 false claims pass
+anka93f_host_nic_backend.kleis                 13/13 positive
+anka93f_host_nic_backend_false_witnesses.kleis  0/8 false claims pass
+anka94a_ethernet_contract.kleis                 8/8 positive
+anka94a_ethernet_contract_false_witnesses.kleis 0/4 false claims pass
+anka94b_arp_contract.kleis                      9/9 positive
+anka94b_arp_contract_false_witnesses.kleis      0/4 false claims pass
+anka94c_ipv4_icmp_contract.kleis               14/14 positive
+anka94c_ipv4_icmp_contract_false_witnesses.kleis 0/7 false claims pass
+```
+
+All five positive theories contain no new axioms.  The new formal package is
+**63/63 positive assertions verified; 0/34 deliberately false claims pass**.
+
+The Ethernet contract freezes the virtual-NIC frame boundary as:
+
+```text
+dst MAC[6] | src MAC[6] | EtherType[2] | payload
+```
+
+with no guest-visible preamble/SFD/IFG or FCS and VLAN deferred.  ARP is limited
+to Ethernet/IPv4 ARP, and the first IPv4/ICMP contract supports only fixed-IHL (20-byte header),
+nonfragmented local IPv4 plus length-safe ICMP echo; IPv4 options are deferred.  These are user-space protocol
+contracts; protocol parsing is deliberately not moved into the kernel.
+
+The 9.3e.4b/9.3f candidate source contains **822 Rust tests**.  Closure requires
+a local Rust run; the prior closed runtime baseline remains 802/802.

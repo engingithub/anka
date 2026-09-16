@@ -1,0 +1,72 @@
+// =============================================================================
+// Anka64 Ethernet User-Space Contract (Phase 9.4a, formal-first)
+// =============================================================================
+// No new axioms.  This freezes the byte-level frame boundary before guest
+// Ethernet parser code is written.
+//
+// Virtual NIC frame presented to user space:
+//   dst MAC[6] | src MAC[6] | EtherType[2] | payload
+// No preamble/SFD/IFG.  FCS is not guest-visible.  802.1Q VLAN is deferred.
+// Unknown EtherTypes are syntactically valid Ethernet frames and may be ignored.
+// =============================================================================
+
+// 14-byte header, max 1514 bytes excluding FCS.
+define ethernet94a_length_valid(len : BitVec16) =
+    bvuge(len,bvconst(14,16)) ∧ bvule(len,bvconst(1514,16))
+
+// Header extraction is only legal after the 14-byte lower bound.
+define ethernet94a_header_access_safe(len : BitVec16) =
+    bvuge(len,bvconst(14,16))
+
+// EtherType is network byte order: byte12 is high byte, byte13 is low byte.
+// Inputs are represented in BitVec16 so shifts need no widening primitive.
+define ethernet94a_ethertype(byte12 : BitVec16, byte13 : BitVec16) : BitVec16 =
+    bvor(bvshl(byte12,bvconst(8,16)),byte13)
+
+// Parser acceptance is structural only.  EtherType policy is a later layer.
+define ethernet94a_parse_accepts(len : BitVec16, known_ethertype : Bool) =
+    ethernet94a_length_valid(len)
+
+example "ETH94A-1 13-byte frame is rejected before header access" {
+    assert(¬ethernet94a_length_valid(bvconst(13,16)))
+}
+
+example "ETH94A-2 14-byte structural frame is parseable" {
+    assert(ethernet94a_length_valid(bvconst(14,16)))
+}
+
+example "ETH94A-3 1514-byte ordinary frame is parseable" {
+    assert(ethernet94a_length_valid(bvconst(1514,16)))
+}
+
+example "ETH94A-4 1515-byte ordinary frame is rejected" {
+    assert(¬ethernet94a_length_valid(bvconst(1515,16)))
+}
+
+example "ETH94A-5 accepted frame always permits safe fixed-header access" {
+    assert(
+        ∀(n : BitVec16).
+            ethernet94a_length_valid(n) ⇒ ethernet94a_header_access_safe(n)
+    )
+}
+
+example "ETH94A-6 EtherType 0x0806 is extracted from bytes 12,13" {
+    assert(
+        ethernet94a_ethertype(bvconst(8,16),bvconst(6,16))
+        = bvconst(2054,16)
+    )
+}
+
+example "ETH94A-7 EtherType 0x0800 is extracted from bytes 12,13" {
+    assert(
+        ethernet94a_ethertype(bvconst(8,16),bvconst(0,16))
+        = bvconst(2048,16)
+    )
+}
+
+example "ETH94A-8 unknown EtherType does not make a structurally valid frame malformed" {
+    assert(
+        ethernet94a_parse_accepts(bvconst(64,16),false)
+        = ethernet94a_parse_accepts(bvconst(64,16),true)
+    )
+}

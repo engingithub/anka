@@ -392,6 +392,13 @@ pub struct Transaction {
     pub auth_generation: Option<Generation>,
     pub physical_address: Option<u64>,
     pub write_data: Option<Vec<u8>>,
+    /// Bytes observed by a committed Read/Fetch transaction.
+    ///
+    /// This is populated only in the commit phase, after generation,
+    /// authority, translation and physical-span revalidation all pass.
+    /// Asynchronous bus masters (for example NIC TX) consume this exact
+    /// committed observation instead of peeking at physical memory later.
+    pub read_data: Option<Vec<u8>>,
     pub fault: Option<FaultRecord>,
 }
 
@@ -751,9 +758,10 @@ pub struct RequestHandle {
 /// `NicCompletion`, etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceCompletionStatus {
-    /// DMA transaction committed — data is in guest buffer.
+    /// DMA transaction committed.  Direction-specific effects are complete:
+    /// RX bytes are in guest memory; TX bytes are captured for the host sink.
     Success,
-    /// DMA transaction faulted — guest buffer unchanged.
+    /// DMA transaction faulted — no direction-specific commit effect occurred.
     DmaFault(FaultReason),
 }
 

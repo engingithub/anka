@@ -1,0 +1,112 @@
+// =============================================================================
+// Anka64 IPv4 + ICMP Echo User-Space Contract (Phase 9.4c, formal-first)
+// =============================================================================
+// No new axioms.  First stack intentionally supports only nonfragmented IPv4
+// and ICMP echo request/reply.  IPv4 options and fragmentation are deferred;
+// therefore the first parser accepts only IHL=5 (20-byte IPv4 header).
+// TCP/UDP are later phases.
+// =============================================================================
+
+define ipv494c_lengths_safe(
+    header_len : BitVec16,
+    total_len : BitVec16,
+    available_len : BitVec16
+) = header_len=bvconst(20,16)
+    ∧ bvuge(total_len,header_len)
+    ∧ bvule(total_len,available_len)
+
+define ipv494c_supported_packet(
+    version_is_four : Bool,
+    lengths_safe : Bool,
+    checksum_valid : Bool,
+    fragmented : Bool,
+    destination_is_local : Bool
+) = version_is_four
+    ∧ lengths_safe
+    ∧ checksum_valid
+    ∧ ¬fragmented
+    ∧ destination_is_local
+
+// ICMP Echo requires the fixed 8-byte ICMP header before identifier/sequence
+// or checksum fields can be inspected.
+define icmp94c_length_safe(icmp_len : BitVec16) =
+    bvuge(icmp_len,bvconst(8,16))
+
+define icmp94c_should_echo_reply(
+    ipv4_supported : Bool,
+    protocol_is_icmp : Bool,
+    icmp_length_safe : Bool,
+    type_is_echo_request : Bool,
+    code_is_zero : Bool,
+    icmp_checksum_valid : Bool
+) = ipv4_supported
+    ∧ protocol_is_icmp
+    ∧ icmp_length_safe
+    ∧ type_is_echo_request
+    ∧ code_is_zero
+    ∧ icmp_checksum_valid
+
+// Echo reply conserves identifier, sequence and payload tokens exactly.
+define icmp94c_reply_identifier(id : BitVec16) : BitVec16 = id
+define icmp94c_reply_sequence(seq : BitVec16) : BitVec16 = seq
+define icmp94c_reply_payload(payload_token : BitVec64) : BitVec64 = payload_token
+
+example "IPICMP94C-1 minimum IPv4 header lengths are safe" {
+    assert(ipv494c_lengths_safe(
+        bvconst(20,16),bvconst(20,16),bvconst(20,16)))
+}
+
+example "IPICMP94C-2 total length shorter than header is rejected" {
+    assert(¬ipv494c_lengths_safe(
+        bvconst(24,16),bvconst(20,16),bvconst(64,16)))
+}
+
+example "IPICMP94C-3 truncated packet is rejected" {
+    assert(¬ipv494c_lengths_safe(
+        bvconst(20,16),bvconst(60,16),bvconst(59,16)))
+}
+
+example "IPICMP94C-4 valid nonfragmented local IPv4 packet is supported" {
+    assert(ipv494c_supported_packet(true,true,true,false,true)=true)
+}
+
+example "IPICMP94C-5 non-IPv4 version is rejected" {
+    assert(ipv494c_supported_packet(false,true,true,false,true)=false)
+}
+
+example "IPICMP94C-6 fragmented IPv4 is deferred and rejected" {
+    assert(ipv494c_supported_packet(true,true,true,true,true)=false)
+}
+
+example "IPICMP94C-7 IPv4 options are deferred by the first stack" {
+    assert(¬ipv494c_lengths_safe(
+        bvconst(24,16),bvconst(24,16),bvconst(64,16)))
+}
+
+example "IPICMP94C-8 minimum ICMP echo header is safe" {
+    assert(icmp94c_length_safe(bvconst(8,16)))
+}
+
+example "IPICMP94C-9 truncated ICMP header is rejected" {
+    assert(¬icmp94c_length_safe(bvconst(7,16)))
+}
+
+example "IPICMP94C-10 valid ICMP echo request receives echo reply" {
+    assert(icmp94c_should_echo_reply(true,true,true,true,true,true)=true)
+}
+
+example "IPICMP94C-11 bad ICMP checksum receives no echo reply" {
+    assert(icmp94c_should_echo_reply(true,true,true,true,true,false)=false)
+}
+
+example "IPICMP94C-12 reply preserves ICMP identifier" {
+    assert(∀(id : BitVec16). icmp94c_reply_identifier(id)=id)
+}
+
+example "IPICMP94C-13 reply preserves ICMP sequence" {
+    assert(∀(seq : BitVec16). icmp94c_reply_sequence(seq)=seq)
+}
+
+example "IPICMP94C-14 reply preserves opaque payload bytes" {
+    assert(∀(p : BitVec64). icmp94c_reply_payload(p)=p)
+}
