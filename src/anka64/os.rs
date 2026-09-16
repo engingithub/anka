@@ -6,10 +6,11 @@
 //!
 //! Syscall convention (via TRAP #0):
 //!   R0 = syscall number
-//!   R1–R3 = arguments
-//!   R0 = return value
+//!   R1–R8 = syscall-specific arguments
+//!   R0 = primary return value; selected syscalls also return R1
 
 use super::block::{BlockController, BlockCompletion};
+use super::nic::{NicCompletion, NicRxRequest, NicRxSubmitResult};
 use super::core::Anka64Core;
 use super::fabric::Fabric;
 use super::isa::*;
@@ -37,6 +38,7 @@ pub const SYS_RECV_WAIT: u64 = 14; // recv_wait(peer_slot, peer_gen) → blockin
 pub const SYS_DEV_SUBMIT_ASYNC: u64 = 15; // dev_submit_async(same args) → R0=0,R1=slot,R2=gen
 pub const SYS_DEV_WAIT: u64 = 16; // dev_wait(slot, gen) → completion status
 pub const SYS_DEV_EVENT_WAIT: u64 = 17; // dev_event_wait(cap_slot, cap_gen, epoch) → status, epoch
+pub const SYS_NIC_RX: u64 = 18; // nic_rx(dev_slot, dev_gen, buf_slot, buf_gen) → status, len
 
 /// Maximum messages per mailbox.  Enforced by all producers:
 /// SYS_SEND, SYS_SEND_KEY, and SYS_SEND_CAP.
@@ -330,6 +332,21 @@ struct PreparedDevSubmit {
     source_domain: super::state::DomainId,
     source_authority_id: super::state::AuthorityId,
     delegation_id: Option<super::state::DelegationId>,
+}
+
+/// Side-effect-free validation result for SYS_NIC_RX.
+///
+/// All fields needed to accept one queued private RX frame are resolved
+/// before any DMA domain is minted or any frame is dequeued.
+#[derive(Debug)]
+struct PreparedNicRx {
+    device_binding: DeviceBinding,
+    requester: RequesterKey,
+    target_object: ObjectId,
+    target_offset: u64,
+    source_domain: DomainId,
+    source_authority_id: AuthorityId,
+    delegation_id: Option<DelegationId>,
 }
 
 /// Exact-peer blocking receive (Phase 9.2e).
@@ -698,8 +715,8 @@ pub enum BootError {
 /// completion, pair quiescence).
 ///
 /// The generic surface delegates directly to the inner controller.
-/// Block-specific operations (submit, storage access) require an
-/// explicit pattern match to unwrap the inner `BlockController`.
+/// Device-specific operations (Block submission/storage, NIC RX submission)
+/// require an explicit kind check/unwrap before entering that controller.
 ///
 /// Formal basis: anka_generic_device_refinement.kleis GENDEV-1..13.
 ///   Generic(Block) = Block for all observables.
@@ -712,17 +729,18 @@ pub enum DeviceController {
 impl DeviceController {
     /// Advance the device by one machine tick.
     /// GENDEV-1: Block wrapper preserves block transition result.
-    /// NIC tick is a no-op: unsolicited arrival is host-driven.
+    /// NIC private queued RX is inert, while accepted finite RX DMA advances.
     pub fn tick(&mut self, fabric: &mut Fabric) {
         match self {
             DeviceController::Block(c) => c.tick(fabric),
-            DeviceController::Nic(_) => {}
+            DeviceController::Nic(c) => c.tick(fabric),
         }
     }
 
     /// Does this device have autonomous (in-flight) work?
     /// GENDEV-2: Block wrapper preserves autonomous-work observable.
-    /// NIC: queued private RX is not autonomous work (NIC93E3-10).
+    /// NIC: queued private RX alone is inert; accepted finite DMA is
+    /// autonomous work (NIC93E-24).
     pub fn has_autonomous_work(&self) -> bool {
         match self {
             DeviceController::Block(c) => c.has_autonomous_work(),
@@ -732,7 +750,8 @@ impl DeviceController {
 
     /// Does this device require interrupt service?
     /// GENDEV-3: Block wrapper preserves attention observable.
-    /// NIC: attention is a latched notification (NIC93E3-4..5, 17).
+    /// NIC: arrival attention is latched; ready finite-DMA completions
+    /// are an independent level-derived attention source.
     pub fn requires_attention(&self) -> bool {
         match self {
             DeviceController::Block(c) => c.requires_attention(),
@@ -751,7 +770,6 @@ impl DeviceController {
     }
 
     /// Number of ready completions.
-    /// NIC has no completion model in 9.3e.3.
     pub fn completion_count(&self) -> usize {
         match self {
             DeviceController::Block(c) => c.completion_count(),
@@ -761,14 +779,14 @@ impl DeviceController {
 
     /// Pop the next ready completion as a lossless generic envelope.
     ///
-    /// The inner device-specific completion is preserved intact:
-    ///   Wrap_generic(Block) loses no block semantics.
-    /// NIC has no completion model in 9.3e.3; always returns None.
+    /// The inner device-specific completion is preserved intact; generic
+    /// routing observes only handle/requester/status/secondary-result.
     pub fn consume_completion(&mut self) -> Option<DeviceCompletion> {
         match self {
             DeviceController::Block(c) =>
                 c.consume_completion().map(DeviceCompletion::Block),
-            DeviceController::Nic(_) => None,
+            DeviceController::Nic(c) =>
+                c.consume_completion().map(DeviceCompletion::Nic),
         }
     }
 
@@ -867,8 +885,8 @@ impl DeviceController {
 /// Wraps device-type-specific completions without projecting away
 /// any information.  Generic kernel machinery accesses only the
 /// common observations (handle, requester, status) through accessor
-/// methods; device-specific payload (block_number, delegation_id,
-/// future NIC fields, etc.) is preserved intact inside the envelope.
+/// methods; device-specific payload (block_number, transferred_len,
+/// delegation_id, etc.) is preserved intact inside the envelope.
 ///
 /// This satisfies the formal conservation law:
 ///   Generic(Block) = Block — genericization changes the view of a
@@ -876,6 +894,7 @@ impl DeviceController {
 #[derive(Debug, Clone)]
 pub enum DeviceCompletion {
     Block(BlockCompletion),
+    Nic(NicCompletion),
 }
 
 impl DeviceCompletion {
@@ -883,6 +902,7 @@ impl DeviceCompletion {
     pub fn handle(&self) -> super::state::RequestHandle {
         match self {
             DeviceCompletion::Block(c) => c.handle,
+            DeviceCompletion::Nic(c) => c.handle,
         }
     }
 
@@ -890,6 +910,7 @@ impl DeviceCompletion {
     pub fn requester(&self) -> RequesterKey {
         match self {
             DeviceCompletion::Block(c) => c.requester,
+            DeviceCompletion::Nic(c) => c.requester,
         }
     }
 
@@ -897,6 +918,18 @@ impl DeviceCompletion {
     pub fn status(&self) -> super::state::DeviceCompletionStatus {
         match self {
             DeviceCompletion::Block(c) => c.status,
+            DeviceCompletion::Nic(c) => c.status,
+        }
+    }
+
+    /// Optional secondary syscall result carried by this device kind.
+    ///
+    /// Block's historical ABI has no secondary result.  NIC RX returns
+    /// committed byte count in R1 (zero on DMA fault).
+    pub fn secondary_result(&self) -> Option<u64> {
+        match self {
+            DeviceCompletion::Block(_) => None,
+            DeviceCompletion::Nic(c) => Some(c.transferred_len),
         }
     }
 }
@@ -2027,19 +2060,19 @@ impl Kernel {
         }
     }
 
-    /// True if the block controller has autonomous work that can make
-    /// progress without any process executing instructions.
+    /// True if any registered controller has accepted nonterminal work
+    /// that can progress without a process executing instructions.
     ///
-    /// Structural definition: Waiting ∨ DmaReady ∨ DmaInFlight.
-    /// Completed is NOT autonomous — it is immediately serviceable
-    /// kernel work (the DMA domain has already been destroyed).
+    /// Private queued NIC RX is deliberately excluded: only accepted
+    /// finite requests (and Block waiting/DMA states) are autonomous.
+    /// Completed work is immediately serviceable kernel bookkeeping.
     fn has_autonomous_io(&self) -> bool {
         self.device_registry.devices.iter()
             .any(|d| d.controller.has_autonomous_work())
     }
 
-    /// Advance block I/O by one tick without executing any guest
-    /// instruction and without ticking the architectural timer.
+    /// Advance autonomous device I/O by one tick without executing any
+    /// guest instruction and without ticking the architectural timer.
     ///
     /// This is the idle progress boundary: the kernel observes that
     /// no process is runnable but hardware may still be active.  It
@@ -2305,11 +2338,10 @@ impl Kernel {
     ///   I_n commits → tick_devices() → route assertions → I_{n+1}
     ///
     /// Timer source: edge-triggered — fires once at period expiry.
-    /// Block device: level-triggered — L_dev := (C > 0).
-    ///   As long as the completion queue is non-empty, the source
-    ///   remains asserted and posts P_dev every tick.  Consuming
-    ///   P_dev in deliver_pending() does not consume completions;
-    ///   if C > 0 persists, P_dev is re-posted on the next tick.
+    /// Device source is aggregate: Block completion attention is
+    /// level-derived from C > 0; NIC attention is arrival_latch OR C > 0.
+    /// The interrupt handler services generic completion/event state before
+    /// acknowledging NIC arrival latches.
     fn tick_devices(&mut self, idx: usize) {
         // --- Timer source ---
         let timer_fired = if let Some(ref mut timer) = self.fabric.timer {
@@ -2368,7 +2400,7 @@ impl Kernel {
         self.resume_from_trap(idx);
     }
 
-    /// Drain the block controller's completion queue and wake
+    /// Drain every registered device completion queue and wake
     /// processes whose identity matches a completed request.
     ///
     /// Two independent identity checks:
@@ -2418,9 +2450,9 @@ impl Kernel {
         // the interrupt does NOT select whose I/O completed.  Delivery
         // uses exclusively (Completion.requester, DeviceBinding, RequestHandle).
         //
-        // Phase 9.3c: the completion is a lossless DeviceCompletion
-        // envelope.  Only generic accessors (handle, requester, status)
-        // are used for routing; device-specific payload is preserved.
+        // The completion is a lossless DeviceCompletion envelope.
+        // Generic routing uses handle/requester/status; device-specific
+        // payload remains preserved, with an optional ABI secondary result.
         for dev_idx in 0..self.device_registry.devices.len() {
             loop {
                 let ctrl = &mut self.device_registry.devices[dev_idx].controller;
@@ -2468,11 +2500,15 @@ impl Kernel {
                         self.processes[slot].async_requests.remove(pos);
                     }
 
+                    let secondary = completion.secondary_result();
                     let proc = &mut self.processes[slot];
                     proc.core.r[R0 as usize] = match completion.status() {
                         super::state::DeviceCompletionStatus::Success => 0,
                         super::state::DeviceCompletionStatus::DmaFault(_) => u64::MAX,
                     };
+                    if let Some(value) = secondary {
+                        proc.core.r[R1 as usize] = value;
+                    }
                     let pc = proc.core.event_return()
                         .expect("matched I/O completion requires outstanding syscall EventFrame");
                     proc.core.pc = pc;
@@ -2589,6 +2625,9 @@ impl Kernel {
             }
             SYS_DEV_EVENT_WAIT => {
                 self.handle_dev_event_wait(idx);
+            }
+            SYS_NIC_RX => {
+                self.handle_nic_rx(idx);
             }
             _ => {
                 eprintln!("Unknown syscall {} from pid {}",
@@ -4566,6 +4605,206 @@ impl Kernel {
                 observed_sequence,
             });
         }
+    }
+
+    /// Side-effect-free preflight for SYS_NIC_RX (18).
+    ///
+    /// ABI:
+    ///   R1 = NIC capability slot
+    ///   R2 = NIC capability generation
+    ///   R3 = buffer capability slot
+    ///   R4 = buffer capability generation
+    ///
+    /// Error codes:
+    ///   1 malformed ABI fields
+    ///   2 caller already has IoWait
+    ///   3 stale/wrong-kind NIC handle
+    ///   4 exact presented NIC authority lacks NIC_RX / backing mismatch
+    ///   5 exact binding is unregistered or not a NIC
+    ///   6 stale/wrong-kind buffer handle
+    ///   7 presented buffer lacks WRITE
+    ///   8 buffer provenance names another driver incarnation
+    ///   9 no private RX frame available
+    ///  10 front frame does not fit the presented buffer span
+    ///  11 no finite NIC request slot is free
+    ///  12 exact DMA delegation failed after preflight
+    ///
+    /// This function performs only reads/checks.  It never creates a DMA
+    /// domain, dequeues a frame, modifies a controller slot, or consumes an
+    /// AuthorityId.  In particular, errors 1-11 are pre-admission no-ops.
+    fn preflight_nic_rx(&self, idx: usize) -> Result<PreparedNicRx, u64> {
+        let r1 = self.processes[idx].core.r[R1 as usize];
+        let r2 = self.processes[idx].core.r[R2 as usize];
+        let r3 = self.processes[idx].core.r[R3 as usize];
+        let r4 = self.processes[idx].core.r[R4 as usize];
+
+        // Gate 0: exact checked ABI decode.
+        let dev_slot = u32::try_from(r1).map_err(|_| 1u64)?;
+        let dev_gen = u32::try_from(r2).map_err(|_| 1u64)?;
+        let buf_slot = u32::try_from(r3).map_err(|_| 1u64)?;
+        let buf_gen = u32::try_from(r4).map_err(|_| 1u64)?;
+
+        let dev_handle = CapabilityHandle { slot: dev_slot, generation: dev_gen };
+        let buf_handle = CapabilityHandle { slot: buf_slot, generation: buf_gen };
+
+        // Gate 1: presented device handle must resolve as Device.
+        let dev_resolved = self.resolve_capability(idx, dev_handle).ok_or(3u64)?;
+        let (dev_object, dev_object_gen, dev_rights, dev_authority_id) =
+            match &dev_resolved {
+                ResolvedCapability::Device {
+                    object, object_generation, rights, authority_id, ..
+                } => (*object, *object_generation, *rights, *authority_id),
+                ResolvedCapability::Memory { .. } => return Err(3),
+            };
+
+        // Gate 2: exact presented/backing device authority must contain NIC_RX.
+        let domain = self.processes[idx].core.domain;
+        if !self.fabric.validate_device_authority(
+            domain,
+            dev_authority_id,
+            dev_object,
+            dev_object_gen,
+            dev_rights,
+            DeviceRights::NIC_RX,
+        ) {
+            return Err(4);
+        }
+
+        // Gate 3: exact DeviceBinding must route to a NIC controller.
+        let binding = DeviceBinding {
+            object: dev_object,
+            generation: dev_object_gen,
+        };
+        let nic = self.device_registry.lookup(binding)
+            .and_then(|slot| slot.controller.as_nic())
+            .ok_or(5u64)?;
+
+        // Gate 4: presented buffer handle must resolve as Memory.
+        let buf_resolved = self.resolve_capability(idx, buf_handle).ok_or(6u64)?;
+        let (buf_object, buf_offset, buf_length, buf_perms, buf_authority_id, delegation_id) =
+            match &buf_resolved {
+                ResolvedCapability::Memory {
+                    object, offset, length, perms, authority_id, delegation_id, ..
+                } => (*object, *offset, *length, *perms, *authority_id, *delegation_id),
+                ResolvedCapability::Device { .. } => return Err(6),
+            };
+
+        // Gate 5: RX writes device bytes into guest memory.
+        if !buf_perms.contains(Permissions::WRITE) {
+            return Err(7);
+        }
+
+        // Gate 6: when provenance exists, this exact driver incarnation must
+        // be the delegation target.  The original client need not still live.
+        if let Some(tid) = delegation_id {
+            let current = ProcessKey {
+                slot: idx,
+                generation: self.processes[idx].generation,
+            };
+            if tid.driver != current {
+                return Err(8);
+            }
+        }
+
+        // Gate 7: private frame must already exist.  Merely polling NIC_RX on
+        // an empty queue creates no request and no Fabric state.
+        let frame_len = nic.peek_rx()
+            .map(|frame| frame.len() as u64)
+            .ok_or(9u64)?;
+
+        // Gate 8: the exact presented buffer span must fit the whole frame.
+        // No capability stitching and no partial packet DMA.
+        if frame_len > buf_length {
+            return Err(10);
+        }
+
+        // Gate 9: capacity check before exact delegation mints a DMA domain.
+        if nic.free_slot_count() == 0 {
+            return Err(11);
+        }
+
+        let requester = RequesterKey {
+            slot: idx as u32,
+            generation: self.processes[idx].generation,
+        };
+
+        Ok(PreparedNicRx {
+            device_binding: binding,
+            requester,
+            target_object: buf_object,
+            target_offset: buf_offset,
+            source_domain: domain,
+            source_authority_id: buf_authority_id,
+            delegation_id,
+        })
+    }
+
+    /// SYS_NIC_RX (18) — copy one queued private RX frame into guest memory.
+    ///
+    /// This is a finite blocking DMA operation, not an arrival wait.  If the
+    /// queue is empty the call returns immediately with error 9; drivers use
+    /// SYS_DEV_EVENT_WAIT to sleep for future unsolicited activity.
+    ///
+    /// On accepted non-empty RX:
+    ///   private queue -> exact WRITE delegation -> finite Fabric DMA -> IoWait
+    /// and completion returns R0=0, R1=committed frame length.
+    /// DMA fault returns R0=MAX, R1=0.  Once a frame has been accepted it is
+    /// not requeued on a later commit-time fault.
+    fn handle_nic_rx(&mut self, idx: usize) {
+        // Gate before all other work: a process may have at most one blocking
+        // finite I/O request outstanding through IoWait.
+        if self.processes[idx].io_wait.is_some() {
+            self.fail_nic_rx(idx, 2);
+            return;
+        }
+
+        let prepared = match self.preflight_nic_rx(idx) {
+            Ok(p) => p,
+            Err(code) => {
+                self.fail_nic_rx(idx, code);
+                return;
+            }
+        };
+
+        let request = NicRxRequest {
+            requester: prepared.requester,
+            target_object: prepared.target_object,
+            target_offset: prepared.target_offset,
+            source_domain: prepared.source_domain,
+            source_authority_id: prepared.source_authority_id,
+            delegation_id: prepared.delegation_id,
+        };
+
+        let binding = prepared.device_binding;
+        let result = {
+            let slot = self.device_registry.lookup_mut(binding)
+                .expect("NIC RX preflight validated exact binding");
+            let nic = slot.controller.as_nic_mut()
+                .expect("NIC RX preflight validated controller kind");
+            nic.submit_rx(request, &mut self.fabric)
+        };
+
+        match result {
+            NicRxSubmitResult::Accepted(handle) => {
+                self.processes[idx].io_wait = Some(IoWait {
+                    request: DeviceRequestKey {
+                        device: binding,
+                        request: handle,
+                    },
+                });
+                // Leave the syscall EventFrame outstanding.  Completion drain
+                // writes R0/R1 and performs event_return().
+            }
+            NicRxSubmitResult::NoPacket => self.fail_nic_rx(idx, 9),
+            NicRxSubmitResult::DeviceBusy => self.fail_nic_rx(idx, 11),
+            NicRxSubmitResult::DelegationFailed => self.fail_nic_rx(idx, 12),
+        }
+    }
+
+    fn fail_nic_rx(&mut self, idx: usize, code: u64) {
+        self.processes[idx].core.r[R0 as usize] = code;
+        self.processes[idx].core.r[R1 as usize] = 0;
+        self.resume_from_trap(idx);
     }
 
     fn fail_dev_submit(&mut self, idx: usize, code: u64) {
@@ -11781,7 +12020,9 @@ mod tests {
         // Peek at the completion before drain — unwrap the lossless envelope
         let comp = kernel.device_registry.devices[0].controller
             .consume_completion().unwrap();
-        let DeviceCompletion::Block(block_comp) = &comp;
+        let DeviceCompletion::Block(block_comp) = &comp else {
+            panic!("expected Block completion from block controller");
+        };
         assert_eq!(block_comp.delegation_id, Some(tid),
             "delegation_id must propagate unchanged through controller");
 
@@ -11931,7 +12172,9 @@ mod tests {
         }
         let comp = kernel.device_registry.devices[0].controller
             .consume_completion().unwrap();
-        let DeviceCompletion::Block(block_comp) = &comp;
+        let DeviceCompletion::Block(block_comp) = &comp else {
+            panic!("expected Block completion from block controller");
+        };
         assert_eq!(block_comp.status, super::super::state::DeviceCompletionStatus::Success);
         assert!(block_comp.delegation_id.is_none(),
             "legacy path must carry no delegation_id");
@@ -18563,7 +18806,9 @@ mod tests {
             "status preserved");
 
         // Unwrap the lossless envelope — block-specific fields intact
-        let DeviceCompletion::Block(block_comp) = generic_comp;
+        let DeviceCompletion::Block(block_comp) = generic_comp else {
+            panic!("expected Block completion from block controller");
+        };
         assert_eq!(block_comp.handle, handle, "inner handle");
         assert_eq!(block_comp.requester, rk, "inner requester");
         assert_eq!(block_comp.block_number, 2, "block_number preserved");
@@ -19544,7 +19789,7 @@ mod tests {
         fabric.write_physical(0x000000, &asm.to_bytes());
         seal_code_object(&mut fabric, text, dom);
 
-        let nic = super::super::nic::NicController::new();
+        let nic = super::super::nic::NicController::new(AgentId(300));
         let mut kernel = Kernel::new(fabric);
         let pk = kernel.spawn(core);
         let slot = pk.slot;
@@ -19630,9 +19875,9 @@ mod tests {
         assert!(!dev_slot.controller.requires_attention(),
             "fresh NIC has no pending attention");
         assert!(!dev_slot.controller.has_autonomous_work(),
-            "NIC never has autonomous work");
+            "fresh NIC has no accepted finite DMA work");
         assert_eq!(dev_slot.controller.completion_count(), 0,
-            "NIC has no completion model");
+            "fresh NIC has no ready finite-DMA completion");
 
         eprintln!("9.3e.3-1: NIC registration and identity ✓");
     }
@@ -19835,7 +20080,7 @@ mod tests {
         let (mut kernel, _slot, nic_a_binding) = nic_setup();
 
         // Register a second NIC
-        let nic_b = super::super::nic::NicController::new();
+        let nic_b = super::super::nic::NicController::new(AgentId(301));
         let nic_b_binding = kernel.register_nic_device(nic_b)
             .expect("register NIC B");
 
@@ -19882,7 +20127,7 @@ mod tests {
         fabric.write_physical(0x000000, &asm.to_bytes());
         seal_code_object(&mut fabric, text, dom);
 
-        let nic = super::super::nic::NicController::new();
+        let nic = super::super::nic::NicController::new(AgentId(302));
         let mut kernel = Kernel::new(fabric);
         let pk = kernel.spawn(core);
         let slot = pk.slot;
@@ -19941,8 +20186,8 @@ mod tests {
         fabric.write_physical(0x000000, &asm.to_bytes());
         seal_code_object(&mut fabric, text, dom);
 
-        let nic_a = super::super::nic::NicController::new();
-        let nic_b = super::super::nic::NicController::new();
+        let nic_a = super::super::nic::NicController::new(AgentId(303));
+        let nic_b = super::super::nic::NicController::new(AgentId(304));
         let mut kernel = Kernel::new(fabric);
         let pk = kernel.spawn(core);
         let slot = pk.slot;
@@ -20143,7 +20388,7 @@ mod tests {
         eprintln!("9.3e.3-18: NIC tick is a no-op ✓");
     }
 
-    // ─── 9.3e.3 test 19: consume_completion always None ───
+    // ─── 9.3e.3 test 19: private queued RX alone has no completion ───
 
     #[test]
     fn p93e3_nic_consume_completion_none() {
@@ -20154,9 +20399,9 @@ mod tests {
         let comp = kernel.device_registry.lookup_mut(binding)
             .unwrap().controller.consume_completion();
         assert!(comp.is_none(),
-            "NIC has no completion model in 9.3e.3");
+            "private queued RX alone must not synthesize a completion");
 
-        eprintln!("9.3e.3-19: NIC consume_completion always None ✓");
+        eprintln!("9.3e.3-19: private RX alone has no completion ✓");
     }
 
     // ─── 9.3e.3 test 20: generic event_sequence exposes NIC epoch ───
@@ -20178,4 +20423,446 @@ mod tests {
 
         eprintln!("9.3e.3-20: generic event_sequence exposes NIC epoch ✓");
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  Phase 9.3e.4a — finite NIC RX DMA witnesses
+    //
+    //  One private queued frame + exact NIC_RX capability + exact WRITE
+    //  buffer authority -> finite Fabric WRITE -> blocking IoWait -> R1 length.
+    // ═══════════════════════════════════════════════════════════════
+
+    fn nic_rx_base() -> (Kernel, usize, DeviceBinding, ObjectId) {
+        let (kernel, slot, binding) = nic_setup();
+        let (data, offset) = kernel.processes[slot]
+            .core
+            .address_map
+            .resolve(0x10000)
+            .expect("nic test data mapping");
+        assert_eq!(offset, 0);
+        (kernel, slot, binding, data)
+    }
+
+    fn issue_nic_rx(
+        kernel: &mut Kernel,
+        slot: usize,
+        dev_handle: CapabilityHandle,
+        buf_handle: CapabilityHandle,
+    ) {
+        let return_pc = kernel.processes[slot].core.pc + 4;
+        kernel.processes[slot].core.event_frames.push(EventFrame {
+            return_pc,
+            return_privilege: Privilege::User,
+            interrupts_were_enabled: true,
+            cause: EventCause::Syscall,
+        });
+        kernel.processes[slot].core.r[R0 as usize] = SYS_NIC_RX;
+        kernel.processes[slot].core.r[R1 as usize] = dev_handle.slot as u64;
+        kernel.processes[slot].core.r[R2 as usize] = dev_handle.generation as u64;
+        kernel.processes[slot].core.r[R3 as usize] = buf_handle.slot as u64;
+        kernel.processes[slot].core.r[R4 as usize] = buf_handle.generation as u64;
+        kernel.processes[slot].core.halted = true;
+        kernel.handle_syscall(slot);
+    }
+
+    #[test]
+    fn p93e4a_nic_rx_success_real_fabric_write_and_secondary_length() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev_handle = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_RX,
+        ).expect("NIC_RX device capability");
+        let buf_handle = kernel.install_capability(
+            slot, data, 0, 512, Permissions::WRITE,
+        ).expect("WRITE buffer capability");
+
+        let frame: Vec<u8> = (0..100).map(|i| (i ^ 0x5A) as u8).collect();
+        assert!(kernel.inject_nic_rx(binding, &frame));
+        let epoch = kernel.device_registry.lookup(binding).unwrap()
+            .controller.event_sequence();
+        let domains_before = kernel.fabric.domain_count();
+
+        issue_nic_rx(&mut kernel, slot, dev_handle, buf_handle);
+
+        assert!(kernel.processes[slot].io_wait.is_some(),
+            "accepted NIC_RX must block in IoWait");
+        let nic = kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap();
+        assert_eq!(nic.rx_queue_len(), 0,
+            "accepted frame leaves private queue exactly once");
+        assert!(nic.has_autonomous_work(),
+            "accepted finite DMA is autonomous work");
+        assert_eq!(nic.event_sequence(), epoch,
+            "DMA admission must not advance unsolicited-arrival epoch");
+        assert_eq!(kernel.fabric.domain_count(), domains_before + 1,
+            "accepted non-empty RX owns one narrow DMA domain");
+
+        // Three ticks: Requested->Authorized->Prepared->Committed.
+        for _ in 0..3 {
+            kernel.idle_progress_once();
+        }
+
+        assert!(kernel.processes[slot].io_wait.is_none());
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 0);
+        assert_eq!(kernel.processes[slot].core.r[R1 as usize], frame.len() as u64,
+            "NIC_RX secondary result is committed byte count");
+        assert!(kernel.processes[slot].core.event_frames.is_empty(),
+            "completion must consume the suspended syscall frame");
+        assert_eq!(kernel.fabric.domain_count(), domains_before,
+            "terminal RX must destroy its narrow DMA domain");
+
+        let phys = kernel.fabric.translate(data, 0).unwrap();
+        assert_eq!(kernel.fabric.read_physical(phys, frame.len() as u64), frame.as_slice());
+
+        let nic = kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap();
+        assert_eq!(nic.event_sequence(), epoch,
+            "RX completion must not synthesize a new arrival event");
+        assert_eq!(nic.completion_count(), 0,
+            "generic completion drain must consume the ready completion");
+    }
+
+    #[test]
+    fn p93e4a_nic_rx_empty_queue_is_immediate_noop() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev_handle = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_RX,
+        ).unwrap();
+        let buf_handle = kernel.install_capability(
+            slot, data, 0, 512, Permissions::WRITE,
+        ).unwrap();
+        let domains_before = kernel.fabric.domain_count();
+
+        issue_nic_rx(&mut kernel, slot, dev_handle, buf_handle);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 9,
+            "empty private RX queue must return the distinguished empty result");
+        assert_eq!(kernel.processes[slot].core.r[R1 as usize], 0);
+        assert!(kernel.processes[slot].io_wait.is_none());
+        assert!(kernel.processes[slot].core.event_frames.is_empty());
+        assert_eq!(kernel.fabric.domain_count(), domains_before,
+            "empty poll must not mint a DMA domain");
+        let nic = kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap();
+        assert_eq!(nic.rx_queue_len(), 0);
+        assert!(!nic.has_autonomous_work());
+    }
+
+    #[test]
+    fn p93e4a_presented_event_right_cannot_be_rescued_by_ambient_nic_rx() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let presented = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::EVENT_WAIT,
+        ).unwrap();
+        let buf_handle = kernel.install_capability(
+            slot, data, 0, 512, Permissions::WRITE,
+        ).unwrap();
+
+        // Ambient NIC_RX exists in the same domain but is not the presented
+        // capability.  Exact-presented-authority must reject the operation.
+        let domain = kernel.processes[slot].core.domain;
+        let ambient_aid = kernel.fabric.alloc_authority_id().unwrap();
+        kernel.fabric.grant_device_with_authority_id(
+            domain, binding.object, DeviceRights::NIC_RX, ambient_aid,
+        ).unwrap();
+
+        let frame = [0xCC; 64];
+        assert!(kernel.inject_nic_rx(binding, &frame));
+        let domains_before = kernel.fabric.domain_count();
+
+        issue_nic_rx(&mut kernel, slot, presented, buf_handle);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 4,
+            "ambient NIC_RX must not rescue presented EVENT_WAIT authority");
+        assert_eq!(kernel.fabric.domain_count(), domains_before);
+        let nic = kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap();
+        assert_eq!(nic.rx_queue_len(), 1,
+            "authority failure must not consume the private frame");
+        assert_eq!(nic.peek_rx(), Some(frame.as_slice()));
+        assert!(!nic.has_autonomous_work());
+    }
+
+    #[test]
+    fn p93e4a_read_only_buffer_cannot_be_rescued_by_ambient_write() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev_handle = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_RX,
+        ).unwrap();
+        let read_handle = kernel.install_capability(
+            slot, data, 0, 512, Permissions::READ,
+        ).unwrap();
+
+        // create_process already gave this domain ambient RW authority over
+        // the data object.  The presented READ-only handle must still fail.
+        let frame = [0xA7; 64];
+        assert!(kernel.inject_nic_rx(binding, &frame));
+        let domains_before = kernel.fabric.domain_count();
+
+        issue_nic_rx(&mut kernel, slot, dev_handle, read_handle);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 7,
+            "RX requires WRITE on the exact presented buffer handle");
+        assert_eq!(kernel.fabric.domain_count(), domains_before);
+        let nic = kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap();
+        assert_eq!(nic.rx_queue_len(), 1);
+        assert_eq!(nic.peek_rx(), Some(frame.as_slice()));
+        assert!(!nic.has_autonomous_work());
+    }
+
+    #[test]
+    fn p93e4a_buffer_backing_authority_must_supply_write() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev_handle = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_RX,
+        ).unwrap();
+
+        // Hostile correspondence witness: manufacture a cap-table slot that
+        // claims WRITE while its exact AuthorityId names only READ authority.
+        // resolve_capability() establishes naming/liveness; the exact DMA
+        // delegation must still reject the backing-rights mismatch.
+        let domain = kernel.processes[slot].core.domain;
+        let aid = kernel.fabric.alloc_authority_id().unwrap();
+        kernel.fabric.grant_with_authority_id(
+            domain, data, 0, 512, Permissions::READ, aid,
+        ).unwrap();
+        let obj_gen = kernel.fabric.objects.get(&data).unwrap().generation;
+        let forged_write = kernel.processes[slot].cap_table.as_mut().unwrap()
+            .install_memory(
+                data, obj_gen, 0, 512, Permissions::WRITE, aid, None,
+            )
+            .expect("hostile cap-table slot");
+
+        let frame = [0xD1; 48];
+        assert!(kernel.inject_nic_rx(binding, &frame));
+        let domains_before = kernel.fabric.domain_count();
+
+        issue_nic_rx(&mut kernel, slot, dev_handle, forged_write);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 12,
+            "slot WRITE must not amplify exact backing READ authority");
+        assert_eq!(kernel.fabric.domain_count(), domains_before,
+            "failed exact delegation must not leak a DMA domain");
+        let nic = kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap();
+        assert_eq!(nic.rx_queue_len(), 1);
+        assert_eq!(nic.peek_rx(), Some(frame.as_slice()));
+        assert!(!nic.has_autonomous_work());
+    }
+
+    #[test]
+    fn p93e4a_buffer_provenance_must_name_current_driver() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev_handle = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_RX,
+        ).unwrap();
+
+        let domain = kernel.processes[slot].core.domain;
+        let aid = kernel.fabric.alloc_authority_id().unwrap();
+        kernel.fabric.grant_with_authority_id(
+            domain, data, 0, 512, Permissions::WRITE, aid,
+        ).unwrap();
+        let obj_gen = kernel.fabric.objects.get(&data).unwrap().generation;
+        let bad_tid = DelegationId {
+            client: ProcessKey { slot: 42, generation: 1 },
+            driver: ProcessKey { slot: slot + 1, generation: 0 },
+            incarnation: 99,
+        };
+        let delegated = kernel.processes[slot].cap_table.as_mut().unwrap()
+            .install_memory(
+                data, obj_gen, 0, 512, Permissions::WRITE, aid, Some(bad_tid),
+            )
+            .expect("delegated buffer capability");
+
+        let frame = [0xE2; 48];
+        assert!(kernel.inject_nic_rx(binding, &frame));
+        let domains_before = kernel.fabric.domain_count();
+
+        issue_nic_rx(&mut kernel, slot, dev_handle, delegated);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 8,
+            "delegated RX buffer must name the exact current driver incarnation");
+        assert_eq!(kernel.fabric.domain_count(), domains_before);
+        let nic = kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap();
+        assert_eq!(nic.rx_queue_len(), 1,
+            "provenance rejection must preserve the private frame");
+        assert_eq!(nic.peek_rx(), Some(frame.as_slice()));
+        assert!(!nic.has_autonomous_work());
+    }
+
+    #[test]
+    fn p93e4a_frame_must_fit_exact_presented_buffer_span() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev_handle = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_RX,
+        ).unwrap();
+        let tiny = kernel.install_capability(
+            slot, data, 128, 16, Permissions::WRITE,
+        ).unwrap();
+        let frame = [0x42; 32];
+        assert!(kernel.inject_nic_rx(binding, &frame));
+        let domains_before = kernel.fabric.domain_count();
+
+        issue_nic_rx(&mut kernel, slot, dev_handle, tiny);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 10,
+            "whole frame must fit the exact presented buffer span");
+        assert_eq!(kernel.fabric.domain_count(), domains_before,
+            "span rejection must occur before DMA-domain creation");
+        let nic = kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap();
+        assert_eq!(nic.rx_queue_len(), 1);
+        assert_eq!(nic.peek_rx(), Some(frame.as_slice()));
+    }
+
+    #[test]
+    fn p93e4a_exact_device_binding_prevents_cross_nic_rx() {
+        let (mut kernel, slot, binding_a, data) = nic_rx_base();
+        let binding_b = kernel.register_nic_device(
+            super::super::nic::NicController::new(AgentId(305)),
+        ).expect("register NIC B");
+
+        let dev_b = kernel.install_device_capability(
+            slot, binding_b.object, DeviceRights::NIC_RX,
+        ).unwrap();
+        let buf = kernel.install_capability(
+            slot, data, 0, 512, Permissions::WRITE,
+        ).unwrap();
+
+        let frame = [0x91; 48];
+        assert!(kernel.inject_nic_rx(binding_a, &frame));
+
+        issue_nic_rx(&mut kernel, slot, dev_b, buf);
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 9,
+            "capability for NIC B must inspect only NIC B's private queue");
+        let a = kernel.device_registry.lookup(binding_a).unwrap()
+            .controller.as_nic().unwrap();
+        let b = kernel.device_registry.lookup(binding_b).unwrap()
+            .controller.as_nic().unwrap();
+        assert_eq!(a.rx_queue_len(), 1);
+        assert_eq!(a.peek_rx(), Some(frame.as_slice()));
+        assert_eq!(b.rx_queue_len(), 0);
+    }
+
+    #[test]
+    fn p93e4a_accepted_delegated_rx_counts_for_pair_until_terminal() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev_handle = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_RX,
+        ).unwrap();
+
+        let driver = ProcessKey {
+            slot,
+            generation: kernel.processes[slot].generation,
+        };
+        let client = ProcessKey { slot: 41, generation: 7 };
+        let tid = DelegationId { client, driver, incarnation: 123 };
+
+        let domain = kernel.processes[slot].core.domain;
+        let aid = kernel.fabric.alloc_authority_id().unwrap();
+        kernel.fabric.grant_with_authority_id(
+            domain, data, 0, 512, Permissions::WRITE, aid,
+        ).unwrap();
+        let obj_gen = kernel.fabric.objects.get(&data).unwrap().generation;
+        let buf = kernel.processes[slot].cap_table.as_mut().unwrap()
+            .install_memory(
+                data, obj_gen, 0, 512, Permissions::WRITE, aid, Some(tid),
+            )
+            .expect("delegated RX buffer");
+
+        let frame = [0x5E; 64];
+        assert!(kernel.inject_nic_rx(binding, &frame));
+        assert_eq!(
+            kernel.device_registry.nonterminal_pair_request_count(&client, &driver),
+            0,
+            "private queued RX must not become pair-attributed work",
+        );
+
+        issue_nic_rx(&mut kernel, slot, dev_handle, buf);
+        assert_eq!(
+            kernel.device_registry.nonterminal_pair_request_count(&client, &driver),
+            1,
+            "accepted finite DMA must delay exact-pair quiescence",
+        );
+
+        for _ in 0..3 {
+            kernel.idle_progress_once();
+        }
+        assert_eq!(
+            kernel.device_registry.nonterminal_pair_request_count(&client, &driver),
+            0,
+            "terminal NIC DMA must cease delaying pair quiescence",
+        );
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 0);
+        assert_eq!(kernel.processes[slot].core.r[R1 as usize], frame.len() as u64);
+    }
+
+    #[test]
+    fn p93e4a_commit_time_revocation_faults_without_requeue() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev_handle = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_RX,
+        ).unwrap();
+        let buf = kernel.install_capability(
+            slot, data, 0, 512, Permissions::WRITE,
+        ).unwrap();
+        let frame = [0x6D; 64];
+        assert!(kernel.inject_nic_rx(binding, &frame));
+
+        issue_nic_rx(&mut kernel, slot, dev_handle, buf);
+        assert!(kernel.processes[slot].io_wait.is_some());
+        assert_eq!(kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap().rx_queue_len(), 0,
+            "accepted frame is owned by the finite request");
+
+        // Revoke after acceptance.  The delegated DMA capability carries the
+        // old generation, so Fabric commit-time revalidation must fault.
+        kernel.fabric.revoke(data);
+        for _ in 0..3 {
+            kernel.idle_progress_once();
+        }
+
+        assert!(kernel.processes[slot].io_wait.is_none());
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], u64::MAX);
+        assert_eq!(kernel.processes[slot].core.r[R1 as usize], 0,
+            "faulted NIC RX transfers zero committed bytes");
+        let nic = kernel.device_registry.lookup(binding).unwrap()
+            .controller.as_nic().unwrap();
+        assert_eq!(nic.rx_queue_len(), 0,
+            "post-acceptance DMA fault does not requeue the packet");
+        assert!(!nic.has_autonomous_work());
+    }
+
+    #[test]
+    fn p93e4a_source_cap_drop_after_acceptance_does_not_cancel_dma() {
+        let (mut kernel, slot, binding, data) = nic_rx_base();
+        let dev_handle = kernel.install_device_capability(
+            slot, binding.object, DeviceRights::NIC_RX,
+        ).unwrap();
+        let buf = kernel.install_capability(
+            slot, data, 0, 512, Permissions::WRITE,
+        ).unwrap();
+        let source_aid = kernel.resolve_capability(slot, buf).unwrap().authority_id();
+        let source_domain = kernel.processes[slot].core.domain;
+        let frame = [0x3C; 40];
+        assert!(kernel.inject_nic_rx(binding, &frame));
+
+        issue_nic_rx(&mut kernel, slot, dev_handle, buf);
+        assert!(kernel.processes[slot].io_wait.is_some());
+
+        // Accepted request owns its narrow derived DMA authority.  Removing
+        // the original presented authority afterward must not cancel it.
+        assert!(kernel.fabric.remove_by_authority_id(source_domain, source_aid));
+
+        for _ in 0..3 {
+            kernel.idle_progress_once();
+        }
+
+        assert_eq!(kernel.processes[slot].core.r[R0 as usize], 0);
+        assert_eq!(kernel.processes[slot].core.r[R1 as usize], frame.len() as u64);
+        let phys = kernel.fabric.translate(data, 0).unwrap();
+        assert_eq!(kernel.fabric.read_physical(phys, frame.len() as u64), frame.as_slice());
+    }
+
 }
