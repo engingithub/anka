@@ -1,0 +1,69 @@
+// Every example is deliberately false and must be rejected.
+import "anka93g1_physical_placement.kleis"
+
+example "FALSE-PM93G1-1 misaligned physical base is accepted" {
+    assert(pm93g_page_aligned(bvconst(4097,64)))
+}
+
+example "FALSE-PM93G1-2 page-plus-one request may round to three pages" {
+    assert(pm93g_rounding_valid(bvconst(4097,64),bvconst(12288,64)))
+}
+
+example "FALSE-PM93G1-3 overlapping live extents are disjoint" {
+    assert(pm93g_extent_disjoint(
+        bvconst(65536,64),bvconst(8192,64),
+        bvconst(69632,64),bvconst(4096,64)))
+}
+
+example "FALSE-PM93G1-4 overlapping candidate is admissible" {
+    assert(pm93g_allocate_admissible(
+        bvconst(69632,64),bvconst(8192,64),
+        bvconst(65536,64),bvconst(65536,64),
+        bvconst(0,1),
+        bvconst(1,1),bvconst(73728,64),bvconst(4096,64),
+        bvconst(0,1),bvconst(0,64),bvconst(0,64)))
+}
+
+example "FALSE-PM93G1-5 candidate beyond pool end is admissible" {
+    assert(pm93g_allocate_admissible(
+        bvconst(126976,64),bvconst(8192,64),
+        bvconst(65536,64),bvconst(65536,64),
+        bvconst(0,1),
+        bvconst(0,1),bvconst(0,64),bvconst(0,64),
+        bvconst(0,1),bvconst(0,64),bvconst(0,64)))
+}
+
+example "FALSE-PM93G1-6 duplicate live owner can allocate twice" {
+    assert(pm93g_allocate_admissible(
+        bvconst(73728,64),bvconst(4096,64),
+        bvconst(65536,64),bvconst(65536,64),
+        bvconst(1,1),
+        bvconst(0,1),bvconst(0,64),bvconst(0,64),
+        bvconst(0,1),bvconst(0,64),bvconst(0,64)))
+}
+
+example "FALSE-PM93G1-7 generation change invalidates same-object placement ownership" {
+    assert(¬pm93g_release_allowed_across_generation(
+        bvconst(12,64),bvconst(7,64),bvconst(12,64),bvconst(8,64)))
+}
+
+example "FALSE-PM93G1-8 different object may release another extent" {
+    assert(pm93g_release_allowed(bvconst(11,64),bvconst(12,64)))
+}
+
+example "FALSE-PM93G1-9 rejection mutates free-state digest" {
+    assert(pm93g_free_digest_after_reject(bvconst(31,64))=bvconst(32,64))
+}
+
+example "FALSE-PM93G1-10 physical placement mints a capability" {
+    assert(pm93g_placement_creates_capability(true)=true)
+}
+
+example "FALSE-PM93G1-11 physical placement mints authority" {
+    assert(pm93g_placement_creates_authority(true)=true)
+}
+
+example "FALSE-PM93G1-12 overflowing physical extent is well formed" {
+    assert(pm93g_extent_well_formed(
+        bvnot(bvconst(4095,64)),bvconst(8192,64)))
+}

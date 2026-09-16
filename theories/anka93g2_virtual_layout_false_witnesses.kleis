@@ -1,0 +1,49 @@
+// Every example is deliberately false and must be rejected.
+import "anka93g2_virtual_layout.kleis"
+
+example "FALSE-VM93G2-1 layout starts inside executable image" {
+    assert(vm93g_layout_start_valid(
+        bvconst(0,64),bvconst(67824,64),bvconst(65536,64)))
+}
+
+example "FALSE-VM93G2-2 misaligned layout start is valid" {
+    assert(vm93g_layout_start_valid(
+        bvconst(0,64),bvconst(65536,64),bvconst(65537,64)))
+}
+
+example "FALSE-VM93G2-3 2048-byte buffer reserves two pages" {
+    assert(vm93g_rounding_valid(bvconst(2048,64),bvconst(8192,64)))
+}
+
+example "FALSE-VM93G2-4 append may exceed process virtual limit" {
+    assert(vm93g_append_admissible(
+        bvconst(126976,64),bvconst(8192,64),bvconst(131072,64)))
+}
+
+example "FALSE-VM93G2-5 misaligned cursor may reserve a region" {
+    assert(vm93g_append_admissible(
+        bvconst(69633,64),bvconst(4096,64),bvconst(131072,64)))
+}
+
+example "FALSE-VM93G2-6 zero-length reservation is admissible" {
+    assert(vm93g_append_admissible(
+        bvconst(69632,64),bvconst(0,64),bvconst(131072,64)))
+}
+
+example "FALSE-VM93G2-7 overlapping virtual regions are disjoint" {
+    assert(vm93g_disjoint(
+        bvconst(69632,64),bvconst(8192,64),
+        bvconst(73728,64),bvconst(4096,64)))
+}
+
+example "FALSE-VM93G2-8 rejected reservation advances cursor" {
+    assert(vm93g_next_after_reject(bvconst(81920,64))=bvconst(86016,64))
+}
+
+example "FALSE-VM93G2-9 virtual placement creates authority" {
+    assert(vm93g_reservation_creates_authority(true)=true)
+}
+
+example "FALSE-VM93G2-10 virtual placement creates delegation" {
+    assert(vm93g_reservation_creates_delegation(true)=true)
+}

@@ -1,0 +1,63 @@
+// Every example is deliberately false and must be rejected.
+import "anka93g3_placement_composition.kleis"
+
+example "FALSE-PMC93G3-1 allocator reservation overrides Fabric rejection" {
+    assert(pmc93g_commit(true,false)=true)
+}
+
+example "FALSE-PMC93G3-2 Fabric placement may commit without reservation" {
+    assert(pmc93g_commit(false,true)=true)
+}
+
+example "FALSE-PMC93G3-3 Fabric rejection leaves orphan allocator ownership" {
+    assert(pmc93g_allocator_owns_after(true,false)=true)
+}
+
+example "FALSE-PMC93G3-4 composition may leave allocator and Fabric disagreement" {
+    assert(
+        ∃(r : Bool). ∃(f : Bool).
+        pmc93g_allocator_owns_after(r,f)
+        ≠ pmc93g_fabric_placed_after(r,f)
+    )
+}
+
+example "FALSE-PMC93G3-5 rollback mutates allocator state digest" {
+    assert(pmc93g_allocator_digest_after_fabric_reject(bvconst(44,64))=bvconst(45,64))
+}
+
+example "FALSE-PMC93G3-6 moving the same object changes authorization" {
+    assert(
+        pmc93g_authorize_at_placement(
+            bvconst(1048576,64),
+            bvconst(7,64),bvconst(7,64),
+            bvconst(0,64),bvconst(4096,64),perm_R,
+            bvconst(4096,64),bvconst(0,64),bvconst(8,64),perm_R)
+        ≠
+        pmc93g_authorize_at_placement(
+            bvconst(2097152,64),
+            bvconst(7,64),bvconst(7,64),
+            bvconst(0,64),bvconst(4096,64),perm_R,
+            bvconst(4096,64),bvconst(0,64),bvconst(8,64),perm_R)
+    )
+}
+
+example "FALSE-PMC93G3-7 physical reuse revives stale-generation authority" {
+    assert(pmc93g_authorize_at_placement(
+        bvconst(1048576,64),
+        bvconst(7,64),bvconst(8,64),
+        bvconst(0,64),bvconst(4096,64),perm_R,
+        bvconst(4096,64),bvconst(0,64),bvconst(8,64),perm_R))
+}
+
+example "FALSE-PMC93G3-8 sealing generation change loses placement ownership" {
+    assert(¬pm93g_release_allowed_across_generation(
+        bvconst(21,64),bvconst(4,64),bvconst(21,64),bvconst(5,64)))
+}
+
+example "FALSE-PMC93G3-9 committed placement creates authority" {
+    assert(pmc93g_creates_authority(true)=true)
+}
+
+example "FALSE-PMC93G3-10 committed placement creates delegation" {
+    assert(pmc93g_creates_delegation(true)=true)
+}

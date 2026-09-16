@@ -134,12 +134,7 @@ pub enum ProcessResult {
 // Physical extent and owned resources
 // ───────────────────────────────────────────────────────────────────
 
-/// A contiguous range of physical memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PhysicalExtent {
-    pub base: u64,
-    pub size: u64,
-}
+pub use super::placement::PhysicalExtent;
 
 /// All resources owned by a specific process incarnation.
 /// Created during prepare_process, consumed during reclaim.

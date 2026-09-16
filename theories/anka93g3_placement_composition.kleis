@@ -1,0 +1,152 @@
+// =============================================================================
+// Anka64 Placement Manager — Allocator/Fabric Composition (Phase 9.3g.3)
+// =============================================================================
+// No new axioms.
+//
+// The placement manager chooses candidate physical/virtual extents.  Fabric
+// remains the final physical placement enforcement boundary (I9), and existing
+// authority remains object-relative (I3).  This theory freezes the transaction
+// joining those layers.
+//
+// Architectural laws:
+//   P5  reusing physical bytes never revives stale generation authority
+//   P6  Fabric remains final physical-placement authority
+//   P7  Fabric rejection rolls allocator reservation back
+//   P8  placement creates no capability, authority, or delegation
+// =============================================================================
+
+import "anka93g1_physical_placement.kleis"
+import "anka93g2_virtual_layout.kleis"
+import "anka64_state_invariants.kleis"
+
+// A placement becomes architecturally committed only if a reservation exists
+// AND Fabric accepts the placement.  Allocator success alone is insufficient.
+define pmc93g_commit(reserved : Bool, fabric_accepts : Bool) =
+    reserved ∧ fabric_accepts
+
+// Final state is deliberately symmetric: no orphan allocator reservation and
+// no Fabric placement outside the manager's reservation transaction.
+define pmc93g_allocator_owns_after(reserved : Bool, fabric_accepts : Bool) =
+    reserved ∧ fabric_accepts
+
+define pmc93g_fabric_placed_after(reserved : Bool, fabric_accepts : Bool) =
+    reserved ∧ fabric_accepts
+
+// Fabric rejection is a full rollback from the caller-visible final state.
+define pmc93g_allocator_digest_after_fabric_reject(before : BitVec64) : BitVec64 = before
+define pmc93g_fabric_digest_after_reject(before : BitVec64) : BitVec64 = before
+
+// Physical placement is an argument to translation only.  Authorization is
+// exactly the existing object-relative authorize() predicate; physical_base is
+// intentionally absent from the equation.
+define pmc93g_authorize_at_placement(
+    physical_base : BitVec64,
+    cap_gen : BitVec64, obj_gen : BitVec64,
+    cap_off : BitVec64, cap_len : BitVec64,
+    cap_perm : BitVec8,
+    obj_size : BitVec64,
+    req_off : BitVec64, req_width : BitVec64,
+    req_perm : BitVec8
+) =
+    authorize(cap_gen,obj_gen,cap_off,cap_len,cap_perm,
+              obj_size,req_off,req_width,req_perm)
+
+// Placement itself mints no Anka security object.
+define pmc93g_creates_capability(committed : Bool) = false
+define pmc93g_creates_authority(committed : Bool) = false
+define pmc93g_creates_delegation(committed : Bool) = false
+
+example "PMC93G3-1 reservation plus Fabric acceptance commits placement" {
+    assert(pmc93g_commit(true,true)=true)
+}
+
+example "PMC93G3-2 allocator reservation alone cannot commit placement" {
+    assert(pmc93g_commit(true,false)=false)
+}
+
+example "PMC93G3-3 Fabric acceptance outside reservation cannot commit composition" {
+    assert(pmc93g_commit(false,true)=false)
+}
+
+example "PMC93G3-4 allocator and Fabric final ownership agree for every outcome" {
+    assert(
+        ∀(r : Bool). ∀(f : Bool).
+        pmc93g_allocator_owns_after(r,f)=pmc93g_fabric_placed_after(r,f)
+    )
+}
+
+example "PMC93G3-5 Fabric rejection leaves no orphan allocator reservation" {
+    assert(pmc93g_allocator_owns_after(true,false)=false)
+}
+
+example "PMC93G3-6 Fabric rejection preserves both externally visible state digests" {
+    assert(
+        ∀(a : BitVec64). ∀(f : BitVec64).
+        pmc93g_allocator_digest_after_fabric_reject(a)=a
+        ∧ pmc93g_fabric_digest_after_reject(f)=f
+    )
+}
+
+example "PMC93G3-7 authorization is independent of physical placement" {
+    assert(
+        ∀(p1 : BitVec64). ∀(p2 : BitVec64).
+        pmc93g_authorize_at_placement(
+            p1,
+            bvconst(7,64),bvconst(7,64),
+            bvconst(0,64),bvconst(4096,64),perm_R,
+            bvconst(4096,64),bvconst(0,64),bvconst(8,64),perm_R)
+        ⟺
+        pmc93g_authorize_at_placement(
+            p2,
+            bvconst(7,64),bvconst(7,64),
+            bvconst(0,64),bvconst(4096,64),perm_R,
+            bvconst(4096,64),bvconst(0,64),bvconst(8,64),perm_R)
+    )
+}
+
+example "PMC93G3-8 stale generation remains denied when physical bytes are reused" {
+    assert(
+        pmc93g_authorize_at_placement(
+            bvconst(1048576,64),
+            bvconst(7,64),bvconst(7,64),
+            bvconst(0,64),bvconst(4096,64),perm_R,
+            bvconst(4096,64),bvconst(0,64),bvconst(8,64),perm_R)
+        ∧
+        ¬pmc93g_authorize_at_placement(
+            bvconst(1048576,64),
+            bvconst(7,64),bvconst(8,64),
+            bvconst(0,64),bvconst(4096,64),perm_R,
+            bvconst(4096,64),bvconst(0,64),bvconst(8,64),perm_R)
+    )
+}
+
+example "PMC93G3-9 authority generation changes do not change placement owner" {
+    assert(pm93g_release_allowed_across_generation(
+        bvconst(21,64),bvconst(4,64),bvconst(21,64),bvconst(5,64)))
+}
+
+example "PMC93G3-10 committed placement creates no capability or authority" {
+    assert(
+        pmc93g_creates_capability(true)=false
+        ∧ pmc93g_creates_authority(true)=false
+        ∧ pmc93g_creates_delegation(true)=false
+    )
+}
+
+example "PMC93G3-11 physical allocator validity does not bypass Fabric veto" {
+    assert(pm93g_allocate_admissible(
+        bvconst(73728,64),bvconst(4096,64),
+        bvconst(65536,64),bvconst(65536,64),
+        bvconst(0,1),
+        bvconst(0,1),bvconst(0,64),bvconst(0,64),
+        bvconst(0,1),bvconst(0,64),bvconst(0,64)))
+    assert(pmc93g_commit(true,false)=false)
+}
+
+example "PMC93G3-12 virtual placement remains separate from authority" {
+    assert(
+        vm93g_append_admissible(
+            bvconst(69632,64),bvconst(4096,64),bvconst(131072,64))
+        ∧ vm93g_reservation_creates_authority(true)=false
+    )
+}

@@ -1,0 +1,206 @@
+// =============================================================================
+// Anka64 Placement Manager — Virtual Layout Contract (Phase 9.3g.2)
+// =============================================================================
+// No new axioms.
+//
+// This theory specifies a monotonic per-process virtual layout builder.
+// It does not assume that executable code is relocatable.  A caller provides
+// an aligned layout_start at or above the end of the executable image; the
+// current implementation may continue to pin code_vaddr=0 until relocation is
+// separately justified.
+//
+// Architectural laws:
+//   P2  live virtual regions of one process are pairwise disjoint
+//   P3  failed reservation is side-effect free
+//   P8  virtual placement does not create authority
+// =============================================================================
+
+import "stdlib/prelude.kleis"
+
+define VM93G_PAGE_SIZE = bvconst(4096,64)
+define VM93G_PAGE_MASK = bvconst(4095,64)
+
+define vm93g_page_aligned(x : BitVec64) =
+    bvand(x,bvconst(4095,64))=bvconst(0,64)
+
+define vm93g_add_fits(base : BitVec64, length : BitVec64) =
+    bvuge(bvadd(base,length),base)
+
+define vm93g_range_well_formed(base : BitVec64, length : BitVec64) =
+    bvugt(length,bvconst(0,64))
+    ∧ bvand(base,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvand(length,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvuge(bvadd(base,length),base)
+
+// Requested logical sizes are rounded into page-sized reservations.
+define vm93g_rounding_valid(requested : BitVec64, reserved : BitVec64) =
+    bvugt(requested,bvconst(0,64))
+    ∧ bvugt(reserved,bvconst(0,64))
+    ∧ bvand(reserved,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvule(requested,reserved)
+    ∧ bvult(bvsub(reserved,requested),bvconst(4096,64))
+
+// Overflow-safe containment in the process's allocatable user virtual range.
+define vm93g_range_within(
+    base : BitVec64,
+    length : BitVec64,
+    user_base : BitVec64,
+    user_length : BitVec64
+) =
+    bvugt(length,bvconst(0,64))
+    ∧ bvand(base,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvand(length,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvuge(bvadd(base,length),base)
+    ∧ bvugt(user_length,bvconst(0,64))
+    ∧ bvand(user_base,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvand(user_length,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvuge(bvadd(user_base,user_length),user_base)
+    ∧ bvule(user_base,base)
+    ∧ bvule(length,user_length)
+    ∧ bvule(bvsub(base,user_base),bvsub(user_length,length))
+
+define vm93g_disjoint(
+    a_base : BitVec64, a_length : BitVec64,
+    b_base : BitVec64, b_length : BitVec64
+) =
+    (bvule(a_base,b_base) ∧ bvule(a_length,bvsub(b_base,a_base)))
+    ∨
+    (bvule(b_base,a_base) ∧ bvule(b_length,bvsub(a_base,b_base)))
+
+// layout_start is legal when it is aligned and begins at or above the end of
+// the executable image.  This avoids requiring code relocation in Phase 9.3g.
+define vm93g_layout_start_valid(
+    code_base : BitVec64,
+    code_length : BitVec64,
+    layout_start : BitVec64
+) =
+    bvugt(code_length,bvconst(0,64))
+    ∧ bvuge(bvadd(code_base,code_length),code_base)
+    ∧ bvand(layout_start,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvule(code_base,layout_start)
+    ∧ bvule(code_length,bvsub(layout_start,code_base))
+
+// Monotonic append reservation.  'next' and length are page aligned; the
+// requested region must fit before the virtual limit without overflow.
+define vm93g_append_admissible(
+    next : BitVec64,
+    length : BitVec64,
+    limit : BitVec64
+) =
+    bvand(next,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvugt(length,bvconst(0,64))
+    ∧ bvand(length,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvule(next,limit)
+    ∧ bvule(length,bvsub(limit,next))
+
+// Defined only as the state transition used after admissibility has succeeded.
+define vm93g_next_after(next : BitVec64, length : BitVec64) : BitVec64 =
+    bvadd(next,length)
+
+// A previously reserved region that ends at/before current next can never
+// overlap a new append beginning exactly at next.
+define vm93g_prior_before_next(
+    prior_base : BitVec64,
+    prior_length : BitVec64,
+    next : BitVec64
+) =
+    bvule(prior_base,next)
+    ∧ bvule(prior_length,bvsub(next,prior_base))
+
+// Transactional reservation failure leaves both cursor and region-count digest
+// unchanged.
+define vm93g_next_after_reject(before : BitVec64) : BitVec64 = before
+define vm93g_region_digest_after_reject(before : BitVec64) : BitVec64 = before
+
+// Placement is not authority.
+define vm93g_reservation_creates_capability(reserved : Bool) = false
+define vm93g_reservation_creates_authority(reserved : Bool) = false
+define vm93g_reservation_creates_delegation(reserved : Bool) = false
+
+example "VM93G2-1 layout may begin at aligned executable end" {
+    assert(vm93g_layout_start_valid(
+        bvconst(0,64),bvconst(65536,64),bvconst(65536,64)))
+}
+
+example "VM93G2-2 layout may begin at aligned point above non-page image end" {
+    assert(vm93g_layout_start_valid(
+        bvconst(0,64),bvconst(67824,64),bvconst(69632,64)))
+}
+
+example "VM93G2-3 layout cannot begin inside executable image" {
+    assert(¬vm93g_layout_start_valid(
+        bvconst(0,64),bvconst(67824,64),bvconst(65536,64)))
+}
+
+example "VM93G2-4 2048-byte logical buffer reserves one page" {
+    assert(vm93g_rounding_valid(bvconst(2048,64),bvconst(4096,64)))
+}
+
+example "VM93G2-5 first page append is admissible" {
+    assert(vm93g_append_admissible(
+        bvconst(69632,64),bvconst(4096,64),bvconst(131072,64)))
+}
+
+example "VM93G2-6 accepted append advances cursor exactly by extent" {
+    assert(vm93g_next_after(bvconst(69632,64),bvconst(4096,64))=bvconst(73728,64))
+}
+
+example "VM93G2-7 exact-limit append is admissible" {
+    assert(vm93g_append_admissible(
+        bvconst(122880,64),bvconst(8192,64),bvconst(131072,64)))
+}
+
+example "VM93G2-8 append beyond virtual limit is rejected" {
+    assert(¬vm93g_append_admissible(
+        bvconst(126976,64),bvconst(8192,64),bvconst(131072,64)))
+}
+
+example "VM93G2-9 misaligned append is rejected" {
+    assert(¬vm93g_append_admissible(
+        bvconst(69633,64),bvconst(4096,64),bvconst(131072,64)))
+}
+
+example "VM93G2-10 sequential append regions are disjoint" {
+    assert(vm93g_disjoint(
+        bvconst(69632,64),bvconst(4096,64),
+        bvconst(73728,64),bvconst(8192,64)))
+}
+
+example "VM93G2-11 prior reservation ending at cursor cannot overlap next append" {
+    assert(
+        vm93g_prior_before_next(
+            bvconst(69632,64),bvconst(12288,64),bvconst(81920,64))
+        ∧ vm93g_append_admissible(
+            bvconst(81920,64),bvconst(4096,64),bvconst(131072,64))
+        ∧ vm93g_disjoint(
+            bvconst(69632,64),bvconst(12288,64),
+            bvconst(81920,64),bvconst(4096,64))
+    )
+}
+
+example "VM93G2-12 reservation outside user virtual range is rejected by containment" {
+    assert(¬vm93g_range_within(
+        bvconst(131072,64),bvconst(4096,64),
+        bvconst(65536,64),bvconst(65536,64)))
+}
+
+example "VM93G2-13 failed reservation preserves virtual-layout summaries" {
+    assert(
+        ∀(n : BitVec64). ∀(r : BitVec64).
+        vm93g_next_after_reject(n)=n
+        ∧ vm93g_region_digest_after_reject(r)=r
+    )
+}
+
+example "VM93G2-14 virtual reservation creates no authority" {
+    assert(
+        vm93g_reservation_creates_capability(true)=false
+        ∧ vm93g_reservation_creates_authority(true)=false
+        ∧ vm93g_reservation_creates_delegation(true)=false
+    )
+}
+
+example "VM93G2-15 code base need not be prescribed by the layout contract" {
+    assert(vm93g_layout_start_valid(
+        bvconst(196608,64),bvconst(16384,64),bvconst(212992,64)))
+}

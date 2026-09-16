@@ -1,0 +1,247 @@
+// =============================================================================
+// Anka64 Placement Manager — Physical Extent Contract (Phase 9.3g.1)
+// =============================================================================
+// No new axioms.
+//
+// This theory freezes the architectural contract of the future physical
+// placement manager.  It deliberately does NOT specify first-fit, best-fit,
+// buddy allocation, free-list representation, or any other allocator policy.
+//
+// Model:
+//   owner = exact placement owner identity (initially ObjectId)
+//   extent = half-open physical range [base, base+length)
+//   pool   = half-open allocatable physical range
+//
+// Architectural laws:
+//   P1  live physical extents are pairwise disjoint
+//   P3  failed allocation is side-effect free
+//   P4  release requires the exact placement owner identity
+//   P5  physical-byte reuse does not identify or authorize an object
+//   P8  placement itself creates no capability, authority, or delegation
+//
+// The two-existing-extent admission predicate below is a bounded local model
+// of the check performed against every live extent.  The architectural rule is
+// pairwise and therefore extends by iteration to an arbitrary live set.
+// =============================================================================
+
+import "stdlib/prelude.kleis"
+
+define PM93G_PAGE_SIZE = bvconst(4096,64)
+define PM93G_PAGE_MASK = bvconst(4095,64)
+
+define pm93g_page_aligned(x : BitVec64) =
+    bvand(x,bvconst(4095,64))=bvconst(0,64)
+
+// Conservative representability rule: base+length must not wrap BitVec64.
+define pm93g_add_fits(base : BitVec64, length : BitVec64) =
+    bvuge(bvadd(base,length),base)
+
+define pm93g_extent_well_formed(base : BitVec64, length : BitVec64) =
+    bvugt(length,bvconst(0,64))
+    ∧ bvand(base,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvand(length,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvuge(bvadd(base,length),base)
+
+// Overflow-safe half-open containment of an extent inside a physical pool.
+define pm93g_extent_within_pool(
+    base : BitVec64,
+    length : BitVec64,
+    pool_base : BitVec64,
+    pool_length : BitVec64
+) =
+    bvugt(length,bvconst(0,64))
+    ∧ bvand(base,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvand(length,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvuge(bvadd(base,length),base)
+    ∧ bvugt(pool_length,bvconst(0,64))
+    ∧ bvand(pool_base,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvand(pool_length,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvuge(bvadd(pool_base,pool_length),pool_base)
+    ∧ bvule(pool_base,base)
+    ∧ bvule(length,pool_length)
+    ∧ bvule(bvsub(base,pool_base),bvsub(pool_length,length))
+
+// A valid page-rounding result is the unique aligned size no smaller than the
+// request and less than one page larger.  This is a relation rather than an
+// algorithm, so the theory does not commit to a rounding implementation.
+define pm93g_rounding_valid(requested : BitVec64, allocated : BitVec64) =
+    bvugt(requested,bvconst(0,64))
+    ∧ bvugt(allocated,bvconst(0,64))
+    ∧ bvand(allocated,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvule(requested,allocated)
+    ∧ bvult(bvsub(allocated,requested),bvconst(4096,64))
+
+// Overflow-free half-open disjointness.  Adjacency is allowed.
+define pm93g_extent_disjoint(
+    a_base : BitVec64, a_length : BitVec64,
+    b_base : BitVec64, b_length : BitVec64
+) =
+    (bvule(a_base,b_base) ∧ bvule(a_length,bvsub(b_base,a_base)))
+    ∨
+    (bvule(b_base,a_base) ∧ bvule(b_length,bvsub(a_base,b_base)))
+
+// Candidate admission against two representative live extents.
+// liveN=false means the corresponding slot is absent.
+define pm93g_allocate_admissible(
+    candidate_base : BitVec64,
+    candidate_length : BitVec64,
+    pool_base : BitVec64,
+    pool_length : BitVec64,
+    owner_already_live : BitVec1,
+    live1 : BitVec1, e1_base : BitVec64, e1_length : BitVec64,
+    live2 : BitVec1, e2_base : BitVec64, e2_length : BitVec64
+) =
+    bvugt(candidate_length,bvconst(0,64))
+    ∧ bvand(candidate_base,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvand(candidate_length,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvuge(bvadd(candidate_base,candidate_length),candidate_base)
+    ∧ bvugt(pool_length,bvconst(0,64))
+    ∧ bvand(pool_base,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvand(pool_length,bvconst(4095,64))=bvconst(0,64)
+    ∧ bvuge(bvadd(pool_base,pool_length),pool_base)
+    ∧ bvule(pool_base,candidate_base)
+    ∧ bvule(candidate_length,pool_length)
+    ∧ bvule(bvsub(candidate_base,pool_base),bvsub(pool_length,candidate_length))
+    ∧ owner_already_live=bvconst(0,1)
+    ∧ (live1=bvconst(0,1) ∨
+        ((bvule(candidate_base,e1_base) ∧ bvule(candidate_length,bvsub(e1_base,candidate_base)))
+         ∨ (bvule(e1_base,candidate_base) ∧ bvule(e1_length,bvsub(candidate_base,e1_base)))))
+    ∧ (live2=bvconst(0,1) ∨
+        ((bvule(candidate_base,e2_base) ∧ bvule(candidate_length,bvsub(e2_base,candidate_base)))
+         ∨ (bvule(e2_base,candidate_base) ∧ bvule(e2_length,bvsub(candidate_base,e2_base)))))
+
+// Exact placement-owner identity.  Object generation is deliberately absent:
+// generation is an authority/lifecycle coordinate and may change while the
+// same object remains physically placed (for example Active -> Sealed).
+define pm93g_release_allowed(
+    requested_object : BitVec64,
+    owner_object : BitVec64
+) =
+    requested_object=owner_object
+
+// A generation transition on the same ObjectId does not change placement
+// ownership.  This structural separation prevents sealing/revocation from
+// accidentally orphaning an extent.
+define pm93g_release_allowed_across_generation(
+    requested_object : BitVec64,
+    requested_generation : BitVec64,
+    owner_object : BitVec64,
+    owner_generation : BitVec64
+) =
+    requested_object=owner_object
+
+// Transactional failure summaries.  These stand for arbitrary allocator-state
+// digests: rejection is a no-op, so both free and allocated summaries persist.
+define pm93g_free_digest_after_reject(before : BitVec64) : BitVec64 = before
+define pm93g_alloc_digest_after_reject(before : BitVec64) : BitVec64 = before
+
+// Placement is not authority.
+define pm93g_placement_creates_capability(placed : Bool) = false
+define pm93g_placement_creates_authority(placed : Bool) = false
+define pm93g_placement_creates_delegation(placed : Bool) = false
+
+example "PM93G1-1 4096-byte boundary is page aligned" {
+    assert(pm93g_page_aligned(bvconst(4096,64)))
+}
+
+example "PM93G1-2 one-byte displacement is not page aligned" {
+    assert(¬pm93g_page_aligned(bvconst(4097,64)))
+}
+
+example "PM93G1-3 one-byte request rounds to one page" {
+    assert(pm93g_rounding_valid(bvconst(1,64),bvconst(4096,64)))
+}
+
+example "PM93G1-4 exact page request remains one page" {
+    assert(pm93g_rounding_valid(bvconst(4096,64),bvconst(4096,64)))
+}
+
+example "PM93G1-5 page-plus-one request rounds to two pages" {
+    assert(pm93g_rounding_valid(bvconst(4097,64),bvconst(8192,64)))
+}
+
+example "PM93G1-6 nonminimal page rounding is rejected" {
+    assert(¬pm93g_rounding_valid(bvconst(4097,64),bvconst(12288,64)))
+}
+
+example "PM93G1-7 adjacent extents are disjoint" {
+    assert(pm93g_extent_disjoint(
+        bvconst(65536,64),bvconst(4096,64),
+        bvconst(69632,64),bvconst(8192,64)))
+}
+
+example "PM93G1-8 overlapping extents are not disjoint" {
+    assert(¬pm93g_extent_disjoint(
+        bvconst(65536,64),bvconst(8192,64),
+        bvconst(69632,64),bvconst(4096,64)))
+}
+
+example "PM93G1-9 candidate inside pool and disjoint from live extents is admissible" {
+    assert(pm93g_allocate_admissible(
+        bvconst(73728,64),bvconst(4096,64),
+        bvconst(65536,64),bvconst(65536,64),
+        bvconst(0,1),
+        bvconst(1,1),bvconst(65536,64),bvconst(4096,64),
+        bvconst(1,1),bvconst(69632,64),bvconst(4096,64)))
+}
+
+example "PM93G1-10 overlapping candidate is rejected" {
+    assert(¬pm93g_allocate_admissible(
+        bvconst(69632,64),bvconst(8192,64),
+        bvconst(65536,64),bvconst(65536,64),
+        bvconst(0,1),
+        bvconst(1,1),bvconst(73728,64),bvconst(4096,64),
+        bvconst(0,1),bvconst(0,64),bvconst(0,64)))
+}
+
+example "PM93G1-11 candidate outside pool is rejected" {
+    assert(¬pm93g_allocate_admissible(
+        bvconst(126976,64),bvconst(8192,64),
+        bvconst(65536,64),bvconst(65536,64),
+        bvconst(0,1),
+        bvconst(0,1),bvconst(0,64),bvconst(0,64),
+        bvconst(0,1),bvconst(0,64),bvconst(0,64)))
+}
+
+example "PM93G1-12 duplicate live owner cannot receive a second extent" {
+    assert(¬pm93g_allocate_admissible(
+        bvconst(73728,64),bvconst(4096,64),
+        bvconst(65536,64),bvconst(65536,64),
+        bvconst(1,1),
+        bvconst(0,1),bvconst(0,64),bvconst(0,64),
+        bvconst(0,1),bvconst(0,64),bvconst(0,64)))
+}
+
+example "PM93G1-13 exact placement owner may release its extent" {
+    assert(pm93g_release_allowed(bvconst(12,64),bvconst(12,64)))
+}
+
+example "PM93G1-14 generation change does not orphan same-object placement" {
+    assert(pm93g_release_allowed_across_generation(
+        bvconst(12,64),bvconst(7,64),bvconst(12,64),bvconst(8,64)))
+}
+
+example "PM93G1-15 different object cannot release another object's extent" {
+    assert(¬pm93g_release_allowed(bvconst(11,64),bvconst(12,64)))
+}
+
+example "PM93G1-16 rejected allocation preserves allocator summaries" {
+    assert(
+        ∀(f : BitVec64). ∀(a : BitVec64).
+        pm93g_free_digest_after_reject(f)=f
+        ∧ pm93g_alloc_digest_after_reject(a)=a
+    )
+}
+
+example "PM93G1-17 placement creates no Anka authority" {
+    assert(
+        pm93g_placement_creates_capability(true)=false
+        ∧ pm93g_placement_creates_authority(true)=false
+        ∧ pm93g_placement_creates_delegation(true)=false
+    )
+}
+
+example "PM93G1-18 overflowing extent is not well formed" {
+    assert(¬pm93g_extent_well_formed(
+        bvnot(bvconst(4095,64)),bvconst(8192,64)))
+}

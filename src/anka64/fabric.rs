@@ -198,6 +198,14 @@ impl Fabric {
         true
     }
 
+    /// Read the current physical base of an object, if placed.
+    ///
+    /// This exposes translation state without conferring authority.  Phase
+    /// 9.3g uses it to keep allocator/Fabric composition transactional.
+    pub fn physical_base(&self, id: ObjectId) -> Option<u64> {
+        self.placement.get(&id).copied()
+    }
+
     /// Move an object to a new physical address.
     ///
     /// Authority is unchanged (I3).
