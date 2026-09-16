@@ -2402,3 +2402,69 @@ The end-to-end target remains literal:
 ```text
 GET /alive HTTP/1.1 -> "Anka64 is alive."
 ```
+
+### Stage 35: Developer Artifact Ingress and Anka Development Shell (Phase 9.3h)
+
+Phase 9.3h begins with a formal trust boundary before adding shell commands.
+The host filesystem is a development artifact store, not part of the Anka
+namespace or protection model.
+
+The ingress chain is:
+
+```text
+DeveloperIngressAuthority
+  -> host artifact bytes
+  -> Anka ObjectId/generation
+  -> PhysicalPlacementManager
+  -> initialize/seal
+  -> shell artifact registry
+```
+
+The three authorities remain distinct:
+
+```text
+artifact ingress != physical placement != execution/spawn authority
+```
+
+The Placement Manager has no authority to execute injected code and mints no
+capabilities.  A registry name is not a capability.  After import, the host
+pathname is not part of artifact identity; the shell tracks the exact sealed
+`(ObjectId, Generation)` incarnation.
+
+Import is transactional: only a completely read, allocated, placed,
+initialized, and sealed artifact may be published.  Failed import rolls back
+resources created by the attempt and publishes no runnable registry entry.
+
+For C source, CCB success and sealed current-generation output are required
+before registration as an executable.  `run <name>` remains an ordinary Anka
+spawn request and requires both exact artifact validity and separately
+presented execution authority.  The host shell must not bypass this by directly
+constructing a privileged core or mutating live guest authority as an ambient
+host privilege.
+
+The formal Phase 9.3h.0 package is:
+
+```text
+anka93h0_developer_artifact_ingress.kleis                    15 positive
+anka93h0_developer_artifact_ingress_false_witnesses.kleis    13 deliberate false claims
+```
+
+No new axioms.  It composes with the Phase 9.3g placement contract.  Benign
+Ethernet/ARP/ICMP programs and intentionally hostile bytecode have the same
+ingress semantics: the developer may introduce them, PM may place them, and
+Anka independently determines what authority they receive.
+
+The intended implementation sequence is:
+
+```text
+9.3h.0  formal developer-ingress contract
+9.3h.1  host artifact loader/registry
+9.3h.2  C source through CCB
+9.3h.3  ordinary run/spawn path with PM + VLB
+9.3h.4  minimal interactive Anka Development Shell
+  -> 9.4a Ethernet
+  -> 9.4b ARP
+  -> 9.4c IPv4/ICMP
+  -> ...
+  -> GET /alive HTTP/1.1 -> "Anka64 is alive."
+```

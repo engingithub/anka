@@ -3365,3 +3365,163 @@ That keeps the route to the project acceptance witness clean:
  -> GET /alive HTTP/1.1
  -> "Anka64 is alive."
 ```
+
+---
+
+## DN-29: Explicit Developer Artifact Ingress Before the Development Shell (Phase 9.3h.0)
+
+**Date:** 2026-09-16
+
+**Decision:**
+
+Formalize the host-to-Anka artifact boundary before implementing the Anka
+Development Shell.  The shell exists so the developer can keep C, assembly,
+and bytecode on the host filesystem while using Anka mechanisms to create,
+place, compile, and spawn artifacts.  That convenience must not turn host
+filesystem access or the Placement Manager into ambient execution authority.
+
+The human trust statement is:
+
+```text
+the developer explicitly authorizes development artifact ingress
+```
+
+The architectural statement is narrower:
+
+```text
+DeveloperIngressAuthority
+  -> may introduce bytes as an Anka artifact
+
+PhysicalPlacementManager
+  -> may choose where that artifact is placed
+
+Anka execution authority
+  -> separately decides who may spawn/run it
+```
+
+Therefore:
+
+```text
+import authority != placement authority != execution authority
+```
+
+The Placement Manager remains intentionally ignorant of code provenance and
+intent.  It does not decide whether an artifact is benign, malicious, CCB
+output, or arbitrary bytecode.  Its answer is only a physical extent.  The
+same rule applies to the expected Ethernet, ARP, and ICMP programs: Anka does
+not need to trust them because they are intended to be benevolent; it can give
+them only the authority their jobs require.
+
+### Development mode is explicit, not ambient host privilege
+
+The 9.3h.0 model introduces a distinct development-ingress authority.  It is
+modeled separately from Fabric permissions and ordinary process capabilities:
+
+```text
+IngressAllowed = DevelopmentMode && DeveloperIngressAuthorityPresent
+```
+
+A host pathname, readable host file, or shell registry name is not such an
+authority.  A sealed/non-development machine has no artifact-ingress channel
+merely because the emulator is running on a host computer.
+
+This creates a future clean distinction such as:
+
+```text
+anka --development   -> explicit development ingress may be provisioned
+anka --sealed        -> no developer artifact ingress
+```
+
+without requiring that exact CLI in 9.3h.
+
+### Transactional artifact ingestion
+
+A direct bytecode import becomes visible in the shell registry only after the
+whole pipeline succeeds:
+
+```text
+explicit ingress authority
+  -> host read
+  -> ObjectId allocation
+  -> PM/Fabric placement
+  -> initialization
+  -> seal
+  -> registry publication
+```
+
+Failure before publication leaves no runnable partial artifact.  Resources
+created by the failed attempt are rolled back so caller-visible registry,
+allocator, and Fabric state are unchanged by the rejected import.
+
+After ingestion, the host pathname has no architectural identity role.  The
+shell artifact key is the exact sealed Anka incarnation:
+
+```text
+ArtifactKey = (ObjectId, Generation)
+```
+
+A stale generation or unsealed output is not a valid runnable artifact.
+Friendly names such as `arp` are development-UI references only:
+
+```text
+name exists != capability exists
+```
+
+### CCB compilation and run remain ordinary Anka operations
+
+For C source, the shell may introduce source bytes, but a compiled artifact is
+valid only after CCB succeeds, the output is sealed, and the recorded
+generation is current.  Compiler failure cannot publish a runnable artifact.
+
+Likewise:
+
+```text
+load/compile != permission to execute
+```
+
+A future `run arp` command is admitted only when all three conditions hold:
+
+```text
+valid exact-generation sealed artifact
+  + explicitly presented execution authority
+  + ordinary Anka spawn admission
+```
+
+The shell must not construct a privileged process directly or mutate a live
+process capability table as a host shortcut.
+
+This makes intentionally hostile input a useful witness rather than a special
+case.  The developer may import `evil.anka`; PM may place it; but without
+separately granted capabilities the code has no ambient access to kernel
+memory, another process, or devices.  Benign Ethernet/ARP/ICMP code obeys the
+same rule.
+
+### Formal package
+
+Phase 9.3h.0 adds:
+
+```text
+anka93h0_developer_artifact_ingress.kleis                    15 positive examples
+anka93h0_developer_artifact_ingress_false_witnesses.kleis    13 deliberate false claims
+```
+
+No new axioms.  The positive theory composes with the closed 9.3g placement
+contract rather than re-proving placement, generation, or Fabric authorization.
+The false companion attacks ambient host authority, development-mode-only
+admission, stale/unsealed artifact identity, placement-as-execution-authority,
+compiler-failure publication, ambient imported-code authority, and spawn
+bypass.
+
+The runtime implementation should follow this formal boundary in the remaining
+9.3h gates:
+
+```text
+9.3h.0  developer artifact-ingress contract (Kleis)
+9.3h.1  host artifact registry + bytecode loading
+9.3h.2  host C source -> CCB -> sealed executable artifact
+9.3h.3  run through PM/VLB + ordinary Anka spawn
+9.3h.4  minimal interactive development monitor
+```
+
+The shell remains a development bridge, not a guest filesystem, package
+manager, general Unix shell, or authority bypass.

@@ -157,12 +157,15 @@ example "PMC93G3-12 virtual placement remains separate from authority" {
 define pmc93g_checked_release_allowed(
     allocator_owns : Bool,
     fabric_still_places : Bool
-) = allocator_owns ∧ ¬fabric_still_places
+) =
+    if allocator_owns then
+        if fabric_still_places then false else true
+    else false
 
 example "PMC93G3-13 checked release is refused while Fabric still places owner" {
-    assert(¬pmc93g_checked_release_allowed(true,true))
+    assert(pmc93g_checked_release_allowed(true,true)=false)
 }
 
 example "PMC93G3-14 checked release is allowed after Fabric placement removal" {
-    assert(pmc93g_checked_release_allowed(true,false))
+    assert(pmc93g_checked_release_allowed(true,false)=true)
 }
