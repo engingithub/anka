@@ -1,0 +1,56 @@
+// Every example is deliberately false and must be rejected.
+import "anka93h0_developer_artifact_ingress.kleis"
+
+example "FALSE-DEVH0-1 host pathname itself authorizes ingress" {
+    assert(devh_host_path_creates_ingress_authority(true)=true)
+}
+
+example "FALSE-DEVH0-2 development mode alone is sufficient authority" {
+    assert(devh_ingress_allowed(true,false)=true)
+}
+
+example "FALSE-DEVH0-3 sealed machine accepts developer ingress" {
+    assert(devh_ingress_allowed(false,true)=true)
+}
+
+example "FALSE-DEVH0-4 shell may ask PM to place artifact before ingress authority" {
+    assert(devh_pm_request_allowed(false,true)=true)
+}
+
+example "FALSE-DEVH0-5 partially initialized unsealed artifact may be registered" {
+    assert(devh_registry_contains_after_import(true,true,true,true,true,false)=true)
+}
+
+example "FALSE-DEVH0-6 stale generation remains a valid shell artifact" {
+    assert(devh_artifact_valid(
+        bvconst(17,64),bvconst(17,64),
+        bvconst(4,64),bvconst(5,64),true)=true)
+}
+
+example "FALSE-DEVH0-7 friendly registry name creates Anka authority" {
+    assert(devh_registry_name_creates_authority(true)=true)
+}
+
+example "FALSE-DEVH0-8 PM placement grants execution authority" {
+    assert(devh_pm_creates_execution_authority(true)=true)
+}
+
+example "FALSE-DEVH0-9 CC_B failure can publish a valid executable" {
+    assert(devh_ccb_output_valid(false,true,bvconst(9,64),bvconst(9,64))=true)
+}
+
+example "FALSE-DEVH0-10 unsealed CC_B output can be runnable" {
+    assert(devh_ccb_output_valid(true,false,bvconst(9,64),bvconst(9,64))=true)
+}
+
+example "FALSE-DEVH0-11 imported artifact receives ambient authority" {
+    assert(devh_import_creates_ambient_authority(true)=true)
+}
+
+example "FALSE-DEVH0-12 registered valid artifact may run without execution authority" {
+    assert(devh_run_admitted(true,false,true)=true)
+}
+
+example "FALSE-DEVH0-13 shell may bypass normal spawn admission" {
+    assert(devh_run_admitted(true,true,false)=true)
+}

@@ -1,0 +1,276 @@
+// =============================================================================
+// Anka64 Development Shell — Developer Artifact Ingress (Phase 9.3h.0)
+// =============================================================================
+// No new axioms.
+//
+// The Development Shell is a host-side development bridge, not an ambient
+// privilege channel and not a guest filesystem.  A developer may explicitly
+// provision a development-ingress authority.  That authority permits artifact
+// introduction; it does NOT turn placement, a host pathname, or registry
+// membership into Anka execution authority.
+//
+// Architectural laws:
+//   H1  host source/path presence is not ingress authority
+//   H2  ingress requires explicit developer authority in development mode
+//   H3  PM chooses placement only; placement creates no authority
+//   H4  shell registry names are not capabilities
+//   H5  artifact references are exact ObjectId/generation and sealed-state keys
+//   H6  import is transactional: only a fully completed pipeline is registered
+//   H7  compile failure/unsealed output cannot become a runnable artifact
+//   H8  run requires valid artifact + presented execution authority + normal spawn
+//   H9  imported code receives no ambient authority, whether benign or hostile
+//   H10 host pathname is not part of Anka artifact identity or authorization
+// =============================================================================
+
+import "anka93g3_placement_composition.kleis"
+
+// -----------------------------------------------------------------------------
+// Development ingress authority
+// -----------------------------------------------------------------------------
+// dev_mode is machine/environment policy.  dev_authority_present is the
+// explicit authority provisioned by the developer.  Host access by itself is
+// intentionally absent from this predicate.
+define devh_ingress_allowed(
+    dev_mode : Bool,
+    dev_authority_present : Bool
+) = dev_mode ∧ dev_authority_present
+
+// Merely finding or reading a host file does not authorize its introduction.
+define devh_ingress_allowed_for_payload(
+    payload_tag : BitVec64,
+    dev_mode : Bool,
+    dev_authority_present : Bool
+) = devh_ingress_allowed(dev_mode, dev_authority_present)
+
+define devh_host_path_creates_ingress_authority(
+    host_path_present : Bool
+) = false
+
+// The ingress orchestrator may ask PM to place a new artifact only after
+// ingress authority has been established and an ObjectId exists.  This does
+// not give PM execution authority; it orders the side-effecting placement step
+// behind the developer-authorized ingress gate.
+define devh_pm_request_allowed(
+    ingress_allowed : Bool,
+    object_allocated : Bool
+) = ingress_allowed ∧ object_allocated
+
+// -----------------------------------------------------------------------------
+// Transactional artifact introduction
+// -----------------------------------------------------------------------------
+// A direct artifact import commits only after every stage completes.  Placement
+// is one stage in this transaction, not the source of authority.
+define devh_import_commit(
+    ingress_allowed : Bool,
+    host_read_ok : Bool,
+    object_allocated : Bool,
+    pm_fabric_placed : Bool,
+    initialized : Bool,
+    sealed : Bool
+) =
+    ingress_allowed
+    ∧ host_read_ok
+    ∧ object_allocated
+    ∧ pm_fabric_placed
+    ∧ initialized
+    ∧ sealed
+
+// Registry publication is the final step: no partial artifact is discoverable
+// as runnable by name.
+define devh_registry_contains_after_import(
+    ingress_allowed : Bool,
+    host_read_ok : Bool,
+    object_allocated : Bool,
+    pm_fabric_placed : Bool,
+    initialized : Bool,
+    sealed : Bool
+) =
+    devh_import_commit(
+        ingress_allowed,
+        host_read_ok,
+        object_allocated,
+        pm_fabric_placed,
+        initialized,
+        sealed)
+
+// Failed ingress rolls back resources created by the attempted import.  These
+// digest functions freeze caller-visible transactional semantics without
+// imposing a representation on the Rust allocator/Fabric/registry state.
+define devh_registry_digest_after_failed_import(before : BitVec64) : BitVec64 = before
+define devh_allocator_digest_after_failed_import(before : BitVec64) : BitVec64 = before
+define devh_fabric_digest_after_failed_import(before : BitVec64) : BitVec64 = before
+
+// -----------------------------------------------------------------------------
+// Artifact identity
+// -----------------------------------------------------------------------------
+// The shell may use a friendly name, but the architectural artifact key is the
+// exact sealed ObjectId/generation incarnation.
+define devh_artifact_valid(
+    stored_object : BitVec64,
+    current_object : BitVec64,
+    stored_generation : BitVec64,
+    current_generation : BitVec64,
+    sealed : Bool
+) =
+    if stored_object = current_object then
+        if stored_generation = current_generation then sealed else false
+    else false
+
+// Host path is intentionally ignored after byte ingestion.  Two paths naming
+// the same exact Anka artifact have identical validity.
+define devh_artifact_valid_at_host_path(
+    host_path_tag : BitVec64,
+    stored_object : BitVec64,
+    current_object : BitVec64,
+    stored_generation : BitVec64,
+    current_generation : BitVec64,
+    sealed : Bool
+) =
+    devh_artifact_valid(
+        stored_object,
+        current_object,
+        stored_generation,
+        current_generation,
+        sealed)
+
+// Friendly registry names are references for the development UI, not Anka
+// security objects.
+define devh_registry_name_creates_authority(name_registered : Bool) = false
+
+// -----------------------------------------------------------------------------
+// CC_B compilation and execution admission
+// -----------------------------------------------------------------------------
+define devh_ccb_output_valid(
+    ccb_success : Bool,
+    output_sealed : Bool,
+    stored_generation : BitVec64,
+    current_generation : BitVec64
+) =
+    if ccb_success then
+        if output_sealed then
+            if stored_generation = current_generation then true else false
+        else false
+    else false
+
+// Loading or compiling code does not grant it ambient capabilities.
+define devh_import_creates_ambient_authority(import_committed : Bool) = false
+
+// PM has the same narrow job under the shell as everywhere else.
+define devh_pm_creates_execution_authority(pm_committed : Bool) = false
+
+// `run name` is merely a request.  Ordinary Anka execution/spawn admission is
+// still required, including explicit presented execution authority.
+define devh_run_admitted(
+    artifact_valid : Bool,
+    execution_authority_present : Bool,
+    normal_spawn_admitted : Bool
+) =
+    artifact_valid
+    ∧ execution_authority_present
+    ∧ normal_spawn_admitted
+
+// =============================================================================
+// Positive witnesses
+// =============================================================================
+
+example "DEVH0-1 explicit development authority admits ingress" {
+    assert(devh_ingress_allowed(true,true)=true)
+}
+
+example "DEVH0-2 sealed mode has no developer ingress" {
+    assert(devh_ingress_allowed(false,true)=false)
+}
+
+example "DEVH0-3 development mode without provisioned authority has no ingress" {
+    assert(devh_ingress_allowed(true,false)=false)
+}
+
+example "DEVH0-4 host pathname presence creates no ingress authority" {
+    assert(devh_host_path_creates_ingress_authority(true)=false)
+}
+
+example "DEVH0-5 PM placement request is behind the developer ingress gate" {
+    assert(devh_pm_request_allowed(true,true)=true)
+    assert(devh_pm_request_allowed(false,true)=false)
+    assert(devh_pm_request_allowed(true,false)=false)
+}
+
+example "DEVH0-6 complete import pipeline alone publishes registry artifact" {
+    assert(devh_registry_contains_after_import(true,true,true,true,true,true)=true)
+    assert(devh_registry_contains_after_import(true,true,true,true,true,false)=false)
+    assert(devh_registry_contains_after_import(false,true,true,true,true,true)=false)
+}
+
+example "DEVH0-7 failed import preserves registry allocator and Fabric digests" {
+    assert(
+        ∀(r : BitVec64). ∀(a : BitVec64). ∀(f : BitVec64).
+        devh_registry_digest_after_failed_import(r)=r
+        ∧ devh_allocator_digest_after_failed_import(a)=a
+        ∧ devh_fabric_digest_after_failed_import(f)=f
+    )
+}
+
+example "DEVH0-8 artifact key requires exact object generation and sealed state" {
+    assert(devh_artifact_valid(
+        bvconst(17,64),bvconst(17,64),
+        bvconst(4,64),bvconst(4,64),true)=true)
+    assert(devh_artifact_valid(
+        bvconst(17,64),bvconst(17,64),
+        bvconst(4,64),bvconst(5,64),true)=false)
+    assert(devh_artifact_valid(
+        bvconst(17,64),bvconst(17,64),
+        bvconst(4,64),bvconst(4,64),false)=false)
+}
+
+example "DEVH0-9 host pathname is not part of artifact validity" {
+    // The definition deliberately ignores host_path_tag.  Exercise two
+    // different concrete host-path tags without requiring quantified Z3.
+    assert(devh_artifact_valid_at_host_path(
+        bvconst(101,64),bvconst(17,64),bvconst(17,64),
+        bvconst(4,64),bvconst(4,64),true)=true)
+    assert(devh_artifact_valid_at_host_path(
+        bvconst(202,64),bvconst(17,64),bvconst(17,64),
+        bvconst(4,64),bvconst(4,64),true)=true)
+}
+
+example "DEVH0-10 registry name and PM placement create no authority" {
+    assert(
+        devh_registry_name_creates_authority(true)=false
+        ∧ devh_pm_creates_execution_authority(true)=false
+        ∧ pmc93g_creates_authority(true)=false
+    )
+}
+
+example "DEVH0-11 CC_B output must succeed be sealed and be current generation" {
+    assert(devh_ccb_output_valid(true,true,bvconst(9,64),bvconst(9,64))=true)
+    assert(devh_ccb_output_valid(false,true,bvconst(9,64),bvconst(9,64))=false)
+    assert(devh_ccb_output_valid(true,false,bvconst(9,64),bvconst(9,64))=false)
+    assert(devh_ccb_output_valid(true,true,bvconst(8,64),bvconst(9,64))=false)
+}
+
+example "DEVH0-12 imported code receives no ambient authority" {
+    assert(devh_import_creates_ambient_authority(true)=false)
+}
+
+example "DEVH0-13 run requires valid artifact explicit execution authority and normal spawn" {
+    assert(devh_run_admitted(true,true,true)=true)
+    assert(devh_run_admitted(true,false,true)=false)
+    assert(devh_run_admitted(true,true,false)=false)
+    assert(devh_run_admitted(false,true,true)=false)
+}
+
+example "DEVH0-14 benign and hostile payloads have identical ingress authority semantics" {
+    // Payload identity is deliberately irrelevant to ingress authority.  The
+    // definition omits payload_tag; exercise distinct concrete payload tags
+    // without making this evaluator-level witness depend on quantified Z3.
+    assert(devh_ingress_allowed_for_payload(bvconst(1,64),true,true)=true)
+    assert(devh_ingress_allowed_for_payload(bvconst(2,64),true,true)=true)
+    assert(devh_ingress_allowed_for_payload(bvconst(1,64),true,false)=false)
+    assert(devh_ingress_allowed_for_payload(bvconst(2,64),true,false)=false)
+}
+
+example "DEVH0-15 placed imported executable is still denied without presented run authority" {
+    assert(pmc93g_commit(true,true)=true)
+    assert(devh_pm_creates_execution_authority(true)=false)
+    assert(devh_run_admitted(true,false,true)=false)
+}
