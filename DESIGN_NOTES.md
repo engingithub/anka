@@ -3525,3 +3525,71 @@ The runtime implementation should follow this formal boundary in the remaining
 
 The shell remains a development bridge, not a guest filesystem, package
 manager, general Unix shell, or authority bypass.
+
+## DN-30: Transactional Host Bytecode Ingress and Exact Artifact Registry (Phase 9.3h.1)
+
+**Date:** 2026-09-16
+
+**Decision:**
+
+Implement the first runtime consumer of the 9.3h.0 contract as a separate
+Anka64 development-ingress module rather than extending the legacy MC68000
+monitor.  `DevelopmentArtifactLoader` is configured as Development or Sealed,
+and every import additionally requires an explicitly provisioned
+`DeveloperIngressAuthority`.  Neither condition implies the other.
+
+A friendly shell name maps only to:
+
+```text
+ArtifactKey = (ObjectId, post-seal Generation)
+```
+
+plus non-authoritative metadata (logical size and artifact kind).  The host
+pathname is deliberately not stored.  Registry resolution revalidates that the
+object still exists, is the same generation, is sealed, and is a Memory object.
+
+The bytecode importer is ordered so every recoverable failure occurs before
+artifact bytes become committed:
+
+```text
+policy/name preflight
+ -> host read
+ -> nonempty/size preflight
+ -> alloc fresh ObjectId
+ -> PM/Fabric placement
+ -> verify PM extent lies inside Fabric RAM
+ -> zero exact object extent
+ -> initialize exact bytes
+ -> seal
+ -> registry publication
+```
+
+PM failure rewinds the fresh unpublished Fabric object.  A composed placement
+that fails the Fabric-RAM admission check first rolls back Fabric identity and
+translation, then uses PM's checked `release_unplaced` path.  To make the
+formal failed-import digest claim true for object identity as well as live
+objects, Fabric now has the narrow crate-private
+`rollback_unpublished_object(ObjectId)` transition.  It succeeds only for the
+exact most-recent Active object and refuses any object already named by memory
+or device authority or already observed by a Fabric transaction/fault record.
+
+After the physical-range/zero preflight, exact-size `initialize_object` and the
+single Active->Sealed transition are internal invariants, not recoverable shell
+errors.  Treating an impossible violation there as a bug avoids falsely claiming
+transactional rollback after physical bytes have already been mutated.
+
+The loader intentionally does not judge payload intent or semantic correctness.
+Benign ARP/ICMP/Ethernet bytecode, malformed bytecode, and intentionally hostile
+bytecode have identical ingress semantics.  Successful import grants no Fabric
+capability and performs no process construction:
+
+```text
+imported + placed + sealed != authorized to execute
+```
+
+Execution authority remains Phase 9.3h.3.
+
+Phase 9.3h.1 adds 12 Rust witnesses.  With the preceding 842-test baseline, the
+source tree now contains 854 Rust tests; the executable test gate must still be
+run in a Rust-enabled environment before declaring the phase closed.
+

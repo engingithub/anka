@@ -2468,3 +2468,40 @@ The intended implementation sequence is:
   -> ...
   -> GET /alive HTTP/1.1 -> "Anka64 is alive."
 ```
+
+**9.3h.1 — host artifact loader/registry (implemented):**
+
+`src/anka64/dev_shell.rs` introduces a development-only ingress layer with
+`DevelopmentMode`, an explicit `DeveloperIngressAuthority`, exact
+`ArtifactKey { object, generation }` registry entries, and transactional raw
+bytecode import from the host filesystem.  The host path is consumed only to
+obtain bytes and is not retained as artifact identity.
+
+The runtime import path is:
+
+```text
+development mode + explicit developer authority
+  -> host read
+  -> fresh Memory ObjectId
+  -> PhysicalPlacementManager/Fabric placement
+  -> physical-range preflight + zero
+  -> initialize exact bytes
+  -> seal (generation bump)
+  -> publish friendly-name -> exact ArtifactKey
+```
+
+Expected failures before publication are side-effect free.  A new narrow
+`Fabric::rollback_unpublished_object()` primitive can rewind only the exact
+most-recent Active object when no memory/device authority has been published;
+this closes the ObjectId-allocation side of failed ingress instead of merely
+leaving an identity hole.  Composed PM placement is released only after the
+Fabric translation has been rolled back.
+
+The loader grants no capability and performs no spawn.  A successfully imported
+artifact is therefore placed and sealed but still cannot execute without the
+separate Phase 9.3h.3 execution-authority/spawn path.  Twelve Rust witnesses
+cover development/sealed policy, missing authority, host-read failure, empty
+input, PM exhaustion, invalid PM/Fabric pool composition, exact post-seal
+generation, host-path irrelevance, no ambient authority, stale/unsealed registry
+rejection, duplicate-name atomicity, and rollback refusal after publication.
+

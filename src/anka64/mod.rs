@@ -21,6 +21,7 @@
 pub mod state;
 pub mod fabric;
 pub mod placement;
+pub mod dev_shell;
 pub mod desc;
 pub mod isa;
 pub mod core;

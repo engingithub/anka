@@ -328,6 +328,53 @@ impl Fabric {
         self.placement.remove(&id);
     }
 
+    /// Roll back the most-recent fresh object allocation before publication.
+    ///
+    /// Phase 9.3h uses this only for failed developer-artifact ingress.  It is
+    /// deliberately narrower than `destroy_object`: the object must still be
+    /// Active, must be the exact most-recent ObjectId, and must not have been
+    /// granted into any domain.  Under those conditions the ObjectId was never
+    /// architecturally published, so rewinding the allocator restores the exact
+    /// pre-attempt Fabric identity state rather than merely leaving an ID hole.
+    ///
+    /// The placement entry, if any, is removed as part of rollback.  Callers
+    /// that composed placement through `PhysicalPlacementManager` must then
+    /// release that now-unplaced reservation through the manager's checked
+    /// teardown path.
+    pub(crate) fn rollback_unpublished_object(&mut self, id: ObjectId) -> bool {
+        if id.0.checked_add(1) != Some(self.next_object_id) {
+            return false;
+        }
+        let obj = match self.objects.get(&id) {
+            Some(obj) if obj.state == ObjectState::Active => obj,
+            _ => return false,
+        };
+        if obj.id != id {
+            return false;
+        }
+
+        let memory_authority_exists = self.domains.values().any(|domain| {
+            domain.capabilities.iter().any(|entry| entry.cap.object() == id)
+        });
+        let device_authority_exists = self.domains.values().any(|domain| {
+            domain.device_authorities.iter().any(|entry| entry.object == id)
+        });
+        let transaction_exists = self.transactions.iter().any(|tx| tx.request.object == id);
+        let fault_record_exists = self.fault_log.iter().any(|fault| fault.object == id);
+        if memory_authority_exists
+            || device_authority_exists
+            || transaction_exists
+            || fault_record_exists
+        {
+            return false;
+        }
+
+        self.placement.remove(&id);
+        self.objects.remove(&id);
+        self.next_object_id = id.0;
+        true
+    }
+
     /// Zero physical memory in the range [base..base+size).
     /// Must be called before recycled extents are granted to new domains.
     pub fn zero_physical(&mut self, base: u64, size: u64) {
