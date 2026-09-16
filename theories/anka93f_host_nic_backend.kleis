@@ -1,0 +1,101 @@
+// =============================================================================
+// Anka64 Host NIC Backend Boundary (Phase 9.3f)
+// =============================================================================
+// No new axioms.
+//
+// Frame bytes are modeled as an opaque BitVec64 token.  This theory is about
+// boundary identity/authority, not Ethernet parsing.
+// =============================================================================
+
+define host_backend_tx_visible(
+    tx_committed : Bool,
+    exact_binding : Bool
+) = tx_committed ∧ exact_binding
+
+// The host observes exactly the committed frame token; no transformation is
+// implied at the NIC/backend boundary.
+define host_backend_observed_frame(frame_token : BitVec64) : BitVec64 = frame_token
+
+// Host RX offer preserves exact virtual-NIC identity and bytes.  Admission into
+// Anka still requires an explicit host injection action.
+define host_backend_rx_offer_routes(
+    offered_object : BitVec64,
+    offered_generation : BitVec64,
+    binding_object : BitVec64,
+    binding_generation : BitVec64
+) = offered_object=binding_object ∧ offered_generation=binding_generation
+
+define host_backend_rx_frame(frame_token : BitVec64) : BitVec64 = frame_token
+
+// Merely offering/injecting a frame enters device-private state.  It cannot
+// directly modify guest memory or mint Anka authority/delegation.
+define host_injection_direct_guest_memory_changed(injected : Bool) = false
+define host_injection_creates_capability(injected : Bool) = false
+define host_injection_creates_delegation(injected : Bool) = false
+
+// External network transmission is host policy, not a consequence of guest TX.
+define external_network_transmitted(
+    guest_tx_committed : Bool,
+    host_policy_allows_external : Bool
+) = guest_tx_committed ∧ host_policy_allows_external
+
+// Loopback is one policy: only when enabled does committed guest TX become a
+// future host RX offer.  It is not a NicController law.
+define loopback_rx_offer(
+    guest_tx_committed : Bool,
+    loopback_policy_enabled : Bool
+) = guest_tx_committed ∧ loopback_policy_enabled
+
+example "HOSTNIC-1 committed exact TX becomes backend-visible" {
+    assert(host_backend_tx_visible(true,true)=true)
+}
+
+example "HOSTNIC-2 uncommitted TX is not backend-visible" {
+    assert(host_backend_tx_visible(false,true)=false)
+}
+
+example "HOSTNIC-3 backend preserves opaque frame bytes" {
+    assert(∀(p : BitVec64). host_backend_observed_frame(p)=p)
+}
+
+example "HOSTNIC-4 RX offer preserves opaque frame bytes" {
+    assert(∀(p : BitVec64). host_backend_rx_frame(p)=p)
+}
+
+example "HOSTNIC-5 RX offer routes only to exact DeviceBinding" {
+    assert(host_backend_rx_offer_routes(
+        bvconst(40,64),bvconst(3,64),bvconst(40,64),bvconst(3,64)))
+}
+
+example "HOSTNIC-6 stale generation cannot route host RX" {
+    assert(¬host_backend_rx_offer_routes(
+        bvconst(40,64),bvconst(2,64),bvconst(40,64),bvconst(3,64)))
+}
+
+example "HOSTNIC-7 host injection without guest DMA cannot mutate guest memory" {
+    assert(host_injection_direct_guest_memory_changed(true)=false)
+}
+
+example "HOSTNIC-8 host injection mints no Anka capability" {
+    assert(host_injection_creates_capability(true)=false)
+}
+
+example "HOSTNIC-9 host injection mints no Anka delegation" {
+    assert(host_injection_creates_delegation(true)=false)
+}
+
+example "HOSTNIC-10 guest TX does not imply external transmission when host policy denies" {
+    assert(external_network_transmitted(true,false)=false)
+}
+
+example "HOSTNIC-11 host policy may permit external transmission" {
+    assert(external_network_transmitted(true,true)=true)
+}
+
+example "HOSTNIC-12 loopback disabled means no automatic RX" {
+    assert(loopback_rx_offer(true,false)=false)
+}
+
+example "HOSTNIC-13 loopback enabled turns committed TX into host RX offer" {
+    assert(loopback_rx_offer(true,true)=true)
+}

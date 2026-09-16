@@ -2904,3 +2904,290 @@ memory target (for placement).  Only the conjunction of all three
 produces guest-visible state change.
 
 787/787 tests; 29 instructions.  Phase 9.3e.3 is complete.
+
+---
+
+## DN-26: Finite NIC DMA — Exact RX/TX Authority and Committed Observations (Phase 9.3e.4)
+
+**Date:** 2026-09-16
+
+**Context:**
+
+Phase 9.3e.3 deliberately stopped at device-private unsolicited RX.  A queued
+frame could advance the NIC event epoch and wake a user-space driver, but no
+packet bytes could cross into or out of guest memory.  Phase 9.3e.4 adds that
+crossing as a finite, capability-mediated DMA operation rather than as an
+ambient property of packet arrival.
+
+### Direction is authority
+
+The two operations use distinct device rights and opposite memory authority:
+
+```text
+SYS_NIC_RX = 18:  NIC_RX + Memory.WRITE
+SYS_NIC_TX = 19:  NIC_TX + Memory.READ
+```
+
+The direction is from the point of view of guest memory:
+
+```text
+RX: NIC-private frame -> Fabric WRITE -> guest buffer
+TX: guest buffer       -> Fabric READ  -> host-visible TX sink
+```
+
+`NIC_RX` cannot authorize TX, `NIC_TX` cannot authorize RX, WRITE cannot be
+used as READ, and ambient authority cannot repair an insufficient presented
+handle.
+
+### Admission is exact and finite
+
+Each operation is admitted only after side-effect-free validation of:
+
+```text
+exact generation-qualified Device capability
+exact backing Device authority
+required NIC operation right
+exact registered NIC DeviceBinding
+exact generation-qualified Memory capability
+required memory permission
+exact delegated-driver provenance when present
+finite byte span inside the presented capability
+finite controller capacity
+```
+
+Only after these gates pass may the controller derive a narrow DMA domain.
+The exact span is delegated from the presented backing `AuthorityId`; two
+adjacent capabilities cannot be stitched into one request.
+
+For RX, the private queue head is not removed until exact DMA delegation has
+succeeded:
+
+```text
+pre-admission failure => Delta RXQueue = 0 and Delta DMA domains = 0
+```
+
+Once accepted, the request owns the packet.  A later commit-time fault does not
+requeue it.  This intentionally avoids introducing implicit retry/reordering
+semantics.
+
+### Accepted work owns derived authority
+
+After admission, the original source handle is no longer the lifetime of the
+request.  The finite request owns its narrow derived DMA authority:
+
+```text
+accepted request + source capability dropped -> request may still commit
+```
+
+Underlying object generation/authority is nevertheless revalidated by Fabric
+at commit, so revoking/recycling the object faults the request.
+
+Queued private RX remains outside pair quiescence.  An accepted nonterminal
+RX or TX request with `DelegationId(client, driver, ...)` contributes exactly
+one unit to that pair until terminal completion.
+
+### Fabric READ captures the committed observation
+
+TX exposed a missing asynchronous-Fabric primitive.  Authorization alone is
+not enough: an asynchronous reader needs the bytes that were observed at the
+actual commit point.  `Transaction` therefore carries:
+
+```text
+read_data: Option<Vec<u8>>
+```
+
+For READ/Fetch, Fabric populates `read_data` only in the commit phase, after
+commit-time generation, authority, translation, and physical-span
+revalidation.  Synchronous `execute_read` consumes the same captured result.
+NIC TX therefore never performs a direct physical-memory peek after an earlier
+authorization decision.
+
+The conservation law is:
+
+```text
+Committed READ -> read_data = exact authorized committed observation
+Faulted READ   -> read_data = None
+```
+
+and the NIC law is:
+
+```text
+Committed NIC TX READ -> TXSink += read_data
+Faulted NIC TX READ   -> Delta TXSink = 0
+```
+
+### Completion ABI
+
+Both finite NIC operations return through the generic lossless completion
+envelope:
+
+```text
+R0 = 0        on success
+R0 = u64::MAX on commit-time DMA fault
+R1 = committed byte count (zero on fault)
+```
+
+RX/TX completion does **not** advance the unsolicited-arrival epoch.  The event
+epoch continues to mean one thing only: a successful host-to-private-RX
+arrival occurred.
+
+### Raw NIC frame bound versus Ethernet syntax
+
+The raw NIC TX syscall accepts a nonzero opaque byte sequence up to 1514 bytes.
+It intentionally does not require the 14-byte Ethernet header minimum.  The
+next user-space layer owns that syntax rule:
+
+```text
+raw NIC transport: 1..1514 bytes
+Ethernet parser:    14..1514 bytes
+```
+
+This keeps packet transport and protocol parsing separate.
+
+### Formal gate
+
+```text
+anka93e4_finite_nic_dma.kleis                   19/19 positive
+anka93e4_finite_nic_dma_false_witnesses.kleis   0/11 false claims pass
+```
+
+No new axioms.  The false witnesses include permission-direction confusion,
+ambient rescue, premature RX dequeue, invalid TX length, pair attribution of
+queued RX, faulted-TX sink mutation, and finite completion falsely advancing
+the unsolicited-RX epoch.
+
+9.3e.4a RX closed locally at **802/802 Rust tests**.  The integrated 9.3e.4b TX/9.3f candidate contains **822 Rust tests**; it
+requires the normal local Rust gate before closure.
+
+---
+
+## DN-27: Host-Controlled Virtual Ethernet Boundary and Formal-First Networking (Phase 9.3f / 9.4)
+
+**Date:** 2026-09-16
+
+**Context:**
+
+Once finite TX exists, the next question is where a transmitted frame goes.
+Anka must be able to develop and test a real Ethernet stack without granting a
+guest process ambient control of the host's physical network interface.
+
+The answer is a host/emulator policy boundary outside Anka's capability model.
+
+### Connectivity policy is not NIC semantics
+
+The guest sees a virtual NIC that produces and consumes opaque frame bytes.
+The host decides what happens beyond that boundary:
+
+```text
+Anka userspace
+    -> NicController
+        -> HostNicBackend
+            -> loopback | synthetic LAN | another VM | future external bridge
+```
+
+The central laws are:
+
+```text
+Guest TX completion != external-network transmission
+Host RX offer       != guest-memory mutation
+Loopback            != NicController semantics
+```
+
+A committed TX frame must first be explicitly extracted from the exact
+`DeviceBinding`.  A backend may record, drop, loop, synthesize a peer response,
+or eventually forward it according to host policy.
+
+Likewise, `HostNicBackend::poll_rx` merely offers an opaque frame.  It enters
+Anka only when the host explicitly calls `Kernel::inject_nic_rx`, at which point
+it enters the bounded NIC-private RX queue.  Even then, guest memory remains
+unchanged until an authorized `SYS_NIC_RX` finite DMA request succeeds.
+
+### The backend is environment policy, not an Anka principal
+
+`HostNicBackend` does not receive `AuthorityId`, `DelegationId`, or a guest
+capability.  It represents the machine environment itself.  Anka's authority
+proof has already ended at successful finite TX; a future bridge to a physical
+host interface is governed by host policy, not by inventing a guest authority
+that claims to represent the host OS.
+
+The backend nevertheless preserves exact virtual-device identity:
+
+```text
+HostNicFrame = (DeviceBinding, bytes)
+```
+
+so two virtual NICs cannot alias merely because they emit identical bytes.
+
+### Deterministic loopback is the first policy
+
+`LoopbackBackend` records a committed guest TX and queues the same
+`(DeviceBinding, bytes)` as a future host RX offer.  It does **not** inject the
+frame automatically.  This gives tests an explicit causal trace:
+
+```text
+Guest TX
+ -> host extracts committed frame
+ -> loopback policy creates RX offer
+ -> host chooses to inject
+ -> NIC-private RX queue
+ -> event wake
+ -> authorized SYS_NIC_RX
+ -> guest memory
+```
+
+That separation lets later backends replace loopback without changing the NIC
+or guest protocol stack.
+
+The current in-memory TX sink/backend queues are deliberately emulator test
+state rather than a final flow-control design.  If a real external backend can
+stop draining, bounded backend queues/backpressure become a separate host-side
+policy problem; they must not silently change Anka's finite-DMA authority laws.
+
+### Formal-first protocol boundary
+
+Before writing guest protocol parsers, the protocol contracts are frozen in
+Kleis.  Frames remain opaque at the host backend; Ethernet interpretation
+belongs in user space.
+
+**Ethernet (9.4a):**
+
+```text
+dst MAC[6] | src MAC[6] | EtherType[2] | payload
+```
+
+Virtual-NIC frames exclude preamble/SFD/IFG and guest-visible FCS.  Ordinary
+untagged Ethernet is limited to 14..1514 bytes; VLAN is deferred.  EtherType is
+network byte order from bytes 12 and 13.  Unknown EtherTypes are syntactically
+valid and may be ignored safely.
+
+**ARP (9.4b):** first support is Ethernet/IPv4 ARP only.  A reply is produced
+only for a structurally valid request naming the local IPv4 target, and the
+reply preserves the request sender's MAC/IP as the reply target identity.
+
+**IPv4 + ICMP echo (9.4c):** the first stack accepts only fixed-IHL
+(20-byte-header), structurally valid, checksum-valid, nonfragmented IPv4
+addressed locally.  IPv4 options and fragment reassembly are deferred.  ICMP
+echo requires at least its fixed 8-byte header; replies preserve identifier,
+sequence, and opaque payload.
+
+Formal package:
+
+```text
+anka93f_host_nic_backend.kleis                    13/13 positive
+anka93f_host_nic_backend_false_witnesses.kleis     0/8 false claims pass
+anka94a_ethernet_contract.kleis                     8/8 positive
+anka94a_ethernet_contract_false_witnesses.kleis     0/4 false claims pass
+anka94b_arp_contract.kleis                          9/9 positive
+anka94b_arp_contract_false_witnesses.kleis          0/4 false claims pass
+anka94c_ipv4_icmp_contract.kleis                   14/14 positive
+anka94c_ipv4_icmp_contract_false_witnesses.kleis    0/7 false claims pass
+```
+
+Together with DN-26's finite-DMA gate, the new formal package is **63/63
+positive assertions verified and 0/34 deliberately false claims pass**, with
+no new axioms.
+
+The next runtime witness after the finite-TX/host-backend Rust gate is green is
+not a kernel Ethernet parser.  It is a CC_B-compiled user-space driver/stack
+that uses the frozen boundary to construct and parse Ethernet, beginning with a
+deterministic synthetic/loopback peer and ARP.

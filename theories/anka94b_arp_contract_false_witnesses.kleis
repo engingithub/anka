@@ -1,0 +1,17 @@
+import "anka94b_arp_contract.kleis"
+
+example "FALSE-ARP94B-1 parser accepts 27-byte ARP payload" {
+    assert(arp94b_payload_safe(bvconst(27,16)))
+}
+
+example "FALSE-ARP94B-2 ARP replies to nonlocal target" {
+    assert(arp94b_should_reply(true,true,true,false)=true)
+}
+
+example "FALSE-ARP94B-3 ARP reply recursively causes reply" {
+    assert(arp94b_should_reply(true,true,false,true)=true)
+}
+
+example "FALSE-ARP94B-4 malformed ARP header triggers reply" {
+    assert(arp94b_should_reply(true,false,true,true)=true)
+}

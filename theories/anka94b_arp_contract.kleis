@@ -1,0 +1,71 @@
+// =============================================================================
+// Anka64 ARP User-Space Contract (Phase 9.4b, formal-first)
+// =============================================================================
+// No new axioms.  Models the deterministic Ethernet/IPv4 ARP subset that the
+// first user-space network stack will support.
+// =============================================================================
+
+define arp94b_payload_safe(payload_len : BitVec16) =
+    bvuge(payload_len,bvconst(28,16))
+
+// The executable parser will compute these four field checks from bytes:
+// HTYPE=1, PTYPE=0x0800, HLEN=6, PLEN=4.
+define arp94b_header_supported(
+    htype_ethernet : Bool,
+    ptype_ipv4 : Bool,
+    hlen_six : Bool,
+    plen_four : Bool
+) = htype_ethernet ∧ ptype_ipv4 ∧ hlen_six ∧ plen_four
+
+define arp94b_should_reply(
+    payload_safe : Bool,
+    header_supported : Bool,
+    opcode_is_request : Bool,
+    target_ip_is_local : Bool
+) = payload_safe
+    ∧ header_supported
+    ∧ opcode_is_request
+    ∧ target_ip_is_local
+
+// Reply construction conserves request identity tokens by swapping peer/local
+// roles; actual byte serialization is a later executable witness.
+define arp94b_reply_sender_mac(local_mac : BitVec64) : BitVec64 = local_mac
+define arp94b_reply_target_mac(request_sender_mac : BitVec64) : BitVec64 = request_sender_mac
+define arp94b_reply_sender_ip(local_ip : BitVec32) : BitVec32 = local_ip
+define arp94b_reply_target_ip(request_sender_ip : BitVec32) : BitVec32 = request_sender_ip
+
+example "ARP94B-1 28-byte ARP payload is safe" {
+    assert(arp94b_payload_safe(bvconst(28,16)))
+}
+
+example "ARP94B-2 27-byte payload is rejected" {
+    assert(¬arp94b_payload_safe(bvconst(27,16)))
+}
+
+example "ARP94B-3 Ethernet IPv4 ARP header subset is supported" {
+    assert(arp94b_header_supported(true,true,true,true)=true)
+}
+
+example "ARP94B-4 request for local IPv4 address receives reply" {
+    assert(arp94b_should_reply(true,true,true,true)=true)
+}
+
+example "ARP94B-5 request for another IPv4 address does not receive reply" {
+    assert(arp94b_should_reply(true,true,true,false)=false)
+}
+
+example "ARP94B-6 incoming ARP reply is not answered with another ARP reply" {
+    assert(arp94b_should_reply(true,true,false,true)=false)
+}
+
+example "ARP94B-7 malformed header never triggers reply" {
+    assert(arp94b_should_reply(true,false,true,true)=false)
+}
+
+example "ARP94B-8 reply target MAC is exactly request sender MAC" {
+    assert(∀(m : BitVec64). arp94b_reply_target_mac(m)=m)
+}
+
+example "ARP94B-9 reply target IP is exactly request sender IP" {
+    assert(∀(ip : BitVec32). arp94b_reply_target_ip(ip)=ip)
+}

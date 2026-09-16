@@ -373,6 +373,58 @@ DMA engines
 
 Different principals and interfaces; the same laws of authority.
 
+
+---
+
+## Host-controlled networking is another authority boundary
+
+The user-space NIC work adds a useful distinction for the future headless web
+node: **permission to produce a virtual Ethernet frame is not permission to use
+the host's physical network**.
+
+Anka's guest-side authority chain ends at a committed finite NIC operation:
+
+```text
+presented NIC_TX capability
+  + presented Memory.READ capability
+  -> exact finite Fabric READ
+  -> committed virtual-NIC frame
+```
+
+What happens next is emulator/host policy:
+
+```text
+virtual NIC frame
+  -> HostNicBackend
+  -> {loopback, synthetic peer, future external bridge}
+```
+
+Conversely, host-provided input first enters bounded NIC-private state:
+
+```text
+Host RX offer
+  -> explicit host injection
+  -> private RX queue + event epoch
+  -> presented NIC_RX + Memory.WRITE
+  -> finite Fabric WRITE
+  -> guest memory
+```
+
+Therefore neither direction creates an ambient shortcut around the authority
+model:
+
+```text
+GuestTx(frame)  != authority to transmit on the physical host network
+HostInject(frame) != direct guest-memory authority
+```
+
+A future externally bridged headless node should keep this split.  OIDC/OAuth
+answers which remote principal may request an application operation; Anka
+capabilities authorize the resulting local resource/device operations; host
+network policy determines whether a virtual frame is allowed to leave the
+emulator.  These are related enforcement layers, not one universal "trusted"
+bit.
+
 ---
 
 ## Future milestone

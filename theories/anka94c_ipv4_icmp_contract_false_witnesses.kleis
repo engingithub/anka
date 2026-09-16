@@ -1,0 +1,31 @@
+import "anka94c_ipv4_icmp_contract.kleis"
+
+example "FALSE-IPICMP94C-1 truncated IPv4 packet is accepted" {
+    assert(ipv494c_lengths_safe(
+        bvconst(20,16),bvconst(60,16),bvconst(59,16)))
+}
+
+example "FALSE-IPICMP94C-2 fragmented IPv4 is supported by first stack" {
+    assert(ipv494c_supported_packet(true,true,true,true,true)=true)
+}
+
+example "FALSE-IPICMP94C-3 bad IPv4 checksum is supported" {
+    assert(ipv494c_supported_packet(true,true,false,false,true)=true)
+}
+
+example "FALSE-IPICMP94C-4 IPv4 options are silently accepted by first stack" {
+    assert(ipv494c_lengths_safe(
+        bvconst(24,16),bvconst(24,16),bvconst(64,16)))
+}
+
+example "FALSE-IPICMP94C-5 truncated ICMP header is safe" {
+    assert(icmp94c_length_safe(bvconst(7,16)))
+}
+
+example "FALSE-IPICMP94C-6 ICMP echo with bad checksum receives reply" {
+    assert(icmp94c_should_echo_reply(true,true,true,true,true,false)=true)
+}
+
+example "FALSE-IPICMP94C-7 ICMP echo reply causes another echo reply" {
+    assert(icmp94c_should_echo_reply(true,true,true,false,true,true)=true)
+}

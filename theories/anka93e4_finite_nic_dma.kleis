@@ -1,0 +1,156 @@
+// =============================================================================
+// Anka64 Finite NIC DMA Implementation Gate (Phase 9.3e.4)
+// =============================================================================
+// No new axioms.  Focused refinement of anka_userspace_nic.kleis.
+//
+// Freezes the concrete RX/TX transaction boundary:
+//   RX: exact NIC_RX + exact WRITE -> finite Fabric WRITE
+//   TX: exact NIC_TX + exact READ  -> finite Fabric READ -> host TX sink
+//   pre-admission rejection has zero controller/Fabric mutation
+//   accepted finite DMA is pair-attributed only through DelegationId provenance
+//   commit-time fault exposes no TX bytes and transfers zero bytes
+//   source handle presence after admission is irrelevant
+//   finite completion never advances unsolicited-RX activity epoch
+// =============================================================================
+
+define NIC93E4_MAX_FRAME = bvconst(1514,16)
+
+define nic93e4_tx_length_valid(len : BitVec16) =
+    bvugt(len,bvconst(0,16)) ∧ bvule(len,NIC93E4_MAX_FRAME)
+
+define nic93e4_rx_accept(
+    packet_available : Bool,
+    exact_binding : Bool,
+    nic_rx_right : Bool,
+    current_generation : Bool,
+    write_authority : Bool,
+    span_ok : Bool,
+    cap_still_present : Bool
+) = packet_available
+    ∧ exact_binding
+    ∧ nic_rx_right
+    ∧ current_generation
+    ∧ write_authority
+    ∧ span_ok
+
+define nic93e4_tx_accept(
+    exact_binding : Bool,
+    nic_tx_right : Bool,
+    current_generation : Bool,
+    read_authority : Bool,
+    span_ok : Bool,
+    cap_still_present : Bool
+) = exact_binding
+    ∧ nic_tx_right
+    ∧ current_generation
+    ∧ read_authority
+    ∧ span_ok
+
+// Admission is the ownership boundary.  Before it, failures are no-ops.
+define nic93e4_rx_queue_after_reject(queue_before : BitVec5) : BitVec5 = queue_before
+define nic93e4_dma_domains_after_reject(domains_before : BitVec8) : BitVec8 = domains_before
+
+// Pair-quiescence counts only accepted, nonterminal work with provenance.
+define nic93e4_pair_contribution(
+    accepted : Bool,
+    nonterminal : Bool,
+    provenance_matches_pair : Bool
+) : BitVec3 =
+    if accepted ∧ nonterminal ∧ provenance_matches_pair
+    then bvconst(1,3)
+    else bvconst(0,3)
+
+// TX sink changes only for a committed READ.  Fault is zero mutation.
+define nic93e4_tx_sink_delta(committed_read : Bool, faulted : Bool) : BitVec3 =
+    if committed_read ∧ ¬faulted then bvconst(1,3) else bvconst(0,3)
+
+// Secondary transfer length is committed length on success, zero on fault.
+define nic93e4_transfer_len(
+    committed : Bool,
+    requested_len : BitVec16
+) : BitVec16 = if committed then requested_len else bvconst(0,16)
+
+// Driver-originated finite DMA completion is not unsolicited RX activity.
+define nic93e4_completion_advances_rx_epoch(operation_is_rx_or_tx : Bool) = false
+
+example "NIC93E4-1 RX exact WRITE authority admits finite copy" {
+    assert(nic93e4_rx_accept(true,true,true,true,true,true,false)=true)
+}
+
+example "NIC93E4-2 RX source handle may disappear after admission" {
+    assert(
+        nic93e4_rx_accept(true,true,true,true,true,true,false)
+        = nic93e4_rx_accept(true,true,true,true,true,true,true)
+    )
+}
+
+example "NIC93E4-3 TX exact READ authority admits finite copy" {
+    assert(nic93e4_tx_accept(true,true,true,true,true,false)=true)
+}
+
+example "NIC93E4-4 TX source handle may disappear after admission" {
+    assert(
+        nic93e4_tx_accept(true,true,true,true,true,false)
+        = nic93e4_tx_accept(true,true,true,true,true,true)
+    )
+}
+
+example "NIC93E4-5 TX requires READ rather than WRITE-shaped absence" {
+    assert(nic93e4_tx_accept(true,true,true,false,true,true)=false)
+}
+
+example "NIC93E4-6 RX requires WRITE" {
+    assert(nic93e4_rx_accept(true,true,true,true,false,true,true)=false)
+}
+
+example "NIC93E4-7 TX zero length rejected" {
+    assert(¬nic93e4_tx_length_valid(bvconst(0,16)))
+}
+
+example "NIC93E4-8 TX maximum raw frame accepted" {
+    assert(nic93e4_tx_length_valid(bvconst(1514,16)))
+}
+
+example "NIC93E4-9 TX oversize rejected" {
+    assert(¬nic93e4_tx_length_valid(bvconst(1515,16)))
+}
+
+example "NIC93E4-10 rejected RX preserves private queue" {
+    assert(∀(q : BitVec5). nic93e4_rx_queue_after_reject(q)=q)
+}
+
+example "NIC93E4-11 rejected operation leaks no DMA domain" {
+    assert(∀(d : BitVec8). nic93e4_dma_domains_after_reject(d)=d)
+}
+
+example "NIC93E4-12 accepted matching nonterminal DMA contributes one pair request" {
+    assert(nic93e4_pair_contribution(true,true,true)=bvconst(1,3))
+}
+
+example "NIC93E4-13 queued/nonaccepted state contributes zero pair work" {
+    assert(nic93e4_pair_contribution(false,true,true)=bvconst(0,3))
+}
+
+example "NIC93E4-14 terminal completion contributes zero pair work" {
+    assert(nic93e4_pair_contribution(true,false,true)=bvconst(0,3))
+}
+
+example "NIC93E4-15 successful committed TX appends exactly one host frame" {
+    assert(nic93e4_tx_sink_delta(true,false)=bvconst(1,3))
+}
+
+example "NIC93E4-16 faulted TX exposes no host frame" {
+    assert(nic93e4_tx_sink_delta(false,true)=bvconst(0,3))
+}
+
+example "NIC93E4-17 failed DMA reports zero transferred bytes" {
+    assert(nic93e4_transfer_len(false,bvconst(73,16))=bvconst(0,16))
+}
+
+example "NIC93E4-18 committed DMA reports exact requested bytes" {
+    assert(nic93e4_transfer_len(true,bvconst(73,16))=bvconst(73,16))
+}
+
+example "NIC93E4-19 finite completion does not advance unsolicited RX epoch" {
+    assert(∀(op : Bool). nic93e4_completion_advances_rx_epoch(op)=false)
+}

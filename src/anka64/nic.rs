@@ -1,4 +1,4 @@
-//! NicController — bounded private RX queue + finite RX DMA (Phase 9.3e.4a).
+//! NicController — bounded private RX + finite RX/TX DMA (Phase 9.3e.4).
 //!
 //! Unsolicited packet arrival semantics:
 //!   * Admitted frames enter a bounded device-private RX queue.
@@ -9,24 +9,21 @@
 //!   * Queued private RX is not pair-attributed work and does not
 //!     constitute autonomous machine progress.
 //!
-//! Finite RX-copy semantics:
-//!   * A later authorized SYS_NIC_RX presents exact NIC_RX authority
-//!     and exact WRITE authority for a guest buffer.
-//!   * Submission delegates exactly the front frame's byte span into a
-//!     fresh DMA domain before dequeuing that frame.
-//!   * Pre-admission failure leaves the private RX queue unchanged.
-//!   * Once accepted, the frame belongs to the finite request.  A later
-//!     DMA fault does not requeue it.
+//! Finite DMA semantics:
+//!   * SYS_NIC_RX requires exact NIC_RX + guest-buffer WRITE authority.
+//!   * SYS_NIC_TX requires exact NIC_TX + guest-buffer READ authority.
+//!   * Both operations derive an exact narrow DMA domain before admission.
 //!   * Accepted nonterminal DMA contributes to pair quiescence when the
 //!     presented buffer carries DelegationId provenance.
-//!   * RX-copy completion does NOT advance the unsolicited-arrival epoch.
+//!   * RX completion does NOT advance the unsolicited-arrival epoch.
+//!   * TX bytes come only from Fabric's committed read observation; the
+//!     controller never peeks at physical memory after authorization.
 //!
 //! Frame size limit: untagged Ethernet (14-byte header + 1500 payload),
 //! excluding FCS (stripped by hardware).  Does not imply 802.1Q VLAN
 //! support.
 //!
-//! Formal basis: anka_userspace_nic.kleis NIC93E-1..24 and
-//! anka93e3_nic_controller.kleis NIC93E3-1..32.
+//! Formal basis: anka_userspace_nic.kleis and the focused 9.3e.4 gate.
 
 use std::collections::VecDeque;
 
@@ -37,21 +34,24 @@ use super::state::{
     RequesterKey, TxState,
 };
 
-/// Maximum accepted frame size: 6 dst + 6 src + 2 EtherType + 1500 payload.
-/// Excludes FCS (4 bytes, stripped by hardware).
+/// Maximum accepted/transmitted frame size: 6 dst + 6 src + 2 EtherType +
+/// 1500 payload. Excludes FCS (4 bytes, stripped by hardware).
 pub const NIC_MAX_FRAME_SIZE: usize = 1514;
 
 /// Bounded private RX queue capacity.
 pub const NIC_RX_QUEUE_CAPACITY: usize = 16;
 
-/// Number of finite DMA request slots.
+/// Number of finite DMA request slots shared by RX and TX.
 const NUM_SLOTS: usize = 2;
 
+/// Direction of one completed NIC finite-DMA operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NicOperation {
+    Rx,
+    Tx,
+}
+
 /// One accepted finite RX-copy request.
-///
-/// The frame bytes themselves are controller-private until submission and
-/// then move into the slot state.  This structure carries only routing,
-/// authority and provenance metadata.
 #[derive(Debug, Clone)]
 pub struct NicRxRequest {
     pub requester: RequesterKey,
@@ -62,13 +62,30 @@ pub struct NicRxRequest {
     pub delegation_id: Option<DelegationId>,
 }
 
+/// One accepted finite TX-copy request.
+///
+/// `frame_len` is the exact byte span delegated from guest memory.  The bytes
+/// themselves are not copied here; they are captured by Fabric at committed
+/// READ and only then appended to the host-visible TX sink.
+#[derive(Debug, Clone)]
+pub struct NicTxRequest {
+    pub requester: RequesterKey,
+    pub source_object: ObjectId,
+    pub source_offset: u64,
+    pub source_domain: DomainId,
+    pub source_authority_id: AuthorityId,
+    pub frame_len: u64,
+    pub delegation_id: Option<DelegationId>,
+}
+
 /// Completion of a finite NIC DMA request.
 #[derive(Debug, Clone)]
 pub struct NicCompletion {
     pub handle: RequestHandle,
     pub requester: RequesterKey,
+    pub operation: NicOperation,
     pub status: DeviceCompletionStatus,
-    /// Number of bytes committed to guest memory.  Zero on DMA fault.
+    /// Number of bytes committed by the operation. Zero on DMA fault.
     pub transferred_len: u64,
     pub delegation_id: Option<DelegationId>,
 }
@@ -82,20 +99,34 @@ pub enum NicRxSubmitResult {
     DelegationFailed,
 }
 
-/// Per-slot lifecycle for finite RX DMA.
+/// Result of attempting to accept one finite TX request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NicTxSubmitResult {
+    Accepted(RequestHandle),
+    DeviceBusy,
+    DelegationFailed,
+}
+
+/// Per-slot lifecycle for finite NIC DMA.
 ///
-/// Conservation: Free + DmaReady + DmaInFlight + Completed = NUM_SLOTS.
+/// Conservation: Free + Ready + InFlight + Completed = NUM_SLOTS.
 #[derive(Debug)]
 enum SlotState {
     Free,
-    DmaReady {
+    RxDmaReady {
         request: NicRxRequest,
         frame: Vec<u8>,
         dma_domain: DomainId,
     },
+    TxDmaReady {
+        request: NicTxRequest,
+        dma_domain: DomainId,
+    },
     DmaInFlight {
-        request: NicRxRequest,
+        requester: RequesterKey,
+        operation: NicOperation,
         frame_len: u64,
+        delegation_id: Option<DelegationId>,
         dma_domain: DomainId,
         tx_idx: usize,
     },
@@ -114,7 +145,21 @@ impl SlotState {
     }
 
     fn is_nonterminal(&self) -> bool {
-        matches!(self, SlotState::DmaReady { .. } | SlotState::DmaInFlight { .. })
+        matches!(
+            self,
+            SlotState::RxDmaReady { .. }
+                | SlotState::TxDmaReady { .. }
+                | SlotState::DmaInFlight { .. }
+        )
+    }
+
+    fn delegation_id(&self) -> Option<DelegationId> {
+        match self {
+            SlotState::RxDmaReady { request, .. } => request.delegation_id,
+            SlotState::TxDmaReady { request, .. } => request.delegation_id,
+            SlotState::DmaInFlight { delegation_id, .. } => *delegation_id,
+            _ => None,
+        }
     }
 }
 
@@ -122,6 +167,10 @@ impl SlotState {
 #[derive(Debug)]
 pub struct NicController {
     rx_queue: VecDeque<Vec<u8>>,
+    /// Frames whose guest-memory READ has committed successfully and are now
+    /// visible to the host backend.  This is not an Anka authority object;
+    /// it is emulator/environment state.
+    tx_sink: VecDeque<Vec<u8>>,
     event_sequence: u64,
     /// Latched notification for admitted unsolicited arrivals only.
     /// Completion attention is derived separately from completion_count().
@@ -139,6 +188,7 @@ impl NicController {
     pub fn new(dma_agent: AgentId) -> Self {
         Self {
             rx_queue: VecDeque::new(),
+            tx_sink: VecDeque::new(),
             event_sequence: 0,
             attention_pending: false,
             slots: std::array::from_fn(|_| SlotState::Free),
@@ -150,15 +200,7 @@ impl NicController {
 
     /// Inject a received frame into the device-private RX queue.
     ///
-    /// All semantic failure checks precede architectural mutation:
-    ///   1. Frame size <= NIC_MAX_FRAME_SIZE
-    ///   2. Queue length < NIC_RX_QUEUE_CAPACITY
-    ///   3. Epoch can advance (checked_add, no silent wrap)
-    ///
-    /// On success: appends exactly one frame, increments epoch once,
-    /// latches arrival attention.  Returns true.
-    ///
-    /// On failure (oversize, full, epoch exhaustion): no mutation.
+    /// All semantic failure checks precede architectural mutation.
     pub fn inject_rx(&mut self, frame: &[u8]) -> bool {
         if frame.len() > NIC_MAX_FRAME_SIZE {
             return false;
@@ -180,15 +222,7 @@ impl NicController {
     ///
     /// Transactional admission order:
     ///   free slot -> front frame -> exact narrow delegation -> dequeue.
-    ///
     /// Therefore any pre-admission failure implies ΔRXQueue = 0.
-    /// For non-empty frames the fresh DMA domain is minted before the
-    /// frame leaves private queue state.  Once accepted, later DMA failure
-    /// consumes the frame rather than requeueing it.
-    ///
-    /// Empty frames are legal private events (preserving 9.3e.3 semantics).
-    /// They complete immediately after admission because Fabric rejects
-    /// zero-length memory transactions; no guest bytes are touched.
     pub fn submit_rx(
         &mut self,
         request: NicRxRequest,
@@ -210,12 +244,12 @@ impl NicController {
         };
 
         if frame_len == 0 {
-            // All authority/kind/provenance gates are performed by the kernel
-            // before this point.  There is no byte span to delegate or mutate.
+            // Empty private events preserve the pre-DMA 9.3e.3 semantics.
             self.rx_queue.pop_front();
             let completion = NicCompletion {
                 handle,
                 requester: request.requester,
+                operation: NicOperation::Rx,
                 status: DeviceCompletionStatus::Success,
                 transferred_len: 0,
                 delegation_id: request.delegation_id,
@@ -226,8 +260,6 @@ impl NicController {
             return NicRxSubmitResult::Accepted(handle);
         }
 
-        // Exact-authority delegation.  This helper performs all validation
-        // before it creates a new domain, so failure has no Fabric side effect.
         let dma_domain = match fabric.delegate_dma_span_from_authority_id(
             request.source_domain,
             request.source_authority_id,
@@ -240,12 +272,10 @@ impl NicController {
             None => return NicRxSubmitResult::DelegationFailed,
         };
 
-        // Delegation succeeded: ownership of the front frame now moves from
-        // private queue state into the accepted finite request.
         let frame = self.rx_queue.pop_front()
             .expect("front frame must remain present across atomic submission");
 
-        self.slots[idx] = SlotState::DmaReady {
+        self.slots[idx] = SlotState::RxDmaReady {
             request,
             frame,
             dma_domain,
@@ -254,18 +284,53 @@ impl NicController {
         NicRxSubmitResult::Accepted(handle)
     }
 
-    /// Advance all accepted finite DMA work by one device tick.
+    /// Accept a finite TX request for exact READ DMA from guest memory.
     ///
-    /// DmaReady -> Fabric Requested, then a single Fabric phase is advanced
-    /// per tick.  On terminal state the narrow DMA domain is destroyed and
-    /// a completion becomes ready.  RX completion never advances the
-    /// unsolicited-arrival event epoch.
+    /// The kernel preflights frame length, exact NIC_TX authority, exact READ
+    /// authority, provenance and slot capacity before this call.  This method
+    /// independently derives the exact READ span before making the request
+    /// visible as controller work.
+    pub fn submit_tx(
+        &mut self,
+        request: NicTxRequest,
+        fabric: &mut Fabric,
+    ) -> NicTxSubmitResult {
+        let idx = match self.slots.iter().position(|s| s.is_free()) {
+            Some(i) => i,
+            None => return NicTxSubmitResult::DeviceBusy,
+        };
+
+        let dma_domain = match fabric.delegate_dma_span_from_authority_id(
+            request.source_domain,
+            request.source_authority_id,
+            request.source_object,
+            request.source_offset,
+            request.frame_len,
+            Permissions::READ,
+        ) {
+            Some(domain) => domain,
+            None => return NicTxSubmitResult::DelegationFailed,
+        };
+
+        let handle = RequestHandle {
+            slot: idx as u8,
+            generation: self.slot_generations[idx],
+        };
+        self.slots[idx] = SlotState::TxDmaReady {
+            request,
+            dma_domain,
+        };
+        self.assert_conservation();
+        NicTxSubmitResult::Accepted(handle)
+    }
+
+    /// Advance all accepted finite DMA work by one device tick.
     pub fn tick(&mut self, fabric: &mut Fabric) {
-        // DmaReady -> DmaInFlight
+        // Ready -> DmaInFlight.
         for i in 0..NUM_SLOTS {
-            if matches!(self.slots[i], SlotState::DmaReady { .. }) {
+            if matches!(self.slots[i], SlotState::RxDmaReady { .. }) {
                 let state = std::mem::replace(&mut self.slots[i], SlotState::Free);
-                if let SlotState::DmaReady { request, frame, dma_domain } = state {
+                if let SlotState::RxDmaReady { request, frame, dma_domain } = state {
                     let frame_len = frame.len() as u64;
                     let dma_req = dma_request(
                         self.dma_agent,
@@ -277,8 +342,31 @@ impl NicController {
                     );
                     let tx_idx = fabric.submit(dma_req, Some(frame));
                     self.slots[i] = SlotState::DmaInFlight {
-                        request,
+                        requester: request.requester,
+                        operation: NicOperation::Rx,
                         frame_len,
+                        delegation_id: request.delegation_id,
+                        dma_domain,
+                        tx_idx,
+                    };
+                }
+            } else if matches!(self.slots[i], SlotState::TxDmaReady { .. }) {
+                let state = std::mem::replace(&mut self.slots[i], SlotState::Free);
+                if let SlotState::TxDmaReady { request, dma_domain } = state {
+                    let dma_req = dma_request(
+                        self.dma_agent,
+                        dma_domain,
+                        request.source_object,
+                        request.source_offset,
+                        request.frame_len,
+                        AccessKind::Read,
+                    );
+                    let tx_idx = fabric.submit(dma_req, None);
+                    self.slots[i] = SlotState::DmaInFlight {
+                        requester: request.requester,
+                        operation: NicOperation::Tx,
+                        frame_len: request.frame_len,
+                        delegation_id: request.delegation_id,
                         dma_domain,
                         tx_idx,
                     };
@@ -286,50 +374,64 @@ impl NicController {
             }
         }
 
-        // DmaInFlight -> advance one Fabric phase; terminal -> Completed
+        // InFlight -> advance one Fabric phase; terminal -> Completed.
         for i in 0..NUM_SLOTS {
-            if let SlotState::DmaInFlight { tx_idx, .. } = &self.slots[i] {
-                let tx_idx = *tx_idx;
-                if !fabric.transaction(tx_idx).state.is_terminal() {
-                    fabric.advance(tx_idx);
-                }
+            let tx_idx = match &self.slots[i] {
+                SlotState::DmaInFlight { tx_idx, .. } => Some(*tx_idx),
+                _ => None,
+            };
+            let Some(tx_idx) = tx_idx else { continue; };
 
-                if fabric.transaction(tx_idx).state.is_terminal() {
-                    let state = std::mem::replace(&mut self.slots[i], SlotState::Free);
-                    if let SlotState::DmaInFlight {
-                        request,
-                        frame_len,
-                        dma_domain,
-                        tx_idx,
-                    } = state
-                    {
-                        let (status, transferred_len) = match fabric.transaction(tx_idx).state {
-                            TxState::Committed => (DeviceCompletionStatus::Success, frame_len),
-                            TxState::Faulted => {
-                                let reason = fabric.transaction(tx_idx)
-                                    .fault
-                                    .as_ref()
-                                    .map(|f| f.reason)
-                                    .unwrap_or(FaultReason::TranslationFault);
-                                (DeviceCompletionStatus::DmaFault(reason), 0)
+            if !fabric.transaction(tx_idx).state.is_terminal() {
+                fabric.advance(tx_idx);
+            }
+
+            if fabric.transaction(tx_idx).state.is_terminal() {
+                let state = std::mem::replace(&mut self.slots[i], SlotState::Free);
+                if let SlotState::DmaInFlight {
+                    requester,
+                    operation,
+                    frame_len,
+                    delegation_id,
+                    dma_domain,
+                    tx_idx,
+                } = state
+                {
+                    let (status, transferred_len) = match fabric.transaction(tx_idx).state {
+                        TxState::Committed => {
+                            if operation == NicOperation::Tx {
+                                let bytes = fabric.transaction(tx_idx).read_data.clone()
+                                    .expect("committed NIC TX READ must retain read_data");
+                                debug_assert_eq!(bytes.len() as u64, frame_len);
+                                self.tx_sink.push_back(bytes);
                             }
-                            _ => unreachable!(),
-                        };
+                            (DeviceCompletionStatus::Success, frame_len)
+                        }
+                        TxState::Faulted => {
+                            let reason = fabric.transaction(tx_idx)
+                                .fault
+                                .as_ref()
+                                .map(|f| f.reason)
+                                .unwrap_or(FaultReason::TranslationFault);
+                            (DeviceCompletionStatus::DmaFault(reason), 0)
+                        }
+                        _ => unreachable!(),
+                    };
 
-                        fabric.destroy_domain(dma_domain);
-                        let completion = NicCompletion {
-                            handle: RequestHandle {
-                                slot: i as u8,
-                                generation: self.slot_generations[i],
-                            },
-                            requester: request.requester,
-                            status,
-                            transferred_len,
-                            delegation_id: request.delegation_id,
-                        };
-                        self.slots[i] = SlotState::Completed { completion };
-                        self.completion_order.push_back(i as u8);
-                    }
+                    fabric.destroy_domain(dma_domain);
+                    let completion = NicCompletion {
+                        handle: RequestHandle {
+                            slot: i as u8,
+                            generation: self.slot_generations[i],
+                        },
+                        requester,
+                        operation,
+                        status,
+                        transferred_len,
+                        delegation_id,
+                    };
+                    self.slots[i] = SlotState::Completed { completion };
+                    self.completion_order.push_back(i as u8);
                 }
             }
         }
@@ -357,30 +459,22 @@ impl NicController {
     }
 
     /// Current unsolicited-RX activity epoch.
-    ///
-    /// Monotonic: advances only on successful `inject_rx`, never on DMA
-    /// submission or completion.
     pub fn event_sequence(&self) -> u64 {
         self.event_sequence
     }
 
-    /// Queued private RX alone is not autonomous work.  Accepted finite DMA is.
+    /// Queued private RX and host-visible committed TX frames are inert.
+    /// Only accepted nonterminal finite DMA is autonomous work.
     pub fn has_autonomous_work(&self) -> bool {
         self.slots.iter().any(|s| s.is_nonterminal())
     }
 
-    /// Attention is the OR of two independent sources:
-    ///   arrival latch OR ready completion.
-    ///
-    /// Acknowledging arrival never consumes a completion, and consuming a
-    /// completion never clears an unrelated arrival latch.
+    /// Attention is the OR of arrival latch and ready completion.
     pub fn requires_attention(&self) -> bool {
         self.attention_pending || self.completion_count() != 0
     }
 
     /// Clear only the unsolicited-arrival notification latch.
-    ///
-    /// Preserves queued frames, event epoch, request slots and completions.
     pub fn acknowledge_attention(&mut self) {
         self.attention_pending = false;
     }
@@ -396,22 +490,16 @@ impl NicController {
     }
 
     /// Quantitative pair-attributed nonterminal request count.
-    ///
-    /// Private queued RX is absent from this count.  Only accepted DmaReady /
-    /// DmaInFlight work whose DelegationId names the exact client/driver pair
-    /// contributes.  Completed work is terminal and therefore excluded.
     pub fn nonterminal_pair_request_count(
         &self,
         client: &ProcessKey,
         peer: &ProcessKey,
     ) -> usize {
         self.slots.iter().filter(|slot| {
-            let request = match slot {
-                SlotState::DmaReady { request, .. } => request,
-                SlotState::DmaInFlight { request, .. } => request,
-                _ => return false,
-            };
-            match request.delegation_id {
+            if !slot.is_nonterminal() {
+                return false;
+            }
+            match slot.delegation_id() {
                 Some(did) => did.client == *client && did.driver == *peer,
                 None => false,
             }
@@ -426,6 +514,21 @@ impl NicController {
     /// Peek at the private RX queue head without transferring ownership.
     pub fn peek_rx(&self) -> Option<&[u8]> {
         self.rx_queue.front().map(|v| v.as_slice())
+    }
+
+    /// Number of committed guest TX frames waiting for the host environment.
+    pub fn tx_frame_count(&self) -> usize {
+        self.tx_sink.len()
+    }
+
+    /// Peek at the oldest committed guest TX frame.
+    pub fn peek_tx(&self) -> Option<&[u8]> {
+        self.tx_sink.front().map(|v| v.as_slice())
+    }
+
+    /// Transfer one committed guest TX frame to the host environment.
+    pub fn take_tx(&mut self) -> Option<Vec<u8>> {
+        self.tx_sink.pop_front()
     }
 
     /// Current generation for a request slot (test/diagnostic surface).
@@ -750,4 +853,147 @@ mod tests {
         assert_eq!(nic.rx_queue_len(), 1);
         assert_eq!(nic.peek_rx(), Some([0x30; 8].as_slice()));
     }
+
+    fn tx_dma_fixture(span: u64, bytes: &[u8]) -> (Fabric, DomainId, ObjectId, AuthorityId) {
+        let mut fabric = Fabric::new(0x20000);
+        let object = fabric.alloc_object("nic_tx_buf", 0x1000, ObjectKind::Memory);
+        assert!(fabric.place_object(object, 0x5000));
+        assert!(fabric.initialize_object(object, 0, bytes));
+        let domain = fabric.create_domain();
+        let aid = fabric.alloc_authority_id().expect("authority id");
+        fabric.grant_with_authority_id(
+            domain,
+            object,
+            0,
+            span,
+            Permissions::READ,
+            aid,
+        ).expect("READ authority");
+        (fabric, domain, object, aid)
+    }
+
+    fn tx_request(
+        domain: DomainId,
+        object: ObjectId,
+        aid: AuthorityId,
+        frame_len: u64,
+    ) -> NicTxRequest {
+        NicTxRequest {
+            requester: RequesterKey { slot: 1, generation: 2 },
+            source_object: object,
+            source_offset: 0,
+            source_domain: domain,
+            source_authority_id: aid,
+            frame_len,
+            delegation_id: None,
+        }
+    }
+
+    #[test]
+    fn tx_committed_read_becomes_host_visible_only_after_commit() {
+        let frame: Vec<u8> = (0..64).map(|i| (i as u8).wrapping_mul(3)).collect();
+        let (mut fabric, domain, object, aid) = tx_dma_fixture(512, &frame);
+        let mut nic = NicController::new(NIC_AGENT);
+
+        let handle = match nic.submit_tx(
+            tx_request(domain, object, aid, frame.len() as u64),
+            &mut fabric,
+        ) {
+            NicTxSubmitResult::Accepted(h) => h,
+            other => panic!("expected TX acceptance, got {:?}", other),
+        };
+
+        assert_eq!(nic.tx_frame_count(), 0,
+            "accepted TX must not expose bytes before Fabric commit");
+        assert!(nic.has_autonomous_work());
+
+        for _ in 0..3 {
+            nic.tick(&mut fabric);
+        }
+
+        assert_eq!(nic.tx_frame_count(), 1);
+        assert_eq!(nic.peek_tx(), Some(frame.as_slice()));
+        assert_eq!(nic.event_sequence(), 0,
+            "driver-originated TX must not manufacture unsolicited RX activity");
+
+        let completion = nic.consume_completion().expect("TX completion");
+        assert_eq!(completion.handle, handle);
+        assert_eq!(completion.operation, NicOperation::Tx);
+        assert_eq!(completion.status, DeviceCompletionStatus::Success);
+        assert_eq!(completion.transferred_len, frame.len() as u64);
+        assert_eq!(nic.take_tx(), Some(frame));
+        assert_eq!(nic.tx_frame_count(), 0);
+    }
+
+    #[test]
+    fn tx_commit_time_revocation_produces_no_host_frame() {
+        let frame = vec![0xA7; 80];
+        let (mut fabric, domain, object, aid) = tx_dma_fixture(512, &frame);
+        let mut nic = NicController::new(NIC_AGENT);
+
+        assert!(matches!(
+            nic.submit_tx(tx_request(domain, object, aid, frame.len() as u64), &mut fabric),
+            NicTxSubmitResult::Accepted(_)
+        ));
+
+        // Advance through request creation/authorization, then invalidate the
+        // object before commit-time revalidation.
+        nic.tick(&mut fabric);
+        nic.tick(&mut fabric);
+        fabric.revoke(object);
+        nic.tick(&mut fabric);
+
+        assert_eq!(nic.tx_frame_count(), 0,
+            "faulted READ must never append bytes to the host TX sink");
+        let completion = nic.consume_completion().expect("fault completion");
+        assert_eq!(completion.operation, NicOperation::Tx);
+        assert!(matches!(completion.status, DeviceCompletionStatus::DmaFault(_)));
+        assert_eq!(completion.transferred_len, 0);
+    }
+
+    #[test]
+    fn third_tx_submission_is_busy_and_mints_no_dma_domain() {
+        let frame = vec![0x39; 32];
+        let (mut fabric, domain, object, aid) = tx_dma_fixture(512, &frame);
+        let mut nic = NicController::new(NIC_AGENT);
+
+        assert!(matches!(
+            nic.submit_tx(tx_request(domain, object, aid, frame.len() as u64), &mut fabric),
+            NicTxSubmitResult::Accepted(_)
+        ));
+        assert!(matches!(
+            nic.submit_tx(tx_request(domain, object, aid, frame.len() as u64), &mut fabric),
+            NicTxSubmitResult::Accepted(_)
+        ));
+        assert_eq!(nic.free_slot_count(), 0);
+        let domains_before = fabric.domain_count();
+
+        assert_eq!(
+            nic.submit_tx(tx_request(domain, object, aid, frame.len() as u64), &mut fabric),
+            NicTxSubmitResult::DeviceBusy,
+        );
+        assert_eq!(fabric.domain_count(), domains_before,
+            "busy TX rejection must precede exact DMA delegation");
+        assert_eq!(nic.tx_frame_count(), 0,
+            "uncommitted/busy TX cannot become host-visible");
+    }
+
+    #[test]
+    fn tx_sink_is_not_autonomous_work_or_device_attention() {
+        let frame = vec![0x5C; 32];
+        let (mut fabric, domain, object, aid) = tx_dma_fixture(512, &frame);
+        let mut nic = NicController::new(NIC_AGENT);
+        assert!(matches!(
+            nic.submit_tx(tx_request(domain, object, aid, frame.len() as u64), &mut fabric),
+            NicTxSubmitResult::Accepted(_)
+        ));
+        for _ in 0..3 { nic.tick(&mut fabric); }
+        assert!(nic.requires_attention(), "ready completion is interrupt attention");
+        let _ = nic.consume_completion().unwrap();
+        assert!(!nic.has_autonomous_work());
+        assert!(!nic.requires_attention(),
+            "host-visible TX sink is passive environment state, not guest interrupt work");
+        assert_eq!(nic.peek_tx(), Some(frame.as_slice()));
+    }
+
 }
