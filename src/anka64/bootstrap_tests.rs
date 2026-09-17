@@ -11,6 +11,11 @@ mod tests {
     use super::super::placement::{
         PhysicalPlacementManager, VirtualLayoutBuilder, PLACEMENT_PAGE_SIZE,
     };
+    use super::super::dev_shell::{
+        DevelopmentArtifactKind, DevelopmentArtifactLoader, DevelopmentMode,
+        DeveloperIngressAuthority, DevelopmentShellError,
+    };
+    use super::super::dev_compiler::DevelopmentCompileError;
     use super::super::state::*;
 
     // ─── Bootstrap function counts ────────────────────────────
@@ -5906,6 +5911,7 @@ mod tests {
         // fields before boot (Phase 8.1c).
         format!(
             "int main() {{ \
+             int mode = *{mode}; \
              int src = {layout_src}; \
              int slen = *src; \
              int sbase = src + 8; \
@@ -5934,7 +5940,9 @@ mod tests {
              int sz = *{op}; \
              int lp = *{litp}; \
              if (lp == {outsize}) {{ lp = 0; }} \
+             if (mode == {compile_only}) {{ return 0; }} \
              return syscall(6, {layout_out}, sz, lp); }} ",
+            mode = WS_MODE, compile_only = CCB_MODE_COMPILE_ONLY,
             layout_src = LAYOUT_SRC,
             srclimit = SOURCE_SIZE - 8,
             layout_out = LAYOUT_OUT,
@@ -10528,6 +10536,157 @@ mod tests {
         eprintln!(
             "9.3g.3: CC_B program -> PM physical placement -> VLB layout -> SYS_SPAWN -> 42 ✓"
         );
+    }
+
+
+    // ═══════════════════════════════════════════════════════════
+    // Phase 9.3h.2 — host C source -> real CC_B -> sealed artifact
+    //
+    // `compile` uses CC_B in explicit compile-only mode.  The produced
+    // program is not executed as part of compilation, and the target
+    // development registry receives a newly sealed artifact with the future
+    // Anka logical path derived from the mirrored userspace source tree.
+    // ═══════════════════════════════════════════════════════════
+
+    fn p93h2_temp_userspace_source(relative: &str, source: &[u8])
+        -> (std::path::PathBuf, std::path::PathBuf)
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "anka64-p93h2-{}-{nonce}", std::process::id()));
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, source).unwrap();
+        (root, path)
+    }
+
+    #[test]
+    fn p93h2_ccb_compile_only_registers_mirrored_executable_without_running_it() {
+        let ccb = build_ccb();
+        let (root, source) = p93h2_temp_userspace_source(
+            "bin/hello.c",
+            b"int main() { return 77; }",
+        );
+
+        let auth = DeveloperIngressAuthority::provision();
+        let mut fabric = Fabric::new(0x400000);
+        let mut pm = PhysicalPlacementManager::new(0x10000, 0x200000).unwrap();
+        let mut loader = DevelopmentArtifactLoader::new(DevelopmentMode::Development);
+
+        let key = loader.compile_c_file(
+            Some(&auth),
+            &mut fabric,
+            &mut pm,
+            "hello",
+            &root,
+            &source,
+            &ccb,
+        ).expect("CC_B compile-only development import");
+
+        let artifact = loader.registry().get("hello").unwrap();
+        assert_eq!(artifact.key, key);
+        assert_eq!(artifact.kind, DevelopmentArtifactKind::CompiledC);
+        assert_eq!(artifact.logical_path.as_deref(), Some("/bin/hello"));
+        assert!(artifact.code_size > 0);
+        assert_eq!(artifact.lit_start, 0);
+        assert_eq!(artifact.logical_size, artifact.code_size);
+        assert!(fabric.domains.is_empty(),
+            "compilation/import must not create target execution authority");
+
+        let object = fabric.objects.get(&key.object).unwrap();
+        assert_eq!(object.state, ObjectState::Sealed);
+        assert_eq!(object.generation, key.generation);
+        assert_eq!(key.generation, Generation(1));
+        assert_eq!(pm.allocated_extent(key.object).unwrap().size % PLACEMENT_PAGE_SIZE, 0);
+
+        // The same future Anka path cannot be published under a second shell
+        // nickname.  This is namespace uniqueness, not capability semantics.
+        let object_count = fabric.objects.len();
+        let allocation_count = pm.allocated_count();
+        assert_eq!(
+            loader.compile_c_file(
+                Some(&auth), &mut fabric, &mut pm, "hello-again",
+                &root, &source, &ccb,
+            ),
+            Err(DevelopmentShellError::LogicalPathAlreadyRegistered),
+        );
+        assert_eq!(fabric.objects.len(), object_count);
+        assert_eq!(pm.allocated_count(), allocation_count);
+
+        std::fs::remove_dir_all(root).unwrap();
+        eprintln!("9.3h.2: /bin/hello compiled by CC_B without execution and registered sealed ✓");
+    }
+
+    #[test]
+    fn p93h2_ccb_compiled_literal_geometry_survives_registry_import() {
+        let ccb = build_ccb();
+        let (root, source) = p93h2_temp_userspace_source(
+            "system/services/net/literal_probe.c",
+            br#"int main() { return *"hello"; }"#,
+        );
+
+        let auth = DeveloperIngressAuthority::provision();
+        let mut fabric = Fabric::new(0x400000);
+        let mut pm = PhysicalPlacementManager::new(0x10000, 0x200000).unwrap();
+        let mut loader = DevelopmentArtifactLoader::new(DevelopmentMode::Development);
+
+        let key = loader.compile_c_file(
+            Some(&auth), &mut fabric, &mut pm, "literal-probe",
+            &root, &source, &ccb,
+        ).expect("compile C source with literal segment");
+        let artifact = loader.registry().get("literal-probe").unwrap();
+
+        assert_eq!(
+            artifact.logical_path.as_deref(),
+            Some("/system/services/net/literal_probe"),
+        );
+        assert!(artifact.lit_start > artifact.code_size,
+            "two-ended CC_B arena must leave literals above code");
+        assert_eq!(artifact.logical_size, OUTPUT_SIZE as u64,
+            "literal-bearing artifact preserves full CC_B backing arena");
+
+        let phys = pm.allocated_extent(key.object).unwrap().base;
+        let header = fabric.read_physical(phys + artifact.lit_start, 8);
+        assert_eq!(u64::from_le_bytes(header.try_into().unwrap()), 5,
+            "literal header must preserve UTF-8 byte length for hello");
+
+        std::fs::remove_dir_all(root).unwrap();
+        eprintln!("9.3h.2: CC_B literal segment metadata survives host bridge + PM import ✓");
+    }
+
+    #[test]
+    fn p93h2_ccb_compile_failure_publishes_nothing_in_target_machine() {
+        let ccb = build_ccb();
+        let (root, source) = p93h2_temp_userspace_source(
+            "system/services/net/broken.c",
+            b"int main( { return 1; }",
+        );
+
+        let auth = DeveloperIngressAuthority::provision();
+        let mut fabric = Fabric::new(0x400000);
+        let mut pm = PhysicalPlacementManager::new(0x10000, 0x200000).unwrap();
+        let mut loader = DevelopmentArtifactLoader::new(DevelopmentMode::Development);
+        let free_before = pm.free_extents().to_vec();
+
+        let result = loader.compile_c_file(
+            Some(&auth), &mut fabric, &mut pm, "broken",
+            &root, &source, &ccb,
+        );
+        assert!(matches!(
+            result,
+            Err(DevelopmentShellError::Compiler(
+                DevelopmentCompileError::CompilerRejected(_)
+            ))
+        ));
+        assert!(loader.registry().is_empty());
+        assert!(fabric.objects.is_empty());
+        assert_eq!(pm.allocated_count(), 0);
+        assert_eq!(pm.free_extents(), free_before.as_slice());
+
+        std::fs::remove_dir_all(root).unwrap();
+        eprintln!("9.3h.2: rejected C source leaves target registry/Fabric/PM unchanged ✓");
     }
 
 }

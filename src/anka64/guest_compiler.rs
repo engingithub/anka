@@ -188,7 +188,16 @@ pub(crate) const WS_FIX_TABLE: i64      = LAYOUT_WS + 0xB68;
 // After compilation: code = [0, WS_OUT_POS), lits = [WS_LIT_POS, OUTPUT_SIZE).
 // Placed AFTER the fixup table (0x4B68) to avoid overlap.
 pub(crate) const WS_LIT_POS: i64        = LAYOUT_WS + 0x4B68;
+/// Development compiler mode word.  Zero preserves the historical CC_B
+/// behavior (compile, seal, then SYS_EXEC).  Phase 9.3h.2 writes
+/// CCB_MODE_COMPILE_ONLY so `compile` produces a sealed artifact without
+/// executing developer source as part of compilation.
+pub(crate) const WS_MODE: i64           = LAYOUT_WS + 0x4B70;
+pub(crate) const CCB_MODE_COMPILE_AND_RUN: u64 = 0;
+pub(crate) const CCB_MODE_COMPILE_ONLY: u64 = 1;
 const _: () = assert!(WS_LIT_POS <= MOVI_MAX);
+const _: () = assert!(WS_MODE <= MOVI_MAX);
+const _: () = assert!((WS_MODE - LAYOUT_WS + 8) <= WS_SIZE);
 // ─── Token types (same as 6B.3) ──────────────────
 
 // ─── Token types ──────────────────────────────────

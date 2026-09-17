@@ -1451,9 +1451,9 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | ISA instructions | 29 |
 | Self-hosted compiler | Fixed point (CC_B == CC_C) |
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
-| CC_B = CC_C | 46 functions, 67,824 bytes |
+| CC_B = CC_C | 46 functions; binary size verified by fixed-point regression |
 | Canonical source | ~17 KB |
-| Tests | 802 passing at 9.3e.4a closure; 822 in 9.3e.4b/9.3f candidate |
+| Tests | 860 Rust tests in source at 9.3h.2; executable gate pending local Rust run |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -2504,4 +2504,73 @@ cover development/sealed policy, missing authority, host-read failure, empty
 input, PM exhaustion, invalid PM/Fabric pool composition, exact post-seal
 generation, host-path irrelevance, no ambient authority, stale/unsealed registry
 rejection, duplicate-name atomicity, and rollback refusal after publication.
+
+**9.3h.2 — mirrored userspace tree and compile-only CC_B path (implemented):**
+
+The host project now contains a deliberately small `userspace/` hierarchy that
+mirrors the logical namespace Anka64 is growing toward:
+
+```text
+userspace/
+  system/
+    services/
+      net/
+    compiler/
+  bin/
+  lib/
+  include/anka/
+  etc/
+```
+
+This is not a Unix filesystem clone and not a guest mount.  Directory roots are
+introduced only when real Anka software gives them a semantic role.  In
+particular, networking programs belong under `system/services/net`, not under
+`examples`.  C source paths map mechanically to future logical install paths:
+
+```text
+userspace/system/services/net/arp.c -> /system/services/net/arp
+userspace/bin/hello.c               -> /bin/hello
+```
+
+Host path, logical install path, and runtime artifact identity remain distinct:
+
+```text
+host pathname != logical namespace path != (ObjectId, Generation)
+```
+
+The logical path is registry metadata only and grants no authority.  The
+development loader rejects sources outside the declared userspace root, rejects
+non-`.c` source mappings, and enforces one published artifact per logical path.
+
+CC_B now has an explicit workspace mode word.  Historical bootstrap behavior
+remains mode 0 (`compile + seal + SYS_EXEC`), while the development shell writes
+mode 1 (`compile + seal only`).  This closes a security/semantic gap discovered
+before implementation: a shell `compile` command must not execute developer
+source merely because CC_B historically used `SYS_EXEC` as its compiler test
+closure.
+
+`src/anka64/dev_compiler.rs` runs the real self-hosted CC_B under ankad in a
+transient Anka64 machine.  ankad still creates the compiler process through
+ordinary `SYS_SPAWN`/`SYS_WAIT`; the host does not manufacture a privileged CC_B
+core.  On success the bridge exports the sealed compiler output as executable
+image bytes plus `code_size`/`lit_start` geometry.  Literal-bearing images retain
+the full CC_B output arena so future execution can map code RX and literals R
+without changing their compiled offsets.  The target development registry then
+imports and seals those bytes through the normal 9.3h.1 PM/Fabric path, creating
+no execution authority.
+
+The additional formal package is:
+
+```text
+anka93h2_compile_only.kleis                    4/4 positive
+anka93h2_compile_only_false_witnesses.kleis    0/4 false claims pass
+```
+
+No new axioms.  It states that successful sealed current-generation CC_B output
+may be published, `compile` may not execute the produced artifact, and logical
+install paths are non-authoritative.
+
+Phase 9.3h.2 adds six Rust tests over the 854-test 9.3h.1 baseline, bringing the
+source tree to 860 tests.  The Rust gate must be run in a Rust-enabled
+environment before declaring the phase closed.
 

@@ -1,0 +1,20 @@
+// Deliberate false companions for Phase 9.3h.2.
+import "anka93h2_compile_only.kleis"
+
+example "FALSE-DEVH2-1 compiler failure may publish executable" {
+    assert(devh2_compiled_artifact_publishable(
+        true,false,true,bvconst(7,64),bvconst(7,64))=true)
+}
+
+example "FALSE-DEVH2-2 unsealed compiler output may publish executable" {
+    assert(devh2_compiled_artifact_publishable(
+        true,true,false,bvconst(7,64),bvconst(7,64))=true)
+}
+
+example "FALSE-DEVH2-3 compile command may execute produced artifact" {
+    assert(devh2_compile_command_valid(true,true)=true)
+}
+
+example "FALSE-DEVH2-4 logical install path grants authority" {
+    assert(devh2_logical_path_creates_authority(true)=true)
+}

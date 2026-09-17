@@ -1,4 +1,4 @@
-//! Anka64 development artifact ingress (Phase 9.3h.1).
+//! Anka64 development artifact ingress and source registry (Phase 9.3h.1--9.3h.2).
 //!
 //! This module is the host-development bridge promised by the 9.3h.0 Kleis
 //! contract.  It deliberately stops before execution:
@@ -13,8 +13,9 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
+use super::dev_compiler::{compile_c_with_ccb, DevelopmentCompileError};
 use super::fabric::Fabric;
 use super::placement::{PhysicalExtent, PhysicalPlacementManager, PlacementError};
 use super::state::{Generation, ObjectId, ObjectKind, ObjectState};
@@ -59,14 +60,25 @@ pub struct ArtifactKey {
 pub enum DevelopmentArtifactKind {
     /// Raw Anka64 bytecode imported from the host filesystem.
     Bytecode,
+    /// C source compiled by the self-hosted CC_B in compile-only mode.
+    CompiledC,
 }
 
 /// Registry metadata intentionally excludes the host pathname.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DevelopmentArtifact {
     pub key: ArtifactKey,
+    /// Complete executable backing size stored in the Anka object.
     pub logical_size: u64,
+    /// Executable code prefix length.
+    pub code_size: u64,
+    /// Zero when no literal segment exists.  Otherwise literals occupy
+    /// `[lit_start, logical_size)` and must be mapped read-only at run time.
+    pub lit_start: u64,
     pub kind: DevelopmentArtifactKind,
+    /// Future Anka namespace path, e.g. `/system/services/net/arp`.
+    /// This is non-authoritative metadata and never contains the host pathname.
+    pub logical_path: Option<String>,
 }
 
 /// Friendly-name registry.  Names are UI references, never capabilities.
@@ -94,6 +106,16 @@ impl DevelopmentArtifactRegistry {
 
     pub fn contains_name(&self, name: &str) -> bool {
         self.entries.contains_key(name)
+    }
+
+    pub fn get_by_logical_path(&self, logical_path: &str) -> Option<&DevelopmentArtifact> {
+        self.entries
+            .values()
+            .find(|artifact| artifact.logical_path.as_deref() == Some(logical_path))
+    }
+
+    pub fn contains_logical_path(&self, logical_path: &str) -> bool {
+        self.get_by_logical_path(logical_path).is_some()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &DevelopmentArtifact)> {
@@ -132,13 +154,19 @@ impl DevelopmentArtifactRegistry {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum DevelopmentShellError {
     DevelopmentIngressDisabled,
     DeveloperAuthorityRequired,
     InvalidArtifactName,
     ArtifactNameAlreadyRegistered,
+    InvalidUserspaceRoot,
+    SourceOutsideUserspace,
+    SourceMustBeC,
+    NonUtf8LogicalPath,
+    LogicalPathAlreadyRegistered,
     HostRead(io::ErrorKind),
+    Compiler(DevelopmentCompileError),
     EmptyArtifact,
     ArtifactSizeOverflow,
     Placement(PlacementError),
@@ -151,7 +179,7 @@ pub enum DevelopmentShellError {
     ArtifactWrongObjectKind,
 }
 
-/// Phase 9.3h.1 host artifact loader and registry.
+/// Phase 9.3h.1--9.3h.2 host artifact loader, compiler bridge, and registry.
 ///
 /// The loader owns no Fabric authority and no physical memory.  Fabric and PM
 /// are borrowed explicitly for each import so the architectural ownership
@@ -196,7 +224,65 @@ impl DevelopmentArtifactLoader {
         // Host I/O occurs before any Anka/Fabric mutation.
         let bytes = fs::read(host_path)
             .map_err(|err| DevelopmentShellError::HostRead(err.kind()))?;
-        self.import_bytes_after_host_read(fabric, placement, name, &bytes)
+        self.import_artifact_bytes(
+            fabric,
+            placement,
+            name,
+            &bytes,
+            DevelopmentArtifactKind::Bytecode,
+            bytes.len() as u64,
+            0,
+            None,
+        )
+    }
+
+    /// Compile one host C source file through the real self-hosted CC_B and
+    /// register the resulting sealed executable artifact.
+    ///
+    /// `userspace_root` defines the host mirror of the future Anka namespace.
+    /// For example:
+    ///
+    /// `userspace/system/services/net/arp.c` -> `/system/services/net/arp`
+    ///
+    /// The host pathname is consumed during this operation and is not stored.
+    /// The logical path is non-authoritative registry metadata.
+    pub fn compile_c_file<P: AsRef<Path>, R: AsRef<Path>>(
+        &mut self,
+        authority: Option<&DeveloperIngressAuthority>,
+        fabric: &mut Fabric,
+        placement: &mut PhysicalPlacementManager,
+        name: &str,
+        userspace_root: R,
+        host_source: P,
+        ccb_image: &[u8],
+    ) -> Result<ArtifactKey, DevelopmentShellError> {
+        self.preflight_ingress(authority, name)?;
+
+        let (source_path, logical_path) = resolve_userspace_c_source(
+            userspace_root.as_ref(),
+            host_source.as_ref(),
+        )?;
+        if self.registry.contains_logical_path(&logical_path) {
+            return Err(DevelopmentShellError::LogicalPathAlreadyRegistered);
+        }
+
+        // All host/source/compiler failures happen before the target Fabric is
+        // mutated.  CC_B runs in a transient Anka machine in compile-only mode.
+        let source = fs::read(&source_path)
+            .map_err(|err| DevelopmentShellError::HostRead(err.kind()))?;
+        let compiled = compile_c_with_ccb(ccb_image, &source)
+            .map_err(DevelopmentShellError::Compiler)?;
+
+        self.import_artifact_bytes(
+            fabric,
+            placement,
+            name,
+            &compiled.bytes,
+            DevelopmentArtifactKind::CompiledC,
+            compiled.code_size,
+            compiled.lit_start,
+            Some(logical_path),
+        )
     }
 
     fn preflight_ingress(
@@ -219,12 +305,16 @@ impl DevelopmentArtifactLoader {
         Ok(())
     }
 
-    fn import_bytes_after_host_read(
+    fn import_artifact_bytes(
         &mut self,
         fabric: &mut Fabric,
         placement: &mut PhysicalPlacementManager,
         name: &str,
         bytes: &[u8],
+        kind: DevelopmentArtifactKind,
+        code_size: u64,
+        lit_start: u64,
+        logical_path: Option<String>,
     ) -> Result<ArtifactKey, DevelopmentShellError> {
         if bytes.is_empty() {
             return Err(DevelopmentShellError::EmptyArtifact);
@@ -286,11 +376,70 @@ impl DevelopmentArtifactLoader {
             DevelopmentArtifact {
                 key,
                 logical_size,
-                kind: DevelopmentArtifactKind::Bytecode,
+                code_size,
+                lit_start,
+                kind,
+                logical_path,
             },
         );
         Ok(key)
     }
+}
+
+/// Resolve a host C source under the mirrored `userspace/` root to the
+/// corresponding future Anka logical install path.
+///
+/// This mapping carries no authority.  Canonicalization also prevents symlinks
+/// inside the source tree from escaping the declared userspace root.
+pub fn logical_install_path_for_c_source(
+    userspace_root: &Path,
+    host_source: &Path,
+) -> Result<String, DevelopmentShellError> {
+    resolve_userspace_c_source(userspace_root, host_source)
+        .map(|(_, logical)| logical)
+}
+
+fn resolve_userspace_c_source(
+    userspace_root: &Path,
+    host_source: &Path,
+) -> Result<(PathBuf, String), DevelopmentShellError> {
+    let root = fs::canonicalize(userspace_root)
+        .map_err(|err| match err.kind() {
+            io::ErrorKind::NotFound => DevelopmentShellError::InvalidUserspaceRoot,
+            kind => DevelopmentShellError::HostRead(kind),
+        })?;
+    let source = fs::canonicalize(host_source)
+        .map_err(|err| DevelopmentShellError::HostRead(err.kind()))?;
+
+    let relative = source
+        .strip_prefix(&root)
+        .map_err(|_| DevelopmentShellError::SourceOutsideUserspace)?;
+    if relative.extension().and_then(|ext| ext.to_str()) != Some("c") {
+        return Err(DevelopmentShellError::SourceMustBeC);
+    }
+
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => {
+                let text = part.to_str()
+                    .ok_or(DevelopmentShellError::NonUtf8LogicalPath)?;
+                parts.push(text.to_string());
+            }
+            _ => return Err(DevelopmentShellError::SourceOutsideUserspace),
+        }
+    }
+    let last = parts.last_mut()
+        .ok_or(DevelopmentShellError::SourceOutsideUserspace)?;
+    if !last.ends_with(".c") {
+        return Err(DevelopmentShellError::SourceMustBeC);
+    }
+    last.truncate(last.len() - 2);
+    if last.is_empty() {
+        return Err(DevelopmentShellError::SourceMustBeC);
+    }
+
+    Ok((source, format!("/{}", parts.join("/"))))
 }
 
 fn extent_fits_fabric(extent: PhysicalExtent, fabric_mem_size: usize) -> bool {
@@ -604,4 +753,60 @@ mod tests {
         assert!(!fabric.rollback_unpublished_object(second),
             "an object already published into authority may not be rewound");
     }
+
+    #[test]
+    fn p93h2_logical_path_mirrors_future_anka_namespace() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "anka64-userspace-map-{}-{nonce}", std::process::id()));
+        let net = root.join("system/services/net");
+        fs::create_dir_all(&net).unwrap();
+        let arp = net.join("arp.c");
+        fs::write(&arp, b"int main() { return 0; }").unwrap();
+
+        assert_eq!(
+            logical_install_path_for_c_source(&root, &arp).unwrap(),
+            "/system/services/net/arp",
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn p93h2_source_outside_userspace_is_rejected() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "anka64-userspace-root-{}-{nonce}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!(
+            "anka64-outside-{}-{nonce}.c", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&outside, b"int main() { return 0; }").unwrap();
+
+        assert_eq!(
+            logical_install_path_for_c_source(&root, &outside),
+            Err(DevelopmentShellError::SourceOutsideUserspace),
+        );
+        fs::remove_file(outside).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn p93h2_only_c_sources_map_into_logical_namespace() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "anka64-userspace-ext-{}-{nonce}", std::process::id()));
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let bytecode = bin.join("hello.anka");
+        fs::write(&bytecode, [0u8; 4]).unwrap();
+
+        assert_eq!(
+            logical_install_path_for_c_source(&root, &bytecode),
+            Err(DevelopmentShellError::SourceMustBeC),
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
 }

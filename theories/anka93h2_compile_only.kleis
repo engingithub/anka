@@ -1,0 +1,76 @@
+// =============================================================================
+// Anka64 Development Shell — Compile-Only CC_B Boundary (Phase 9.3h.2)
+// =============================================================================
+// No new axioms.
+//
+// 9.3h.0 already establishes developer ingress, exact-generation artifact
+// identity, and ordinary spawn admission.  9.3h.2 adds one operational law
+// required by the development shell:
+//
+//   `compile` is not `run`.
+//
+// CC_B may read developer-authorized C source and produce a sealed executable
+// artifact, but the compile command must not SYS_EXEC that output.  Execution
+// remains a separate 9.3h.3 action requiring explicit execution authority and
+// normal spawn admission.
+//
+// The future Anka logical install path (for example /system/services/net/arp)
+// is namespace metadata only.  It is not a capability and grants no authority.
+// =============================================================================
+
+import "anka93h0_developer_artifact_ingress.kleis"
+
+// Publication after C compilation is just the existing ingress gate composed
+// with the 9.3h.0 CC_B output validity rule.
+define devh2_compiled_artifact_publishable(
+    ingress_allowed : Bool,
+    ccb_success : Bool,
+    output_sealed : Bool,
+    stored_generation : BitVec64,
+    current_generation : BitVec64
+) =
+    if ingress_allowed then
+        devh_ccb_output_valid(
+            ccb_success,
+            output_sealed,
+            stored_generation,
+            current_generation)
+    else false
+
+// A development-shell `compile` operation is valid only when CC_B did not
+// execute the produced artifact as a child.  This is deliberately independent
+// of whether the resulting artifact is otherwise valid and publishable.
+define devh2_compile_command_valid(
+    publishable : Bool,
+    output_executed : Bool
+) = if publishable then
+        if output_executed then false else true
+    else false
+
+// Logical installation paths are names, not security objects.
+define devh2_logical_path_creates_authority(
+    logical_path_present : Bool
+) = false
+
+example "DEVH2-1 successful sealed current-generation CC_B output is publishable" {
+    assert(devh2_compiled_artifact_publishable(
+        true,true,true,bvconst(7,64),bvconst(7,64))=true)
+}
+
+example "DEVH2-2 compile command does not execute produced artifact" {
+    assert(devh2_compile_command_valid(true,false)=true)
+    assert(devh2_compile_command_valid(true,true)=false)
+}
+
+example "DEVH2-3 failed unsealed or stale CC_B output is not publishable" {
+    assert(devh2_compiled_artifact_publishable(
+        true,false,true,bvconst(7,64),bvconst(7,64))=false)
+    assert(devh2_compiled_artifact_publishable(
+        true,true,false,bvconst(7,64),bvconst(7,64))=false)
+    assert(devh2_compiled_artifact_publishable(
+        true,true,true,bvconst(6,64),bvconst(7,64))=false)
+}
+
+example "DEVH2-4 logical install path creates no Anka authority" {
+    assert(devh2_logical_path_creates_authority(true)=false)
+}

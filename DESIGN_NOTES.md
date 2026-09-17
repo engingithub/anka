@@ -3593,3 +3593,111 @@ Phase 9.3h.1 adds 12 Rust witnesses.  With the preceding 842-test baseline, the
 source tree now contains 854 Rust tests; the executable test gate must still be
 run in a Rust-enabled environment before declaring the phase closed.
 
+## DN-31: Earned Userspace Namespace and Compile-Only CC_B (Phase 9.3h.2)
+
+**Date:** 2026-09-16
+
+**Decision:**
+
+Before writing Ethernet/ARP/ICMP as real C files, establish a host source tree
+that mirrors the future Anka64 logical namespace without copying Unix wholesale.
+The development source root is:
+
+```text
+userspace/
+  system/services/net/
+  system/compiler/
+  bin/
+  lib/
+  include/anka/
+  etc/
+```
+
+These roots are semantic, not historical compatibility aliases.  We do not add
+`/usr`, `/sbin`, `/var`, `/home`, or similar structure unless future Anka
+software creates a concrete requirement for it.  `examples/` remains for
+demonstrations; Ethernet, ARP, IPv4, ICMP, TCP, and HTTP are system software and
+belong under `userspace/system/services/net/`.
+
+The host/source mapping is deterministic:
+
+```text
+userspace/<relative>.c -> /<relative-without-.c>
+```
+
+Thus:
+
+```text
+userspace/system/services/net/arp.c -> /system/services/net/arp
+```
+
+The three identities remain separate:
+
+```text
+host source path
+!= logical Anka install path
+!= exact runtime ArtifactKey(ObjectId, Generation)
+```
+
+Neither pathname is authority.  The logical install path is non-authoritative
+registry metadata and is unique within the development registry.
+
+### Compile is not run
+
+Reviewing the existing canonical CC_B exposed an important mismatch with the
+9.3h.0 contract: CC_B historically compiled, sealed, and immediately `SYS_EXEC`d
+its output because execution was the bootstrap compiler's regression witness.
+That behavior is wrong for a development-shell `compile` operation.  Compiling
+an arbitrary source file must not execute it.
+
+Add a workspace control word `WS_MODE`:
+
+```text
+0 = historical compile + seal + execute
+1 = development compile + seal only
+```
+
+Mode 0 preserves every existing bootstrap path.  Mode 1 is selected only by the
+9.3h.2 development compiler bridge.  The new Kleis theory freezes:
+
+```text
+compile command valid -> output was not executed
+logical install path -> no authority
+```
+
+with 4/4 positive examples and 0/4 deliberate false claims.
+
+### Real CC_B remains inside Anka
+
+`dev_compiler.rs` does not replace CC_B with a host C compiler.  It boots ankad
+in a transient Anka64 compilation machine; ankad uses normal `SYS_SPAWN` to
+launch the actual self-hosted CC_B with source R, output RWS, and workspace RW.
+The workspace requests compile-only mode.  Successful compilation requires:
+
+```text
+CC_B success
++ output object Sealed
++ valid code/literal arena geometry
++ no third process slot (no compiled child execution)
+```
+
+The bridge then returns the sealed output contents and executable geometry to the
+host development layer.  A no-literal image stores only the code prefix.  A
+literal-bearing image preserves the full fixed output arena so literal offsets
+remain unchanged.  The target `DevelopmentArtifactLoader` reintroduces that
+artifact through PM/Fabric, seals it, records exact generation plus
+`code_size`/`lit_start`, and grants no capability.
+
+This host-mediated transfer is intentional for the development shell: the host
+filesystem is the artifact store described at the start of 9.3h.  Execution is
+still a later operation under 9.3h.3 and requires explicit execution authority
+and ordinary Anka spawn admission.
+
+The source tree now contains 860 Rust tests (854 prior + 6 Phase 9.3h.2 tests).
+
+Next gate:
+
+```text
+9.3h.3  run a registered artifact through PM/VLB + ordinary Anka spawn
+```
+
