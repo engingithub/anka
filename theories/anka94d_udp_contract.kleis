@@ -1,0 +1,104 @@
+// =============================================================================
+// Anka64 UDP User-Space Contract (Phase 9.4d, formal-first)
+// =============================================================================
+// No new axioms.  First UDP stack supports one strict IPv4/UDP subset:
+// - IPv4 has already passed the Phase 9.4c nonfragmented/local checks,
+// - protocol is 17,
+// - UDP length is at least the fixed 8-byte header and exactly consumes the
+//   IPv4 payload (Ethernet padding remains outside IPv4 total_length),
+// - the datagram targets the explicit development UDP endpoint,
+// - IPv4 UDP checksum 0 means "not supplied"; otherwise the pseudo-header
+//   checksum must validate.
+// Socket tables, routing, fragmentation and multiplexed endpoints are later.
+// =============================================================================
+
+define udp94d_length_safe(
+    udp_len : BitVec16,
+    ipv4_payload_len : BitVec16
+) = bvuge(udp_len,bvconst(8,16))
+    ∧ udp_len=ipv4_payload_len
+
+define udp94d_checksum_acceptable(
+    checksum_omitted : Bool,
+    pseudoheader_checksum_valid : Bool
+) = checksum_omitted ∨ pseudoheader_checksum_valid
+
+define udp94d_should_deliver(
+    ipv4_supported : Bool,
+    protocol_is_udp : Bool,
+    length_safe : Bool,
+    destination_is_service : Bool,
+    checksum_omitted : Bool,
+    pseudoheader_checksum_valid : Bool
+) = ipv4_supported
+    ∧ protocol_is_udp
+    ∧ length_safe
+    ∧ destination_is_service
+    ∧ (checksum_omitted ∨ pseudoheader_checksum_valid)
+
+// The one-shot Phase 9.4d reply witness is a UDP payload reflector.  This is
+// not a socket API: it only proves that UDP framing, endpoint identity and TX
+// serialization are correct before multiplexing is introduced.
+define udp94d_reply_source_port(request_destination_port : BitVec16) : BitVec16 =
+    request_destination_port
+
+define udp94d_reply_destination_port(request_source_port : BitVec16) : BitVec16 =
+    request_source_port
+
+define udp94d_reply_length(request_length : BitVec16) : BitVec16 =
+    request_length
+
+define udp94d_reply_payload(payload_token : BitVec64) : BitVec64 =
+    payload_token
+
+example "UDP94D-1 minimum 8-byte UDP datagram is safe" {
+    assert(udp94d_length_safe(bvconst(8,16),bvconst(8,16)))
+}
+
+example "UDP94D-2 seven-byte UDP datagram is rejected" {
+    assert(¬udp94d_length_safe(bvconst(7,16),bvconst(7,16)))
+}
+
+example "UDP94D-3 UDP length must exactly consume IPv4 payload" {
+    assert(¬udp94d_length_safe(bvconst(12,16),bvconst(13,16)))
+}
+
+example "UDP94D-4 zero IPv4 UDP checksum is accepted as omitted" {
+    assert(udp94d_checksum_acceptable(true,false)=true)
+}
+
+example "UDP94D-5 supplied valid UDP checksum is accepted" {
+    assert(udp94d_checksum_acceptable(false,true)=true)
+}
+
+example "UDP94D-6 supplied invalid UDP checksum is rejected" {
+    assert(udp94d_checksum_acceptable(false,false)=false)
+}
+
+example "UDP94D-7 valid local service datagram is delivered" {
+    assert(udp94d_should_deliver(true,true,true,true,false,true)=true)
+}
+
+example "UDP94D-8 non-UDP IPv4 payload is not delivered to UDP" {
+    assert(udp94d_should_deliver(true,false,true,true,false,true)=false)
+}
+
+example "UDP94D-9 datagram for another endpoint is not delivered" {
+    assert(udp94d_should_deliver(true,true,true,false,false,true)=false)
+}
+
+example "UDP94D-10 reply source port is request destination port" {
+    assert(∀(p : BitVec16). udp94d_reply_source_port(p)=p)
+}
+
+example "UDP94D-11 reply destination port is request source port" {
+    assert(∀(p : BitVec16). udp94d_reply_destination_port(p)=p)
+}
+
+example "UDP94D-12 reply preserves UDP length" {
+    assert(∀(n : BitVec16). udp94d_reply_length(n)=n)
+}
+
+example "UDP94D-13 reply preserves opaque UDP payload bytes" {
+    assert(∀(p : BitVec64). udp94d_reply_payload(p)=p)
+}

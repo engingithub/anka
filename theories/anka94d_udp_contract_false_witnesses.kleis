@@ -1,0 +1,21 @@
+import "anka94d_udp_contract.kleis"
+
+example "FALSE-UDP94D-1 seven-byte UDP datagram is accepted" {
+    assert(udp94d_length_safe(bvconst(7,16),bvconst(7,16)))
+}
+
+example "FALSE-UDP94D-2 UDP length may leave bytes inside IPv4 payload" {
+    assert(udp94d_length_safe(bvconst(12,16),bvconst(13,16)))
+}
+
+example "FALSE-UDP94D-3 supplied bad UDP checksum is accepted" {
+    assert(udp94d_checksum_acceptable(false,false)=true)
+}
+
+example "FALSE-UDP94D-4 datagram for another endpoint is delivered" {
+    assert(udp94d_should_deliver(true,true,true,false,false,true)=true)
+}
+
+example "FALSE-UDP94D-5 non-UDP IPv4 payload reaches UDP service" {
+    assert(udp94d_should_deliver(true,false,true,true,false,true)=true)
+}
