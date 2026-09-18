@@ -1,0 +1,29 @@
+import "anka94f_socket_contract.kleis"
+
+example "FALSE-SOCK94F-1 unestablished TCP payload reaches application" {
+    assert(sock94f_network_delivery(false,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-SOCK94F-2 out-of-order TCP payload reaches application" {
+    assert(sock94f_network_delivery(true,true,true,false,true,true,true)=true)
+}
+
+example "FALSE-SOCK94F-3 oversized payload is copied into bounded socket buffer" {
+    assert(sock94f_network_delivery(true,true,true,true,true,true,false)=true)
+}
+
+example "FALSE-SOCK94F-4 wrong process may issue socket SEND" {
+    assert(sock94f_client_send(false,true,true,true)=true)
+}
+
+example "FALSE-SOCK94F-5 zero-length socket SEND is accepted" {
+    assert(sock94f_client_send(true,true,false,true)=true)
+}
+
+example "FALSE-SOCK94F-6 application selects TCP sequence number" {
+    assert(sock94f_client_selects_tcp_sequence()=true)
+}
+
+example "FALSE-SOCK94F-7 ordinary socket client requires NIC authority" {
+    assert(sock94f_client_requires_nic()=true)
+}

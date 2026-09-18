@@ -4017,3 +4017,50 @@ by the existing Phase 9.3d device-event contract and does not confer RX or TX.
 Neither TCP state nor endpoint identity grants capability.  Sockets remain the
 next architectural phase that will connect transport state to ordinary user
 processes.
+
+
+## DN-39: Sockets Are a User-Space Process Boundary, Not New Kernel Networking (Phase 9.4f)
+
+**Decision.** Build the first socket abstraction from mechanisms Anka already
+has: exact-incarnation IPC, explicitly shared memory, and the Phase 9.4e TCP
+service model.  Do not add `socket()`, `accept()`, `recv()`, or `send()` kernel
+syscalls and do not move TCP state into Rust.
+
+The first socket service owns exactly one passive TCP connection and one exact
+client `ProcessKey`.  The client sees a byte stream through a bounded shared
+buffer plus four semantic message forms: CONNECTED, DATA(length), SEND(length),
+and CLOSED.  The socket process retains the peer tuple, TCP sequence space,
+checksums, and NIC authority.  Therefore an HTTP process in the next phase can
+operate on request/response bytes without knowing Ethernet, IPv4, TCP headers,
+or SEQ/ACK arithmetic.
+
+The Phase 9.4f bootstrap maps one 1024-byte memory object into both domains but
+at independently chosen virtual addresses.  This is explicit shared-memory
+authority, not a globally named buffer.  The application capability table is
+empty; the service alone receives `EVENT_WAIT|NIC_RX|NIC_TX` and the private RW
+DMA-buffer capability.  Shared memory does not imply device authority.
+
+IPC is exact-generation rather than PID-only.  Notifications use
+`SYS_SEND_KEY`, and blocking receives use `SYS_RECV_WAIT` against the exact peer
+incarnation.  After a validated in-order TCP payload is copied into the shared
+buffer, the socket service sends DATA(n) and waits specifically for that
+client's SEND(n).  An unrelated mailbox message is not sufficient to complete
+the wait.
+
+We intentionally do not introduce wait-any in this phase.  The first HTTP-like
+exchange naturally alternates network input and application response: wait for
+TCP, deliver DATA, wait for exact client SEND, transmit, then return to TCP.
+The NIC side continues to use finite `SYS_NIC_RX` plus
+`SYS_DEV_EVENT_WAIT`; the client side uses exact-peer `SYS_RECV_WAIT`.  General
+multiplexing should be introduced only when multiple simultaneously live event
+sources require it.
+
+The socket service owns `SND.NXT` and `RCV.NXT`.  SEND(n) carries only a byte
+count.  Outgoing sequence/acknowledgement fields are selected from owned TCP
+state, and successful transmission advances `SND.NXT` by exactly `n`.  This is
+the central abstraction boundary: the application can choose bytes, but not
+transport coordinates.
+
+The formal contract adds no axioms and freezes 14 positive properties plus
+seven hostile false witnesses.  The executable witness adds seven Rust tests
+over the 909-test TCP baseline, for an expected 916-test Phase 9.4f gate.

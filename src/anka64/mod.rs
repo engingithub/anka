@@ -43,6 +43,8 @@ mod ipv4_icmp_tests;
 mod udp_tests;
 #[cfg(test)]
 mod tcp_tests;
+#[cfg(test)]
+mod socket_tests;
 pub mod multicore;
 pub mod ankad;
 pub mod system_image;

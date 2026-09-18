@@ -10,9 +10,10 @@ Implemented progression:
 - `icmp.c` — Phase 9.4c: validated ICMP echo request/reply through authorized NIC TX
 - `udp.c` — Phase 9.4d: strict IPv4 UDP validation and one-shot payload reflection on development port 49152
 - `tcp.c` — Phase 9.4e: single passive TCP connection with handshake, in-order ACK, and FIN close on development port 49153
+- `socket.c` — Phase 9.4f: process-facing single stream socket over exact IPC + explicitly shared memory
 
 Planned next:
-- sockets and HTTP
+- HTTP
 
 These are real Anka64 system services, not examples. The end-to-end target is:
 
@@ -149,3 +150,19 @@ from leaking into padding when a shorter control reply is emitted.
 The service remains ordinary user-space C with explicit NIC_RX|NIC_TX and RW
 DMA-buffer authority. TCP state changes protocol behavior only; it creates no
 new capability or kernel authority.
+
+
+## Phase 9.4f socket boundary
+
+`socket.c` is the first process-facing network abstraction. It owns the same
+strict single-connection TCP state machine and all NIC authority, but exposes
+only CONNECTED, DATA(length), SEND(length), and CLOSED to one exact client
+incarnation. A 1024-byte object is explicitly mapped into both domains as the
+stream buffer. The ordinary client has no NIC/DMA capability and never supplies
+TCP sequence or acknowledgement numbers.
+
+The Phase 9.4f witness client is `userspace/bin/socket_echo.c`: it waits for
+CONNECTED, receives four opaque stream bytes (`ping`) via DATA(4), writes
+`pong` into the shared buffer, issues SEND(4), and waits for CLOSED. The socket
+service alone turns those bytes into TCP and advances SND.NXT. This is the seam
+the HTTP service will consume next.

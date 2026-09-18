@@ -2954,3 +2954,94 @@ anka94e_tcp_contract_false_witnesses.kleis   7 deliberate false claims
 
 Eight executable witnesses are added over the closed 901-test UDP baseline;
 the expected Phase 9.4e Rust gate is 909 tests.
+
+
+### Stage 41: Process-Facing Stream Socket Service (Phase 9.4f)
+
+Phase 9.4f places the first application-facing byte-stream boundary above the
+single-connection TCP state machine.  No kernel socket syscall is added.
+`userspace/system/services/net/socket.c` remains an ordinary CC_B-compiled
+user-space process that owns the NIC/TCP state, while
+`userspace/bin/socket_echo.c` is an ordinary client process with no NIC
+capability.
+
+The executable topology is:
+
+```text
+external TCP peer
+  -> exact EVENT_WAIT|NIC_RX|NIC_TX authority
+  -> /system/services/net/socket
+       owns peer tuple + RCV.NXT + SND.NXT
+       owns TCP checksum/header serialization
+       |
+       | exact ProcessKey IPC: CONNECTED / DATA(n) / CLOSED
+       | explicitly shared 1024-byte stream buffer
+       v
+     /bin/socket_echo
+       no NIC capability
+       no TCP sequence/acknowledgement inputs
+       |
+       `-- exact ProcessKey IPC: SEND(n)
+```
+
+The first socket service is deliberately one passive stream connection on the
+same development TCP endpoint `49153`.  It is not yet a descriptor table or a
+POSIX API.  Its process-facing protocol is intentionally tiny:
+
+```text
+1             CONNECTED
+2             CLOSED
+4096 + n      DATA(n), 1 <= n <= 1024
+8192 + n      SEND(n), 1 <= n <= 1024
+```
+
+`DATA(n)` means exactly `n` opaque TCP payload bytes have been copied into the
+shared stream buffer.  `SEND(n)` means the exact client requests that the first
+`n` bytes currently in that same buffer be serialized as TCP payload.  The
+application never supplies a peer tuple, TCP flags, sequence number,
+acknowledgement number, checksum, Ethernet address, or NIC handle.
+
+The shared buffer is explicit bootstrap authority rather than ambient memory.
+The socket service maps it at `0x1c000`; the client maps the same object at
+`0x18000`.  The service retains its private NIC DMA buffer at `0x18000`.
+The ordinary client receives no capability-table entries at all in the Phase
+9.4f witness; in particular it has no device capability and no DMA capability.
+CPU access to the shared object comes only from the explicit per-domain memory
+grant used to construct the two-process witness.
+
+Generation-qualified IPC is the process boundary.  The socket service sends
+notifications with `SYS_SEND_KEY` to the exact client `ProcessKey`, and after a
+DATA notification blocks with `SYS_RECV_WAIT` for that exact client
+incarnation before consuming a SEND request.  The client similarly uses
+`SYS_RECV_WAIT` against the exact socket-service incarnation.  A pathname or
+socket endpoint does not create IPC or NIC authority.
+
+The first socket protocol intentionally alternates network and application
+work rather than introducing a new kernel wait-any primitive.  While waiting
+for future network traffic, the service uses the Phase 9.3d finite-RX plus
+`SYS_DEV_EVENT_WAIT` discipline.  After delivering one bounded DATA event it
+waits on the exact client for the corresponding SEND request, then returns to
+network waiting.  This half-duplex request/reply seam is sufficient for the
+next HTTP milestone and leaves general event multiplexing to a phase that
+actually requires it.
+
+A client SEND is serialized with TCP sequence `SND.NXT` and acknowledgement
+`RCV.NXT`; the application cannot select either value.  After successful TX,
+`SND.NXT` advances by the exact application byte count.  Incoming data reaches
+the shared buffer only after the same exact-tuple, checksum, in-order SEQ, and
+ACK validation frozen by Phase 9.4e.  Accepted FIN becomes a CLOSED
+notification after the final TCP ACK.
+
+The governing formal gate is:
+
+```text
+anka94f_socket_contract.kleis                  14 positive examples
+anka94f_socket_contract_false_witnesses.kleis   7 deliberate false claims
+```
+
+Seven executable witnesses are added over the closed 909-test TCP baseline;
+the expected Phase 9.4f Rust gate is 916 tests.  The end-to-end witness sends
+`ping` over TCP, proves the ordinary client sees only those four stream bytes,
+has the client write `pong` into the shared buffer, and verifies that the
+socket service alone constructs the corresponding TCP payload and sequence
+state.

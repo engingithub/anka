@@ -1,0 +1,133 @@
+// =============================================================================
+// Anka64 Process-Facing Stream Socket Contract (Phase 9.4f)
+// =============================================================================
+// No new axioms.  This phase places one process-facing byte-stream abstraction
+// above the single-connection TCP state machine from Phase 9.4e.
+//
+// The socket service, not the client application, owns:
+// - NIC authority,
+// - TCP peer tuple,
+// - RCV.NXT / SND.NXT,
+// - TCP checksum/header serialization.
+//
+// The exact client ProcessKey sees only:
+// - CONNECTED notification,
+// - DATA(length) with bytes copied into an explicitly shared buffer,
+// - SEND(length) with bytes read from that buffer,
+// - CLOSED notification.
+//
+// Scope: one passive stream connection, one exact client, 1024-byte shared
+// buffer.  No descriptor table, accept queue, multiple sockets, wait-any,
+// nonblocking mode, or kernel socket syscalls yet.
+// =============================================================================
+
+define sock94f_network_delivery(
+    established : Bool,
+    tuple_match : Bool,
+    checksum_valid : Bool,
+    sequence_exact : Bool,
+    acknowledgement_exact : Bool,
+    payload_nonempty : Bool,
+    payload_fits : Bool
+) =
+    if established then
+        if tuple_match then
+            if checksum_valid then
+                if sequence_exact then
+                    if acknowledgement_exact then
+                        if payload_nonempty then
+                            if payload_fits then true else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define sock94f_client_send(
+    exact_client : Bool,
+    ordinary_message : Bool,
+    length_nonzero : Bool,
+    length_fits : Bool
+) =
+    if exact_client then
+        if ordinary_message then
+            if length_nonzero then
+                if length_fits then true else false
+            else false
+        else false
+    else false
+
+define sock94f_notify_length(payload_len : BitVec16) : BitVec16 = payload_len
+
+define sock94f_copy_byte(value : BitVec8) : BitVec8 = value
+
+define sock94f_tx_seq(snd_nxt : BitVec32) : BitVec32 = snd_nxt
+
+define sock94f_tx_ack(rcv_nxt : BitVec32) : BitVec32 = rcv_nxt
+
+define sock94f_after_send(snd_nxt : BitVec32, send_len : BitVec32) : BitVec32 =
+    bvadd(snd_nxt,send_len)
+
+define sock94f_close_notify(fin_accepted : Bool) =
+    if fin_accepted then true else false
+
+define sock94f_client_requires_nic() = false
+
+define sock94f_client_selects_tcp_sequence() = false
+
+example "SOCK94F-1 established exact in-order payload reaches socket client" {
+    assert(sock94f_network_delivery(true,true,true,true,true,true,true)=true)
+}
+
+example "SOCK94F-2 data before TCP establishment is not delivered" {
+    assert(sock94f_network_delivery(false,true,true,true,true,true,true)=false)
+}
+
+example "SOCK94F-3 wrong TCP tuple is not delivered" {
+    assert(sock94f_network_delivery(true,false,true,true,true,true,true)=false)
+}
+
+example "SOCK94F-4 oversized payload is not copied into bounded socket buffer" {
+    assert(sock94f_network_delivery(true,true,true,true,true,true,false)=false)
+}
+
+example "SOCK94F-5 socket DATA notification preserves exact byte length" {
+    assert(sock94f_notify_length(bvconst(517,16))=bvconst(517,16))
+}
+
+example "SOCK94F-6 socket shared-buffer copy preserves opaque bytes" {
+    assert(∀(b : BitVec8). sock94f_copy_byte(b)=b)
+}
+
+example "SOCK94F-7 exact client may request bounded nonempty send" {
+    assert(sock94f_client_send(true,true,true,true)=true)
+}
+
+example "SOCK94F-8 wrong client cannot request socket send" {
+    assert(sock94f_client_send(false,true,true,true)=false)
+}
+
+example "SOCK94F-9 outgoing TCP sequence is owned current SND.NXT" {
+    assert(∀(s : BitVec32). sock94f_tx_seq(s)=s)
+}
+
+example "SOCK94F-10 outgoing TCP acknowledgement is owned current RCV.NXT" {
+    assert(∀(r : BitVec32). sock94f_tx_ack(r)=r)
+}
+
+example "SOCK94F-11 socket send advances SND.NXT by exact application byte count" {
+    assert(sock94f_after_send(bvconst(5001,32),bvconst(37,32))=bvconst(5038,32))
+}
+
+example "SOCK94F-12 accepted TCP FIN becomes process-facing CLOSED notification" {
+    assert(sock94f_close_notify(true)=true)
+}
+
+example "SOCK94F-13 ordinary socket client requires no NIC capability" {
+    assert(sock94f_client_requires_nic()=false)
+}
+
+example "SOCK94F-14 socket client does not select TCP sequence numbers" {
+    assert(sock94f_client_selects_tcp_sequence()=false)
+}
