@@ -166,3 +166,17 @@ CONNECTED, receives four opaque stream bytes (`ping`) via DATA(4), writes
 `pong` into the shared buffer, issues SEND(4), and waits for CLOSED. The socket
 service alone turns those bytes into TCP and advances SND.NXT. This is the seam
 the HTTP service will consume next.
+
+
+## Phase 9.4g HTTP boundary
+
+`httpd.c` is the first application-layer service using the Phase 9.4f socket
+boundary. It has no NIC or DMA capability and sees only CONNECTED, DATA(n),
+SEND(n), CLOSED plus the explicitly shared 1024-byte stream buffer.
+
+The first route is intentionally small: one complete bounded
+`GET /alive HTTP/1.1` request ending in `\r\n\r\n` returns a 200 response whose
+body is exactly `Anka64 is alive.`. Header bytes are opaque. Other first
+requests receive a bounded 404. Request reassembly across multiple socket DATA
+events, pipelining, request bodies, persistent HTTP connections, TLS, and
+concurrent clients are deferred.

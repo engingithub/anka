@@ -36,3 +36,7 @@ anka64> run /bin/hello
 
 The first compile lazily bootstraps the self-hosted CC_B compiler inside Anka;
 subsequent compiles reuse that compiler image for the session.
+
+Phase 9.4g adds `/system/services/net/httpd`, an ordinary socket client in the
+protection sense even though it is system software in the logical namespace.
+It receives no NIC authority; the socket service owns all transport mechanics.

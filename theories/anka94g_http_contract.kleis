@@ -1,0 +1,121 @@
+// =============================================================================
+// Anka64 HTTP /alive Contract (Phase 9.4g)
+// =============================================================================
+// No new axioms.  This phase is an application-layer client of the Phase 9.4f
+// process-facing stream socket service.
+//
+// Scope of the first HTTP milestone:
+// - one established socket connection,
+// - one complete request in one bounded DATA notification,
+// - exact request line: GET /alive HTTP/1.1\r\n,
+// - request ends in \r\n\r\n; intervening header bytes are opaque,
+// - valid /alive -> HTTP 200 with body exactly "Anka64 is alive.",
+// - other complete requests -> bounded HTTP 404 with empty body,
+// - application has no NIC authority and cannot select TCP SEQ/ACK.
+//
+// Deferred: request reassembly across DATA events, pipelining, request bodies,
+// chunked coding, persistent HTTP connections, general headers, TLS.
+// =============================================================================
+
+define http94g_alive_request(
+    connected : Bool,
+    data_event : Bool,
+    length_nonzero : Bool,
+    length_fits : Bool,
+    request_complete : Bool,
+    method_get : Bool,
+    path_alive : Bool,
+    version_11 : Bool
+) =
+    if connected then
+        if data_event then
+            if length_nonzero then
+                if length_fits then
+                    if request_complete then
+                        if method_get then
+                            if path_alive then
+                                if version_11 then true else false
+                            else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define http94g_status(alive_request : Bool) : BitVec16 =
+    if alive_request then bvconst(200,16) else bvconst(404,16)
+
+define http94g_body_length(alive_request : Bool) : BitVec16 =
+    if alive_request then bvconst(16,16) else bvconst(0,16)
+
+define http94g_send_length(alive_request : Bool) : BitVec16 =
+    if alive_request then bvconst(74,16) else bvconst(64,16)
+
+define http94g_headers_select_authority() = false
+
+define http94g_client_requires_nic() = false
+
+define http94g_client_selects_tcp_sequence() = false
+
+define http94g_client_selects_tcp_acknowledgement() = false
+
+example "HTTP94G-1 exact complete GET alive request is accepted" {
+    assert(http94g_alive_request(true,true,true,true,true,true,true,true)=true)
+}
+
+example "HTTP94G-2 request before socket connection is not accepted" {
+    assert(http94g_alive_request(false,true,true,true,true,true,true,true)=false)
+}
+
+example "HTTP94G-3 incomplete request is not accepted as alive" {
+    assert(http94g_alive_request(true,true,true,true,false,true,true,true)=false)
+}
+
+example "HTTP94G-4 wrong method is not the alive route" {
+    assert(http94g_alive_request(true,true,true,true,true,false,true,true)=false)
+}
+
+example "HTTP94G-5 wrong path is not the alive route" {
+    assert(http94g_alive_request(true,true,true,true,true,true,false,true)=false)
+}
+
+example "HTTP94G-6 wrong HTTP version is not the alive route" {
+    assert(http94g_alive_request(true,true,true,true,true,true,true,false)=false)
+}
+
+example "HTTP94G-7 alive route returns status 200" {
+    assert(http94g_status(true)=bvconst(200,16))
+}
+
+example "HTTP94G-8 non-alive request returns status 404" {
+    assert(http94g_status(false)=bvconst(404,16))
+}
+
+example "HTTP94G-9 alive body length is exactly sixteen bytes" {
+    assert(http94g_body_length(true)=bvconst(16,16))
+}
+
+example "HTTP94G-10 exact 200 response occupies seventy-four stream bytes" {
+    assert(http94g_send_length(true)=bvconst(74,16))
+}
+
+example "HTTP94G-11 exact 404 response occupies sixty-four stream bytes" {
+    assert(http94g_send_length(false)=bvconst(64,16))
+}
+
+example "HTTP94G-12 opaque HTTP header bytes create no authority" {
+    assert(http94g_headers_select_authority()=false)
+}
+
+example "HTTP94G-13 HTTP process requires no NIC capability" {
+    assert(http94g_client_requires_nic()=false)
+}
+
+example "HTTP94G-14 HTTP process does not select TCP sequence numbers" {
+    assert(http94g_client_selects_tcp_sequence()=false)
+}
+
+example "HTTP94G-15 HTTP process does not select TCP acknowledgements" {
+    assert(http94g_client_selects_tcp_acknowledgement()=false)
+}

@@ -4064,3 +4064,36 @@ transport coordinates.
 The formal contract adds no axioms and freezes 14 positive properties plus
 seven hostile false witnesses.  The executable witness adds seven Rust tests
 over the 909-test TCP baseline, for an expected 916-test Phase 9.4f gate.
+
+
+## DN-40: HTTP Is an Ordinary Socket Client, Not a Networking Exception (Phase 9.4g)
+
+**Decision.** Implement the first HTTP service entirely above the Phase 9.4f
+process-facing socket boundary. Do not grant the HTTP process a NIC capability,
+DMA capability, peer tuple, TCP flags, sequence numbers, acknowledgement
+numbers, or checksum responsibilities. HTTP consumes bytes and produces bytes;
+the socket service remains the authority and transport boundary.
+
+The first route is intentionally literal: a complete bounded request whose
+request line is `GET /alive HTTP/1.1` and whose headers terminate in the HTTP
+blank line receives `200 OK` with body `Anka64 is alive.`. The body is exactly
+16 bytes and the response carries `Content-Length: 16` plus `Connection: close`.
+Other first requests receive a bounded 404 with an empty body. Header contents
+are opaque in this phase and therefore create no authority or routing effect.
+
+The current socket protocol alternates one network DATA delivery with one exact
+client SEND. Therefore Phase 9.4g deliberately requires the complete HTTP
+request to fit in one DATA notification (maximum 1024 bytes). This is a scoped
+milestone, not a claim that TCP message boundaries are HTTP message boundaries.
+General stream reassembly should be added only by changing the socket/application
+protocol explicitly rather than smuggling buffering into the HTTP parser.
+
+`httpd.c` maps only the explicitly shared stream object and has an empty
+capability table in the executable witness. It waits on the exact socket-service
+`ProcessKey`, writes response bytes into the shared buffer, and requests
+`SEND(n)`. The socket service alone chooses TCP `SEQ/ACK`, serializes checksums,
+and advances `SND.NXT` by the exact HTTP response byte count.
+
+The formal contract adds no axioms and freezes 15 positive properties plus
+eight hostile false witnesses. Seven executable tests are added over the
+916-test socket baseline, giving an expected Phase 9.4g runtime gate of 923.
