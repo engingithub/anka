@@ -2677,3 +2677,48 @@ bringing the source tree to 877 tests.  No additional Kleis theory is required:
 the shell is a parser/dispatcher over the 9.3h.0, 9.3h.2, and 9.3h.3 authority
 contracts.  The executable 877-test gate must pass before Phase 9.3h is merged.
 
+
+
+### Stage 36: Ethernet as Real Anka C System Software (Phase 9.4a)
+
+Phase 9.4a crosses the boundary from device infrastructure to protocol code.
+The Ethernet parser is no longer a Rust fixture: it is the real CC_B source
+`userspace/system/services/net/ethernet.c`.
+
+The executable path is:
+
+```text
+host source ethernet.c
+  -> self-hosted CC_B
+  -> sealed Anka executable image
+  -> user process with exact NIC_RX + buffer WRITE handles
+  -> SYS_NIC_RX finite DMA
+  -> 14..1514 byte validation
+  -> EtherType bytes 12,13 in network order
+  -> ARP / IPv4 / unknown dispatch result
+```
+
+No Ethernet parsing was added to the kernel, NIC controller, or host backend.
+The NIC remains an opaque frame transport.  A 13-byte raw NIC frame can be
+delivered by finite DMA but is rejected by the user-space Ethernet parser; an
+unknown EtherType remains structurally valid and is ignored/identified without
+being reclassified as malformed.
+
+The Phase 9.4a test environment starts with an empty capability table and seeds
+only the exact authorities needed by this one-service witness: NIC_RX as handle
+`0:0` and the mapped DMA buffer's WRITE authority as `1:0`.  The buffer is
+mapped at virtual `0x10000`.  These values are a deterministic bootstrap ABI
+for the current witness, not authority derived from a host path or logical Anka
+path.  A future service manager may replace this startup convention without
+changing Ethernet syntax.
+
+The formal contract already present in the tree remains the governing gate:
+
+```text
+anka94a_ethernet_contract.kleis                  8/8 positive
+anka94a_ethernet_contract_false_witnesses.kleis  0/4 false claims pass
+```
+
+No new axioms or new Kleis semantics are introduced by the runtime bridge.
+Five Rust witnesses are added over the 877-test 9.3h baseline; the expected
+Phase 9.4a executable gate is 882 tests.
