@@ -1,0 +1,214 @@
+// =============================================================================
+// Anka64 Development Shell — Explicit Execution Authority (Phase 9.3h.3)
+// =============================================================================
+// No new axioms.
+//
+// 9.3h.0 established that `run` requires a valid artifact, presented execution
+// authority, and ordinary spawn admission.  9.3h.1/9.3h.2 established exact
+// sealed artifact identity and compile != run.  9.3h.3 now freezes the missing
+// bridge: what allows the development host to PRESENT executable authority to
+// the ordinary Anka spawn path.
+//
+// Architectural laws:
+//   R1  developer ingress authority is not developer execution authority
+//   R2  execution presentation requires an exact current sealed ArtifactKey
+//   R3  code presentation is RX only; literal presentation is R only
+//   R4  developer execution authority is not inherited by the child
+//   R5  presenting authority does not execute the artifact
+//   R6  VLB construction and ordinary SYS_SPAWN admission remain mandatory
+//
+// The developer may authorize a run, but the development bridge does not become
+// a second execution mechanism.  It may only arrange exact ordinary Anka
+// authority so that the existing spawn path can do the execution.
+// =============================================================================
+
+import "anka93h2_compile_only.kleis"
+
+// -----------------------------------------------------------------------------
+// Separate developer execution authority
+// -----------------------------------------------------------------------------
+// ingress_authority_present is intentionally ignored.  Being allowed to import
+// code does not imply being allowed to run it.  The second token is a separate,
+// explicit developer act.
+define devh3_execution_authority_present(
+    ingress_authority_present : Bool,
+    developer_execution_authority_present : Bool
+) = developer_execution_authority_present
+
+// -----------------------------------------------------------------------------
+// Exact code authority presentation
+// -----------------------------------------------------------------------------
+// The development bridge may present RX authority only for the exact sealed
+// artifact incarnation named by the registry.  The explicit developer run
+// authority is checked independently from artifact validity.
+define devh3_code_authority_valid(
+    developer_execution_authority_present : Bool,
+    stored_object : BitVec64,
+    current_object : BitVec64,
+    stored_generation : BitVec64,
+    current_generation : BitVec64,
+    sealed : Bool,
+    presented_object : BitVec64,
+    presented_generation : BitVec64,
+    presented_perms : BitVec8
+) =
+    if developer_execution_authority_present then
+        if stored_object = current_object then
+            if stored_generation = current_generation then
+                if sealed then
+                    if presented_object = stored_object then
+                        if presented_generation = stored_generation then
+                            if presented_perms = perm_RX then true else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+// Literal authority is a distinct read-only presentation.  When the artifact
+// has no literal segment, no literal grant should be presented at all.  This
+// keeps the development runner least-authority rather than granting a harmless
+// but unnecessary capability.
+define devh3_literal_authority_valid(
+    has_literals : Bool,
+    developer_execution_authority_present : Bool,
+    stored_object : BitVec64,
+    current_object : BitVec64,
+    stored_generation : BitVec64,
+    current_generation : BitVec64,
+    sealed : Bool,
+    literal_grant_present : Bool,
+    presented_object : BitVec64,
+    presented_generation : BitVec64,
+    presented_perms : BitVec8
+) =
+    if has_literals then
+        if literal_grant_present then
+            if developer_execution_authority_present then
+                if stored_object = current_object then
+                    if stored_generation = current_generation then
+                        if sealed then
+                            if presented_object = stored_object then
+                                if presented_generation = stored_generation then
+                                    if presented_perms = perm_R then true else false
+                                else false
+                            else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else
+        if literal_grant_present then false else true
+
+// The host-side developer token never becomes child authority.  It authorizes
+// the bridge to arrange ordinary Anka capabilities; it is not itself an Anka
+// capability and is not inherited by spawned code.
+define devh3_child_receives_developer_execution_authority(
+    developer_execution_authority_present : Bool
+) = false
+
+// Presenting exact authority is preparation for spawn, not execution itself.
+define devh3_authority_presentation_executes_artifact(
+    presentation_valid : Bool
+) = false
+
+// -----------------------------------------------------------------------------
+// Run composition
+// -----------------------------------------------------------------------------
+// This refines 9.3h.0's abstract run gate with the concrete 9.3h.3 pieces.
+// A layout built by VLB and ordinary spawn admission are both required.  The
+// development bridge has no alternate host-side "execute now" path.
+define devh3_run_committed(
+    artifact_valid : Bool,
+    developer_execution_authority_present : Bool,
+    code_authority_valid : Bool,
+    literal_authority_valid : Bool,
+    virtual_layout_ready : Bool,
+    normal_spawn_admitted : Bool
+) =
+    if devh_run_admitted(
+        artifact_valid,
+        developer_execution_authority_present,
+        normal_spawn_admitted) then
+        if code_authority_valid then
+            if literal_authority_valid then
+                if virtual_layout_ready then true else false
+            else false
+        else false
+    else false
+
+// =============================================================================
+// Positive witnesses
+// =============================================================================
+
+example "DEVH3-1 ingress authority is not execution authority" {
+    assert(devh3_execution_authority_present(true,false)=false)
+    assert(devh3_execution_authority_present(false,true)=true)
+}
+
+example "DEVH3-2 code presentation requires explicit run authority exact current sealed artifact and RX" {
+    assert(devh3_code_authority_valid(
+        true,
+        bvconst(17,64),bvconst(17,64),
+        bvconst(4,64),bvconst(4,64),true,
+        bvconst(17,64),bvconst(4,64),perm_RX)=true)
+
+    assert(devh3_code_authority_valid(
+        false,
+        bvconst(17,64),bvconst(17,64),
+        bvconst(4,64),bvconst(4,64),true,
+        bvconst(17,64),bvconst(4,64),perm_RX)=false)
+
+    assert(devh3_code_authority_valid(
+        true,
+        bvconst(17,64),bvconst(17,64),
+        bvconst(4,64),bvconst(5,64),true,
+        bvconst(17,64),bvconst(4,64),perm_RX)=false)
+
+    assert(devh3_code_authority_valid(
+        true,
+        bvconst(17,64),bvconst(17,64),
+        bvconst(4,64),bvconst(4,64),true,
+        bvconst(17,64),bvconst(4,64),perm_R)=false)
+}
+
+example "DEVH3-3 literal presentation is read-only and absent when artifact has no literals" {
+    assert(devh3_literal_authority_valid(
+        true,true,
+        bvconst(17,64),bvconst(17,64),
+        bvconst(4,64),bvconst(4,64),true,
+        true,bvconst(17,64),bvconst(4,64),perm_R)=true)
+
+    assert(devh3_literal_authority_valid(
+        true,true,
+        bvconst(17,64),bvconst(17,64),
+        bvconst(4,64),bvconst(4,64),true,
+        true,bvconst(17,64),bvconst(4,64),perm_RX)=false)
+
+    assert(devh3_literal_authority_valid(
+        false,true,
+        bvconst(17,64),bvconst(17,64),
+        bvconst(4,64),bvconst(4,64),true,
+        false,bvconst(17,64),bvconst(4,64),perm_R)=true)
+
+    assert(devh3_literal_authority_valid(
+        false,true,
+        bvconst(17,64),bvconst(17,64),
+        bvconst(4,64),bvconst(4,64),true,
+        true,bvconst(17,64),bvconst(4,64),perm_R)=false)
+}
+
+example "DEVH3-4 developer run token is not inherited and authority presentation does not execute" {
+    assert(devh3_child_receives_developer_execution_authority(true)=false)
+    assert(devh3_authority_presentation_executes_artifact(true)=false)
+}
+
+example "DEVH3-5 full run still requires VLB readiness and ordinary spawn admission" {
+    assert(devh3_run_committed(true,true,true,true,true,true)=true)
+    assert(devh3_run_committed(true,true,true,true,false,true)=false)
+    assert(devh3_run_committed(true,true,true,true,true,false)=false)
+    assert(devh3_run_committed(true,false,true,true,true,true)=false)
+    assert(devh3_run_committed(false,true,true,true,true,true)=false)
+}

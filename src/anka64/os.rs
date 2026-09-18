@@ -1084,6 +1084,15 @@ impl Kernel {
         }
     }
 
+    /// Return the owned Fabric after a one-shot kernel session.
+    ///
+    /// Phase 9.3h.3 uses this to execute an explicitly authorized development
+    /// artifact through ordinary SYS_SPAWN, tear down the transient supervisor,
+    /// and restore the same Fabric to the host development registry.
+    pub(crate) fn into_fabric(self) -> Fabric {
+        self.fabric
+    }
+
     // ─── Physical extent allocation ──────────────────────────────
     //
     // Exact-size reuse: scan pool for matching extent, else bump.

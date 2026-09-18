@@ -1,0 +1,30 @@
+// Deliberate false companions for Phase 9.3h.3.
+import "anka93h3_execution_authority.kleis"
+
+example "FALSE-DEVH3-1 ingress authority alone authorizes execution" {
+    assert(devh3_execution_authority_present(true,false)=true)
+}
+
+example "FALSE-DEVH3-2 stale artifact generation may receive RX code authority" {
+    assert(devh3_code_authority_valid(
+        true,
+        bvconst(17,64),bvconst(17,64),
+        bvconst(4,64),bvconst(5,64),true,
+        bvconst(17,64),bvconst(4,64),perm_RX)=true)
+}
+
+example "FALSE-DEVH3-3 literal segment may receive executable authority" {
+    assert(devh3_literal_authority_valid(
+        true,true,
+        bvconst(17,64),bvconst(17,64),
+        bvconst(4,64),bvconst(4,64),true,
+        true,bvconst(17,64),bvconst(4,64),perm_RX)=true)
+}
+
+example "FALSE-DEVH3-4 presenting execution authority executes artifact directly" {
+    assert(devh3_authority_presentation_executes_artifact(true)=true)
+}
+
+example "FALSE-DEVH3-5 shell run may bypass ordinary spawn admission" {
+    assert(devh3_run_committed(true,true,true,true,true,false)=true)
+}

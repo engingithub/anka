@@ -3701,3 +3701,59 @@ Next gate:
 9.3h.3  run a registered artifact through PM/VLB + ordinary Anka spawn
 ```
 
+
+
+## DN-32: Explicit Developer Execution Authority Uses Ordinary SYS_SPAWN (Phase 9.3h.3)
+
+**Decision.** A development artifact does not become executable merely because
+it was imported, compiled, placed, or named.  Running it requires a second
+explicit host-development token, `DeveloperExecutionAuthority`, distinct from
+`DeveloperIngressAuthority`.  This token authorizes only the bridge that presents
+ordinary Anka authority for the exact current sealed artifact.
+
+The presentation is least-authority:
+
+```text
+artifact code     -> RX only
+artifact literals -> R only, when literals exist
+```
+
+The developer token itself is not a Fabric capability, is never inserted into a
+guest capability table, and is not inherited by the child.  Presenting RX/R is
+not execution.  A one-shot PM-placed supervisor must still invoke the existing
+`SYS_SPAWN` ABI with a `VirtualLayoutBuilder`-generated `SpawnLayout`, then
+observe the exact lifecycle handle with `SYS_WAIT`.
+
+This avoids two tempting shortcuts: direct host construction of the target
+`Anka64Core`, and live ambient mutation of a running guest domain.  The host
+development bridge may establish a trusted one-shot supervisor through the boot
+root, but the target program is created only by the ordinary Anka spawn path.
+
+The runner validates the registry's exact `(ObjectId, Generation)`, sealed state,
+compiled image geometry, and PM/Fabric placement agreement before allocating
+transient state.  VLB places child code/stack/trap and supervisor
+code/control/artifact/stack/trap regions without caller-supplied hexadecimal
+layout knowledge.  Kernel-owned stack/trap physical extents start above both the PM pool and the
+Fabric physical high-water mark, so they cannot collide with existing placement.
+
+After completion the child is collected through `SYS_WAIT`, the transient
+supervisor is reclaimed, its PM-managed code/control objects are destroyed and
+released, and the caller receives the same Fabric with the registered artifact
+unchanged.  Missing execution authority, stale artifact identity, or PM/Fabric
+placement disagreement is rejected before any process is spawned.
+
+Formal gate:
+
+```text
+anka93h3_execution_authority.kleis                    5/5
+anka93h3_execution_authority_false_witnesses.kleis    0/5
+```
+
+No new axioms.  Eight Rust witnesses raise the source test count from 860 to
+868; the executable Rust gate is required before closing 9.3h.3.
+
+Next gate:
+
+```text
+9.3h.4  thin interactive Anka Development Shell command layer
+```

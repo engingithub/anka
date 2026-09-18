@@ -1,4 +1,4 @@
-//! Anka64 development artifact ingress and source registry (Phase 9.3h.1--9.3h.2).
+//! Anka64 development artifact ingress and source registry (Phase 9.3h.1--9.3h.3).
 //!
 //! This module is the host-development bridge promised by the 9.3h.0 Kleis
 //! contract.  It deliberately stops before execution:
@@ -134,6 +134,26 @@ impl DevelopmentArtifactRegistry {
     ) -> Result<&DevelopmentArtifact, DevelopmentShellError> {
         let artifact = self.entries.get(name)
             .ok_or(DevelopmentShellError::ArtifactNotFound)?;
+        Self::validate_current(fabric, artifact)
+    }
+
+    /// Resolve an absolute future-Anka logical path to the exact current
+    /// sealed artifact.  The path is namespace metadata only; this lookup
+    /// performs no authority grant.
+    pub fn resolve_current_by_logical_path(
+        &self,
+        fabric: &Fabric,
+        logical_path: &str,
+    ) -> Result<&DevelopmentArtifact, DevelopmentShellError> {
+        let artifact = self.get_by_logical_path(logical_path)
+            .ok_or(DevelopmentShellError::ArtifactNotFound)?;
+        Self::validate_current(fabric, artifact)
+    }
+
+    fn validate_current<'a>(
+        fabric: &Fabric,
+        artifact: &'a DevelopmentArtifact,
+    ) -> Result<&'a DevelopmentArtifact, DevelopmentShellError> {
         let object = fabric.objects.get(&artifact.key.object)
             .ok_or(DevelopmentShellError::ArtifactObjectMissing)?;
         if object.generation != artifact.key.generation {
@@ -179,7 +199,7 @@ pub enum DevelopmentShellError {
     ArtifactWrongObjectKind,
 }
 
-/// Phase 9.3h.1--9.3h.2 host artifact loader, compiler bridge, and registry.
+/// Phase 9.3h.1--9.3h.3 host artifact loader, compiler bridge, and registry.
 ///
 /// The loader owns no Fabric authority and no physical memory.  Fabric and PM
 /// are borrowed explicitly for each import so the architectural ownership

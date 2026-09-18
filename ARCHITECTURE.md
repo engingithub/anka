@@ -1453,7 +1453,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions; binary size verified by fixed-point regression |
 | Canonical source | ~17 KB |
-| Tests | 860 Rust tests in source at 9.3h.2; executable gate pending local Rust run |
+| Tests | 868 Rust tests in source at 9.3h.3; executable gate pending local Rust run |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -2570,7 +2570,67 @@ No new axioms.  It states that successful sealed current-generation CC_B output
 may be published, `compile` may not execute the produced artifact, and logical
 install paths are non-authoritative.
 
-Phase 9.3h.2 adds six Rust tests over the 854-test 9.3h.1 baseline, bringing the
-source tree to 860 tests.  The Rust gate must be run in a Rust-enabled
-environment before declaring the phase closed.
+Phase 9.3h.2 adds six Rust tests over the 854-test 9.3h.1 baseline.  The
+executable gate is closed at **860/860 Rust tests passing**, with the 9.3h.2
+Kleis gate at **4/4 positive + 0/4 false claims**.
+
+**9.3h.3 — explicit execution authority and ordinary spawn (implemented):**
+
+Compilation and execution are now separate host-development acts.  A registered
+artifact remains inert until the developer presents a distinct
+`DeveloperExecutionAuthority`; `DeveloperIngressAuthority` does not satisfy this
+gate.  `src/anka64/dev_runner.rs` resolves the exact current sealed
+`ArtifactKey`, verifies PM/Fabric placement agreement, and creates VLB-derived
+layouts for both a one-shot supervisor and the target child.
+
+The execution bridge deliberately does not manufacture a child core.  The
+explicit developer token authorizes presentation of ordinary Anka authority to
+the transient supervisor:
+
+```text
+code     -> RX over [0, code_size)
+literals -> R  over [lit_start, logical_size), when present
+```
+
+No WRITE authority is presented and a no-literal artifact receives no redundant
+literal grant.  The token itself is host policy: it is not a Fabric capability,
+is never placed in a guest capability table, and therefore cannot be inherited
+by the child.
+
+The supervisor is itself a PM-placed sealed Anka object.  Its read-only control
+object contains the VLB-generated `SpawnLayout`; the supervisor performs real
+`SYS_SPAWN`, receives a normal lifecycle handle, and performs `SYS_WAIT`.  Thus
+the constructive run path is:
+
+```text
+DeveloperExecutionAuthority
+  + exact sealed ArtifactKey
+  -> exact RX(code) + R(literals) presentation
+  -> VLB SpawnLayout
+  -> guest SYS_SPAWN
+  -> guest SYS_WAIT
+  -> ProcessResult
+```
+
+The PM pool and the kernel's transient stack/trap arena remain disjoint: the
+one-shot Kernel begins dynamic physical allocation above both the PM pool and the Fabric's current physical high-water mark.
+After the wait result is collected, supervisor/child domains and process-owned
+resources are reclaimed, the temporary supervisor/control objects are destroyed
+and their PM extents released, and the original Fabric is returned to the
+development registry with the registered artifact still sealed and placed.
+
+The formal Phase 9.3h.3 package is:
+
+```text
+anka93h3_execution_authority.kleis                    5/5 positive
+anka93h3_execution_authority_false_witnesses.kleis    0/5 false claims pass
+```
+
+No new axioms.  The hostile companions reject ingress-as-run-authority, stale
+RX presentation, executable literal authority, presentation-as-execution, and
+any shell run that bypasses normal spawn admission.
+
+Phase 9.3h.3 adds eight Rust witnesses over the 860-test 9.3h.2 baseline,
+bringing the source tree to 868 tests.  The runtime gate must be run in a
+Rust-enabled environment before declaring the subphase closed.
 

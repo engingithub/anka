@@ -16,6 +16,9 @@ mod tests {
         DeveloperIngressAuthority, DevelopmentShellError,
     };
     use super::super::dev_compiler::DevelopmentCompileError;
+    use super::super::dev_runner::{
+        run_registered_artifact, DeveloperExecutionAuthority, DevelopmentRunError,
+    };
     use super::super::state::*;
 
     // ─── Bootstrap function counts ────────────────────────────
@@ -10687,6 +10690,108 @@ mod tests {
 
         std::fs::remove_dir_all(root).unwrap();
         eprintln!("9.3h.2: rejected C source leaves target registry/Fabric/PM unchanged ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Phase 9.3h.3 — explicit developer execution authority
+    //
+    // A registered artifact remains inert until a separate developer
+    // execution token authorizes exact RX/R presentation to a transient
+    // supervisor.  The supervisor itself must use ordinary SYS_SPAWN/SYS_WAIT.
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn p93h3_ccb_registered_artifact_requires_separate_execution_authority_and_runs_via_spawn() {
+        let ccb = build_ccb();
+        let (root, source) = p93h2_temp_userspace_source(
+            "bin/hello.c",
+            b"int main() { return 77; }",
+        );
+
+        let ingress = DeveloperIngressAuthority::provision();
+        let execution = DeveloperExecutionAuthority::provision();
+        let mut fabric = Fabric::new(0x400000);
+        let mut pm = PhysicalPlacementManager::new(0x10000, 0x200000).unwrap();
+        let mut loader = DevelopmentArtifactLoader::new(DevelopmentMode::Development);
+
+        let key = loader.compile_c_file(
+            Some(&ingress), &mut fabric, &mut pm, "hello",
+            &root, &source, &ccb,
+        ).expect("compile /bin/hello through CC_B");
+
+        let object_count = fabric.objects.len();
+        let allocation_count = pm.allocated_count();
+        assert_eq!(
+            run_registered_artifact(
+                loader.registry(), None, &mut fabric, &mut pm, "/bin/hello",
+            ),
+            Err(DevelopmentRunError::DeveloperExecutionAuthorityRequired),
+        );
+        assert_eq!(fabric.objects.len(), object_count);
+        assert_eq!(pm.allocated_count(), allocation_count);
+        assert!(fabric.domains.is_empty());
+
+        let report = run_registered_artifact(
+            loader.registry(), Some(&execution), &mut fabric, &mut pm, "/bin/hello",
+        ).expect("explicitly authorized /bin/hello run");
+
+        assert_eq!(report.artifact, key);
+        assert_eq!(report.child_result, ProcessResult::Exited(77));
+        assert_eq!(report.presented_code_permissions, Permissions::RX);
+        assert_eq!(report.presented_literal_permissions, None);
+        assert!(report.process_slots_observed >= 2,
+            "run must create a child through SYS_SPAWN");
+        assert!(fabric.domains.is_empty(),
+            "transient development supervisor leaves no live authority");
+        assert_eq!(pm.allocated_count(), allocation_count,
+            "only the registered artifact remains PM-owned after run");
+        assert_eq!(
+            loader.registry().resolve_current_by_logical_path(&fabric, "/bin/hello")
+                .unwrap().key,
+            key,
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+        eprintln!("9.3h.3: explicit run authority -> RX presentation -> VLB -> SYS_SPAWN -> 77 ✓");
+    }
+
+    #[test]
+    fn p93h3_ccb_literal_artifact_runs_with_read_only_literal_authority() {
+        let ccb = build_ccb();
+        let (root, source) = p93h2_temp_userspace_source(
+            "system/services/net/literal_probe.c",
+            br#"int main() { return *"hello"; }"#,
+        );
+
+        let ingress = DeveloperIngressAuthority::provision();
+        let execution = DeveloperExecutionAuthority::provision();
+        let mut fabric = Fabric::new(0x400000);
+        let mut pm = PhysicalPlacementManager::new(0x10000, 0x200000).unwrap();
+        let mut loader = DevelopmentArtifactLoader::new(DevelopmentMode::Development);
+
+        let key = loader.compile_c_file(
+            Some(&ingress), &mut fabric, &mut pm, "literal-probe",
+            &root, &source, &ccb,
+        ).expect("compile literal-bearing CC_B artifact");
+        let artifact = loader.registry().get("literal-probe").unwrap();
+        assert!(artifact.lit_start > artifact.code_size);
+
+        let report = run_registered_artifact(
+            loader.registry(), Some(&execution), &mut fabric, &mut pm,
+            "/system/services/net/literal_probe",
+        ).expect("run literal-bearing artifact through ordinary spawn");
+
+        assert_eq!(report.artifact, key);
+        assert_eq!(report.child_result, ProcessResult::Exited(5),
+            "*\"hello\" must read the literal byte-length header");
+        assert_eq!(report.presented_code_permissions, Permissions::RX);
+        assert_eq!(report.presented_literal_permissions, Some(Permissions::READ));
+        assert!(report.child_layout.stack_vaddr >= artifact.logical_size,
+            "VLB must place stack above the complete code/literal backing image");
+        assert!(fabric.domains.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+        eprintln!("9.3h.3: literal-bearing artifact receives RX(code)+R(literals), never RX literals ✓");
     }
 
 }

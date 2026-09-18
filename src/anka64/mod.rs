@@ -23,6 +23,7 @@ pub mod fabric;
 pub mod placement;
 pub mod dev_shell;
 pub mod dev_compiler;
+pub mod dev_runner;
 pub mod desc;
 pub mod isa;
 pub mod core;
