@@ -35,6 +35,8 @@ pub mod guest_compiler;
 mod bootstrap_tests;
 #[cfg(test)]
 mod ethernet_tests;
+#[cfg(test)]
+mod arp_tests;
 pub mod multicore;
 pub mod ankad;
 pub mod system_image;

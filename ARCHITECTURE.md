@@ -2722,3 +2722,64 @@ anka94a_ethernet_contract_false_witnesses.kleis  0/4 false claims pass
 No new axioms or new Kleis semantics are introduced by the runtime bridge.
 Five Rust witnesses are added over the 877-test 9.3h baseline; the expected
 Phase 9.4a executable gate is 882 tests.
+
+
+### Stage 37: ARP as Bidirectional Anka C System Software (Phase 9.4b)
+
+Phase 9.4b extends the real user-space network path from classification to the
+first protocol response.  The implementation is
+`userspace/system/services/net/arp.c`; neither the kernel, virtual NIC, nor host
+backend interprets ARP.
+
+The executable path is:
+
+```text
+opaque Ethernet frame
+  -> exact NIC_RX + RW buffer authority
+  -> SYS_NIC_RX finite DMA
+  -> user-space Ethernet/ARP structural validation
+  -> Ethernet/IPv4 ARP request + local-target test
+  -> in-place ARP reply construction
+  -> exact NIC_TX + same RW buffer authority
+  -> SYS_NIC_TX finite DMA
+  -> committed virtual-NIC TX frame
+```
+
+The first service identity is deliberately fixed configuration for the
+one-service witness:
+
+```text
+MAC  02:00:00:00:00:02
+IPv4 10.0.0.2
+```
+
+It is not kernel policy and it creates no authority.  A future service manager
+or configuration object may supply the same information without changing ARP
+syntax or the NIC capability rules.
+
+The service accepts only Ethernet/IPv4 ARP with HTYPE=1, PTYPE=0x0800, HLEN=6,
+PLEN=4.  Since the parser receives the whole guest-visible Ethernet frame, at
+least 42 bytes are required before any ARP fixed-field access.  Requests are
+answered only when opcode is 1 and the target IPv4 equals the configured local
+address.  Incoming replies and nonlocal requests produce no TX.  The reply is
+serialized in network byte order, uses the request sender MAC/IP as target
+identity, uses the local MAC/IP as sender identity, and retains the received
+frame length so existing Ethernet padding is conserved.
+
+The Phase 9.4b bootstrap capability surface is explicit and minimal: a single
+NIC device handle containing NIC_RX|NIC_TX at `0:0`, and the mapped DMA buffer
+with RW authority at `1:0`.  RX therefore consumes WRITE from the exact buffer
+authority and TX consumes READ from that same exact authority.  Logical path
+`/system/services/net/arp` supplies no capability and no authority.
+
+No new kernel mechanism or Kleis axiom is introduced.  The existing formal
+contract remains the governing protocol gate:
+
+```text
+anka94b_arp_contract.kleis                  9/9 positive
+anka94b_arp_contract_false_witnesses.kleis  0/4 false claims pass
+```
+
+The earlier finite-NIC-DMA theories remain the authority proof for RX/TX.  Six
+new Rust witnesses are added over the closed 882-test Ethernet baseline; the
+expected Phase 9.4b executable gate is 888 tests.

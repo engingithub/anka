@@ -3854,3 +3854,44 @@ The existing formal-first Ethernet theory is sufficient: it already freezes
 the length bounds, safe fixed-header access, network-order EtherType extraction,
 and the rule that unknown EtherTypes are valid Ethernet syntax.  Phase 9.4a
 therefore requires no additional Kleis axioms or authority theory.
+
+
+## DN-35: ARP Owns Reply Semantics in User Space (Phase 9.4b)
+
+**Decision.** Implement ARP request validation, reply construction, and reply
+transmission entirely in CC_B-compiled C.  Do not add ARP awareness to the
+kernel, NIC controller, or host backend.
+
+`arp.c` receives one opaque virtual-NIC frame using `SYS_NIC_RX`, validates the
+minimal Ethernet envelope plus the frozen Ethernet/IPv4 ARP fixed fields, and
+answers only an opcode-1 request for its configured local IPv4 address.  The
+first executable configuration is MAC `02:00:00:00:00:02`, IPv4 `10.0.0.2`.
+That identity is a service-startup fact for the witness, not a protection
+primitive.
+
+The same mapped object is deliberately used for RX and TX.  The process is
+seeded with one RW memory capability and one NIC device capability containing
+NIC_RX|NIC_TX.  This does not weaken the finite-DMA rule: `SYS_NIC_RX` still
+requires WRITE on the exact presented buffer authority and `SYS_NIC_TX` still
+requires READ on that exact authority.  The combined capability merely allows
+this service to perform both explicitly authorized operations.
+
+Reply construction is in-place because the fixed ARP reply is the same size as
+the request payload.  Before overwriting sender fields, the C program saves the
+request sender MAC/IP in locals.  It then writes Ethernet destination/local
+source, opcode 2, local sender MAC/IP, and the saved peer MAC/IP as target.  The
+TX length is the original RX length, preserving padding bytes rather than
+inventing an Ethernet padding policy inside ARP.
+
+Until a real network-service IPC ABI exists, the one-shot ARP executable checks
+the Ethernet EtherType and frame length itself.  This is a temporary
+composition seam, not a second Ethernet implementation in the kernel.  The
+9.4a service remains the executable witness for generic EtherType dispatch;
+9.4b is the executable witness for the ARP branch once selected.
+
+No new Kleis theory is required.  `anka94b_arp_contract.kleis` already freezes
+the 28-byte ARP payload safety boundary, supported fixed header, local-target
+reply predicate, no reply-to-reply behavior, and preservation of request sender
+MAC/IP as reply target identity.  The existing finite NIC RX/TX theories cover
+the authority transition.  Runtime byte-serialization tests now witness the
+concrete reply layout.
