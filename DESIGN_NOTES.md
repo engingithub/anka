@@ -3812,3 +3812,45 @@ Next phase after that gate:
 ```text
 9.4a  Ethernet as real Anka C system software
 ```
+
+
+## DN-34: Ethernet Belongs in User Space (Phase 9.4a)
+
+**Decision.** Implement the first network protocol layer as real CC_B-compiled
+C system software rather than adding an Ethernet decoder to Rust kernel/device
+code.
+
+`userspace/system/services/net/ethernet.c` performs one authorized finite RX,
+validates the frozen 14..1514-byte untagged Ethernet boundary, and extracts the
+EtherType as `(byte12 << 8) | byte13`.  The current one-shot process exits with
+a dispatch tag (ARP, IPv4, unknown, malformed) so the runtime tests can observe
+the parser without inventing the later ARP/IPv4 service IPC protocol.
+
+The host-side Rust addition is test scaffolding only.  It creates a virtual NIC
+and one DMA buffer, boots the compiled C image, installs exact NIC_RX and WRITE
+capability handles into the otherwise-empty process cap table, injects opaque
+frame bytes, and runs the normal finite-DMA path to completion.  It does not
+interpret Ethernet in Rust.
+
+For this first witness the startup ABI is intentionally explicit and tiny:
+
+```text
+NIC_RX handle       = slot 0, generation 0
+DMA WRITE handle    = slot 1, generation 0
+DMA buffer vaddr    = 0x10000
+```
+
+These are process-environment conventions, not ambient authority.  Authority
+still exists only because the trusted test bootstrap installs the exact device
+and memory capabilities.  Logical path `/system/services/net/ethernet` remains
+non-authoritative.
+
+CC_B does not yet preprocess `#include`, so the Ethernet source remains a
+self-contained translation unit.  Do not create a decorative header hierarchy
+that the actual compiler cannot consume.  Shared headers/source composition are
+to be introduced when a real compiler/linkage requirement appears.
+
+The existing formal-first Ethernet theory is sufficient: it already freezes
+the length bounds, safe fixed-header access, network-order EtherType extraction,
+and the rule that unknown EtherTypes are valid Ethernet syntax.  Phase 9.4a
+therefore requires no additional Kleis axioms or authority theory.
