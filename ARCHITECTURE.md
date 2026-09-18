@@ -3045,3 +3045,80 @@ the expected Phase 9.4f Rust gate is 916 tests.  The end-to-end witness sends
 has the client write `pong` into the shared buffer, and verifies that the
 socket service alone constructs the corresponding TCP payload and sequence
 state.
+
+
+### Stage 42: HTTP `/alive` Above the Process-Facing Socket Boundary (Phase 9.4g)
+
+Phase 9.4g reaches the original networking milestone without adding any new
+kernel networking primitive. `userspace/system/services/net/httpd.c` is an
+ordinary CC_B-compiled application process above the Phase 9.4f socket service.
+It has no NIC capability, no DMA capability, no TCP peer tuple, and no access to
+TCP sequence or acknowledgement state.
+
+The executable topology is:
+
+```text
+external TCP peer
+  -> /system/services/net/socket
+       owns Ethernet / IPv4 / TCP / NIC state
+       |
+       | CONNECTED / DATA(n) / CLOSED
+       | explicitly shared 1024-byte stream buffer
+       v
+     /system/services/net/httpd
+       parses HTTP request bytes only
+       writes HTTP response bytes only
+       |
+       `-- SEND(n)
+```
+
+The first HTTP contract is deliberately bounded. One complete request must
+arrive in one socket `DATA(n)` notification with `1 <= n <= 1024`. The accepted
+route has the exact request line:
+
+```text
+GET /alive HTTP/1.1\r\n
+```
+
+and the request must terminate in `\r\n\r\n`. Header bytes between the request
+line and the terminating blank line are opaque at this stage: they affect no
+authority and are not interpreted. A matching request produces exactly:
+
+```text
+HTTP/1.1 200 OK\r\n
+Content-Length: 16\r\n
+Connection: close\r\n
+\r\n
+Anka64 is alive.
+```
+
+The HTTP stream response is 74 bytes and its body is exactly 16 bytes. Any
+other complete/incomplete first request receives the bounded 64-byte response
+`HTTP/1.1 404 Not Found` with `Content-Length: 0` and `Connection: close`.
+The application then waits for socket `CLOSED`; it never manipulates transport
+state directly.
+
+This phase intentionally does not claim general HTTP stream semantics. Request
+reassembly across multiple DATA notifications, pipelining, request bodies,
+chunked transfer coding, persistent HTTP connections, general header semantics,
+TLS, and concurrent clients are deferred. The one-DATA rule matches the current
+half-duplex socket protocol and is sufficient to close the literal architectural
+milestone:
+
+```text
+GET /alive HTTP/1.1 -> "Anka64 is alive."
+```
+
+The governing formal gate is:
+
+```text
+anka94g_http_contract.kleis                  15 positive examples
+anka94g_http_contract_false_witnesses.kleis   8 deliberate false claims
+```
+
+Seven executable witnesses are added over the closed 916-test socket baseline;
+the expected Phase 9.4g Rust gate is 923 tests. The end-to-end witness performs
+a real TCP handshake, delivers the HTTP request through the socket process,
+verifies the exact 200 response bytes and checksums on the transmitted TCP
+segment, acknowledges the response, sends FIN, and observes both socket and HTTP
+processes terminate through their ordinary protocols.

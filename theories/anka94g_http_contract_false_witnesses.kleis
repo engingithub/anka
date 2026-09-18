@@ -1,0 +1,33 @@
+import "anka94g_http_contract.kleis"
+
+example "FALSE-HTTP94G-1 unconnected request is accepted as alive" {
+    assert(http94g_alive_request(false,true,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-HTTP94G-2 incomplete request is accepted as alive" {
+    assert(http94g_alive_request(true,true,true,true,false,true,true,true)=true)
+}
+
+example "FALSE-HTTP94G-3 wrong method receives alive 200 route" {
+    assert(http94g_alive_request(true,true,true,true,true,false,true,true)=true)
+}
+
+example "FALSE-HTTP94G-4 wrong path receives alive 200 route" {
+    assert(http94g_alive_request(true,true,true,true,true,true,false,true)=true)
+}
+
+example "FALSE-HTTP94G-5 alive body length is fifteen bytes" {
+    assert(http94g_body_length(true)=bvconst(15,16))
+}
+
+example "FALSE-HTTP94G-6 HTTP process requires NIC authority" {
+    assert(http94g_client_requires_nic()=true)
+}
+
+example "FALSE-HTTP94G-7 HTTP process selects TCP sequence numbers" {
+    assert(http94g_client_selects_tcp_sequence()=true)
+}
+
+example "FALSE-HTTP94G-8 HTTP process selects TCP acknowledgements" {
+    assert(http94g_client_selects_tcp_acknowledgement()=true)
+}

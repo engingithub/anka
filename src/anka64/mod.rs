@@ -45,6 +45,8 @@ mod udp_tests;
 mod tcp_tests;
 #[cfg(test)]
 mod socket_tests;
+#[cfg(test)]
+mod http_tests;
 pub mod multicore;
 pub mod ankad;
 pub mod system_image;
