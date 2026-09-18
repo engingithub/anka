@@ -1,0 +1,221 @@
+// =============================================================================
+// Anka64 TCP User-Space Contract (Phase 9.4e, formal-first)
+// =============================================================================
+// No new axioms.  The first TCP service is a single passive connection over
+// the strict IPv4 subset already frozen by Phase 9.4c:
+//
+//   LISTEN -> SYN_RCVD -> ESTABLISHED -> CLOSED
+//
+// Scope:
+// - protocol = 6 and exact development endpoint,
+// - fixed 20-byte TCP header (data offset = 5),
+// - TCP checksum is mandatory and covers IPv4 pseudo-header + TCP segment,
+// - SYN consumes one receive sequence number,
+// - the final handshake ACK must match exact tuple/SEQ/ACK,
+// - established payload is accepted only in-order and advances RCV.NXT by its
+//   exact byte length,
+// - FIN is accepted only in-order and consumes one receive sequence number.
+//
+// Deferred: options, retransmission timers, out-of-order queues, simultaneous
+// open, multiple connections, window scaling, congestion control, sockets.
+// =============================================================================
+
+define tcp94e_length_safe(
+    tcp_len : BitVec16,
+    data_offset_words : BitVec8
+) = bvuge(tcp_len,bvconst(20,16))
+    ∧ data_offset_words=bvconst(5,8)
+
+define tcp94e_listen_syn(
+    ipv4_supported : Bool,
+    protocol_is_tcp : Bool,
+    length_safe : Bool,
+    destination_is_service : Bool,
+    checksum_valid : Bool,
+    syn_only : Bool,
+    payload_empty : Bool
+) = ipv4_supported
+    ∧ protocol_is_tcp
+    ∧ length_safe
+    ∧ destination_is_service
+    ∧ checksum_valid
+    ∧ syn_only
+    ∧ payload_empty
+
+define tcp94e_tuple_match(
+    saved_ip : BitVec32,
+    saved_port : BitVec16,
+    packet_ip : BitVec32,
+    packet_port : BitVec16
+) =
+    if saved_ip=packet_ip then
+        if saved_port=packet_port then true else false
+    else false
+
+define tcp94e_syn_rcvd_ack(
+    tuple_match : Bool,
+    checksum_valid : Bool,
+    ack_only : Bool,
+    payload_empty : Bool,
+    packet_seq : BitVec32,
+    rcv_nxt : BitVec32,
+    packet_ack : BitVec32,
+    snd_nxt : BitVec32
+) =
+    if tuple_match then
+        if checksum_valid then
+            if ack_only then
+                if payload_empty then
+                    if packet_seq=rcv_nxt then
+                        if packet_ack=snd_nxt then true else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define tcp94e_data_ok(
+    tuple_match : Bool,
+    checksum_valid : Bool,
+    ack_data_flags : Bool,
+    payload_nonempty : Bool,
+    packet_seq : BitVec32,
+    rcv_nxt : BitVec32,
+    packet_ack : BitVec32,
+    snd_nxt : BitVec32
+) =
+    if tuple_match then
+        if checksum_valid then
+            if ack_data_flags then
+                if payload_nonempty then
+                    if packet_seq=rcv_nxt then
+                        if packet_ack=snd_nxt then true else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define tcp94e_fin_ok(
+    tuple_match : Bool,
+    checksum_valid : Bool,
+    fin_ack_only : Bool,
+    payload_empty : Bool,
+    packet_seq : BitVec32,
+    rcv_nxt : BitVec32,
+    packet_ack : BitVec32,
+    snd_nxt : BitVec32
+) =
+    if tuple_match then
+        if checksum_valid then
+            if fin_ack_only then
+                if payload_empty then
+                    if packet_seq=rcv_nxt then
+                        if packet_ack=snd_nxt then true else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define tcp94e_after_syn(peer_seq : BitVec32) : BitVec32 =
+    bvadd(peer_seq,bvconst(1,32))
+
+define tcp94e_after_data(rcv_nxt : BitVec32, payload_len : BitVec32) : BitVec32 =
+    bvadd(rcv_nxt,payload_len)
+
+define tcp94e_after_fin(rcv_nxt : BitVec32) : BitVec32 =
+    bvadd(rcv_nxt,bvconst(1,32))
+
+define tcp94e_synack_seq(iss : BitVec32) : BitVec32 = iss
+
+define tcp94e_synack_ack(peer_seq : BitVec32) : BitVec32 =
+    bvadd(peer_seq,bvconst(1,32))
+
+define tcp94e_ack_seq(snd_nxt : BitVec32) : BitVec32 = snd_nxt
+
+define tcp94e_ack_ack(rcv_nxt : BitVec32) : BitVec32 = rcv_nxt
+
+example "TCP94E-1 minimum fixed TCP header is safe" {
+    assert(tcp94e_length_safe(bvconst(20,16),bvconst(5,8)))
+}
+
+example "TCP94E-2 nineteen-byte TCP segment is rejected" {
+    assert(¬tcp94e_length_safe(bvconst(19,16),bvconst(5,8)))
+}
+
+example "TCP94E-3 TCP options are deferred by the first stack" {
+    assert(¬tcp94e_length_safe(bvconst(24,16),bvconst(6,8)))
+}
+
+example "TCP94E-4 valid passive-open SYN is accepted" {
+    assert(tcp94e_listen_syn(true,true,true,true,true,true,true)=true)
+}
+
+example "TCP94E-5 bad checksum cannot open a connection" {
+    assert(tcp94e_listen_syn(true,true,true,true,false,true,true)=false)
+}
+
+example "TCP94E-6 SYN consumes exactly one receive sequence number" {
+    assert(tcp94e_after_syn(bvconst(1000,32))=bvconst(1001,32))
+}
+
+example "TCP94E-7 SYN-ACK acknowledges peer SYN" {
+    assert(tcp94e_synack_ack(bvconst(77,32))=bvconst(78,32))
+}
+
+example "TCP94E-8 final handshake ACK must match tuple sequence and acknowledgement" {
+    assert(tcp94e_syn_rcvd_ack(
+        true,true,true,true,
+        bvconst(1001,32),bvconst(1001,32),
+        bvconst(5001,32),bvconst(5001,32)
+    )=true)
+}
+
+example "TCP94E-9 wrong tuple cannot complete handshake" {
+    assert(tcp94e_syn_rcvd_ack(
+        false,true,true,true,
+        bvconst(1001,32),bvconst(1001,32),
+        bvconst(5001,32),bvconst(5001,32)
+    )=false)
+}
+
+example "TCP94E-10 in-order established payload is accepted" {
+    assert(tcp94e_data_ok(
+        true,true,true,true,
+        bvconst(1001,32),bvconst(1001,32),
+        bvconst(5001,32),bvconst(5001,32)
+    )=true)
+}
+
+example "TCP94E-11 out-of-order payload is rejected" {
+    assert(tcp94e_data_ok(
+        true,true,true,true,
+        bvconst(1002,32),bvconst(1001,32),
+        bvconst(5001,32),bvconst(5001,32)
+    )=false)
+}
+
+example "TCP94E-12 payload advances RCV.NXT by exact byte length" {
+    assert(tcp94e_after_data(bvconst(1001,32),bvconst(17,32))=bvconst(1018,32))
+}
+
+example "TCP94E-13 valid in-order FIN ACK is accepted" {
+    assert(tcp94e_fin_ok(
+        true,true,true,true,
+        bvconst(1018,32),bvconst(1018,32),
+        bvconst(5001,32),bvconst(5001,32)
+    )=true)
+}
+
+example "TCP94E-14 FIN consumes exactly one receive sequence number" {
+    assert(tcp94e_after_fin(bvconst(1018,32))=bvconst(1019,32))
+}
+
+example "TCP94E-15 pure ACK sequence is current SND.NXT" {
+    assert(∀(s : BitVec32). tcp94e_ack_seq(s)=s)
+}
+
+example "TCP94E-16 pure ACK acknowledgement is current RCV.NXT" {
+    assert(∀(r : BitVec32). tcp94e_ack_ack(r)=r)
+}

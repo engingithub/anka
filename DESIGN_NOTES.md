@@ -3944,3 +3944,76 @@ No additional Kleis theory is required.  The pre-existing
 IPv4 checksum/nonfragment/local-destination support, ICMP fixed-header safety,
 echo reply predicate, and exact identifier/sequence/payload conservation.  The
 runtime C witnesses concretize byte layout and checksum serialization.
+
+
+## DN-37: UDP Checksum and Endpoint Semantics Stay in User Space (Phase 9.4d)
+
+**Decision.** Keep UDP framing, endpoint filtering, pseudo-header checksum
+validation, and reply serialization entirely in CC_B-compiled C.  The first
+endpoint is development port `49152` and reflects opaque payload bytes; it is a
+transport witness, not yet a socket table.
+
+UDP length must be at least eight bytes and exactly consume the IPv4 payload.
+For IPv4 UDP, checksum zero retains its protocol-defined meaning of "checksum
+omitted"; any supplied checksum must validate over the IPv4 pseudo-header and
+complete UDP datagram.  Replies always emit a real checksum, mapping a computed
+wire value of zero to `0xffff` so zero remains reserved for omission.
+
+No new kernel mechanism or authority is introduced.  The same explicit finite
+DMA rights used by ICMP provide RX/WRITE and TX/READ.  Phase 9.4d closes at the
+formal gate of 13 positive / five rejected false witnesses and the 901-test
+runtime gate.
+
+
+## DN-38: TCP Begins as One Explicit Passive State Machine, Not a Socket API (Phase 9.4e)
+
+**Decision.** Introduce TCP as a real persistent CC_B process before introducing
+sockets.  The first service owns exactly one passive connection and therefore
+makes TCP state observable without prematurely inventing file descriptors,
+listen queues, process-facing socket IPC, retransmission machinery, or a
+multi-connection table.
+
+The supported state graph is:
+
+```text
+LISTEN -> SYN_RCVD -> ESTABLISHED -> CLOSED
+```
+
+A transition is allowed only after the strict IPv4 envelope, local destination,
+protocol 6, fixed 20-byte TCP header, endpoint 49153, and mandatory TCP
+pseudo-header checksum have validated.  After SYN, the peer IPv4/port tuple is
+saved.  The final ACK, every accepted data segment, and FIN must match that
+same tuple and exact `SEQ/ACK` expectations.  The service accepts only in-order
+payload; there is intentionally no retransmission or reassembly queue yet.
+
+The deterministic initial send sequence is `0x414e4b41` for the executable
+witness.  This makes byte-level tests reproducible and is not the eventual ISN
+policy.  SYN and FIN each consume one sequence number; data consumes exactly
+its payload length.  These arithmetic laws are frozen in
+`anka94e_tcp_contract.kleis` using 32-bit bit-vector addition so wraparound is
+part of the formal relation even though the first executable witnesses do not
+exercise the wrap boundary.
+
+The C implementation maintains state across repeated finite `SYS_NIC_RX`
+attempts.  `SYS_NIC_RX` is deliberately not an arrival wait: when the private
+RX queue is empty it returns error 9 with no DMA request.  The persistent TCP
+service responds by calling `SYS_DEV_EVENT_WAIT` on the same exact NIC handle
+with its last observed activity epoch, then retries `SYS_NIC_RX` after wakeup.
+This preserves the finite-DMA contract and avoids polling.  Malformed,
+nonlocal, wrong-endpoint, wrong-tuple, bad-checksum, out-of-order, and
+wrong-ACK packets produce no TX and do not advance TCP state.
+
+SYN-ACK and pure ACK packets are rebuilt rather than mutating a data packet in
+place.  Their IPv4 total length is 40 and TX length is 60 bytes; the six bytes
+of Ethernet padding are explicitly zeroed.  This prevents bytes from a
+previous received TCP payload from becoming observable padding in a shorter
+control reply.
+
+The authority model gains no new mechanism.  Because this is the first
+persistent network listener, its exact device handle combines
+`EVENT_WAIT|NIC_RX|NIC_TX`; one RW DMA-buffer capability permits the same
+finite DMA operations already proved.  `EVENT_WAIT` is independently checked
+by the existing Phase 9.3d device-event contract and does not confer RX or TX.
+Neither TCP state nor endpoint identity grants capability.  Sockets remain the
+next architectural phase that will connect transport state to ordinary user
+processes.
