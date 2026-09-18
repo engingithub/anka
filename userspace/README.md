@@ -22,3 +22,17 @@ logical install path by removing the `userspace/` prefix and `.c` extension:
 
 The host path, logical path, and runtime `(ObjectId, Generation)` remain three
 distinct identities.  Neither path grants authority.
+
+
+## Development shell
+
+From the project root, `anka dev` starts the Phase 9.3h monitor with this tree
+as its default source mirror.  For example:
+
+```text
+anka64> compile bin/hello.c
+anka64> run /bin/hello
+```
+
+The first compile lazily bootstraps the self-hosted CC_B compiler inside Anka;
+subsequent compiles reuse that compiler image for the session.

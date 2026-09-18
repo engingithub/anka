@@ -31,6 +31,11 @@ fn main() {
         run_cc(&args[2..]);
         return;
     }
+    // Subcommand: anka dev
+    if args.len() > 1 && args[1] == "dev" {
+        run_dev(&args[2..]);
+        return;
+    }
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print_help();
@@ -668,6 +673,63 @@ EXAMPLE:
 }
 
 // ---------------------------------------------------------------------------
+// Anka64 development shell subcommand
+// ---------------------------------------------------------------------------
+
+fn run_dev(args: &[String]) {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("\
+Anka64 Development Shell
+
+USAGE:
+    anka dev [--userspace PATH]
+
+OPTIONS:
+    --userspace PATH  Host mirror of the future Anka64 namespace
+                      (default: userspace)
+    --help, -h        Print this help
+
+The shell provides compile, raw-bytecode ingress, artifact inspection,
+and ordinary run/spawn commands.  Type 'help' inside the shell for the
+command list.");
+        return;
+    }
+
+    let mut userspace_root = String::from("userspace");
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--userspace" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --userspace requires a path");
+                    process::exit(2);
+                }
+                userspace_root = args[i].clone();
+            }
+            other => {
+                eprintln!("error: unknown anka dev option: {other}");
+                eprintln!("Try 'anka dev --help' for usage.");
+                process::exit(2);
+            }
+        }
+        i += 1;
+    }
+
+    let mut shell = anka::anka64::dev_monitor::DevelopmentShellSession::new(&userspace_root)
+        .unwrap_or_else(|err| {
+            eprintln!("error: cannot start development shell: {err}");
+            process::exit(1);
+        });
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    shell.run_interactive(stdin.lock(), stdout.lock()).unwrap_or_else(|err| {
+        eprintln!("error: development shell I/O failed: {err}");
+        process::exit(1);
+    });
+}
+
+// ---------------------------------------------------------------------------
 // C compiler subcommand
 // ---------------------------------------------------------------------------
 
@@ -853,6 +915,8 @@ EXAMPLES:
     anka --hello --emit-srec h.srec Write hello demo as S-record file
     anka asm hello.s                Assemble source → hello.srec
     anka asm hello.s -o out.srec    Assemble with explicit output path
+    anka dev                         Start the Anka64 Development Shell
+    anka dev --userspace userspace  Use an explicit host userspace mirror
     anka cc hello.c --run           Compile and run C program
     anka cc hello.c -o hello.srec   Compile C to S-record
 

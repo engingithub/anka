@@ -1453,7 +1453,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions; binary size verified by fixed-point regression |
 | Canonical source | ~17 KB |
-| Tests | 868 Rust tests in source at 9.3h.3; executable gate pending local Rust run |
+| Tests | 877 Rust tests in source at 9.3h.4; 868/868 gate closed for 9.3h.3; 9.3h.4 gate pending local Rust run |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -2630,7 +2630,50 @@ No new axioms.  The hostile companions reject ingress-as-run-authority, stale
 RX presentation, executable literal authority, presentation-as-execution, and
 any shell run that bypasses normal spawn admission.
 
-Phase 9.3h.3 adds eight Rust witnesses over the 860-test 9.3h.2 baseline,
-bringing the source tree to 868 tests.  The runtime gate must be run in a
-Rust-enabled environment before declaring the subphase closed.
+Phase 9.3h.3 adds eight Rust witnesses over the 860-test 9.3h.2 baseline.
+The executable gate is closed at **868/868 Rust tests passing**, with the
+9.3h.3 Kleis gate at **5/5 positive + 0/5 false claims**.
+
+**9.3h.4 — minimal interactive development shell (implemented):**
+
+`src/anka64/dev_monitor.rs` is a deliberately thin line-oriented monitor over
+the already-proved 9.3h mechanisms.  It adds no authority primitive and no
+alternate execution route.  Its commands are:
+
+```text
+compile <source.c> [name]
+load bin <file> [name]
+run <name|/logical/path>
+artifacts
+objects
+placements
+help
+quit | exit
+```
+
+`compile` delegates to the 9.3h.2 compile-only path; `load bin` delegates to
+transactional 9.3h.1 ingress; and `run` creates a short-lived explicit
+`DeveloperExecutionAuthority` and delegates to the 9.3h.3 VLB + ordinary
+`SYS_SPAWN`/`SYS_WAIT` path.  Observation commands create no guest authority.
+The monitor intentionally has no pipes, globbing, redirection, environment
+expansion, or host-shell language.
+
+The self-hosted compiler is bootstrapped lazily on the first `compile`.  The
+Rust AST seed CC_A runs under ankad and compiles the same canonical C source
+used by the fixed-point regression into CC_B in compile-only mode.  CC_B is
+then cached as development bytes for the session; developer source is still
+compiled only by CC_B.  This promotes the former test-only CC_B construction
+into normal development tooling without substituting a host C compiler.
+
+The command-line entry point is `anka dev [--userspace PATH]`, defaulting to
+`userspace/`.  Source arguments may be written relative to that mirror, e.g.
+`compile bin/hello.c`, while logical execution uses `/bin/hello`.  `run` is
+synchronous in 9.3h.4 because the 9.3h.3 runner already performs `SYS_WAIT`; a
+separate `wait`/`ps` surface is therefore not invented before persistent
+process management requires it.
+
+Phase 9.3h.4 adds nine Rust witnesses over the closed 868-test baseline,
+bringing the source tree to 877 tests.  No additional Kleis theory is required:
+the shell is a parser/dispatcher over the 9.3h.0, 9.3h.2, and 9.3h.3 authority
+contracts.  The executable 877-test gate must pass before Phase 9.3h is merged.
 

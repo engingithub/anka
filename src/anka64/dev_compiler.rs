@@ -11,10 +11,11 @@
 
 use super::ankad::{build_ankad_code, SUPERVISOR_COMPILER_VADDR};
 use super::fabric::Fabric;
+use super::cc;
 use super::guest_compiler::{
-    CCB_MODE_COMPILE_ONLY, LAYOUT_OUT, LAYOUT_SRC, LAYOUT_WS,
-    OUTPUT_SIZE, SOURCE_SIZE, WS_FUNC_COUNT, WS_LIT_POS, WS_MODE,
-    WS_OUT_POS, WS_SIZE,
+    build_6b4_compiler, canonical_compiler_source, CCB_MODE_COMPILE_ONLY,
+    LAYOUT_OUT, LAYOUT_SRC, LAYOUT_WS, OUTPUT_SIZE, SOURCE_SIZE,
+    WS_FUNC_COUNT, WS_LIT_POS, WS_MODE, WS_OUT_POS, WS_SIZE,
 };
 use super::os::{BootError, BootGrant, BootImage, BootInfo, BootMap, Kernel};
 use super::placement::{PhysicalPlacementManager, PlacementError};
@@ -69,6 +70,7 @@ pub enum DevelopmentCompileError {
     OutputNotSealed,
     InvalidOutputGeometry,
     CompileCommandExecutedOutput,
+    BootstrappedCompilerHasLiterals,
 }
 
 /// Compile one C translation unit through the real self-hosted CC_B.
@@ -81,10 +83,38 @@ pub fn compile_c_with_ccb(
     ccb_image: &[u8],
     source: &[u8],
 ) -> Result<CompiledCImage, DevelopmentCompileError> {
-    if ccb_image.is_empty() {
+    compile_c_with_compiler_image(ccb_image, DEVELOPMENT_CCB_CODE_VADDR, source)
+}
+
+/// Bootstrap the self-hosted CC_B image from the Rust AST seed (CC_A).
+///
+/// This is development tooling, not a host C compiler shortcut: CC_A itself
+/// runs as an ordinary Anka process under ankad and compiles the canonical C
+/// source in compile-only mode.  The resulting sealed bytes are cached by the
+/// interactive development shell and used for subsequent user-source builds.
+pub fn bootstrap_development_ccb() -> Result<Vec<u8>, DevelopmentCompileError> {
+    let compiler_prog = build_6b4_compiler();
+    let cca_image = cc::compile(&compiler_prog).to_bytes();
+    let canonical_source = canonical_compiler_source();
+    let ccb = compile_c_with_compiler_image(&cca_image, 0, canonical_source.as_bytes())?;
+    if ccb.lit_start != 0 {
+        // The compiler image itself is intentionally code-only today.  If the
+        // canonical compiler gains literals, its child-image grant/mapping
+        // contract must be extended before silently treating them as RX code.
+        return Err(DevelopmentCompileError::BootstrappedCompilerHasLiterals);
+    }
+    Ok(ccb.bytes)
+}
+
+fn compile_c_with_compiler_image(
+    compiler_image: &[u8],
+    compiler_code_vaddr: u64,
+    source: &[u8],
+) -> Result<CompiledCImage, DevelopmentCompileError> {
+    if compiler_image.is_empty() {
         return Err(DevelopmentCompileError::EmptyCompilerImage);
     }
-    if ccb_image.len() > 0x1FFFF {
+    if compiler_image.len() > 0x1FFFF {
         return Err(DevelopmentCompileError::CompilerImageTooLarge);
     }
     if source.len().saturating_add(8) > SOURCE_SIZE as usize {
@@ -101,7 +131,7 @@ pub fn compile_c_with_ccb(
         &mut fabric, &mut placement, "dev-ankad", ANKAD_OBJECT_SIZE,
     )?;
     let compiler_obj = allocate_placed(
-        &mut fabric, &mut placement, "dev-ccb", ccb_image.len() as u64,
+        &mut fabric, &mut placement, "dev-compiler", compiler_image.len() as u64,
     )?;
     let source_obj = allocate_placed(
         &mut fabric, &mut placement, "dev-c-source", SOURCE_SIZE as u64,
@@ -119,7 +149,7 @@ pub fn compile_c_with_ccb(
         }
     }
 
-    if !fabric.initialize_object(compiler_obj, 0, ccb_image)
+    if !fabric.initialize_object(compiler_obj, 0, compiler_image)
         || !fabric.seal_object(compiler_obj)
     {
         return Err(DevelopmentCompileError::InitializationRejected);
@@ -132,9 +162,22 @@ pub fn compile_c_with_ccb(
         return Err(DevelopmentCompileError::InitializationRejected);
     }
 
-    // `compile` must not imply `run`.  The historical zero value preserves
-    // compile+exec behavior for the bootstrap regression corpus; the
-    // development shell explicitly selects compile-only mode.
+    // The Rust AST seed compiler (CC_A) historically relies on the harness to
+    // initialize the downward-growing literal frontier.  Canonical CC_B also
+    // initializes it itself, so doing this here is redundant for CC_B but
+    // required for bootstrap symmetry with the long-standing supervised
+    // compiler harness.
+    let lit_pos_offset = (WS_LIT_POS - LAYOUT_WS) as u64;
+    if !fabric.initialize_object(
+        workspace_obj,
+        lit_pos_offset,
+        &(OUTPUT_SIZE as u64).to_le_bytes(),
+    ) {
+        return Err(DevelopmentCompileError::InitializationRejected);
+    }
+
+    // `compile` must not imply `run`.  Both the Rust AST seed compiler (CC_A)
+    // and canonical self-hosted CC_B honor this workspace mode word.
     let mode_offset = (WS_MODE - LAYOUT_WS) as u64;
     if !fabric.initialize_object(
         workspace_obj,
@@ -144,7 +187,7 @@ pub fn compile_c_with_ccb(
         return Err(DevelopmentCompileError::InitializationRejected);
     }
 
-    let ankad_code = build_ankad_code(ccb_image.len(), DEVELOPMENT_CCB_CODE_VADDR);
+    let ankad_code = build_ankad_code(compiler_image.len(), compiler_code_vaddr);
     if ankad_code.len() as u64 > ANKAD_OBJECT_SIZE
         || !fabric.initialize_object(ankad_obj, 0, &ankad_code)
         || !fabric.seal_object(ankad_obj)
@@ -164,7 +207,7 @@ pub fn compile_c_with_ccb(
             BootGrant {
                 obj: compiler_obj,
                 offset: 0,
-                size: ccb_image.len() as u64,
+                size: compiler_image.len() as u64,
                 perms: Permissions::RX,
             },
             BootGrant {
@@ -207,7 +250,7 @@ pub fn compile_c_with_ccb(
             },
             BootMap {
                 vaddr: SUPERVISOR_COMPILER_VADDR,
-                size: ccb_image.len() as u64,
+                size: compiler_image.len() as u64,
                 obj: compiler_obj,
                 obj_offset: 0,
             },

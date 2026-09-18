@@ -3750,10 +3750,65 @@ anka93h3_execution_authority_false_witnesses.kleis    0/5
 ```
 
 No new axioms.  Eight Rust witnesses raise the source test count from 860 to
-868; the executable Rust gate is required before closing 9.3h.3.
+868.  The executable gate closed at **868/868**, with 5/5 positive Kleis
+witnesses and 0/5 deliberate false claims passing.
 
-Next gate:
+
+## DN-33: The Development Shell Is a Thin Monitor, Not a New Authority Layer (Phase 9.3h.4)
+
+**Decision.** Finish Phase 9.3h with a minimal line-oriented development
+monitor whose only job is parsing and dispatch.  It must not duplicate compiler,
+placement, capability, or process-lifecycle logic.
+
+The command surface is intentionally small:
 
 ```text
-9.3h.4  thin interactive Anka Development Shell command layer
+compile <source.c> [name]
+load bin <file> [name]
+run <name|/logical/path>
+artifacts
+objects
+placements
+help
+quit | exit
+```
+
+There are no pipes, redirection, globbing, variable expansion, or inherited Unix
+shell semantics.  `compile` is exactly the 9.3h.2 compile-only operation.
+`load bin` is exactly 9.3h.1 transactional ingress.  `run` provisions a
+short-lived `DeveloperExecutionAuthority` as the explicit developer act and
+then invokes the 9.3h.3 runner; the token is not retained in shell state and is
+never guest authority.  `artifacts`, `objects`, and `placements` are read-only
+inspection surfaces.
+
+The monitor owns one persistent development Fabric, PM, and artifact registry.
+Its PM pool occupies only the lower half of the development machine, leaving a
+disjoint upper region for the transient kernel stack/trap allocations required
+by the normal run path.  The registered artifact survives each synchronous
+run unchanged.
+
+The interactive shell must also be able to obtain CC_B without relying on a
+test-only helper or a host C compiler.  The canonical fixed-point source
+generator is therefore available to development code.  On the first `compile`,
+CC_A (the Rust-AST bootstrap seed) runs under ankad and compiles that canonical
+C source in compile-only mode to produce CC_B.  The shell caches the resulting
+CC_B bytes for the session; all developer C then goes through the existing
+self-hosted CC_B path.  A regression asserts that the development canonical
+source is byte-for-byte the same source used by the fixed-point tests.
+
+`run` remains synchronous in 9.3h.4 because the existing runner already uses
+`SYS_WAIT` and returns a terminal `ProcessResult`.  We intentionally do not add
+`wait` or `ps` commands until Anka has a real persistent-process development
+requirement; inventing them now would force a second process-management model.
+
+No new Kleis theory is needed for 9.3h.4.  The phase adds no semantic transition
+that is not already covered by 9.3h.0 ingress, 9.3h.2 compile-only, and 9.3h.3
+execution-authority/spawn contracts.  Nine Rust witnesses raise the source test
+count from 868 to 877.  The executable 877-test gate closes the whole 9.3h
+branch before merge.
+
+Next phase after that gate:
+
+```text
+9.4a  Ethernet as real Anka C system software
 ```

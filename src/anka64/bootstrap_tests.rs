@@ -5903,6 +5903,15 @@ mod tests {
             "", "", "")
     }
 
+    #[test]
+    fn p93h4_exported_canonical_source_matches_fixed_point_source() {
+        assert_eq!(
+            super::super::guest_compiler::canonical_compiler_source(),
+            canonical_compiler_source(),
+            "development-shell CC_B bootstrap source must match the fixed-point regression source",
+        );
+    }
+
     fn canonical_compilermain() -> String {
         // After compilation, normalize literal segment offset:
         // lp == OUTPUT_SIZE → no literals → pass 0 as R3.

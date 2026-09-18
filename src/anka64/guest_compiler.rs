@@ -17,6 +17,9 @@ use super::fabric::Fabric;
 use super::state::*;
 use super::os::{SYS_EXEC, SYS_SEAL};
 
+mod canonical_source;
+pub(crate) use canonical_source::canonical_compiler_source;
+
 pub(crate) const CPU0: AgentId = AgentId(0);
 
 
@@ -2846,7 +2849,7 @@ pub fn build_6b4_compiler() -> Program {
                 vec![],
             ),
 
-            // ─── Seal → Exec ─────────────────────────
+            // ─── Seal → optional Exec ─────────────────
             Stmt::Expr(syscall(SYS_SEAL as u8, vec![lit(LAYOUT_OUT)])),
             assign(3, deref(lit(WS_OUT_POS))),
             // Normalize literal segment offset:
@@ -2857,6 +2860,19 @@ pub fn build_6b4_compiler() -> Program {
             Stmt::If(binop(BinOp::Eq, var(0), lit(OUTPUT_SIZE)),
                 vec![assign(0, lit(0))],
                 vec![]),
+            // Phase 9.3h.4 bootstrap closure: the Rust AST seed compiler must
+            // obey the same compile-only mode contract as canonical CC_B.
+            // Otherwise building CC_B for the shell would immediately execute
+            // the freshly compiled compiler as a second child.
+            Stmt::If(
+                binop(
+                    BinOp::Eq,
+                    deref(lit(WS_MODE)),
+                    lit(CCB_MODE_COMPILE_ONLY as i64),
+                ),
+                vec![Stmt::Return(lit(0))],
+                vec![],
+            ),
             assign(4, syscall(SYS_EXEC as u8,
                 vec![lit(LAYOUT_OUT), var(3), var(0)])),
             Stmt::Return(var(4)),
