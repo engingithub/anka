@@ -37,6 +37,8 @@ mod bootstrap_tests;
 mod ethernet_tests;
 #[cfg(test)]
 mod arp_tests;
+#[cfg(test)]
+mod ipv4_icmp_tests;
 pub mod multicore;
 pub mod ankad;
 pub mod system_image;

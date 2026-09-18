@@ -3895,3 +3895,52 @@ reply predicate, no reply-to-reply behavior, and preservation of request sender
 MAC/IP as reply target identity.  The existing finite NIC RX/TX theories cover
 the authority transition.  Runtime byte-serialization tests now witness the
 concrete reply layout.
+
+
+## DN-36: IPv4 Validates the Envelope; ICMP Owns Echo Reply Semantics (Phase 9.4c)
+
+**Decision.** Keep IPv4 and ICMP in CC_B-compiled user space and reject protocol
+features that the first stack does not yet structurally support.  Do not add
+checksum, fragmentation, or echo semantics to Rust kernel/device code.
+
+`ipv4.c` consumes one frame through `SYS_NIC_RX` and accepts only ordinary
+Ethernet carrying IPv4 with version 4, IHL 5, contained total length, a valid
+20-byte header checksum, no More-Fragments flag and zero fragment offset.  A
+packet must also name the configured local IPv4 address before protocol
+selection is considered local delivery.  IPv4 options and fragment reassembly
+are deferred rather than silently interpreted.
+
+`icmp.c` is the first Internet-layer bidirectional service.  It repeats the
+small Ethernet/IPv4 envelope validation it depends on because CC_B currently
+has no linker and Anka does not yet have a network-service IPC/startup ABI.  It
+then requires protocol 1, at least the fixed 8-byte ICMP header, a valid ICMP
+checksum, type 8, and code 0.  Only that predicate may produce TX.  Incoming
+echo replies, other ICMP types/codes, nonlocal traffic, malformed lengths, bad
+checksums, IPv4 options, and fragments do not produce a reply.
+
+Reply construction occurs in the same finite DMA buffer.  Before overwriting
+addresses, the C code saves the request Ethernet source MAC and IPv4 source.
+The reply writes local MAC/IP as source and the saved peer identity as
+destination, changes only ICMP type/code/checksum within the ICMP message, and
+therefore preserves identifier, sequence, and payload bytes exactly.  IPv4 TTL
+is reset to 64 and its checksum is recomputed.  The original RX frame length is
+used for TX so Ethernet padding outside IPv4 total length remains untouched.
+
+The checksum routine is intentionally byte-oriented and network-order aware.
+It sums 16-bit big-endian words, folds end-around carry, and treats an odd
+trailing byte as the high byte of the final word.  Runtime witnesses check both
+normal and odd-length echo payloads rather than relying only on a Rust-side
+expected checksum.
+
+The authority surface does not change.  The IPv4-only witness receives exact
+NIC_RX plus WRITE-buffer capability.  The ICMP echo witness receives exact
+NIC_RX|NIC_TX plus RW-buffer capability.  RX and TX remain the same finite-DMA
+syscalls proved earlier; protocol validation cannot amplify either authority.
+Logical paths `/system/services/net/ipv4` and `/system/services/net/icmp` grant
+nothing.
+
+No additional Kleis theory is required.  The pre-existing
+`anka94c_ipv4_icmp_contract.kleis` already freezes fixed-IHL length safety,
+IPv4 checksum/nonfragment/local-destination support, ICMP fixed-header safety,
+echo reply predicate, and exact identifier/sequence/payload conservation.  The
+runtime C witnesses concretize byte layout and checksum serialization.
