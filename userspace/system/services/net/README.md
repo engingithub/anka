@@ -9,9 +9,10 @@ Implemented progression:
 - `ipv4.c` — Phase 9.4c: fixed-IHL IPv4 validation, checksum and local protocol dispatch
 - `icmp.c` — Phase 9.4c: validated ICMP echo request/reply through authorized NIC TX
 - `udp.c` — Phase 9.4d: strict IPv4 UDP validation and one-shot payload reflection on development port 49152
+- `tcp.c` — Phase 9.4e: single passive TCP connection with handshake, in-order ACK, and FIN close on development port 49153
 
 Planned next:
-- TCP, sockets, and HTTP
+- sockets and HTTP
 
 These are real Anka64 system services, not examples. The end-to-end target is:
 
@@ -126,3 +127,25 @@ As with ARP and ICMP, `udp.c` independently validates the small Ethernet/IPv4
 envelope because CC_B still has no linker and Anka has no inter-service network
 startup/IPC ABI. The fixed port is configuration for this executable witness;
 it is not kernel policy and creates no authority.
+
+
+## Phase 9.4e TCP boundary
+
+`tcp.c` is the first persistent stateful network service. It accepts one
+passive connection on development port `49153` and implements
+`LISTEN -> SYN_RCVD -> ESTABLISHED -> CLOSED`. The first stack supports only
+the strict fixed-header IPv4/TCP subset: data offset 5, mandatory TCP
+pseudo-header checksum, exact saved peer IPv4/port tuple, exact final handshake
+ACK, and in-order payload/FIN sequence numbers. TCP options, retransmission,
+out-of-order queues, multiple connections, congestion control, and sockets are
+deferred.
+
+The executable witness uses deterministic local ISS `0x414e4b41`. SYN and FIN
+each consume one receive sequence number; accepted data advances `RCV.NXT` by
+its exact byte count. SYN-ACK and ACK replies are rebuilt as 40-byte IPv4/TCP
+packets in 60-byte Ethernet frames with zero padding, preventing received data
+from leaking into padding when a shorter control reply is emitted.
+
+The service remains ordinary user-space C with explicit NIC_RX|NIC_TX and RW
+DMA-buffer authority. TCP state changes protocol behavior only; it creates no
+new capability or kernel authority.

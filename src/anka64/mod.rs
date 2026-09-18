@@ -41,6 +41,8 @@ mod arp_tests;
 mod ipv4_icmp_tests;
 #[cfg(test)]
 mod udp_tests;
+#[cfg(test)]
+mod tcp_tests;
 pub mod multicore;
 pub mod ankad;
 pub mod system_image;

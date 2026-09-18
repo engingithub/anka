@@ -2866,3 +2866,91 @@ anka94c_ipv4_icmp_contract_false_witnesses.kleis   0/7 false claims pass
 No new axiom or kernel mechanism is introduced.  Six new Rust witnesses are
 added over the closed 888-test ARP baseline; the expected Phase 9.4c executable
 gate is 894 tests.
+
+
+### Stage 39: UDP as Real Anka C Transport Software (Phase 9.4d)
+
+Phase 9.4d adds the first real transport-layer path in CC_B-compiled user-space
+C.  `userspace/system/services/net/udp.c` receives an opaque Ethernet frame
+through finite `SYS_NIC_RX`, validates the strict Phase 9.4c IPv4 subset, then
+validates and reflects one UDP endpoint without adding protocol knowledge to
+the kernel or virtual NIC.
+
+The executable boundary is:
+
+```text
+Ethernet/IPv4 frame
+  -> exact NIC_RX + buffer WRITE authority
+  -> protocol = 17
+  -> UDP length >= 8 and exactly equals IPv4 payload length
+  -> IPv4 UDP checksum 0 accepted as omitted, otherwise pseudo-header checksum
+  -> development endpoint 49152
+  -> opaque payload reflection
+  -> recomputed UDP + IPv4 checksums
+  -> exact NIC_TX + buffer READ authority
+```
+
+The fixed port is a development witness, not a socket table and not kernel
+policy.  The formal gate is `anka94d_udp_contract.kleis`: 13 positive examples
+with five deliberate false witnesses.  Seven executable witnesses were added
+over the closed 894-test IPv4/ICMP baseline, closing Phase 9.4d at 901 tests.
+
+
+### Stage 40: Single-Connection TCP State Machine in Real Anka C (Phase 9.4e)
+
+Phase 9.4e introduces the first stateful transport service.  The protocol logic
+lives in `userspace/system/services/net/tcp.c`; Rust remains virtual-NIC test
+scaffolding and the kernel remains protocol-opaque.
+
+The first TCP service is deliberately a strict single passive connection:
+
+```text
+LISTEN
+  -- valid SYN --> SYN_RCVD
+  -- exact final ACK --> ESTABLISHED
+  -- exact in-order data --> ESTABLISHED + ACK
+  -- exact in-order FIN|ACK --> final ACK + CLOSED
+```
+
+The accepted envelope is the strict Phase 9.4c IPv4 subset with protocol 6,
+local destination `10.0.0.2`, fixed 20-byte TCP header (`data offset = 5`),
+mandatory IPv4-pseudo-header TCP checksum, and temporary development endpoint
+`49153`.  TCP options, IP fragmentation, retransmission timers, out-of-order
+queues, simultaneous open, multiple connections, congestion control, and
+socket multiplexing are explicitly deferred.
+
+The passive-open witness uses deterministic local ISS `0x414e4b41` (`ANKA`).
+This is test/service configuration, not a claim about production TCP ISN
+selection.  SYN consumes one peer sequence number.  The final handshake ACK
+must name the exact saved peer IPv4/port tuple and satisfy
+`SEQ == RCV.NXT` and `ACK == SND.NXT`.  Established payload is accepted only
+in-order with the same exact acknowledgement relation, and advances `RCV.NXT`
+by the exact payload byte count.  FIN similarly requires the exact current
+sequence/acknowledgement and consumes one sequence number.
+
+Control replies are freshly serialized as 60-byte Ethernet frames containing a
+40-byte IPv4/TCP packet.  Bytes 54..59 are zeroed before TX.  This is important
+for an ACK generated in response to a longer data segment: received payload is
+not accidentally reflected as Ethernet padding.  IPv4 and TCP checksums are
+recomputed in C for every SYN-ACK or ACK.
+
+The persistent TCP service adds no new authority mechanism, but unlike the
+one-shot UDP/ICMP witnesses it must wait for future unsolicited NIC activity.
+Its exact device handle at deterministic slot `0:0` therefore carries
+`EVENT_WAIT|NIC_RX|NIC_TX`, with one exact RW DMA-buffer capability at `1:0`
+and the buffer mapped at `0x10000`.  `SYS_NIC_RX` remains a finite DMA
+operation: an empty RX queue returns error 9 rather than blocking.  The service
+then uses `SYS_DEV_EVENT_WAIT` with the last observed device epoch and retries
+finite `SYS_NIC_RX` after wakeup.  RX still requires WRITE and TX still
+requires READ on the presented buffer capability; TCP state and event waiting
+add no ambient authority.
+
+The governing formal gate is:
+
+```text
+anka94e_tcp_contract.kleis                  16 positive examples
+anka94e_tcp_contract_false_witnesses.kleis   7 deliberate false claims
+```
+
+Eight executable witnesses are added over the closed 901-test UDP baseline;
+the expected Phase 9.4e Rust gate is 909 tests.

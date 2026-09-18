@@ -1,0 +1,45 @@
+import "anka94e_tcp_contract.kleis"
+
+example "FALSE-TCP94E-1 nineteen-byte TCP header is safe" {
+    assert(tcp94e_length_safe(bvconst(19,16),bvconst(5,8)))
+}
+
+example "FALSE-TCP94E-2 TCP options are silently accepted" {
+    assert(tcp94e_length_safe(bvconst(24,16),bvconst(6,8)))
+}
+
+example "FALSE-TCP94E-3 bad checksum may open passive connection" {
+    assert(tcp94e_listen_syn(true,true,true,true,false,true,true)=true)
+}
+
+example "FALSE-TCP94E-4 wrong tuple may complete handshake" {
+    assert(tcp94e_syn_rcvd_ack(
+        false,true,true,true,
+        bvconst(1001,32),bvconst(1001,32),
+        bvconst(5001,32),bvconst(5001,32)
+    )=true)
+}
+
+example "FALSE-TCP94E-5 out-of-order payload is accepted" {
+    assert(tcp94e_data_ok(
+        true,true,true,true,
+        bvconst(1002,32),bvconst(1001,32),
+        bvconst(5001,32),bvconst(5001,32)
+    )=true)
+}
+
+example "FALSE-TCP94E-6 wrong ACK number is accepted in established state" {
+    assert(tcp94e_data_ok(
+        true,true,true,true,
+        bvconst(1001,32),bvconst(1001,32),
+        bvconst(5002,32),bvconst(5001,32)
+    )=true)
+}
+
+example "FALSE-TCP94E-7 out-of-order FIN is accepted" {
+    assert(tcp94e_fin_ok(
+        true,true,true,true,
+        bvconst(1019,32),bvconst(1018,32),
+        bvconst(5001,32),bvconst(5001,32)
+    )=true)
+}
