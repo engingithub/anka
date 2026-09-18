@@ -2783,3 +2783,86 @@ anka94b_arp_contract_false_witnesses.kleis  0/4 false claims pass
 The earlier finite-NIC-DMA theories remain the authority proof for RX/TX.  Six
 new Rust witnesses are added over the closed 882-test Ethernet baseline; the
 expected Phase 9.4b executable gate is 888 tests.
+
+
+### Stage 38: IPv4 + ICMP Echo as Real Anka C System Software (Phase 9.4c)
+
+Phase 9.4c adds the first checksum-bearing Internet protocol path in real
+CC_B-compiled user-space C.  The sources are
+`userspace/system/services/net/ipv4.c` and
+`userspace/system/services/net/icmp.c`; the kernel, virtual NIC, and host
+backend remain protocol-opaque.
+
+The IPv4 witness is:
+
+```text
+opaque Ethernet frame
+  -> exact NIC_RX + buffer WRITE authority
+  -> SYS_NIC_RX finite DMA
+  -> Ethernet EtherType 0x0800
+  -> fixed IPv4 version/IHL = 4/5
+  -> total-length containment
+  -> valid 20-byte IPv4 header checksum
+  -> no MF flag and zero fragment offset
+  -> configured local IPv4 destination
+  -> protocol dispatch: ICMP / other
+```
+
+The first stack intentionally rejects IPv4 options and fragmentation.  The
+one-shot IPv4 service uses exit tag `1` for local ICMP dispatch, `2` for a
+valid packet addressed elsewhere, `3` for a valid local non-ICMP packet, and
+`64` for malformed or currently unsupported IPv4 structure.
+
+The ICMP witness continues the same finite-DMA path bidirectionally:
+
+```text
+opaque Ethernet/IPv4 frame
+  -> SYS_NIC_RX
+  -> IPv4 validation
+  -> protocol = 1
+  -> ICMP length >= 8
+  -> valid ICMP checksum
+  -> echo request type 8, code 0
+  -> in-place echo reply construction
+  -> recomputed ICMP + IPv4 checksums
+  -> SYS_NIC_TX
+  -> committed virtual-NIC TX frame
+```
+
+The executable witness uses the same local identity established by ARP:
+
+```text
+MAC  02:00:00:00:00:02
+IPv4 10.0.0.2
+```
+
+The reply addresses Ethernet and IPv4 back to the request sender, sets ICMP
+type to echo reply (`0`), preserves identifier, sequence, and opaque payload
+bytes exactly, resets IPv4 TTL to 64, and preserves any Ethernet padding beyond
+IPv4 total length.  Both even- and odd-length ICMP messages are checksumed in
+network byte order.
+
+CC_B still has no linker and Anka does not yet have a network-service startup
+or IPC protocol.  Therefore both files are deliberately standalone translation
+units.  `ipv4.c` is the generic IPv4 validation/dispatch executable witness;
+`icmp.c` validates the small Ethernet+IPv4 envelope it depends on directly
+before owning echo reply semantics.  This is the same temporary composition
+seam used by ARP, not a kernel protocol path and not a claim that the final
+stack will duplicate parsers.
+
+The IPv4 parser needs only NIC_RX at handle `0:0` and a WRITE DMA capability at
+`1:0`.  The echo responder receives explicit NIC_RX|NIC_TX and RW buffer
+authority at the same deterministic handles so RX consumes WRITE and TX
+consumes READ from the exact presented buffer capability.  Service names and
+logical paths remain non-authoritative.
+
+The existing formal contract is the governing gate:
+
+```text
+anka94c_ipv4_icmp_contract.kleis                  14/14 positive
+anka94c_ipv4_icmp_contract_false_witnesses.kleis   0/7 false claims pass
+```
+
+No new axiom or kernel mechanism is introduced.  Six new Rust witnesses are
+added over the closed 888-test ARP baseline; the expected Phase 9.4c executable
+gate is 894 tests.

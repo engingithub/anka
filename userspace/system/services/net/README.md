@@ -6,11 +6,11 @@ Implemented progression:
 
 - `ethernet.c` — Phase 9.4a: finite NIC RX, Ethernet length validation, EtherType extraction and dispatch
 - `arp.c` — Phase 9.4b: Ethernet/IPv4 ARP validation plus authorized local reply TX
+- `ipv4.c` — Phase 9.4c: fixed-IHL IPv4 validation, checksum and local protocol dispatch
+- `icmp.c` — Phase 9.4c: validated ICMP echo request/reply through authorized NIC TX
 
 Planned next:
-- `ipv4.c`
-- `icmp.c`
-- later UDP/TCP, sockets, and HTTP
+- UDP/TCP, sockets, and HTTP
 
 These are real Anka64 system services, not examples. The end-to-end target is:
 
@@ -83,3 +83,23 @@ authorities, not authority derived from `/system/services/net/arp`.
 Until Anka has an inter-service IPC/startup protocol, `arp.c` validates the
 small Ethernet envelope it depends on directly.  This does not move Ethernet
 or ARP parsing into Rust and does not establish a second kernel protocol path.
+
+
+## Phase 9.4c IPv4 + ICMP boundary
+
+The first IPv4 stack accepts only version 4 with IHL 5, a contained total
+length, valid 20-byte header checksum, no fragmentation, and the configured
+local destination `10.0.0.2`.  Options and fragment reassembly are deferred.
+`ipv4.c` exposes the generic one-shot dispatch witness; local protocol 1 is
+ICMP.
+
+`icmp.c` is independently runnable and therefore validates the small
+Ethernet+IPv4 envelope it depends on before interpreting ICMP.  A reply is sent
+only for checksum-valid type-8/code-0 echo requests with at least the fixed
+8-byte ICMP header.  The reply uses local MAC/IP as source, the request peer as
+destination, preserves identifier/sequence/payload, recomputes both ICMP and
+IPv4 checksums, and leaves Ethernet padding beyond IPv4 total length untouched.
+Odd-length ICMP payloads are supported by the Internet checksum implementation.
+
+As in 9.4b, this duplicate envelope check is a temporary composition seam while
+CC_B has no linker and Anka has no inter-service network startup/IPC ABI.
