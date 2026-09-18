@@ -8,9 +8,10 @@ Implemented progression:
 - `arp.c` — Phase 9.4b: Ethernet/IPv4 ARP validation plus authorized local reply TX
 - `ipv4.c` — Phase 9.4c: fixed-IHL IPv4 validation, checksum and local protocol dispatch
 - `icmp.c` — Phase 9.4c: validated ICMP echo request/reply through authorized NIC TX
+- `udp.c` — Phase 9.4d: strict IPv4 UDP validation and one-shot payload reflection on development port 49152
 
 Planned next:
-- UDP/TCP, sockets, and HTTP
+- TCP, sockets, and HTTP
 
 These are real Anka64 system services, not examples. The end-to-end target is:
 
@@ -103,3 +104,25 @@ Odd-length ICMP payloads are supported by the Internet checksum implementation.
 
 As in 9.4b, this duplicate envelope check is a temporary composition seam while
 CC_B has no linker and Anka has no inter-service network startup/IPC ABI.
+
+
+## Phase 9.4d UDP boundary
+
+`udp.c` is the first transport-layer user-space witness. It accepts only the
+strict Phase 9.4c IPv4 subset, protocol 17, and a UDP datagram whose length is
+at least 8 bytes and exactly consumes the IPv4 payload. IPv4 UDP checksum zero
+is accepted as the protocol-defined "checksum omitted" case; a supplied
+checksum must validate over the IPv4 pseudo-header plus the complete UDP
+datagram.
+
+The first endpoint is deliberately a development witness, not a socket table:
+UDP destination port `49152` reflects the opaque payload to the request sender.
+The reply swaps UDP source/destination ports, uses local MAC/IP as source,
+recomputes IPv4 and UDP checksums, resets TTL to 64, and preserves Ethernet
+padding outside IPv4 total length. Anka emits a real nonzero UDP checksum even
+when the IPv4 request omitted one.
+
+As with ARP and ICMP, `udp.c` independently validates the small Ethernet/IPv4
+envelope because CC_B still has no linker and Anka has no inter-service network
+startup/IPC ABI. The fixed port is configuration for this executable witness;
+it is not kernel policy and creates no authority.
