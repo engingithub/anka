@@ -4370,3 +4370,223 @@ the AnkaCC2 lexer/parser core under CC_B without renegotiating what identifiers,
 full-width literals, source provenance, bootstrap generations, or future linking
 are allowed to mean.
 
+## DN-43: Bootstrap AnkaCC2 With a Narrow Real Front End Before Expanding AC2 (Phase 10.1)
+
+**Date:** 2026-09-19
+
+**Context.** Phase 10.0 froze the AC2 target profile, CC2 bootstrap provenance,
+and AOM/link authority rules.  The implementation risk in 10.1 is now the
+opposite one: trying to implement the entire target profile at once would mix a
+new lexer, parser, type system, object format, linker, include mechanism, and
+self-hosting transition into one debugging surface.  The existing CC_B compiler
+process ABI already gives us a supervised source/workspace/output environment
+and a compile-only sealing path.
+
+**Decision.** Build the first AnkaCC2 compiler as real Anka userspace C that is
+itself accepted by CC_B, and make its language input strictly larger only where
+Phase 9 userspace has already earned the pressure.  The implementation lives at:
+
+```text
+userspace/system/compiler/ankacc2_stage1.c
+```
+
+and the bootstrap edge is literal rather than conceptual:
+
+```text
+CC_B(ankacc2_stage1.c) -> sealed AnkaCC2-stage1 image
+AnkaCC2-stage1(AC2 stage-1 source) -> sealed direct executable
+```
+
+The development bridge reuses the same compiler code virtual address and the
+same exact source/workspace/output ABI as CC_B.  It also forces compile-only
+mode, so compiling with AnkaCC2 cannot silently execute the produced program.
+
+**Lexer decision.** Stage 1 implements the frozen C-style ASCII identifier
+shape exactly:
+
+```text
+[A-Za-z_][A-Za-z0-9_]{0,62}
+```
+
+This is a semantic expansion over the bootstrap compiler's source spelling
+constraints while preserving the 63-byte AC2 bound.  Decimal and `0x`/`0X`
+hexadecimal integer tokens preserve any magnitude through `u64::MAX`.  Width is
+computed from significant digits; leading zeroes therefore do not consume the
+magnitude budget.  Decimal 20-digit values are checked lexicographically against
+`18446744073709551615`, avoiding an overflow-prone host or signed-range shortcut.
+
+**Parser decision.** Do not pretend Stage 1 implements the whole AC2 profile.
+The executable parser envelope is intentionally:
+
+```text
+int f() { return INTEGER; }
+int f() { return g(); }
+```
+
+for one or more zero-parameter functions.  This is enough to force real symbol
+spelling, function definition tables, forward-call fixups, `main` resolution,
+and direct execution while keeping declarations/types/AOM/linking out of 10.1.
+Parameterized functions and richer expressions are rejected with a stable parse
+diagnostic rather than accidentally accepted as partial C.
+
+**Direct-backend decision.** Stage 1 still emits the pre-AOM direct executable
+format.  A full-width constant is synthesized nibble-by-nibble into a 64-bit
+target register, so lexical support for `0xffffffffffffffff` is not defeated by
+the ISA's small `MOVI` immediate.  Every generated function saves/restores LR on
+the stack before RET.  That detail is required by Anka64's CALL/RET authority
+stack: a function that calls another function must restore the caller's exact
+return target before its own RET.
+
+**Stable diagnostics.** The first failure taxonomy is intentionally small and
+machine-readable:
+
+```text
+1 lexical rejection
+2 identifier too long
+3 integer magnitude/hex-token rejection
+4 outside stage-1 grammar
+5 duplicate function
+6 missing main
+7 unresolved function
+8 bounded compiler resource exhaustion
+```
+
+The first error is retained in the shared compiler workspace and compilation
+returns nonzero.  A failed compile never publishes a successful executable.
+
+**Authority decision.** Reusing the compiler ABI does not weaken the Phase 10.0
+authority theorem:
+
+```text
+CC_B builds compiler != execution authority
+compiler accepts source != execution authority
+compiler seals output != execution authority
+```
+
+The produced direct executable remains inert until ordinary exact-artifact and
+execution admission occurs.  Stage 1 emits no AOM, so symbol names and fixups
+remain compiler-internal address relationships only.
+
+**Formal result.** `anka101_ankacc2_frontend.kleis` refines the Phase 10.0 AC2
+profile without new axioms.  It closes at 15/15 positive examples.  Its hostile
+companion closes at 0/8 accepted claims: digit-first identifiers, 64-byte
+identifiers, above-width integer tokens, parameterized Stage-1 functions,
+unsealed compiler admission, premature AOM output, and compilation-derived
+execution authority are all rejected.
+
+**Runtime gate.** Nine Rust witnesses exercise the real intended path, including
+CC_B -> AnkaCC2, 63-byte uppercase/underscore identifiers, exact maximum decimal
+and hexadecimal 64-bit literals, significant-width leading-zero behavior,
+stable width/parser/symbol diagnostics, and execution of the generated direct
+image.  After the bootstrap-grammar correction below, the complete regression
+suite closes at:
+
+```text
+932 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+This is the previous 923-test Phase 9.4g baseline plus all nine Phase 10.1
+runtime witnesses, with no regressions.
+
+**Bootstrap-grammar correction.** The first Cargo run reached the intended
+bootstrap boundary and failed all nine new witnesses before AnkaCC2 executed:
+CC_B returned `CompilerRejected(1)` while compiling `ankacc2_stage1.c`.  The
+source contained one bare `syscall(5, ...)` expression statement.  CC_B reserves
+`syscall` as a primary expression and does not admit it through the ordinary
+identifier-call statement production.  Rewriting that operation as
+`int seal = syscall(5, ...);` keeps the exact same seal operation while placing
+it inside grammar CC_B actually supports.  A direct audit of the corrected
+source against CC_B's frozen lexer/parser accepts the complete translation unit.
+This is a bootstrap-compatibility repair, not an expansion of CC_B and not a
+change to the AC2 Stage-1 language.  The corrected tree subsequently passed the
+full Cargo suite at 932/932, so this failure is retained as a regression lesson
+rather than an open gate.
+
+**Closure.** Phase 10.1 is CLOSED: 932/932 Rust tests, 15/15 positive Kleis
+witnesses, 0/8 hostile witnesses accepted, and no new axioms.  The old compiler
+now builds the first executable generation of its successor through the ordinary
+Anka compile-only/seal path.
+
+**Consequence.** Phase 10.2 can expand declarations/types/ABI against a working
+second-generation lexical/parser core without also inventing AOM or the linker.
+The bootstrap compiler remains a provenance root, not a permanent language
+constraint.
+
+## DN-44: Provenance Is a Trust Relationship, Not a PKI Product
+
+**Date:** 2026-09-19
+
+**Context.** Phase 10's compiler lineage makes software provenance an explicit
+architectural concern.  Modern network distribution often makes the problem look
+cryptographic because the receiver sees little more than `untrusted network ->
+bytes`.  Historically, however, software could arrive through a much larger
+physical and institutional channel: a known vendor, purchasing records, labeled
+media, sealed packaging, postal/courier custody, a receiving department, and a
+machine-room operator.  For especially sensitive material an organization could
+replace the general delivery channel with its own trusted courier/emissary and
+maintain a direct chain of custody.
+
+**Decision.** Do not define Anka provenance as X.509, a public CA hierarchy, or
+any other particular PKI.  Define the architectural core as:
+
+```text
+recognized authority A
++ purpose/namespace for which local policy trusts A
++ attestation by A to exact sealed artifact X
++ current exact identity of X
+-> provenance of X is acceptable for that policy
+```
+
+The attestation may travel through conventional PKI, an offline signature, a
+locally controlled build key, a site-specific attestation service, or a physical
+chain of custody accepted by local policy.  An air-gapped installation may, for
+example, accept a release physically carried by its own designated custodian.
+The cryptographic and physical cases are mechanisms for carrying evidence about
+the same underlying relationship; neither mechanism is itself the relationship.
+
+The memorable minimal statement is:
+
+```text
+this trusted authority vouches for this exact sealed artifact
+```
+
+How the installation came to trust that authority is a separate root-of-trust
+and policy problem.  Sometimes that answer is a conventional certificate chain;
+sometimes it is an offline key under organizational custody; sometimes it is a
+controlled build performed locally; and sometimes it is a human chain of custody.
+Physical delivery is not intrinsically secure, and cryptography does not remove
+the need to decide which authority is recognized.
+
+**Separation from execution authority.** Provenance answers where an artifact is
+accepted as coming from / being vouched for.  It does not answer what the artifact
+may cause on this machine:
+
+```text
+cryptographic validity != recognized authority
+recognized provenance   != execution authority
+artifact name/path       != provenance
+transport channel        != authority
+```
+
+A signature from an unrecognized key therefore creates no Anka authority.  The
+same is true of a physically delivered tape merely because somebody carried it.
+Only local policy can bind evidence to a recognized provenance authority, and
+only the ordinary Anka exact-artifact/capability/spawn path can authorize the
+resulting software to execute.
+
+**Consequence for Phase 10.9.** Supply-chain closure should be able to explain
+two independent histories for any admitted compiler/program artifact:
+
+```text
+artifact derivation:
+source -> compiler generation -> object/link steps -> exact sealed artifact
+
+trust derivation:
+local trust policy -> recognized attester/custodian -> attestation/custody evidence
+                   -> exact sealed artifact
+```
+
+PKI can be one implementation of the second line, but Anka must not bake one
+global trust transport into the meaning of provenance.  This keeps high-assurance,
+offline, air-gapped, organization-local, and conventional Internet distribution
+under the same small architectural rule.

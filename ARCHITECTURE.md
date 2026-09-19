@@ -1453,7 +1453,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions; binary size verified by fixed-point regression |
 | Canonical source | ~17 KB |
-| Tests | 923/923 Rust tests through Phase 9.4g HTTP; Phase 10.0 adds formal contracts only |
+| Tests | 932/932 Rust tests through Phase 10.1 AnkaCC2 stage 1 |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -3124,7 +3124,7 @@ verifies the exact 200 response bytes and checksums on the transmitted TCP
 segment, acknowledges the response, sends FIN, and observes both socket and HTTP
 processes terminate through their ordinary protocols.
 
-### Stage 43 (planned): Second-Generation Self-Hosted Anka C Toolchain (Phase 10)
+### Stage 43 (in progress): Second-Generation Self-Hosted Anka C Toolchain (Phase 10)
 
 Phase 9.4g closes the original CPU-to-HTTP vertical slice.  That closure also
 provides the demanding client for the next toolchain phase.  CC_B proved that a
@@ -3178,6 +3178,51 @@ candidate new CC2      -> recompile same source -> fixed-point witness
 The compiler bootstrap is therefore provenance, not nomenclature: every
 accepted compiler artifact must have an exact compiler generation, exact source
 artifact, successful compilation result, and sealed output behind it.
+
+#### Artifact provenance is not defined by PKI
+
+Anka treats provenance as a policy-recognized relationship between an authority
+and an **exact sealed artifact**, not as a synonym for any particular network
+PKI.  The irreducible statement is:
+
+```text
+this authority, trusted here for this purpose, vouches for this exact sealed artifact
+```
+
+The evidence carrying that statement may be a conventional certificate/signature
+chain, an offline signing key, a locally controlled build authority, an
+organization-specific attestation service, or a physical chain of custody.  A
+high-assurance installation may legitimately send its own courier/emissary to a
+supplier, receive physical media under observation, and carry that exact object
+across an air gap.  Historically the equivalent chain often looked like:
+
+```text
+known vendor -> ordered media -> sealed package -> postal/courier custody
+             -> receiving records -> machine-room operator
+```
+
+That channel is not magically trustworthy merely because it is physical; rather,
+local policy may recognize the vendor, custodian, purchasing record, package, and
+operator as evidence establishing the artifact's provenance.  The Internet
+collapses much of that surrounding institution into `untrusted network -> bytes`,
+so cryptography must often carry evidence that was previously supplied out of
+band by custody, records, recognizable media, and people.
+
+Accordingly PKI is one **mechanism for transporting an attestation**, not the
+definition of provenance.  A valid signature from an unrecognized key creates no
+Anka authority, and provenance by itself creates no execution authority.
+Cryptography can authenticate/integrity-protect the attestation; Anka policy
+decides whether the attesting authority is recognized for the namespace/purpose,
+and ordinary exact-artifact + execution admission still decides whether state may
+change.  The eventual Phase 10.9 supply-chain closure should therefore preserve
+both lineages explicitly:
+
+```text
+artifact lineage:   source -> compiler generation -> sealed output -> linked artifact
+trust lineage:      local policy -> recognized attesting authority -> exact artifact
+
+provenance != transport mechanism != execution authority
+```
 
 #### AC2 language pressure and first scope
 
@@ -3280,9 +3325,13 @@ client and an adversarial gate before the next one depends on it:
 10.0  AC2 language + bootstrap + object/link authority contracts — CLOSED
       - 55/55 positive Kleis witnesses, 0/26 hostile witnesses accepted
       - no new axioms
-10.1  AnkaCC2 lexer/parser core under CC_B
-      - practical identifiers, full-width literals, diagnostics
-      - direct executable output retained as the first bootstrap target
+10.1  AnkaCC2 lexer/parser core under CC_B — CLOSED
+      - C-style ASCII identifiers, 1..63 bytes
+      - decimal/0x integer magnitude through full u64
+      - stable diagnostics and deliberately narrow direct grammar
+      - direct executable output retained; no AOM yet
+      - 932/932 Rust tests, including 9/9 Phase 10.1 runtime witnesses
+      - 15/15 positive Kleis witnesses, 0/8 hostile witnesses accepted
 10.2  AC2 declarations/types/ABI
       - prototypes, arrays/pointers, structs, typedefs, enums
       - explicit constant/global-data rules as required
@@ -3368,6 +3417,82 @@ These are structural/toolchain-protocol proofs, not a claim that Kleis has prove
 all AC2 or AnkaCC2 compiler semantics.  Semantic correctness remains subject to
 the permanent compiler corpus, self-hosting, fixed-point identity, hostile source
 programs, and the Phase 10 CPU-to-HTTP rebuild gate.
+
+#### Phase 10.1 implementation: CC_B-built AnkaCC2 stage 1
+
+Phase 10.1 introduces the first real AnkaCC2 implementation at
+`userspace/system/compiler/ankacc2_stage1.c`.  The source is intentionally
+written inside CC_B's existing source language so the bootstrap edge is real:
+
+```text
+CC_B + ankacc2_stage1.c -> sealed AnkaCC2 stage-1 compiler
+```
+
+The stage-1 compiler reuses the already-audited CC_B compiler-process ABI: exact
+source bytes are mapped read-only, compiler workspace/output mappings remain the
+same, and compile-only mode seals output without executing it.  A development
+bridge may present the CC_B-built compiler image to that ABI, but it does not
+grant execution authority to the produced program.
+
+The first parser envelope is deliberately smaller than the full AC2 target:
+
+```text
+identifier := [A-Za-z_][A-Za-z0-9_]{0,62}
+integer    := decimal-u64 | 0[xX]hex-u64
+function   := int identifier() { return expression; }
+expression := integer | identifier()
+program    := function+
+```
+
+Decimal and hexadecimal width are magnitude rules, not spelling-length rules:
+leading zeroes do not consume the 64-bit magnitude budget.  The lexer preserves
+all 64 bits, and the direct backend synthesizes a full target word rather than
+forcing values through the old 18-bit `MOVI` source-literal ceiling.
+
+Stage 10.1 intentionally emits the existing direct executable form.  It emits no
+AOM and performs no static linking; those boundaries remain Phase 10.3 and 10.4.
+Its direct code generator supports zero-argument functions, exact function-name
+resolution, forward-call fixups, one return expression, and a small stack frame
+that preserves Anka64 CALL/RET return authority across nested calls.
+
+The stage-1 workspace diagnostic contract is stable:
+
+```text
+1  invalid lexical byte/token
+2  identifier exceeds 63 bytes
+3  integer magnitude exceeds 64 bits or malformed hex token
+4  source is outside the stage-1 parser grammar
+5  duplicate function definition
+6  missing main
+7  unresolved function call
+8  compiler table/output resource bound exceeded
+```
+
+Nine executable Phase 10.1 witnesses exercise the real compiler path:
+CC_B builds AnkaCC2; a 63-byte identifier containing uppercase/underscore
+characters compiles and executes; 64-byte identifiers fail; maximum hexadecimal
+and decimal `u64` literals execute as `0xffffffffffffffff`; leading zeroes do
+not fake width; above-u64 spellings fail; intentionally unsupported parameter
+and expression grammar fails; and duplicate/missing/unresolved function cases
+produce stable diagnostics.  After correcting the bootstrap-source grammar
+issue described in DN-43, the complete Rust regression suite closes at:
+
+```text
+932 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Thus all nine new Phase 10.1 runtime witnesses and the prior 923-test baseline
+pass together.  Phase 10.1 is runtime-closed.
+
+The Phase 10.1 refinement theory closes independently at:
+
+```text
+anka101_ankacc2_frontend.kleis                  15/15
+anka101_ankacc2_frontend_false_witnesses.kleis  0/8 hostile accepted
+```
+
+with no new axioms.  The theory explicitly records that Stage 10.1 does not yet
+emit AOM and that successful compilation creates no execution authority.
 
 #### Formal scope
 
