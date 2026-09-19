@@ -1,0 +1,139 @@
+// =============================================================================
+// Anka64 Phase 10.0 — AC2 Language/Profile Contract
+// =============================================================================
+// No new axioms. This freezes only the first Anka C v2 (AC2) language/profile
+// boundary needed by AnkaCC2. It is deliberately not a proof of C semantics.
+//
+// AC2 v1 lexical/profile commitments:
+// - target word/literal width: 64 bits,
+// - ASCII C-style identifiers, 1..63 bytes,
+// - decimal/hex integer tokens may preserve the full 64-bit magnitude,
+// - ordinary byte character/string literals are part of the profile,
+// - prototypes, pointers, arrays, structs, typedefs and enums are required,
+// - separate translation units and source/header composition are required,
+// - source bundles are exact read-only bytes; the host does no C semantics,
+// - source/include names are metadata and create no authority.
+//
+// Type interpretation, ABI details, object encoding and preprocessing semantics
+// are frozen in later Phase 10 subphases. Unicode identifiers are deferred.
+// =============================================================================
+
+define AC2_MAX_IDENTIFIER_BYTES : BitVec16 = bvconst(63,16)
+define AC2_TARGET_LITERAL_BITS : BitVec8 = bvconst(64,8)
+
+define ac2_identifier_supported(
+    ascii_c_shape : Bool,
+    length_bytes : BitVec16
+) =
+    if ascii_c_shape then
+        if bvuge(length_bytes,bvconst(1,16)) then
+            if bvule(length_bytes,AC2_MAX_IDENTIFIER_BYTES) then true else false
+        else false
+    else false
+
+define ac2_integer_literal_width_supported(width_bits : BitVec8) =
+    if bvuge(width_bits,bvconst(1,8)) then
+        if bvule(width_bits,AC2_TARGET_LITERAL_BITS) then true else false
+    else false
+
+define ac2_core_profile_present(
+    byte_literals : Bool,
+    prototypes : Bool,
+    pointers : Bool,
+    arrays : Bool,
+    structs : Bool,
+    typedefs : Bool,
+    enums : Bool,
+    separate_translation_units : Bool,
+    source_header_composition : Bool
+) =
+    if byte_literals then
+        if prototypes then
+            if pointers then
+                if arrays then
+                    if structs then
+                        if typedefs then
+                            if enums then
+                                if separate_translation_units then
+                                    if source_header_composition then true else false
+                                else false
+                            else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define ac2_source_bundle_valid(
+    read_only : Bool,
+    exact_bytes : Bool,
+    logical_names_unique : Bool,
+    host_c_parse : Bool,
+    host_macro_expand : Bool,
+    host_symbol_resolve : Bool,
+    host_link : Bool
+) =
+    if read_only then
+        if exact_bytes then
+            if logical_names_unique then
+                if host_c_parse then false
+                else if host_macro_expand then false
+                else if host_symbol_resolve then false
+                else if host_link then false
+                else true
+            else false
+        else false
+    else false
+
+define ac2_source_name_creates_authority() = false
+
+define ac2_header_name_creates_authority() = false
+
+example "AC2100-1 one-byte ASCII identifier is supported" {
+    assert(ac2_identifier_supported(true,bvconst(1,16))=true)
+}
+
+example "AC2100-2 sixty-three-byte ASCII identifier is supported" {
+    assert(ac2_identifier_supported(true,bvconst(63,16))=true)
+}
+
+example "AC2100-3 sixty-four-byte identifier is outside AC2 v1" {
+    assert(ac2_identifier_supported(true,bvconst(64,16))=false)
+}
+
+example "AC2100-4 Unicode identifier spelling is deferred" {
+    assert(ac2_identifier_supported(false,bvconst(12,16))=false)
+}
+
+example "AC2100-5 full 64-bit integer literal magnitude is supported" {
+    assert(ac2_integer_literal_width_supported(bvconst(64,8))=true)
+}
+
+example "AC2100-6 sixty-five-bit integer literal is outside target width" {
+    assert(ac2_integer_literal_width_supported(bvconst(65,8))=false)
+}
+
+example "AC2100-7 required first AC2 profile is complete" {
+    assert(ac2_core_profile_present(true,true,true,true,true,true,true,true,true)=true)
+}
+
+example "AC2100-8 missing struct support is not the required AC2 profile" {
+    assert(ac2_core_profile_present(true,true,true,true,false,true,true,true,true)=false)
+}
+
+example "AC2100-9 exact read-only source bundle with no host C semantics is valid" {
+    assert(ac2_source_bundle_valid(true,true,true,false,false,false,false)=true)
+}
+
+example "AC2100-10 host preprocessing invalidates the Anka semantic closure path" {
+    assert(ac2_source_bundle_valid(true,true,true,false,true,false,false)=false)
+}
+
+example "AC2100-11 source logical name grants no authority" {
+    assert(ac2_source_name_creates_authority()=false)
+}
+
+example "AC2100-12 header logical name grants no authority" {
+    assert(ac2_header_name_creates_authority()=false)
+}

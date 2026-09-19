@@ -1,0 +1,142 @@
+// =============================================================================
+// Anka64 Phase 10.0 — AnkaCC2 Bootstrap Provenance Contract
+// =============================================================================
+// No new axioms. This freezes bootstrap lineage/provenance, not compiler
+// semantic correctness.
+//
+//   CC_B  -> CC2_0
+//   CC2_0 -> CC2_1
+//   CC2_1 -> CC2_2
+//
+// Authoritative AnkaCC2 is admitted only when CC2_1 and CC2_2 are produced
+// from the exact same current source, through exact-generation predecessors,
+// are sealed, and are byte-identical. CC2_0 need not equal the fixed point.
+// Host compiler/preprocessor/linker/symbol-resolution semantics are forbidden
+// from the Phase 10 closure path.
+// =============================================================================
+
+define CC2_STAGE_CCB : BitVec8 = bvconst(255,8)
+define CC2_STAGE_0 : BitVec8 = bvconst(0,8)
+define CC2_STAGE_1 : BitVec8 = bvconst(1,8)
+define CC2_STAGE_2 : BitVec8 = bvconst(2,8)
+
+define cc2_bootstrap_edge(
+    producer_stage : BitVec8,
+    output_stage : BitVec8
+) =
+    if producer_stage=CC2_STAGE_CCB then
+        if output_stage=CC2_STAGE_0 then true else false
+    else if producer_stage=CC2_STAGE_0 then
+        if output_stage=CC2_STAGE_1 then true else false
+    else if producer_stage=CC2_STAGE_1 then
+        if output_stage=CC2_STAGE_2 then true else false
+    else false
+
+define cc2_compile_publishable(
+    compile_success : Bool,
+    output_sealed : Bool,
+    compiler_generation_exact : Bool,
+    source_generation_exact : Bool
+) =
+    if compile_success then
+        if output_sealed then
+            if compiler_generation_exact then
+                if source_generation_exact then true else false
+            else false
+        else false
+    else false
+
+define cc2_host_semantics_absent(
+    host_compiler : Bool,
+    host_preprocessor : Bool,
+    host_symbol_resolver : Bool,
+    host_linker : Bool
+) =
+    if host_compiler then false
+    else if host_preprocessor then false
+    else if host_symbol_resolver then false
+    else if host_linker then false
+    else true
+
+define cc2_fixed_point_accept(
+    edge_ccb_0 : Bool,
+    edge_0_1 : Bool,
+    edge_1_2 : Bool,
+    exact_generation_provenance : Bool,
+    same_exact_source_all_steps : Bool,
+    cc2_1_sealed : Bool,
+    cc2_2_sealed : Bool,
+    cc2_1_equals_cc2_2 : Bool,
+    host_semantics_absent : Bool
+) =
+    if edge_ccb_0 then
+        if edge_0_1 then
+            if edge_1_2 then
+                if exact_generation_provenance then
+                    if same_exact_source_all_steps then
+                        if cc2_1_sealed then
+                            if cc2_2_sealed then
+                                if cc2_1_equals_cc2_2 then
+                                    if host_semantics_absent then true else false
+                                else false
+                            else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define cc2_bootstrap_requires_cc2_0_equal_cc2_1() = false
+
+example "BOOT100-1 CC_B may produce CC2_0" {
+    assert(cc2_bootstrap_edge(CC2_STAGE_CCB,CC2_STAGE_0)=true)
+}
+
+example "BOOT100-2 CC2_0 may produce CC2_1" {
+    assert(cc2_bootstrap_edge(CC2_STAGE_0,CC2_STAGE_1)=true)
+}
+
+example "BOOT100-3 CC2_1 may produce CC2_2" {
+    assert(cc2_bootstrap_edge(CC2_STAGE_1,CC2_STAGE_2)=true)
+}
+
+example "BOOT100-4 CC_B may not skip directly to CC2_1" {
+    assert(cc2_bootstrap_edge(CC2_STAGE_CCB,CC2_STAGE_1)=false)
+}
+
+example "BOOT100-5 exact successful sealed compilation is publishable" {
+    assert(cc2_compile_publishable(true,true,true,true)=true)
+}
+
+example "BOOT100-6 stale compiler generation cannot publish bootstrap output" {
+    assert(cc2_compile_publishable(true,true,false,true)=false)
+}
+
+example "BOOT100-7 stale source generation cannot publish bootstrap output" {
+    assert(cc2_compile_publishable(true,true,true,false)=false)
+}
+
+example "BOOT100-8 closure path with no host language semantics is clean" {
+    assert(cc2_host_semantics_absent(false,false,false,false)=true)
+}
+
+example "BOOT100-9 host preprocessor invalidates closure" {
+    assert(cc2_host_semantics_absent(false,true,false,false)=false)
+}
+
+example "BOOT100-10 exact same-source byte-identical self-host fixed point is authoritative" {
+    assert(cc2_fixed_point_accept(true,true,true,true,true,true,true,true,true)=true)
+}
+
+example "BOOT100-11 byte-different CC2_1 and CC2_2 do not close bootstrap" {
+    assert(cc2_fixed_point_accept(true,true,true,true,true,true,true,false,true)=false)
+}
+
+example "BOOT100-12 changing source between self-compile steps does not close bootstrap" {
+    assert(cc2_fixed_point_accept(true,true,true,true,false,true,true,true,true)=false)
+}
+
+example "BOOT100-13 CC2_0 is explicitly not required to equal CC2_1" {
+    assert(cc2_bootstrap_requires_cc2_0_equal_cc2_1()=false)
+}

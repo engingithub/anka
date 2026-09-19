@@ -1,0 +1,30 @@
+// Every example is deliberately false and must be rejected.
+import "anka100_cc2_bootstrap_contract.kleis"
+
+example "FALSE-BOOT100-1 bootstrap may skip CC2_0" {
+    assert(cc2_bootstrap_edge(CC2_STAGE_CCB,CC2_STAGE_1)=true)
+}
+
+example "FALSE-BOOT100-2 stale compiler generation may publish CC2 output" {
+    assert(cc2_compile_publishable(true,true,false,true)=true)
+}
+
+example "FALSE-BOOT100-3 failed compile may publish sealed CC2 output" {
+    assert(cc2_compile_publishable(false,true,true,true)=true)
+}
+
+example "FALSE-BOOT100-4 changed source may still establish fixed point" {
+    assert(cc2_fixed_point_accept(true,true,true,true,false,true,true,true,true)=true)
+}
+
+example "FALSE-BOOT100-5 byte-different CC2_1 and CC2_2 establish fixed point" {
+    assert(cc2_fixed_point_accept(true,true,true,true,true,true,true,false,true)=true)
+}
+
+example "FALSE-BOOT100-6 host linker semantics may participate in authoritative closure" {
+    assert(cc2_host_semantics_absent(false,false,false,true)=true)
+}
+
+example "FALSE-BOOT100-7 CC2_0 must already equal CC2_1" {
+    assert(cc2_bootstrap_requires_cc2_0_equal_cc2_1()=true)
+}

@@ -1,0 +1,54 @@
+// Every example is deliberately false and must be rejected.
+import "anka100_aom_link_contract.kleis"
+
+example "FALSE-AOM100-1 unresolved required import may link" {
+    assert(aom_required_import_resolved(bvconst(0,8))=true)
+}
+
+example "FALSE-AOM100-2 duplicate definitions uniquely resolve an import" {
+    assert(aom_required_import_resolved(bvconst(2,8))=true)
+}
+
+example "FALSE-AOM100-3 relocation one byte beyond section is accepted" {
+    assert(aom_relocation_in_bounds(bvconst(100,64),bvconst(93,64),bvconst(8,64))=true)
+}
+
+example "FALSE-AOM100-4 incompatible relocation target kind is valid" {
+    assert(aom_relocation_valid(true,true,false)=true)
+}
+
+example "FALSE-AOM100-5 misaligned AOM section is valid" {
+    assert(aom_section_valid(true,true,true,false)=true)
+}
+
+example "FALSE-AOM100-6 malformed symbol table yields valid module" {
+    assert(aom_module_valid(true,true,false,true)=true)
+}
+
+example "FALSE-AOM100-7 writable executable code is a valid linked permission plan" {
+    assert(aom_permissions_valid(true,true,true,false,false)=true)
+}
+
+example "FALSE-AOM100-8 failed link may publish executable artifact" {
+    assert(aom_link_publishable(true,false,true,true,true)=true)
+}
+
+example "FALSE-AOM100-9 successful link directly admits execution without explicit authority" {
+    assert(aom_execution_admitted(true,false,true)=true)
+}
+
+example "FALSE-AOM100-10 symbol name creates runtime authority" {
+    assert(aom_symbol_name_creates_authority()=true)
+}
+
+example "FALSE-AOM100-11 relocation creates an Anka capability" {
+    assert(aom_relocation_creates_capability()=true)
+}
+
+example "FALSE-AOM100-12 successful linking creates execution authority" {
+    assert(aom_successful_link_creates_execution_authority()=true)
+}
+
+example "FALSE-AOM100-13 linking may amplify runtime authority" {
+    assert(aom_link_amplifies_runtime_authority()=true)
+}
