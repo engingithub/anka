@@ -1,0 +1,171 @@
+// =============================================================================
+// Anka64 Phase 10.1 — AnkaCC2 Stage-1 Front-End Refinement
+// =============================================================================
+// No new axioms.  This theory refines the Phase 10.0 AC2 profile into the
+// deliberately smaller executable front-end slice implemented first under
+// CC_B.  It does not claim the complete AC2 profile is implemented yet.
+//
+// Stage-1 commitments:
+// - C-style ASCII identifier shape, 1..63 bytes,
+// - decimal and 0x/0X hexadecimal integer tokens whose magnitude fits 64 bits,
+// - leading zeroes do not increase magnitude width,
+// - direct grammar: int f() { return <u64-literal-or-zero-arg-call>; },
+// - direct executable output only; AOM remains Phase 10.3,
+// - compiler image must itself be produced by CC_B and sealed,
+// - compilation never manufactures execution authority.
+// =============================================================================
+
+import "anka100_ac2_profile_contract.kleis"
+
+define stage1_identifier_first(ch : BitVec8) =
+    if bvuge(ch,bvconst(65,8)) then
+        if bvule(ch,bvconst(90,8)) then true
+        else if bvuge(ch,bvconst(97,8)) then
+            if bvule(ch,bvconst(122,8)) then true
+            else if ch = bvconst(95,8) then true else false
+        else if ch = bvconst(95,8) then true else false
+    else if bvuge(ch,bvconst(97,8)) then
+        if bvule(ch,bvconst(122,8)) then true
+        else if ch = bvconst(95,8) then true else false
+    else if ch = bvconst(95,8) then true else false
+
+define stage1_identifier_rest(ch : BitVec8) =
+    if bvuge(ch,bvconst(65,8)) then
+        if bvule(ch,bvconst(90,8)) then true
+        else if bvuge(ch,bvconst(97,8)) then
+            if bvule(ch,bvconst(122,8)) then true
+            else if bvuge(ch,bvconst(48,8)) then
+                if bvule(ch,bvconst(57,8)) then true
+                else if ch = bvconst(95,8) then true else false
+            else if ch = bvconst(95,8) then true else false
+        else if bvuge(ch,bvconst(48,8)) then
+            if bvule(ch,bvconst(57,8)) then true
+            else if ch = bvconst(95,8) then true else false
+        else if ch = bvconst(95,8) then true else false
+    else if bvuge(ch,bvconst(97,8)) then
+        if bvule(ch,bvconst(122,8)) then true
+        else if bvuge(ch,bvconst(48,8)) then
+            if bvule(ch,bvconst(57,8)) then true
+            else if ch = bvconst(95,8) then true else false
+        else if ch = bvconst(95,8) then true else false
+    else if bvuge(ch,bvconst(48,8)) then
+        if bvule(ch,bvconst(57,8)) then true
+        else if ch = bvconst(95,8) then true else false
+    else if ch = bvconst(95,8) then true else false
+
+define stage1_identifier_supported(
+    first_ok : Bool,
+    rest_ok : Bool,
+    length_bytes : BitVec16
+) =
+    if first_ok then
+        if rest_ok then ac2_identifier_supported(true,length_bytes)
+        else false
+    else false
+
+define stage1_integer_supported(
+    base : BitVec8,
+    significant_digits : BitVec16,
+    magnitude_within_u64 : Bool
+) =
+    if magnitude_within_u64 then
+        if base = bvconst(16,8) then
+            if bvule(significant_digits,bvconst(16,16)) then true else false
+        else if base = bvconst(10,8) then
+            if bvule(significant_digits,bvconst(20,16)) then true else false
+        else false
+    else false
+
+define stage1_direct_grammar_supported(
+    return_type_int : Bool,
+    zero_parameters : Bool,
+    exactly_one_return : Bool,
+    expression_is_u64_literal_or_zero_arg_call : Bool
+) =
+    if return_type_int then
+        if zero_parameters then
+            if exactly_one_return then
+                if expression_is_u64_literal_or_zero_arg_call then true else false
+            else false
+        else false
+    else false
+
+define stage1_compiler_admitted(
+    compiler_built_by_ccb : Bool,
+    compiler_sealed : Bool,
+    exact_source_bytes : Bool,
+    compile_only_mode : Bool
+) =
+    if compiler_built_by_ccb then
+        if compiler_sealed then
+            if exact_source_bytes then
+                if compile_only_mode then true else false
+            else false
+        else false
+    else false
+
+define stage1_emits_aom() = false
+
+define stage1_compile_grants_execution_authority() = false
+
+example "AC2101-1 uppercase ASCII may start an identifier" {
+    assert(stage1_identifier_first(bvconst(65,8))=true)
+}
+
+example "AC2101-2 underscore may start an identifier" {
+    assert(stage1_identifier_first(bvconst(95,8))=true)
+}
+
+example "AC2101-3 digit may continue but not start an identifier" {
+    assert(stage1_identifier_first(bvconst(55,8))=false)
+    assert(stage1_identifier_rest(bvconst(55,8))=true)
+}
+
+example "AC2101-4 sixty-three-byte C-style identifier is stage-1 supported" {
+    assert(stage1_identifier_supported(true,true,bvconst(63,16))=true)
+}
+
+example "AC2101-5 sixty-four-byte identifier remains outside AC2 v1" {
+    assert(stage1_identifier_supported(true,true,bvconst(64,16))=false)
+}
+
+example "AC2101-6 sixteen significant hex digits fit the stage-1 token" {
+    assert(stage1_integer_supported(bvconst(16,8),bvconst(16,16),true)=true)
+}
+
+example "AC2101-7 seventeen significant hex digits are rejected" {
+    assert(stage1_integer_supported(bvconst(16,8),bvconst(17,16),false)=false)
+}
+
+example "AC2101-8 twenty significant decimal digits may fit when magnitude is within u64" {
+    assert(stage1_integer_supported(bvconst(10,8),bvconst(20,16),true)=true)
+}
+
+example "AC2101-9 decimal spelling above u64 is rejected even at twenty digits" {
+    assert(stage1_integer_supported(bvconst(10,8),bvconst(20,16),false)=false)
+}
+
+example "AC2101-10 leading zeroes are excluded from significant-digit width" {
+    assert(stage1_integer_supported(bvconst(16,8),bvconst(16,16),true)=true)
+    assert(stage1_integer_supported(bvconst(10,8),bvconst(20,16),true)=true)
+}
+
+example "AC2101-11 direct zero-parameter single-return grammar is admitted" {
+    assert(stage1_direct_grammar_supported(true,true,true,true)=true)
+}
+
+example "AC2101-12 parameters remain outside the stage-1 parser envelope" {
+    assert(stage1_direct_grammar_supported(true,false,true,true)=false)
+}
+
+example "AC2101-13 stage-1 compiler image requires CC_B provenance and compile-only admission" {
+    assert(stage1_compiler_admitted(true,true,true,true)=true)
+}
+
+example "AC2101-14 stage-1 still emits no AOM" {
+    assert(stage1_emits_aom()=false)
+}
+
+example "AC2101-15 compilation creates no execution authority" {
+    assert(stage1_compile_grants_execution_authority()=false)
+}

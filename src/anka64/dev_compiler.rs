@@ -86,6 +86,24 @@ pub fn compile_c_with_ccb(
     compile_c_with_compiler_image(ccb_image, DEVELOPMENT_CCB_CODE_VADDR, source)
 }
 
+/// Compile one AC2 stage-1 translation unit through a CC_B-built AnkaCC2 image.
+///
+/// Phase 10.1 deliberately reuses the already-audited compiler process ABI:
+/// source/workspace/output mappings are identical to CC_B, while the compiler
+/// image itself is an ordinary sealed Anka executable produced by CC_B.  This
+/// bridge does not grant execution authority to the produced program; the
+/// compiler is forced into compile-only mode exactly like `compile_c_with_ccb`.
+pub fn compile_c_with_ankacc2_stage1(
+    compiler_image: &[u8],
+    source: &[u8],
+) -> Result<CompiledCImage, DevelopmentCompileError> {
+    compile_c_with_compiler_image(
+        compiler_image,
+        DEVELOPMENT_CCB_CODE_VADDR,
+        source,
+    )
+}
+
 /// Bootstrap the self-hosted CC_B image from the Rust AST seed (CC_A).
 ///
 /// This is development tooling, not a host C compiler shortcut: CC_A itself

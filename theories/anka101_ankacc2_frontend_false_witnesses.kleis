@@ -1,0 +1,34 @@
+// Every example is deliberately false and must be rejected.
+import "anka101_ankacc2_frontend.kleis"
+
+example "FALSE-AC2101-1 digit may start a C identifier" {
+    assert(stage1_identifier_first(bvconst(55,8))=true)
+}
+
+example "FALSE-AC2101-2 sixty-four-byte identifier is accepted" {
+    assert(stage1_identifier_supported(true,true,bvconst(64,16))=true)
+}
+
+example "FALSE-AC2101-3 seventeen significant hex digits fit u64" {
+    assert(stage1_integer_supported(bvconst(16,8),bvconst(17,16),true)=true)
+}
+
+example "FALSE-AC2101-4 an above-u64 decimal token is accepted" {
+    assert(stage1_integer_supported(bvconst(10,8),bvconst(20,16),false)=true)
+}
+
+example "FALSE-AC2101-5 stage-1 already supports parameterized functions" {
+    assert(stage1_direct_grammar_supported(true,false,true,true)=true)
+}
+
+example "FALSE-AC2101-6 an unsealed compiler image is admitted" {
+    assert(stage1_compiler_admitted(true,false,true,true)=true)
+}
+
+example "FALSE-AC2101-7 stage-1 emits AOM" {
+    assert(stage1_emits_aom()=true)
+}
+
+example "FALSE-AC2101-8 successful compilation grants execution authority" {
+    assert(stage1_compile_grants_execution_authority()=true)
+}
