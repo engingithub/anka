@@ -3332,9 +3332,14 @@ client and an adversarial gate before the next one depends on it:
       - direct executable output retained; no AOM yet
       - 932/932 Rust tests, including 9/9 Phase 10.1 runtime witnesses
       - 15/15 positive Kleis witnesses, 0/8 hostile witnesses accepted
-10.2  AC2 declarations/types/ABI
-      - prototypes, arrays/pointers, structs, typedefs, enums
-      - explicit constant/global-data rules as required
+10.2  AC2 declarations/types/ABI — CLOSED
+      - compatible prototypes + exact signature matching
+      - int/char/void, pointers, fixed arrays, structs, typedefs, enums
+      - R0..R3 scalar/pointer argument ABI; R0 scalar/pointer return
+      - array-parameter decay, stack-resident local objects, sizeof(type[/extent])
+      - mutable file-scope data rejected while the backend is code-only
+      - 944/944 Rust tests, including 12/12 Phase 10.2 runtime witnesses
+      - 23/23 positive Kleis witnesses, 0/14 hostile witnesses accepted
 10.3  AOM relocatable object emission + separate translation units
 10.4  ankald static linker + permission-aware linked artifacts
 10.5  source bundles + headers/includes + minimum earned preprocessing
@@ -3493,6 +3498,153 @@ anka101_ankacc2_frontend_false_witnesses.kleis  0/8 hostile accepted
 
 with no new axioms.  The theory explicitly records that Stage 10.1 does not yet
 emit AOM and that successful compilation creates no execution authority.
+
+#### Phase 10.2 implementation: AC2 declarations, types, and direct ABI
+
+Phase 10.2 adds a second CC_B-buildable compiler source at
+`userspace/system/compiler/ankacc2_stage2.c`.  Stage 1 remains intact as the
+closed lexical/parser checkpoint; Stage 2 deliberately keeps the same supervised
+source/workspace/output process ABI and the same compile-only sealing boundary:
+
+```text
+CC_B + ankacc2_stage2.c -> sealed AnkaCC2 stage-2 compiler
+AnkaCC2 stage 2 + typed AC2 source -> sealed direct executable
+```
+
+This is still pre-AOM.  Type-system growth does not silently introduce a linker,
+a writable global-data segment, or execution authority.
+
+The first explicit AC2 data model is:
+
+```text
+int       size 8, align 8
+char      size 1, align 1
+pointer   size 8, align 8
+enum      int representation (size 8, align 8)
+void      no object representation
+```
+
+Pointers may be nested.  Fixed local arrays have a positive extent and decay to
+an element pointer when used as function parameters.  Struct fields are laid out
+in declaration order with each field aligned to its type alignment; the final
+struct size is rounded to the maximum field alignment.  Thus, for example,
+`struct { char c; int x; }` places `c` at 0, `x` at 8, and has size 16.
+For the Stage-2 arithmetic subset, `char` values are integer-promoted to `int`
+before `+`/`-`; this does not change their one-byte object representation.  Scalar
+value compatibility admits both `char`→`int` widening and `int`→`char` narrowing;
+the latter stores the low byte and later loads it zero-extended into the word ABI.  Arrays,
+structs, and local frame growth are bounded explicitly: Stage 2 admits at most
+1024 elements per fixed extent and at most 8192 bytes of stack-resident typed
+objects per function.  Incomplete recursive-by-value fields are rejected;
+pointers to previously introduced/incomplete struct identities remain the
+recursion mechanism.
+
+`typedef` preserves the exact target type.  Named enums have the `int`
+representation and introduce compile-time enumerator constants.  Stage 2 also
+adds `sizeof(type)` and `sizeof(type[extent])` as an executable layout witness.
+The current direct expression slice supports integer/enum values, scalar locals,
+address-of, 64-bit pointer dereference, function calls, and integer `+`/`-`.
+Struct member expressions and general array indexing are intentionally not
+claimed by 10.2; the phase establishes declaration/layout/ABI semantics rather
+than pretending the entire C expression language arrived at once.
+
+The function ABI is now explicit rather than inherited accidentally from the
+bootstrap compiler:
+
+```text
+arguments 0..3 : R0, R1, R2, R3
+return value   : R0
+caller         : evaluates arguments, then loads R0..R3
+callee         : spills named parameters into its stack frame
+LR / FP        : saved and restored by the callee
+local objects  : stack-resident, bounded frame
+```
+
+Stage 2 supports at most four scalar or pointer parameters.  Arrays in parameter
+position decay to element pointers.  Struct-by-value parameters/returns remain
+deferred rather than inventing an aggregate ABI prematurely.  Prototypes and
+definitions must match exactly in return type, argument count, and parameter
+types.  A called prototype must resolve to a definition before publication.
+`main` remains exactly an `int` zero-argument definition for the direct runner.
+
+The direct executable format has no writable data mapping.  Consequently mutable
+file-scope objects are rejected with a dedicated diagnostic instead of being
+smuggled into executable memory:
+
+```text
+sealed code artifact != writable global-data authority
+```
+
+This is an architectural choice, not a permanent rejection of C globals.  The
+first honest file-scope data representation belongs with AOM section semantics,
+where code/data permissions and relocation are explicit.
+
+Stage-2 diagnostics extend the stable 10.1 set without changing codes 1..8:
+
+```text
+9   type/object mismatch
+10  declaration/tag/alias error
+11  prototype/definition signature mismatch
+12  direct ABI limit or invalid aggregate-by-value use
+13  object/layout/frame bound violation
+14  mutable file-scope data unsupported by the direct backend
+```
+
+Twelve new Rust witnesses exercise the intended implementation path: CC_B builds
+Stage 2; compatible four-register prototypes execute; array-parameter decay plus
+address/dereference executes; typedefs and enum constants participate in typed
+calls; struct/array `sizeof` reflects real layout; byte-sized `char` survives a
+word-register ABI; prototype mismatch, fifth argument, struct-by-value ABI,
+recursive-by-value layout, zero arrays, mutable globals, unresolved prototypes,
+void objects, and unknown typedefs are rejected with stable diagnostics.  After
+the flat-bootstrap-local repair and the `int`→`char` scalar-conversion repair,
+the complete Rust regression suite closes at:
+
+```text
+944 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Thus all twelve new Phase 10.2 runtime witnesses and the prior 932-test baseline
+pass together.  Phase 10.2 is runtime-closed.
+
+The executable formal refinement is already closed independently:
+
+```text
+anka102_ac2_types_abi.kleis                  23/23
+anka102_ac2_types_abi_false_witnesses.kleis   0/14 hostile accepted
+```
+
+with no new axioms.  The hostile theory explicitly rejects word-sized `char`,
+void objects, zero/over-bound arrays, misaligned struct layout, incompatible
+prototypes, a fifth register argument, struct-by-value admission, failure to
+decay array parameters, mutable globals in the code-only backend, premature AOM,
+denial of the supported `int`→`char` scalar conversion, and type-checking as a source of execution authority.
+
+The bootstrap source itself is statically constrained before runtime testing.
+After the first runtime attempt exposed CC_B's flat per-function local-symbol
+scope, block-local redeclarations in `primary`, `unary`, and `topitem` were
+renamed so every bootstrap local is unique within its function.  The corrected
+source is compact multiline C rather than a single minified line: 19,745 source
+bytes remain below CC_B's 20,472-byte source limit while still being readable.
+It uses at most four parameters per bootstrap function, 61/64 bootstrap
+functions, at most 14/32 flat symbols in any function, no duplicate flat local
+names, and about 368 call sites against CC_B's 512-fixup bound.  The largest
+source integer literal remains 81,920, below CC_B's 131,071 source-literal cap.
+The prior generated-text preflight estimate was about 80,232 bytes against the
+81,920-byte output arena; the redundant address-of branch removed during the
+flat-scope repair only reduces that pressure.  These are bootstrap-shape checks;
+the authoritative runtime gate remains CC_B actually compiling and executing
+Stage 2 under Anka.
+
+The flat-scope restriction is a property of the *bootstrap compiler*, not an
+AC2 language rule.  A successor compiler must be written in the language of its
+predecessor until the bootstrap edge has been crossed.  The second runtime pass
+then exposed a distinct Stage-2 semantic boundary: byte storage was implemented,
+but scalar assignment compatibility admitted `char`→`int` without the matching
+`int`→`char` narrowing used by `char c = 42`.  That conversion now stores the low
+byte and reloads it zero-extended through the word-register ABI.  With both
+bootstrap and scalar-conversion repairs in place, the 944/944 runtime gate and
+the 23/23 + 0/14 formal gate jointly close Phase 10.2.
 
 #### Formal scope
 

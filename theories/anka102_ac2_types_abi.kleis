@@ -1,0 +1,233 @@
+// =============================================================================
+// Anka64 Phase 10.2 — AC2 Declarations, Types, and Direct-Executable ABI
+// =============================================================================
+// No new axioms.  This theory refines the Phase 10.1 front end with the first
+// explicit AC2 object/type and function-call ABI rules while preserving the
+// pre-AOM direct-executable boundary.
+//
+// Implemented Stage-2 commitments:
+// - int is 64-bit, char is 8-bit, pointers are 64-bit, enum has int layout,
+// - void has no object representation,
+// - fixed local arrays have positive bounded extent and remain stack-resident,
+// - struct fields are aligned and the final struct size is rounded to max align,
+// - typedef preserves its target type; enum constants are compile-time values,
+// - at most four scalar/pointer arguments are passed in R0..R3,
+// - scalar/pointer return value is R0; aggregate-by-value ABI is deferred,
+// - prototype/definition signatures must match exactly,
+// - array parameters decay to element pointers,
+// - mutable file-scope data is rejected while the backend is code-only,
+// - compilation/sealing still grants no execution authority and emits no AOM.
+// =============================================================================
+
+import "anka101_ankacc2_frontend.kleis"
+
+define ac2102_size_int() = bvconst(8,16)
+define ac2102_align_int() = bvconst(8,16)
+define ac2102_size_char() = bvconst(1,16)
+define ac2102_align_char() = bvconst(1,16)
+define ac2102_size_pointer() = bvconst(8,16)
+define ac2102_align_pointer() = bvconst(8,16)
+define ac2102_size_enum() = bvconst(8,16)
+define ac2102_align_enum() = bvconst(8,16)
+
+define ac2102_void_object_valid() = false
+
+define ac2102_array_supported(
+    element_has_object_layout : Bool,
+    count : BitVec16,
+    total_fits_stage2_frame : Bool
+) =
+    if element_has_object_layout then
+        if bvugt(count,bvconst(0,16)) then
+            if bvule(count,bvconst(1024,16)) then
+                if total_fits_stage2_frame then true else false
+            else false
+        else false
+    else false
+
+define ac2102_struct_field_supported(
+    field_has_object_layout : Bool,
+    extent_positive : Bool,
+    aligned_offset : Bool,
+    total_fits_stage2_frame : Bool
+) =
+    if field_has_object_layout then
+        if extent_positive then
+            if aligned_offset then
+                if total_fits_stage2_frame then true else false
+            else false
+        else false
+    else false
+
+define ac2102_struct_char_then_int_offsets(
+    char_offset : BitVec16,
+    int_offset : BitVec16,
+    final_size : BitVec16
+) =
+    if char_offset = bvconst(0,16) then
+        if int_offset = bvconst(8,16) then
+            if final_size = bvconst(16,16) then true else false
+        else false
+    else false
+
+define ac2102_typedef_preserves_type(
+    target_known : Bool,
+    alias_unique : Bool,
+    use_resolves_to_target : Bool
+) =
+    if target_known then
+        if alias_unique then
+            if use_resolves_to_target then true else false
+        else false
+    else false
+
+define ac2102_prototype_matches_definition(
+    return_type_equal : Bool,
+    argc_equal : Bool,
+    parameter_types_equal : Bool
+) =
+    if return_type_equal then
+        if argc_equal then
+            if parameter_types_equal then true else false
+        else false
+    else false
+
+define ac2102_register_abi_supported(
+    argc : BitVec8,
+    scalar_or_pointer_parameters : Bool,
+    scalar_pointer_or_void_return : Bool
+) =
+    if bvule(argc,bvconst(4,8)) then
+        if scalar_or_pointer_parameters then
+            if scalar_pointer_or_void_return then true else false
+        else false
+    else false
+
+define ac2102_array_parameter_decays_to_pointer(
+    declared_array_parameter : Bool,
+    signature_records_element_pointer : Bool
+) =
+    if declared_array_parameter then
+        if signature_records_element_pointer then true else false
+    else false
+
+define ac2102_direct_backend_mutable_global_supported() = false
+
+define ac2102_local_storage_is_stack_resident() = true
+
+define ac2102_emits_aom() = false
+
+define ac2102_compile_grants_execution_authority() = false
+
+define ac2102_integer_promote(type_tag : BitVec8) =
+    if type_tag = bvconst(2,8) then bvconst(1,8) else type_tag
+
+define ac2102_add_sub_supported(left_type : BitVec8, right_type : BitVec8) =
+    if ac2102_integer_promote(left_type) = bvconst(1,8) then
+        if ac2102_integer_promote(right_type) = bvconst(1,8) then true else false
+    else false
+
+define ac2102_scalar_value_compatible(want_type : BitVec8, got_type : BitVec8) =
+    if want_type = got_type then true
+    else if want_type = bvconst(1,8) then
+        if got_type = bvconst(2,8) then true else false
+    else if want_type = bvconst(2,8) then
+        if got_type = bvconst(1,8) then true else false
+    else false
+
+example "AC2102-1 int object is one Anka64 word" {
+    assert(ac2102_size_int()=bvconst(8,16))
+    assert(ac2102_align_int()=bvconst(8,16))
+}
+
+example "AC2102-2 char object is one byte" {
+    assert(ac2102_size_char()=bvconst(1,16))
+    assert(ac2102_align_char()=bvconst(1,16))
+}
+
+example "AC2102-3 pointers are one Anka64 word" {
+    assert(ac2102_size_pointer()=bvconst(8,16))
+    assert(ac2102_align_pointer()=bvconst(8,16))
+}
+
+example "AC2102-4 enum uses int layout" {
+    assert(ac2102_size_enum()=bvconst(8,16))
+    assert(ac2102_align_enum()=bvconst(8,16))
+}
+
+example "AC2102-5 void is not an object type" {
+    assert(ac2102_void_object_valid()=false)
+}
+
+example "AC2102-6 bounded positive local array is admitted" {
+    assert(ac2102_array_supported(true,bvconst(3,16),true)=true)
+}
+
+example "AC2102-7 zero-length local array is rejected" {
+    assert(ac2102_array_supported(true,bvconst(0,16),true)=false)
+}
+
+example "AC2102-8 stage-2 array bound is explicit" {
+    assert(ac2102_array_supported(true,bvconst(1024,16),true)=true)
+    assert(ac2102_array_supported(true,bvconst(1025,16),true)=false)
+}
+
+example "AC2102-9 struct char then int receives required padding" {
+    assert(ac2102_struct_char_then_int_offsets(bvconst(0,16),bvconst(8,16),bvconst(16,16))=true)
+}
+
+example "AC2102-10 incomplete recursive-by-value field is rejected" {
+    assert(ac2102_struct_field_supported(false,true,true,true)=false)
+}
+
+example "AC2102-11 typedef is an exact type alias" {
+    assert(ac2102_typedef_preserves_type(true,true,true)=true)
+}
+
+example "AC2102-12 compatible prototype and definition match" {
+    assert(ac2102_prototype_matches_definition(true,true,true)=true)
+}
+
+example "AC2102-13 return mismatch rejects a definition" {
+    assert(ac2102_prototype_matches_definition(false,true,true)=false)
+}
+
+example "AC2102-14 four scalar arguments fit R0 through R3" {
+    assert(ac2102_register_abi_supported(bvconst(4,8),true,true)=true)
+}
+
+example "AC2102-15 fifth register argument is outside stage-2 ABI" {
+    assert(ac2102_register_abi_supported(bvconst(5,8),true,true)=false)
+}
+
+example "AC2102-16 aggregate by value remains deferred" {
+    assert(ac2102_register_abi_supported(bvconst(1,8),false,true)=false)
+}
+
+example "AC2102-17 array parameter records pointer signature" {
+    assert(ac2102_array_parameter_decays_to_pointer(true,true)=true)
+}
+
+example "AC2102-18 local typed objects are stack-resident" {
+    assert(ac2102_local_storage_is_stack_resident()=true)
+}
+
+example "AC2102-19 direct backend has no mutable file-scope data" {
+    assert(ac2102_direct_backend_mutable_global_supported()=false)
+}
+
+example "AC2102-20 phase 10.2 still emits no AOM" {
+    assert(ac2102_emits_aom()=false)
+}
+
+example "AC2102-21 type correctness does not create execution authority" {
+    assert(ac2102_compile_grants_execution_authority()=false)
+}
+example "AC2102-22 char participates in integer arithmetic by promotion" {
+    assert(ac2102_integer_promote(bvconst(2,8))=bvconst(1,8))
+    assert(ac2102_add_sub_supported(bvconst(2,8),bvconst(1,8))=true)
+}
+example "AC2102-23 int and char scalar values convert in both directions" {
+    assert(ac2102_scalar_value_compatible(bvconst(1,8),bvconst(2,8))=true)
+    assert(ac2102_scalar_value_compatible(bvconst(2,8),bvconst(1,8))=true)
+}

@@ -1,0 +1,56 @@
+// Every example is deliberately false and must be rejected.
+import "anka102_ac2_types_abi.kleis"
+
+example "FALSE-AC2102-1 char has word size" {
+    assert(ac2102_size_char()=bvconst(8,16))
+}
+
+example "FALSE-AC2102-2 void is a valid local object type" {
+    assert(ac2102_void_object_valid()=true)
+}
+
+example "FALSE-AC2102-3 zero-length array is admitted" {
+    assert(ac2102_array_supported(true,bvconst(0,16),true)=true)
+}
+
+example "FALSE-AC2102-4 over-bound array is admitted" {
+    assert(ac2102_array_supported(true,bvconst(1025,16),true)=true)
+}
+
+example "FALSE-AC2102-5 misaligned struct int field is valid" {
+    assert(ac2102_struct_char_then_int_offsets(bvconst(0,16),bvconst(1,16),bvconst(9,16))=true)
+}
+
+example "FALSE-AC2102-6 incompatible prototype may define the function" {
+    assert(ac2102_prototype_matches_definition(true,true,false)=true)
+}
+
+example "FALSE-AC2102-7 five register arguments are supported" {
+    assert(ac2102_register_abi_supported(bvconst(5,8),true,true)=true)
+}
+
+example "FALSE-AC2102-8 struct by value is in the stage-2 ABI" {
+    assert(ac2102_register_abi_supported(bvconst(1,8),false,true)=true)
+}
+
+example "FALSE-AC2102-9 array parameter need not decay to pointer" {
+    assert(ac2102_array_parameter_decays_to_pointer(true,false)=true)
+}
+
+example "FALSE-AC2102-10 mutable global data is supported by code-only backend" {
+    assert(ac2102_direct_backend_mutable_global_supported()=true)
+}
+
+example "FALSE-AC2102-11 phase 10.2 emits AOM" {
+    assert(ac2102_emits_aom()=true)
+}
+
+example "FALSE-AC2102-12 successful typed compilation grants execution authority" {
+    assert(ac2102_compile_grants_execution_authority()=true)
+}
+example "FALSE-AC2102-13 char remains a non-integer operand in add/sub" {
+    assert(ac2102_add_sub_supported(bvconst(2,8),bvconst(1,8))=false)
+}
+example "FALSE-AC2102-14 int cannot initialize char scalar" {
+    assert(ac2102_scalar_value_compatible(bvconst(2,8),bvconst(1,8))=false)
+}

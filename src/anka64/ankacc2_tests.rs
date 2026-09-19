@@ -12,7 +12,8 @@ use std::sync::OnceLock;
 
 use super::dev_compiler::{
     bootstrap_development_ccb, compile_c_with_ankacc2_stage1,
-    compile_c_with_ccb, CompiledCImage, DevelopmentCompileError,
+    compile_c_with_ankacc2_stage2, compile_c_with_ccb, CompiledCImage,
+    DevelopmentCompileError,
 };
 use super::fabric::Fabric;
 use super::os::{BootImage, BootInfo, Kernel, ProcessResult};
@@ -31,6 +32,12 @@ const ERR_PARSE: u64 = 4;
 const ERR_DUPLICATE_FUNCTION: u64 = 5;
 const ERR_MISSING_MAIN: u64 = 6;
 const ERR_UNRESOLVED_FUNCTION: u64 = 7;
+const ERR_TYPE: u64 = 9;
+const ERR_DECL: u64 = 10;
+const ERR_SIGNATURE: u64 = 11;
+const ERR_ABI: u64 = 12;
+const ERR_LAYOUT: u64 = 13;
+const ERR_GLOBAL_DATA: u64 = 14;
 
 fn stage1_source() -> &'static [u8] {
     include_bytes!(concat!(
@@ -191,4 +198,144 @@ fn p101_duplicate_missing_and_unresolved_functions_have_stable_diagnostics() {
         "int main(){return missing_function();}",
         ERR_UNRESOLVED_FUNCTION,
     );
+}
+
+
+fn stage2_source() -> &'static [u8] {
+    include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/userspace/system/compiler/ankacc2_stage2.c"
+    ))
+}
+
+fn stage2_image() -> &'static CompiledCImage {
+    static IMAGE: OnceLock<CompiledCImage> = OnceLock::new();
+    IMAGE.get_or_init(|| {
+        compile_c_with_ccb(ccb_image(), stage2_source())
+            .expect("CC_B must compile the real AnkaCC2 stage-2 source")
+    })
+}
+
+fn compile_ac2_v2(source: &str) -> Result<CompiledCImage, DevelopmentCompileError> {
+    compile_c_with_ankacc2_stage2(&stage2_image().bytes, source.as_bytes())
+}
+
+fn assert_v2_rejected(source: &str, expected: u64) {
+    assert_eq!(
+        compile_ac2_v2(source),
+        Err(DevelopmentCompileError::CompilerRejected(expected)),
+    );
+}
+
+#[test]
+fn p102_ccb_builds_real_ankacc2_stage2() {
+    let image = stage2_image();
+    assert!(image.code_size > 0);
+    assert_eq!(image.lit_start, 0,
+        "stage-2 compiler remains a direct code-only bootstrap artifact");
+    assert_eq!(image.process_slots_observed, 2,
+        "building stage 2 must remain compile-only");
+}
+
+#[test]
+fn p102_prototype_and_four_register_argument_abi_execute() {
+    let source = concat!(
+        "int add(int a,int b,int c,int d);",
+        "int add(int a,int b,int c,int d){return a+b+c+d;}",
+        "int main(){return add(10,20,5,7);}"
+    );
+    let image = compile_ac2_v2(source).expect("compatible prototype and 4-arg definition");
+    assert_eq!(run_image(&image), ProcessResult::Exited(42));
+}
+
+#[test]
+fn p102_pointer_and_array_parameter_decay_execute() {
+    let source = concat!(
+        "int first(int a[]);",
+        "int first(int a[]){return *a;}",
+        "int main(){int x=42;return first(&x);}"
+    );
+    let image = compile_ac2_v2(source).expect("array parameter must decay to int pointer");
+    assert_eq!(run_image(&image), ProcessResult::Exited(42));
+}
+
+#[test]
+fn p102_typedef_and_enum_constants_participate_in_typed_calls() {
+    let source = concat!(
+        "typedef int word;",
+        "enum color{red=40,green,blue};",
+        "word id(word x);",
+        "word id(word x){return x;}",
+        "int main(){return id(green+1);}"
+    );
+    let image = compile_ac2_v2(source).expect("typedef and enum metadata must feed type checking");
+    assert_eq!(run_image(&image), ProcessResult::Exited(42));
+}
+
+#[test]
+fn p102_struct_layout_and_array_extent_are_word_aligned() {
+    let source = concat!(
+        "struct pair{char c;int x;};",
+        "int main(){struct pair p;int a[3];return sizeof(struct pair)+sizeof(int[3]);}"
+    );
+    let image = compile_ac2_v2(source).expect("struct and array layout must compile");
+    assert_eq!(run_image(&image), ProcessResult::Exited(40));
+}
+
+#[test]
+fn p102_char_size_is_one_byte_while_scalar_abi_remains_word_return() {
+    let image = compile_ac2_v2("int main(){char c=42;return c+sizeof(char)-1;}")
+        .expect("char object and sizeof(char) must compile");
+    assert_eq!(run_image(&image), ProcessResult::Exited(42));
+}
+
+#[test]
+fn p102_prototype_mismatch_is_rejected_stably() {
+    assert_v2_rejected(
+        "int f(int x);int f(char x){return x;}int main(){return 0;}",
+        ERR_SIGNATURE,
+    );
+}
+
+#[test]
+fn p102_abi_rejects_more_than_four_register_arguments_and_struct_by_value() {
+    assert_v2_rejected(
+        "int f(int a,int b,int c,int d,int e);int main(){return 0;}",
+        ERR_ABI,
+    );
+    assert_v2_rejected(
+        "struct pair{int x;int y;};int f(struct pair p);int main(){return 0;}",
+        ERR_ABI,
+    );
+}
+
+#[test]
+fn p102_invalid_object_layout_is_rejected_stably() {
+    assert_v2_rejected(
+        "struct node{struct node next;};int main(){return 0;}",
+        ERR_LAYOUT,
+    );
+    assert_v2_rejected(
+        "int main(){int a[0];return 0;}",
+        ERR_TYPE,
+    );
+}
+
+#[test]
+fn p102_mutable_file_scope_data_remains_outside_direct_backend() {
+    assert_v2_rejected("int counter;int main(){return 0;}", ERR_GLOBAL_DATA);
+}
+
+#[test]
+fn p102_called_prototype_must_resolve_to_a_definition() {
+    assert_v2_rejected(
+        "int f(int x);int main(){return f(42);}",
+        ERR_UNRESOLVED_FUNCTION,
+    );
+}
+
+#[test]
+fn p102_void_object_and_unknown_typedef_are_type_errors() {
+    assert_v2_rejected("int main(){void x;return 0;}", ERR_TYPE);
+    assert_v2_rejected("mystery main(){return 0;}", ERR_DECL);
 }

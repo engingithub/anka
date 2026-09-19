@@ -104,6 +104,23 @@ pub fn compile_c_with_ankacc2_stage1(
     )
 }
 
+/// Compile one AC2 stage-2 translation unit through the CC_B-built AnkaCC2
+/// declarations/types/ABI compiler.
+///
+/// Phase 10.2 deliberately preserves the same supervised compiler ABI and
+/// compile-only admission used by CC_B and stage 1.  The richer type system
+/// therefore changes source semantics, not artifact or execution authority.
+pub fn compile_c_with_ankacc2_stage2(
+    compiler_image: &[u8],
+    source: &[u8],
+) -> Result<CompiledCImage, DevelopmentCompileError> {
+    compile_c_with_compiler_image(
+        compiler_image,
+        DEVELOPMENT_CCB_CODE_VADDR,
+        source,
+    )
+}
+
 /// Bootstrap the self-hosted CC_B image from the Rust AST seed (CC_A).
 ///
 /// This is development tooling, not a host C compiler shortcut: CC_A itself
