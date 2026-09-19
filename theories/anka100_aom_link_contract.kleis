@@ -1,0 +1,272 @@
+// =============================================================================
+// Anka64 Phase 10.0 — AOM / Static Link / Authority Contract
+// =============================================================================
+// No new axioms. This freezes semantic requirements for the future Anka Object
+// Module (AOM) and ankald before the byte format is chosen in Phase 10.3.
+//
+// Core rules:
+// - required imports resolve to exactly one declared definition,
+// - duplicate strong definitions are rejected,
+// - every relocation has nonzero width, lies inside its owning section, names a
+//   declared target, and has a compatible relocation/target kind,
+// - linked code remains executable/non-writable and read-only data remains
+//   readable/non-writable/non-executable,
+// - failed or incomplete links publish no executable artifact,
+// - names, symbols, relocations and successful linking create no authority,
+// - execution still requires exact artifact validation + explicit execution
+//   authority + ordinary spawn admission.
+// =============================================================================
+
+define AOM_VERSION_1 : BitVec16 = bvconst(1,16)
+
+define aom_version_supported(version : BitVec16) =
+    if version=AOM_VERSION_1 then true else false
+
+define aom_required_import_resolved(definition_count : BitVec8) =
+    if definition_count=bvconst(1,8) then true else false
+
+define aom_no_duplicate_strong(definition_count : BitVec8) =
+    if bvule(definition_count,bvconst(1,8)) then true else false
+
+define aom_relocation_in_bounds(
+    section_length : BitVec64,
+    offset : BitVec64,
+    width : BitVec64
+) =
+    if bvugt(width,bvconst(0,64)) then
+        if bvule(offset,section_length) then
+            if bvule(width,bvsub(section_length,offset)) then true else false
+        else false
+    else false
+
+define aom_relocation_valid(
+    in_bounds : Bool,
+    target_declared : Bool,
+    kind_compatible : Bool
+) =
+    if in_bounds then
+        if target_declared then
+            if kind_compatible then true else false
+        else false
+    else false
+
+define aom_section_valid(
+    nonzero_length : Bool,
+    bounds_valid : Bool,
+    alignment_power_of_two : Bool,
+    base_satisfies_alignment : Bool
+) =
+    if nonzero_length then
+        if bounds_valid then
+            if alignment_power_of_two then
+                if base_satisfies_alignment then true else false
+            else false
+        else false
+    else false
+
+define aom_module_valid(
+    version_supported : Bool,
+    all_sections_valid : Bool,
+    symbols_well_formed : Bool,
+    all_relocations_valid : Bool
+) =
+    if version_supported then
+        if all_sections_valid then
+            if symbols_well_formed then
+                if all_relocations_valid then true else false
+            else false
+        else false
+    else false
+
+define aom_permissions_valid(
+    code_executable : Bool,
+    code_writable : Bool,
+    rodata_readable : Bool,
+    rodata_writable : Bool,
+    rodata_executable : Bool
+) =
+    if code_executable then
+        if code_writable then false
+        else if rodata_readable then
+            if rodata_writable then false
+            else if rodata_executable then false
+            else true
+        else false
+    else false
+
+define aom_link_ready(
+    all_modules_valid : Bool,
+    no_duplicate_strong_exports : Bool,
+    all_required_imports_unique : Bool,
+    all_relocations_valid : Bool,
+    output_permissions_valid : Bool
+) =
+    if all_modules_valid then
+        if no_duplicate_strong_exports then
+            if all_required_imports_unique then
+                if all_relocations_valid then
+                    if output_permissions_valid then true else false
+                else false
+            else false
+        else false
+    else false
+
+define aom_link_publishable(
+    link_ready : Bool,
+    link_success : Bool,
+    output_complete : Bool,
+    output_sealed : Bool,
+    output_generation_current : Bool
+) =
+    if link_ready then
+        if link_success then
+            if output_complete then
+                if output_sealed then
+                    if output_generation_current then true else false
+                else false
+            else false
+        else false
+    else false
+
+define aom_execution_admitted(
+    linked_artifact_valid : Bool,
+    explicit_execution_authority : Bool,
+    normal_spawn_admission : Bool
+) =
+    if linked_artifact_valid then
+        if explicit_execution_authority then
+            if normal_spawn_admission then true else false
+        else false
+    else false
+
+define aom_source_name_creates_authority() = false
+
+define aom_header_name_creates_authority() = false
+
+define aom_symbol_name_creates_authority() = false
+
+define aom_relocation_creates_capability() = false
+
+define aom_successful_link_creates_execution_authority() = false
+
+define aom_link_amplifies_runtime_authority() = false
+
+example "AOM100-1 AOM version one is supported" {
+    assert(aom_version_supported(bvconst(1,16))=true)
+}
+
+example "AOM100-2 unknown AOM version is rejected" {
+    assert(aom_version_supported(bvconst(2,16))=false)
+}
+
+example "AOM100-3 required import resolves with exactly one definition" {
+    assert(aom_required_import_resolved(bvconst(1,8))=true)
+}
+
+example "AOM100-4 unresolved required import is rejected" {
+    assert(aom_required_import_resolved(bvconst(0,8))=false)
+}
+
+example "AOM100-5 multiply defined required import is rejected" {
+    assert(aom_required_import_resolved(bvconst(2,8))=false)
+}
+
+example "AOM100-6 one strong definition is not a duplicate" {
+    assert(aom_no_duplicate_strong(bvconst(1,8))=true)
+}
+
+example "AOM100-7 two strong definitions are rejected" {
+    assert(aom_no_duplicate_strong(bvconst(2,8))=false)
+}
+
+example "AOM100-8 relocation exactly ending at section boundary is safe" {
+    assert(aom_relocation_in_bounds(bvconst(100,64),bvconst(92,64),bvconst(8,64))=true)
+}
+
+example "AOM100-9 relocation extending one byte past section is rejected" {
+    assert(aom_relocation_in_bounds(bvconst(100,64),bvconst(93,64),bvconst(8,64))=false)
+}
+
+example "AOM100-10 zero-width relocation is rejected" {
+    assert(aom_relocation_in_bounds(bvconst(100,64),bvconst(10,64),bvconst(0,64))=false)
+}
+
+example "AOM100-11 declared compatible in-bounds relocation is valid" {
+    assert(aom_relocation_valid(true,true,true)=true)
+}
+
+example "AOM100-12 relocation to undeclared target is invalid" {
+    assert(aom_relocation_valid(true,false,true)=false)
+}
+
+example "AOM100-13 aligned bounded nonempty AOM section is valid" {
+    assert(aom_section_valid(true,true,true,true)=true)
+}
+
+example "AOM100-14 misaligned AOM section is invalid" {
+    assert(aom_section_valid(true,true,true,false)=false)
+}
+
+example "AOM100-15 supported well-formed module is valid" {
+    assert(aom_module_valid(true,true,true,true)=true)
+}
+
+example "AOM100-16 malformed symbol table invalidates module" {
+    assert(aom_module_valid(true,true,false,true)=false)
+}
+
+example "AOM100-17 RX code and R-only non-executable rodata preserve permission separation" {
+    assert(aom_permissions_valid(true,false,true,false,false)=true)
+}
+
+example "AOM100-18 writable executable code is rejected" {
+    assert(aom_permissions_valid(true,true,true,false,false)=false)
+}
+
+example "AOM100-19 semantically complete module set is link-ready" {
+    assert(aom_link_ready(true,true,true,true,true)=true)
+}
+
+example "AOM100-20 duplicate strong export prevents link readiness" {
+    assert(aom_link_ready(true,false,true,true,true)=false)
+}
+
+example "AOM100-21 successful complete sealed current link is publishable" {
+    assert(aom_link_publishable(true,true,true,true,true)=true)
+}
+
+example "AOM100-22 failed link publishes no executable" {
+    assert(aom_link_publishable(true,false,true,true,true)=false)
+}
+
+example "AOM100-23 linked artifact still needs explicit execution authority and normal spawn" {
+    assert(aom_execution_admitted(true,true,true)=true)
+}
+
+example "AOM100-24 successful link alone does not admit execution" {
+    assert(aom_execution_admitted(true,false,true)=false)
+}
+
+example "AOM100-25 source name creates no authority" {
+    assert(aom_source_name_creates_authority()=false)
+}
+
+example "AOM100-26 header name creates no authority" {
+    assert(aom_header_name_creates_authority()=false)
+}
+
+example "AOM100-27 symbol name creates no authority" {
+    assert(aom_symbol_name_creates_authority()=false)
+}
+
+example "AOM100-28 relocation creates no capability" {
+    assert(aom_relocation_creates_capability()=false)
+}
+
+example "AOM100-29 successful linking creates no execution authority" {
+    assert(aom_successful_link_creates_execution_authority()=false)
+}
+
+example "AOM100-30 linking cannot amplify runtime authority" {
+    assert(aom_link_amplifies_runtime_authority()=false)
+}

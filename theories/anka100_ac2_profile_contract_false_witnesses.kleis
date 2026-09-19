@@ -1,0 +1,26 @@
+// Every example is deliberately false and must be rejected.
+import "anka100_ac2_profile_contract.kleis"
+
+example "FALSE-AC2100-1 AC2 retains the old eight-byte identifier ceiling" {
+    assert(ac2_identifier_supported(true,bvconst(9,16))=false)
+}
+
+example "FALSE-AC2100-2 sixty-four-byte identifier is in AC2 v1" {
+    assert(ac2_identifier_supported(true,bvconst(64,16))=true)
+}
+
+example "FALSE-AC2100-3 full 64-bit literal magnitude is unsupported" {
+    assert(ac2_integer_literal_width_supported(bvconst(64,8))=false)
+}
+
+example "FALSE-AC2100-4 host macro expansion is valid source-bundle semantics" {
+    assert(ac2_source_bundle_valid(true,true,true,false,true,false,false)=true)
+}
+
+example "FALSE-AC2100-5 source path itself grants Anka authority" {
+    assert(ac2_source_name_creates_authority()=true)
+}
+
+example "FALSE-AC2100-6 header path itself grants Anka authority" {
+    assert(ac2_header_name_creates_authority()=true)
+}

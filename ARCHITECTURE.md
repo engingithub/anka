@@ -1453,7 +1453,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions; binary size verified by fixed-point regression |
 | Canonical source | ~17 KB |
-| Tests | 877 Rust tests in source at 9.3h.4; 868/868 gate closed for 9.3h.3; 9.3h.4 gate pending local Rust run |
+| Tests | 923/923 Rust tests through Phase 9.4g HTTP; Phase 10.0 adds formal contracts only |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -3116,9 +3116,309 @@ anka94g_http_contract.kleis                  15 positive examples
 anka94g_http_contract_false_witnesses.kleis   8 deliberate false claims
 ```
 
-Seven executable witnesses are added over the closed 916-test socket baseline;
-the expected Phase 9.4g Rust gate is 923 tests. The end-to-end witness performs
+Seven executable witnesses close Phase 9.4g over the 916-test socket baseline;
+the runtime gate is 923/923 tests.  The formal gate closes at 15/15 positive
+examples with 0/8 deliberate false witnesses accepted. The end-to-end witness performs
 a real TCP handshake, delivers the HTTP request through the socket process,
 verifies the exact 200 response bytes and checksums on the transmitted TCP
 segment, acknowledges the response, sends FIN, and observes both socket and HTTP
 processes terminate through their ordinary protocols.
+
+### Stage 43 (planned): Second-Generation Self-Hosted Anka C Toolchain (Phase 10)
+
+Phase 9.4g closes the original CPU-to-HTTP vertical slice.  That closure also
+provides the demanding client for the next toolchain phase.  CC_B proved that a
+small self-hosted compiler is sufficient to construct real Anka software, but
+real userspace has now exposed compiler constraints that distort the software
+above it: eight-character identifiers, restricted integer literals, one
+translation unit, no source/header composition, and no linker-level module
+composition.  The network stack sometimes duplicates lower-layer parsing not
+because the architecture requires duplication, but because the compiler cannot
+yet express the desired module structure.
+
+Phase 10 therefore builds **AnkaCC2**, a second-generation self-hosted C
+toolchain, using the existing authoritative CC_B as its bootstrap compiler.
+The goal is not immediate ISO C conformance.  The goal is an explicitly defined
+freestanding **Anka C v2 (AC2)** profile large enough to write the Anka compiler,
+system services, libraries, and applications without shaping their architecture
+around bootstrap-era compiler limits.
+
+The existing compiler lineage is historical and remains unchanged:
+
+```text
+CC_A --compile canonical AnkaCC64 source--> CC_B
+CC_B --compile canonical AnkaCC64 source--> CC_C
+                                           CC_B == CC_C
+```
+
+`CC_C` is already the fixed-point witness for CC_B and is not renamed or reused
+for the new compiler.  AnkaCC2 uses an explicit generation-qualified bootstrap
+lineage:
+
+```text
+CC_B   + source(AnkaCC2) -> CC2_0        bootstrap image
+CC2_0  + source(AnkaCC2) -> CC2_1        first self-compile
+CC2_1  + source(AnkaCC2) -> CC2_2        second self-compile
+
+required fixed point:  CC2_1 == CC2_2
+
+on closure: authoritative AnkaCC2 := CC2_1
+```
+
+`CC2_0` is not required to equal the fixed point because it is produced by the
+older compiler.  The initial AnkaCC2 source must remain expressible in the
+language CC_B already compiles.  After AnkaCC2 reaches a fixed point, later
+source may adopt AC2 features only through staged bootstrap:
+
+```text
+old authoritative CC2 -> compile new CC2 source -> candidate new CC2
+candidate new CC2      -> recompile same source -> fixed-point witness
+```
+
+The compiler bootstrap is therefore provenance, not nomenclature: every
+accepted compiler artifact must have an exact compiler generation, exact source
+artifact, successful compilation result, and sealed output behind it.
+
+#### AC2 language pressure and first scope
+
+Phase 10.0 freezes the exact AC2 profile before implementation.  The planned
+first profile is driven by software already present in the tree and includes,
+in staged form:
+
+- practical identifier lengths rather than the current eight-character limit;
+- integer literals capable of denoting full target-width values, including
+  hexadecimal constants needed by systems code;
+- ordinary character/string literal use without bootstrap-specific contortions;
+- function prototypes and explicit declarations across translation units;
+- arrays and pointers with specified target-width semantics;
+- `struct`, `typedef`, and `enum` sufficient for system interfaces and packet
+  descriptions;
+- explicitly specified global/constant-data semantics once the executable
+  image model can represent them safely;
+- separate translation units with named imports/exports;
+- source/header composition sufficient for the real
+  `userspace/include/anka/...` tree.
+
+This list is a roadmap, not a claim of ISO C conformance.  Optimizing code
+generation, dynamic linking, ELF compatibility, a hosted libc/POSIX
+environment, C++, a complete historical C preprocessor, and undefined-behavior
+compatibility are not Phase 10 goals unless a real Anka client demonstrates the
+need.
+
+#### Relocatable object modules and linking
+
+Separate compilation introduces a new artifact class.  Phase 10 will define a
+small **Anka Object Module (AOM)** rather than inheriting ELF wholesale.  The
+minimum semantic content is:
+
+```text
+AOM = {
+  version,
+  code / read-only-data sections,
+  exported symbols,
+  imported symbols,
+  typed relocations,
+  section bounds and alignment metadata
+}
+```
+
+The exact byte format is frozen only when Phase 10.3 begins.  The important
+architectural rules are fixed now:
+
+```text
+symbol name          != authority
+source/header path   != authority
+successful compile   != execution authority
+successful link      != execution authority
+relocation           != capability creation
+```
+
+The static Anka linker (`ankald`, working name) is an ordinary user-space tool.
+It resolves only declared symbols, rejects duplicate or unresolved required
+symbols, validates every relocation against its owning section, and constructs
+a linked executable artifact transactionally.  A failed link publishes no
+partially linked executable.  Final W/X/R permissions continue to come from
+Anka object lifecycle and capability rules, not from source-language names or
+linker convention.
+
+The linked output should preserve Anka's existing permission separation rather
+than flattening everything into one writable image: executable code is sealed
+and executable, literal/read-only data is non-writable, and any future writable
+data image is represented explicitly rather than hidden inside an executable
+blob.  Phase 10 may extend the executable-artifact descriptor as required, but
+must not weaken W⊕X to accommodate a conventional object format.
+
+#### Source bundles and headers without host semantic compilation
+
+Anka still has no general guest filesystem, while development source lives in
+the mirrored host `userspace/` tree.  Header support therefore must not quietly
+turn the host into the C preprocessor.  The planned boundary is:
+
+```text
+host paths
+  -> explicit read-only source bundle (path metadata + exact bytes)
+  -> AnkaCC2 include/source resolution inside Anka
+  -> AOM modules
+  -> ankald inside Anka
+  -> linked artifact
+```
+
+The Development Shell may package bytes and logical names into a source bundle,
+but it must not perform C parsing, macro expansion, symbol resolution,
+relocation, or linking.  Logical source/include names remain metadata and grant
+no Anka authority.  The first source-composition step should support the header
+mechanisms actually required by Anka userspace; full macro/preprocessor
+semantics are earned by real clients rather than copied wholesale from Unix C
+toolchains.
+
+#### Phase 10 decomposition
+
+The planned work is intentionally staged so each new abstraction gets a real
+client and an adversarial gate before the next one depends on it:
+
+```text
+10.0  AC2 language + bootstrap + object/link authority contracts — CLOSED
+      - 55/55 positive Kleis witnesses, 0/26 hostile witnesses accepted
+      - no new axioms
+10.1  AnkaCC2 lexer/parser core under CC_B
+      - practical identifiers, full-width literals, diagnostics
+      - direct executable output retained as the first bootstrap target
+10.2  AC2 declarations/types/ABI
+      - prototypes, arrays/pointers, structs, typedefs, enums
+      - explicit constant/global-data rules as required
+10.3  AOM relocatable object emission + separate translation units
+10.4  ankald static linker + permission-aware linked artifacts
+10.5  source bundles + headers/includes + minimum earned preprocessing
+10.6  AnkaCC2 self-host bootstrap and fixed-point closure
+10.7  modularize the compiler/toolchain itself under AC2
+10.8  rebuild/refactor Anka userspace with headers, modules, and libraries
+10.9  supply-chain closure, hostile audit, and CPU-to-HTTP rebuild gate
+```
+
+Subphase boundaries may move when a demanding client exposes a better dependency
+order, but the end conditions do not.
+
+#### Phase 10.0 closure: AC2, bootstrap, and AOM/link contracts
+
+Phase 10.0 is formal-first and is closed before AnkaCC2 implementation begins.
+It adds no compiler code and no new axioms.  The contract is intentionally split
+into three independently executable theories so language-profile decisions,
+bootstrap provenance, and object/link authority cannot hide inside one another.
+
+**AC2 profile contract** (`anka100_ac2_profile_contract.kleis`): the first AC2
+target profile uses C-style ASCII identifiers of 1..63 bytes, preserving a
+bounded symbol representation while decisively removing CC_B's eight-byte
+ceiling.  Unicode identifiers remain deferred.  Integer tokens must preserve
+the complete 64-bit target magnitude; exact signed/type interpretation belongs
+to Phase 10.2.  Byte character/string literals, prototypes, pointers, arrays,
+`struct`, `typedef`, `enum`, separate translation units, and source/header
+composition are requirements of the target AC2 profile.  Development source
+bundles are exact read-only bytes plus unique logical names.  Host C parsing,
+macro expansion, symbol resolution, or linking makes the authoritative closure
+path invalid.  Source and header names grant no authority.
+
+**CC2 bootstrap contract** (`anka100_cc2_bootstrap_contract.kleis`): the only
+initial lineage is
+
+```text
+CC_B -> CC2_0 -> CC2_1 -> CC2_2
+```
+
+and every published compile result requires successful compilation, sealed
+output, and exact current compiler/source generations.  `CC_B -> CC2_1` and
+other skipped edges are invalid.  Fixed-point acceptance requires the exact
+same source across the bootstrap chain and byte-identical `CC2_1 == CC2_2`;
+`CC2_0 == CC2_1` is explicitly *not* required because CC2_0 is produced by the
+older compiler.  Host compiler/preprocessor/symbol-resolver/linker semantics are
+forbidden from the closure chain.
+
+**AOM/link authority contract** (`anka100_aom_link_contract.kleis`): AOM version
+1 is the first semantic version; its exact byte encoding remains deferred to
+Phase 10.3.  Required imports resolve to exactly one definition, duplicate strong
+definitions are rejected, sections must be bounded/nonempty/aligned, relocations
+must have nonzero in-section width and compatible declared targets, and linked
+permissions preserve RX code plus R-only non-executable literal/data sections.
+Link publication is transactional: a failed, incomplete, unsealed, stale, or
+semantically invalid link publishes no executable artifact.  Even a valid linked
+artifact remains inert until exact artifact validation, explicit execution
+authority, and normal spawn admission all hold.  Source names, header names,
+symbol names, relocations, and successful linking create no capability and may
+not amplify runtime authority.
+
+The six Phase 10.0 theories close at:
+
+```text
+AC2 profile:       12/12 positive, 0/6 hostile accepted
+CC2 bootstrap:     13/13 positive, 0/7 hostile accepted
+AOM/link:          30/30 positive, 0/13 hostile accepted
+-------------------------------------------------------
+Phase 10.0 total:  55/55 positive, 0/26 hostile accepted
+```
+
+The hostile suites explicitly assert the forbidden shortcuts: restoring the old
+identifier ceiling, using host preprocessing, treating paths as authority,
+skipping bootstrap generations, accepting stale compiler/source generations,
+closing on changed source or nonidentical self-compiles, resolving zero/multiple
+definitions, accepting out-of-bounds or incompatible relocations, permitting
+W+X output, publishing failed links, or deriving execution/capability authority
+from names or linking.  Every hostile claim is disproved by Z3 rather than merely
+left unobserved.
+
+These are structural/toolchain-protocol proofs, not a claim that Kleis has proved
+all AC2 or AnkaCC2 compiler semantics.  Semantic correctness remains subject to
+the permanent compiler corpus, self-hosting, fixed-point identity, hostile source
+programs, and the Phase 10 CPU-to-HTTP rebuild gate.
+
+#### Formal scope
+
+Kleis is used first for the structural and authority-bearing parts of the
+compiler protocol rather than pretending Phase 10 immediately proves complete C
+compiler correctness.  The planned formal gates include:
+
+- bootstrap provenance is exact-generation and cannot skip a compiler/source
+  generation;
+- compilation/link failure cannot publish an executable artifact;
+- source path, header path, symbol name, and relocation create no authority;
+- imports resolve uniquely or linking fails;
+- every relocation is in bounds and targets a compatible declared section;
+- linker output permissions do not amplify input/runtime authority;
+- linking does not imply execution authority;
+- fixed-point acceptance requires the exact same source and byte-identical
+  `CC2_1 == CC2_2`;
+- hostile witnesses assert the forbidden shortcuts explicitly and must be
+  disproved rather than merely unobserved.
+
+Compiler semantic correctness continues to be attacked by the permanent
+compiler corpus, self-hosting, byte-identical fixed points, hostile source
+programs, and real Anka userspace.  Formal compiler-semantics proofs may grow
+later, but they are not faked by calling object/link invariants a full compiler
+proof.
+
+#### Phase 10 acceptance criterion
+
+Phase 10 closes only when the toolchain can rebuild the software that forced it
+to exist.  The final acceptance chain is:
+
+```text
+CC_B(source_CC2)       -> CC2_0
+CC2_0(source_CC2)      -> CC2_1
+CC2_1(source_CC2)      -> CC2_2
+assert(CC2_1 == CC2_2)
+
+CC2 + ankald
+  -> build the real Anka userspace modules
+  -> Ethernet / ARP / IPv4 / ICMP / UDP / TCP / socket / HTTP
+  -> boot through ordinary Anka mechanisms
+  -> GET /alive HTTP/1.1
+  -> "Anka64 is alive."
+```
+
+The host may store source and package bytes for development, but the closure
+build must contain no host C compiler, host preprocessor, host symbol resolver,
+or host linker semantics.  The authoritative compiler and linker execute as
+ordinary Anka programs under the same authority model as the software they
+produce.
+
+This makes the HTTP milestone a permanent toolchain regression rather than a
+one-time networking demonstration: if AnkaCC2 cannot rebuild the path from
+userspace source to `Anka64 is alive.`, Phase 10 is not complete.
