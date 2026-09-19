@@ -4590,3 +4590,182 @@ PKI can be one implementation of the second line, but Anka must not bake one
 global trust transport into the meaning of provenance.  This keeps high-assurance,
 offline, air-gapped, organization-local, and conventional Internet distribution
 under the same small architectural rule.
+
+## DN-45: Make the Type System Real Before AOM, but Do Not Invent Writable Globals Yet (Phase 10.2)
+
+**Date:** 2026-09-19
+
+**Context.** Phase 10.1 proved the old self-hosted compiler can build a real
+successor front end, but the executable language was intentionally tiny: only
+zero-argument `int` functions returning a literal or another zero-argument call.
+The next pressure is no longer lexical.  Real modular Anka C needs declarations,
+function signatures, pointers, arrays, aggregates, aliases, enum constants, and
+a calling convention that is written down rather than inferred from whichever
+bootstrap compiler happened to generate the code.
+
+At the same time, the Phase 10 roadmap deliberately keeps AOM and the linker in
+10.3/10.4.  A conventional compiler would be tempted to add writable globals by
+placing bytes somewhere convenient in the executable image.  That would be an
+architectural regression for Anka: the direct executable is sealed code, and a
+writable file-scope object needs a real data-section/mapping/permission story.
+
+**Decision.** Introduce `ankacc2_stage2.c` as another real Anka userspace
+compiler source that remains compilable by CC_B.  Keep `ankacc2_stage1.c`
+unchanged as the closed 10.1 checkpoint.  Stage 2 reuses the exact supervised
+compiler process ABI and compile-only seal path; only source semantics expand.
+
+The first AC2 object model is explicit:
+
+```text
+int       8 bytes, align 8
+char      1 byte,  align 1
+pointer   8 bytes, align 8
+enum      same representation as int
+void      no object representation
+```
+
+Struct layout is declaration-order layout with ordinary alignment padding and
+final rounding to the maximum member alignment.  Fixed arrays are contiguous
+`count * element_size` objects.  To keep the bootstrap implementation bounded,
+Stage 2 limits a fixed extent to 1024 elements and the typed local-object portion
+of one frame to 8192 bytes.  Recursive-by-value incomplete structs therefore
+fail, while pointer recursion remains representable.
+
+`typedef` is an exact alias, not a new runtime object.  Enum constants are
+compile-time integer values.  `sizeof(type)` and `sizeof(type[extent])` are
+included now because they make type layout executable and testable without
+waiting for member-access syntax.
+
+**ABI decision.** Freeze the first AnkaCC2 direct function ABI as:
+
+```text
+R0..R3  up to four scalar/pointer arguments
+R0      scalar/pointer return value
+LR      protected CALL/RET return authority, saved by callee
+FP      callee frame pointer, saved by callee
+SP      bounded local-object and temporary-expression stack
+```
+
+Named parameters are spilled into the callee frame.  Array parameters decay to
+an element pointer in the recorded function signature.  Aggregate-by-value
+arguments and returns are deliberately rejected in 10.2; choosing a struct ABI
+without a real need would be exactly the kind of premature convention Anka has
+avoided elsewhere.  A later phase may earn such an ABI.
+
+Function prototypes are now semantic objects.  A definition must match an
+existing prototype exactly in return type, parameter count, and parameter types.
+Calls require a known declaration, and any called prototype must resolve to a
+real definition before the compiler publishes success.  This makes a prototype
+a type/symbol promise, not authority.
+
+**Direct-backend data decision.** Mutable file-scope data remains unsupported:
+
+```text
+file-scope name != storage authority
+compiled declaration != writable mapping
+sealed executable != writable data object
+```
+
+The compiler rejects mutable globals with diagnostic 14.  This is temporary in
+language coverage but permanent in architectural principle.  When globals are
+introduced, AOM must describe their section and the loader must map that section
+with the correct non-executable writable permissions.  The compiler is not
+allowed to smuggle mutable state into RX code just to make a familiar C program
+compile.
+
+**Expression scope.** Phase 10.2 implements only the expression operations
+needed to prove the type and ABI work end to end: integer/enum values, scalar
+locals, address-of, 64-bit pointer dereference, calls, and integer `+`/`-`.
+For the supported arithmetic operators, byte-sized `char` is promoted to `int`;
+the byte storage rule and the word arithmetic rule are deliberately distinct.
+Struct field access, general indexing, character/string literal semantics, and
+the broader expression/statement language remain later compiler work.  This is
+not a claim of full ISO C support; it is the first internally coherent AC2 type
+and ABI layer.
+
+**Stable diagnostics.** Codes 1..8 retain their 10.1 meanings.  Stage 2 adds:
+
+```text
+9   type/object mismatch
+10  declaration/tag/alias error
+11  prototype/definition signature mismatch
+12  direct ABI limit / aggregate-by-value rejection
+13  layout/extent/frame bound violation
+14  mutable file-scope data unsupported by direct backend
+```
+
+The first error remains sticky and failed compilation publishes no successful
+artifact.
+
+**Formal result.** `anka102_ac2_types_abi.kleis` closes at 23/23 positive
+examples.  Its hostile companion closes at 0/14 accepted claims.  No new axioms
+are introduced.  The theory fixes the object sizes/alignments, positive bounded
+arrays, the `char`-then-`int` struct-padding witness, exact prototype matching,
+the four-register scalar/pointer ABI, array-parameter decay, stack-resident
+locals, absence of mutable globals in the direct backend, absence of AOM in
+10.2, and the continuing rule that compilation cannot create execution
+authority.
+
+**Bootstrap-shape audit.** The Stage-2 compiler source is intentionally kept
+inside CC_B's own finite envelope.  The first real Cargo attempt produced 932
+passing baseline tests and 12 `p102_` failures, all at the same upstream edge:
+CC_B rejected `ankacc2_stage2.c` with error 1 before Stage 2 itself ever ran.
+The cause was not the AC2 type system.  CC_B has a flat local-symbol table per
+function and therefore rejects a local name redeclared in another lexical block.
+Stage 2 had legal-C block-local reuse of `type` in `primary`, `type`/`base` in
+`unary`, and `ns`/`nl` in multiple branches of `topitem`.  Those bootstrap names
+are now unique; a redundant identical branch in `unary` was removed at the same
+time.
+
+The corrected source is also no longer stored as one minified line.  Fully
+conventional indentation would exceed the predecessor's source arena, so the
+bootstrap file uses compact multiline formatting: statements and braces are
+line-separated, with blank lines between functions but no indentation.  Static
+inspection now records:
+
+```text
+source bytes                  19,745 / 20,472-byte CC_B source limit
+source headroom                  727 bytes
+bootstrap functions              61 / 64
+maximum bootstrap parameters      4 / 4
+maximum flat symbols/function    14 / 32
+flat local-name duplicates        0
+bootstrap call sites            368 / 512 fixup bound
+largest source literal       81,920 / 131,071
+prior generated-text estimate 80,232 / 81,920-byte output arena
+```
+
+This is an important bootstrap lesson: nested-scope semantics belong to AC2,
+but the implementation of the AC2 compiler must still obey CC_B's flatter
+source language until the successor crosses the bootstrap boundary.  Source
+readability is also constrained by that finite predecessor arena, so compact
+multiline formatting is deliberate rather than accidental.
+
+The generated-text estimate is a preflight bound, not the closure witness.  The
+authoritative gate is still the real runtime path: CC_B must compile Stage 2
+under Anka, Stage 2 must compile/execute the typed witness corpus, and the
+complete Rust regression suite must remain green.
+
+**Runtime witnesses.** Twelve `p102_` tests cover CC_B building Stage 2,
+compatible prototypes plus four register arguments, pointer/address/dereference
+through array-parameter decay, typedef + enum constants, struct and array layout,
+byte-sized `char`, and stable rejection of signature mismatch, five arguments,
+struct-by-value ABI, recursive-by-value layout, zero arrays, mutable globals,
+unresolved prototypes, void objects, and unknown aliases.
+
+**Status.** Implementation and formal gates are complete; the Cargo runtime gate
+first reached 943/944.  The sole failure was narrower than the arithmetic path:
+`char c = 42` failed before `+`/`-` because `typeok()` admitted `char`→`int` but
+not the corresponding Stage-2 scalar narrowing `int`→`char`.  Arithmetic promotion
+was already correct.  Scalar value compatibility is now symmetric for the
+`int`/`char` subset: storing `int` to `char` keeps the low byte, and loading `char`
+zero-extends it into the word-register ABI.  The formal refinement now includes
+that conversion explicitly.  The final full-suite closure count is pending
+execution in the normal Rust toolchain environment.  Phase 10.2 is not CLOSED
+until that runtime result is recorded.
+
+**Consequence.** Phase 10.3 can introduce AOM as a representation for semantics
+that now already exist: typed functions, exact signatures, stack-local object
+layout, and a clear distinction between code and future data sections.  AOM no
+longer has to invent the type system and object model at the same time it invents
+relocation.
