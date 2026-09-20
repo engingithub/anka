@@ -86,8 +86,9 @@ aggregate ABI has been earned.
 
 The direct Stage-2 backend still emits code-only sealed executables.  Mutable
 file-scope data is therefore rejected instead of being placed into executable
-memory.  Writable globals are deferred to the AOM/data-section work where their
-permissions can be represented honestly.
+memory.  Writable globals remain deferred until an explicit writable-data section
+and loader mapping are specified; AOM v1 in Phase 10.3 does not add them merely by
+introducing an object container.
 
 Stage-2 diagnostics extend the stable Stage-1 set:
 
@@ -101,8 +102,7 @@ Stage-2 diagnostics extend the stable Stage-1 set:
 ```
 
 Formal gate: 23/23 positive Kleis examples, 0/14 hostile examples accepted, no
-new axioms.  The runtime gate is the `p102_` Rust witness set plus the complete
-regression suite; Phase 10.2 is not closed until that Cargo result is recorded.
+new axioms.  The complete runtime suite is also closed at 944/944.
 
 The Stage-2 source is constrained by CC_B while it bootstraps its successor.
 CC_B has one flat local-symbol scope per function, so Stage-2 bootstrap source
@@ -115,3 +115,74 @@ now have unique bootstrap names.
 than as one minified line or conventionally indented source.  Conventional
 pretty-printing would exceed CC_B's 20,472-byte source arena.  The compact form
 keeps statements readable while remaining a valid bootstrap input.
+
+## Phase 10.2 closure
+
+Phase 10.2 is closed with the complete regression suite green:
+
+```text
+944 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+The corresponding formal refinement remains 23/23 positive with 0/14 hostile
+witnesses accepted and no new axioms.
+
+## Phase 10.3: AnkaCC2 stage 3 / AOM v1
+
+`ankacc2_stage3.c` remains a real Anka userspace compiler source accepted by
+CC_B, but it no longer emits the direct executable format.  Its compile-only
+output is **AOM v1**, a sealed relocatable object module.
+
+AOM v1 uses this fixed byte geometry:
+
+```text
+header             112 bytes
+function symbol    160 bytes
+relocation          48 bytes
+code alignment       8 bytes
+CALL_PC20 width       8 bytes
+```
+
+The header magic is `ANKAOM1\0`, version 1.  Code begins at byte 112.  The
+format reserves an optional read-only-data section; Stage 3 currently emits no
+rodata and continues to reject mutable file-scope data.
+
+A Stage-3 translation unit does **not** require `main`.  Function definitions
+are strong code exports.  A called prototype with no same-module definition is
+a required import.  Uncalled prototypes are omitted.  Calls to later
+same-module definitions are patched locally; calls that remain external become
+8-byte `CALL_PC20` relocations against the import symbol.
+
+AOM function records preserve return and parameter type metadata.  Phase 10.3
+only publishes signatures whose identity is stable across translation units:
+`int`, `char`, `void` return, and pointer chains rooted in those scalar types.
+Raw translation-unit-local struct-tag indices are not exported as public type
+identity; attempting to do so is diagnostic 16.
+
+Stage 3 adds:
+
+```text
+15  AOM module cannot be published (for example, empty code section)
+16  public AOM signature uses translation-unit-local/nonportable type identity
+```
+
+AOM emission remains compile-only:
+
+```text
+valid AOM != linked executable != execution authority
+```
+
+The Rust development harness contains an AOM parser/structural validator, but it
+does not resolve imports or apply relocations.  Those operations first belong
+to Phase 10.4 `ankald`.
+
+The Stage-3 bootstrap source is deliberately close to the CC_B envelope:
+20,416/20,472 source bytes, 64/64 bootstrap functions, at most four parameters,
+17/32 flat symbols in a function, no duplicate flat locals, and approximately
+383/512 call sites.  This is only a preflight check; CC_B actually building the
+compiler is the runtime authority for closure.
+
+Formal gate: 22/22 positive Kleis examples, 0/15 hostile examples accepted, no
+new axioms.  Eleven `p103_` runtime witnesses are added on top of the 944-test
+baseline; a fully green branch should therefore report 955 tests.  Phase 10.3
+remains open until that Cargo result is observed.

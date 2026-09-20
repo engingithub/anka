@@ -810,6 +810,23 @@ pub(crate) fn canonical_compiler_source() -> String {
         "", "", "")
 }
 
+/// CC_B source variant used only when bootstrapping a compiler whose own
+/// generated image no longer fits the historical 80 KiB fixed-point arena.
+///
+/// The canonical source above is intentionally frozen by the Phase 9.3h
+/// fixed-point regression. This variant changes only the compiler entry
+/// point so a supervised harness can supply a larger output frontier through
+/// WS_OUTPUT_LIMIT. A zero word retains the historical 80 KiB behavior.
+pub(crate) fn extended_compiler_source() -> String {
+    format!(
+        "{}{}{}{}{}{}{}",
+        canonical_stmt_prelude(),
+        canonical_compilefuncdef(),
+        canonical_findmain(),
+        extended_compilermain(),
+        "", "", "")
+}
+
 fn canonical_compilermain() -> String {
     // After compilation, normalize literal segment offset:
     // lp == OUTPUT_SIZE → no literals → pass 0 as R3.
@@ -853,6 +870,56 @@ fn canonical_compilermain() -> String {
          if (mode == {compile_only}) {{ return 0; }} \
          return syscall(6, {layout_out}, sz, lp); }} ",
         mode = WS_MODE, compile_only = CCB_MODE_COMPILE_ONLY,
+        layout_src = LAYOUT_SRC,
+        srclimit = SOURCE_SIZE - 8,
+        layout_out = LAYOUT_OUT,
+        pos = WS_POS, sl = WS_SRC_LEN, tb = WS_TEXT_BASE,
+        e = WS_ERROR, sc = WS_SYM_COUNT, op = WS_OUT_POS,
+        esp = WS_EXPR_SP, espabs = -EXPR_SP_INIT,
+        fc = WS_FUNC_COUNT, fxc = WS_FIX_COUNT,
+        tt = WS_TOK_TYPE, eof = TOK_EOF,
+        litp = WS_LIT_POS, outsize = OUTPUT_SIZE,
+        call = OP_CALL, halt = OP_HALT)
+}
+
+fn extended_compilermain() -> String {
+    format!(
+        "int main() {{ \
+         int mode = *{mode}; \
+         int outlimit = *{outlimit}; \
+         if (outlimit == 0) {{ outlimit = {outsize}; }} \
+         int src = {layout_src}; \
+         int slen = *src; \
+         int sbase = src + 8; \
+         if ({srclimit} < slen) {{ return 0 - 1; }} \
+         *{pos} = 0; \
+         *{sl} = slen; \
+         *{tb} = sbase; \
+         *{e} = 0; \
+         *{sc} = 0; \
+         *{op} = 0; \
+         *{esp} = (0 - {espabs}); \
+         *{fc} = 0; \
+         *{fxc} = 0; \
+         *{litp} = outlimit; \
+         nexttoken(); \
+         int sp = *{op}; \
+         emit({call} << 26); \
+         emit(encs({halt})); \
+         while ((*{tt} != {eof}) & (*{e} == 0)) {{ \
+         compilefuncdef(); }} \
+         resolvefixups(); \
+         int ma = findmain(); \
+         patchcall(sp, ma); \
+         if (*{e} != 0) {{ return 0 - 1; }} \
+         int seal = syscall(5, {layout_out}, 0, 0); \
+         int sz = *{op}; \
+         int lp = *{litp}; \
+         if (lp == outlimit) {{ lp = 0; }} \
+         if (mode == {compile_only}) {{ return 0; }} \
+         return syscall(6, {layout_out}, sz, lp); }} ",
+        mode = WS_MODE, outlimit = WS_OUTPUT_LIMIT,
+        compile_only = CCB_MODE_COMPILE_ONLY,
         layout_src = LAYOUT_SRC,
         srclimit = SOURCE_SIZE - 8,
         layout_out = LAYOUT_OUT,

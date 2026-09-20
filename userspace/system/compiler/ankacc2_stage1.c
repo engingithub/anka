@@ -264,7 +264,7 @@ int encs(int op) {
 
 int emit(int word) {
     int pos = *49224;
-    if (81920 < pos + 8) {
+    if (*68472 < pos + 8) {
         seterror(8);
         return 0;
     }
@@ -474,7 +474,7 @@ int main() {
     *49224 = 0;
     *49240 = 0;
     *49248 = 0;
-    *68456 = 81920;
+    *68456 = *68472;
     int entry = *49224;
     emit(50 << 26);
     emit(encs(62));

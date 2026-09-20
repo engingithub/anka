@@ -1,0 +1,62 @@
+// Every example is deliberately false and must be rejected.
+import "anka103_aom_emission.kleis"
+
+example "FALSE-AOM103-1 code may overlap the AOM header" {
+    assert(aom103_code_section_valid(bvconst(64,64),bvconst(104,64))=true)
+}
+
+example "FALSE-AOM103-2 zero-length code module is publishable" {
+    assert(aom103_code_section_valid(bvconst(0,64),bvconst(112,64))=true)
+}
+
+example "FALSE-AOM103-3 symbol record may have arbitrary size" {
+    assert(aom103_symbol_record_geometry(bvconst(152,64))=true)
+}
+
+example "FALSE-AOM103-4 relocation record may have arbitrary size" {
+    assert(aom103_relocation_record_geometry(bvconst(40,64))=true)
+}
+
+example "FALSE-AOM103-5 uncalled prototype becomes required import" {
+    assert(aom103_required_import(true,false,false)=true)
+}
+
+example "FALSE-AOM103-6 same-module forward definition remains external relocation" {
+    assert(aom103_forward_call_is_local(true,true,true)=true)
+}
+
+example "FALSE-AOM103-7 external call relocation may target an export record" {
+    assert(aom103_external_call_relocation(true,true,bvconst(8,64),false)=true)
+}
+
+example "FALSE-AOM103-8 four-byte relocation patches one Anka instruction" {
+    assert(aom103_external_call_relocation(true,true,bvconst(4,64),true)=true)
+}
+
+example "FALSE-AOM103-9 AOM translation unit requires main" {
+    assert(aom103_requires_main()=true)
+}
+
+example "FALSE-AOM103-10 emitted AOM is already linked executable" {
+    assert(aom103_is_linked_executable()=true)
+}
+
+example "FALSE-AOM103-11 successful object emission grants execution authority" {
+    assert(aom103_emission_creates_execution_authority()=true)
+}
+
+example "FALSE-AOM103-12 relocation creates capability" {
+    assert(aom103_relocation_creates_capability()=true)
+}
+
+example "FALSE-AOM103-13 phase 10.3 silently gains mutable globals" {
+    assert(aom103_mutable_global_supported()=true)
+}
+
+example "FALSE-AOM103-14 signature may discard parameter types" {
+    assert(aom103_signature_preserved(true,true,false)=true)
+}
+
+example "FALSE-AOM103-15 translation-unit-local struct tag id is portable public ABI" {
+    assert(aom103_public_signature_portable(true,true)=true)
+}

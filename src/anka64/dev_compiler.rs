@@ -9,16 +9,18 @@
 //! that sealed output.  Importing them into the development registry is a
 //! separate step and still creates no execution authority.
 
-use super::ankad::{build_ankad_code, SUPERVISOR_COMPILER_VADDR};
+use super::ankad::{build_ankad_code_with_output_size, SUPERVISOR_COMPILER_VADDR};
 use super::fabric::Fabric;
 use super::cc;
 use super::guest_compiler::{
     build_6b4_compiler, canonical_compiler_source, CCB_MODE_COMPILE_ONLY,
-    LAYOUT_OUT, LAYOUT_SRC, LAYOUT_WS, OUTPUT_SIZE, SOURCE_SIZE,
-    WS_FUNC_COUNT, WS_LIT_POS, WS_MODE, WS_OUT_POS, WS_SIZE,
+    LAYOUT_OUT, LAYOUT_SRC, LAYOUT_WS, OUTPUT_SIZE, SOURCE_SIZE, STACK_SIZE,
+    WS_FUNC_COUNT, WS_LIT_POS, WS_MODE, WS_OUT_POS, WS_OUTPUT_LIMIT, WS_SIZE,
 };
+#[cfg(test)]
+use super::guest_compiler::extended_compiler_source;
 use super::os::{BootError, BootGrant, BootImage, BootInfo, BootMap, Kernel};
-use super::placement::{PhysicalPlacementManager, PlacementError};
+use super::placement::{PhysicalPlacementManager, PlacementError, PLACEMENT_PAGE_SIZE};
 use super::state::{ObjectId, ObjectKind, ObjectState, Permissions};
 use super::isa::R10;
 
@@ -36,9 +38,36 @@ const ANKAD_OBJECT_SIZE: u64 = 0x2000;
 const ANKAD_STACK_VADDR: u64 = 0x50000;
 const ANKAD_STACK_SIZE: u64 = 0x4000;
 const ANKAD_TRAP_VADDR: u64 = 0x54000;
+const CHILD_TRAP_SIZE: u64 = PLACEMENT_PAGE_SIZE;
+/// Largest page-aligned compiler output arena that fits below the fixed
+/// 0x30000 compiler-code base while still leaving room for child stack+trap.
+/// This is geometry, not a source-size estimate.  Physical placement remains
+/// owned by PhysicalPlacementManager.
+pub(crate) const DEVELOPMENT_COMPILER_OUTPUT_SIZE: u64 =
+    DEVELOPMENT_CCB_CODE_VADDR
+        - LAYOUT_OUT as u64
+        - STACK_SIZE as u64
+        - CHILD_TRAP_SIZE;
+const _: () = assert!(DEVELOPMENT_COMPILER_OUTPUT_SIZE >= OUTPUT_SIZE as u64);
+const _: () = assert!(DEVELOPMENT_COMPILER_OUTPUT_SIZE & (PLACEMENT_PAGE_SIZE - 1) == 0);
+const _: () = assert!(
+    LAYOUT_OUT as u64
+        + DEVELOPMENT_COMPILER_OUTPUT_SIZE
+        + STACK_SIZE as u64
+        + CHILD_TRAP_SIZE
+        == DEVELOPMENT_CCB_CODE_VADDR
+);
 const COMPILER_QUANTUM: usize = 5_000_000;
 const COMPILER_MAX_ROUNDS: usize = 200;
 
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledAomModule {
+    /// Exact sealed AOM bytes produced by AnkaCC2 stage 3.
+    pub bytes: Vec<u8>,
+    /// Compile-only closure witness: only the compiler child may run.
+    pub process_slots_observed: usize,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledCImage {
     /// Complete backing bytes required to reconstruct the executable image.
@@ -83,7 +112,29 @@ pub fn compile_c_with_ccb(
     ccb_image: &[u8],
     source: &[u8],
 ) -> Result<CompiledCImage, DevelopmentCompileError> {
-    compile_c_with_compiler_image(ccb_image, DEVELOPMENT_CCB_CODE_VADDR, source)
+    compile_c_with_compiler_image(
+        ccb_image,
+        DEVELOPMENT_CCB_CODE_VADDR,
+        source,
+        OUTPUT_SIZE as u64,
+    )
+}
+
+/// Compile through the Phase-10 bootstrap CC_B with the largest arena that
+/// fits below the fixed compiler-code base.  This is intentionally separate
+/// from `compile_c_with_ccb`: the ordinary development shell retains the
+/// historical 80 KiB CC_B artifact geometry.
+#[cfg(test)]
+pub(crate) fn compile_c_with_extended_ccb(
+    ccb_image: &[u8],
+    source: &[u8],
+) -> Result<CompiledCImage, DevelopmentCompileError> {
+    compile_c_with_compiler_image(
+        ccb_image,
+        DEVELOPMENT_CCB_CODE_VADDR,
+        source,
+        DEVELOPMENT_COMPILER_OUTPUT_SIZE,
+    )
 }
 
 /// Compile one AC2 stage-1 translation unit through a CC_B-built AnkaCC2 image.
@@ -101,6 +152,7 @@ pub fn compile_c_with_ankacc2_stage1(
         compiler_image,
         DEVELOPMENT_CCB_CODE_VADDR,
         source,
+        OUTPUT_SIZE as u64,
     )
 }
 
@@ -118,7 +170,32 @@ pub fn compile_c_with_ankacc2_stage2(
         compiler_image,
         DEVELOPMENT_CCB_CODE_VADDR,
         source,
+        OUTPUT_SIZE as u64,
     )
+}
+
+
+/// Compile one AC2 translation unit through the Phase 10.3 AOM-emitting
+/// AnkaCC2 compiler.
+///
+/// The supervised process path is intentionally identical to the earlier
+/// compiler stages.  The output object is sealed in compile-only mode, but its
+/// bytes are an AOM module, not an executable image.  Successful object
+/// emission therefore grants no execution authority.
+pub fn compile_c_to_aom_stage3(
+    compiler_image: &[u8],
+    source: &[u8],
+) -> Result<CompiledAomModule, DevelopmentCompileError> {
+    let raw = compile_c_with_compiler_image(
+        compiler_image,
+        DEVELOPMENT_CCB_CODE_VADDR,
+        source,
+        DEVELOPMENT_COMPILER_OUTPUT_SIZE,
+    )?;
+    Ok(CompiledAomModule {
+        bytes: raw.bytes,
+        process_slots_observed: raw.process_slots_observed,
+    })
 }
 
 /// Bootstrap the self-hosted CC_B image from the Rust AST seed (CC_A).
@@ -131,7 +208,12 @@ pub fn bootstrap_development_ccb() -> Result<Vec<u8>, DevelopmentCompileError> {
     let compiler_prog = build_6b4_compiler();
     let cca_image = cc::compile(&compiler_prog).to_bytes();
     let canonical_source = canonical_compiler_source();
-    let ccb = compile_c_with_compiler_image(&cca_image, 0, canonical_source.as_bytes())?;
+    let ccb = compile_c_with_compiler_image(
+        &cca_image,
+        0,
+        canonical_source.as_bytes(),
+        OUTPUT_SIZE as u64,
+    )?;
     if ccb.lit_start != 0 {
         // The compiler image itself is intentionally code-only today.  If the
         // canonical compiler gains literals, its child-image grant/mapping
@@ -141,10 +223,31 @@ pub fn bootstrap_development_ccb() -> Result<Vec<u8>, DevelopmentCompileError> {
     Ok(ccb.bytes)
 }
 
+/// Bootstrap the output-limit-aware CC_B used only to build Phase 10.3's
+/// larger AnkaCC2 compiler image.  The ordinary development-shell CC_B above
+/// remains the exact Phase 9.3h fixed point and keeps its 80 KiB ABI.
+#[cfg(test)]
+pub(crate) fn bootstrap_extended_ccb() -> Result<Vec<u8>, DevelopmentCompileError> {
+    let compiler_prog = build_6b4_compiler();
+    let cca_image = cc::compile(&compiler_prog).to_bytes();
+    let source = extended_compiler_source();
+    let ccb = compile_c_with_compiler_image(
+        &cca_image,
+        0,
+        source.as_bytes(),
+        DEVELOPMENT_COMPILER_OUTPUT_SIZE,
+    )?;
+    if ccb.lit_start != 0 {
+        return Err(DevelopmentCompileError::BootstrappedCompilerHasLiterals);
+    }
+    Ok(ccb.bytes)
+}
+
 fn compile_c_with_compiler_image(
     compiler_image: &[u8],
     compiler_code_vaddr: u64,
     source: &[u8],
+    output_limit: u64,
 ) -> Result<CompiledCImage, DevelopmentCompileError> {
     if compiler_image.is_empty() {
         return Err(DevelopmentCompileError::EmptyCompilerImage);
@@ -154,6 +257,13 @@ fn compile_c_with_compiler_image(
     }
     if source.len().saturating_add(8) > SOURCE_SIZE as usize {
         return Err(DevelopmentCompileError::SourceTooLarge);
+    }
+    if output_limit < OUTPUT_SIZE as u64
+        || output_limit & (PLACEMENT_PAGE_SIZE - 1) != 0
+        || LAYOUT_OUT as u64 + output_limit + STACK_SIZE as u64 + CHILD_TRAP_SIZE
+            > DEVELOPMENT_CCB_CODE_VADDR
+    {
+        return Err(DevelopmentCompileError::InvalidOutputGeometry);
     }
 
     let mut fabric = Fabric::new(DEVELOPMENT_COMPILER_RAM);
@@ -172,7 +282,10 @@ fn compile_c_with_compiler_image(
         &mut fabric, &mut placement, "dev-c-source", SOURCE_SIZE as u64,
     )?;
     let output_obj = allocate_placed(
-        &mut fabric, &mut placement, "dev-c-output", OUTPUT_SIZE as u64,
+        &mut fabric,
+        &mut placement,
+        "dev-c-output",
+        output_limit,
     )?;
     let workspace_obj = allocate_placed(
         &mut fabric, &mut placement, "dev-c-workspace", WS_SIZE as u64,
@@ -206,7 +319,19 @@ fn compile_c_with_compiler_image(
     if !fabric.initialize_object(
         workspace_obj,
         lit_pos_offset,
-        &(OUTPUT_SIZE as u64).to_le_bytes(),
+        &output_limit.to_le_bytes(),
+    ) {
+        return Err(DevelopmentCompileError::InitializationRejected);
+    }
+
+    // The compiler reads this per-invocation limit instead of baking the
+    // development arena size into generated code.  Older direct harnesses may
+    // leave the word zero and retain OUTPUT_SIZE compatibility.
+    let output_limit_offset = (WS_OUTPUT_LIMIT - LAYOUT_WS) as u64;
+    if !fabric.initialize_object(
+        workspace_obj,
+        output_limit_offset,
+        &output_limit.to_le_bytes(),
     ) {
         return Err(DevelopmentCompileError::InitializationRejected);
     }
@@ -222,7 +347,11 @@ fn compile_c_with_compiler_image(
         return Err(DevelopmentCompileError::InitializationRejected);
     }
 
-    let ankad_code = build_ankad_code(compiler_image.len(), compiler_code_vaddr);
+    let ankad_code = build_ankad_code_with_output_size(
+        compiler_image.len(),
+        compiler_code_vaddr,
+        output_limit,
+    );
     if ankad_code.len() as u64 > ANKAD_OBJECT_SIZE
         || !fabric.initialize_object(ankad_obj, 0, &ankad_code)
         || !fabric.seal_object(ankad_obj)
@@ -254,7 +383,7 @@ fn compile_c_with_compiler_image(
             BootGrant {
                 obj: output_obj,
                 offset: 0,
-                size: OUTPUT_SIZE as u64,
+                size: output_limit,
                 perms: Permissions::RWS,
             },
             BootGrant {
@@ -279,7 +408,7 @@ fn compile_c_with_compiler_image(
             },
             BootMap {
                 vaddr: LAYOUT_OUT as u64,
-                size: OUTPUT_SIZE as u64,
+                size: output_limit,
                 obj: output_obj,
                 obj_offset: 0,
             },
@@ -328,6 +457,19 @@ fn compile_c_with_compiler_image(
 
     let ws_error = read_ws(0x18);
     if ws_error != 0 {
+        let out_pos = read_ws((WS_OUT_POS - LAYOUT_WS) as u64);
+        let lit_pos = read_ws((WS_LIT_POS - LAYOUT_WS) as u64);
+        let function_count = read_ws((WS_FUNC_COUNT - LAYOUT_WS) as u64);
+        eprintln!(
+            "development compiler rejected source: error={} source_bytes={} out_pos={} lit_pos={} free_gap={} functions={} output_limit={}",
+            ws_error,
+            source.len(),
+            out_pos,
+            lit_pos,
+            lit_pos.saturating_sub(out_pos),
+            function_count,
+            output_limit,
+        );
         return Err(DevelopmentCompileError::CompilerRejected(ws_error));
     }
     if init.exit_code != 0 {
@@ -343,8 +485,6 @@ fn compile_c_with_compiler_image(
     let out_pos = read_ws((WS_OUT_POS - LAYOUT_WS) as u64);
     let function_count = read_ws((WS_FUNC_COUNT - LAYOUT_WS) as u64);
     let raw_lit_pos = read_ws((WS_LIT_POS - LAYOUT_WS) as u64);
-    let output_limit = OUTPUT_SIZE as u64;
-
     if out_pos == 0 || out_pos > output_limit || raw_lit_pos > output_limit {
         return Err(DevelopmentCompileError::InvalidOutputGeometry);
     }

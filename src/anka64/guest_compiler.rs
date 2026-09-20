@@ -18,7 +18,7 @@ use super::state::*;
 use super::os::{SYS_EXEC, SYS_SEAL};
 
 mod canonical_source;
-pub(crate) use canonical_source::canonical_compiler_source;
+pub(crate) use canonical_source::{canonical_compiler_source, extended_compiler_source};
 
 pub(crate) const CPU0: AgentId = AgentId(0);
 
@@ -196,11 +196,17 @@ pub(crate) const WS_LIT_POS: i64        = LAYOUT_WS + 0x4B68;
 /// CCB_MODE_COMPILE_ONLY so `compile` produces a sealed artifact without
 /// executing developer source as part of compilation.
 pub(crate) const WS_MODE: i64           = LAYOUT_WS + 0x4B70;
+/// Per-invocation compiler output arena size.  Development compilation may
+/// provide a larger arena than the historical OUTPUT_SIZE while preserving
+/// the compiler's fixed source/workspace/output virtual bases.  Zero means
+/// "use OUTPUT_SIZE" for compatibility with older/bootstrap harnesses.
+pub(crate) const WS_OUTPUT_LIMIT: i64   = LAYOUT_WS + 0x4B78;
 pub(crate) const CCB_MODE_COMPILE_AND_RUN: u64 = 0;
 pub(crate) const CCB_MODE_COMPILE_ONLY: u64 = 1;
 const _: () = assert!(WS_LIT_POS <= MOVI_MAX);
 const _: () = assert!(WS_MODE <= MOVI_MAX);
-const _: () = assert!((WS_MODE - LAYOUT_WS + 8) <= WS_SIZE);
+const _: () = assert!(WS_OUTPUT_LIMIT <= MOVI_MAX);
+const _: () = assert!((WS_OUTPUT_LIMIT - LAYOUT_WS + 8) <= WS_SIZE);
 // ─── Token types (same as 6B.3) ──────────────────
 
 // ─── Token types ──────────────────────────────────
@@ -2857,7 +2863,14 @@ pub fn build_6b4_compiler() -> Program {
             // Otherwise pass the literal frontier as R3.
             // Equality, not comparison: corruption should propagate.
             assign(0, deref(lit(WS_LIT_POS))),
-            Stmt::If(binop(BinOp::Eq, var(0), lit(OUTPUT_SIZE)),
+            // Development harnesses may grant a larger output arena.  A zero
+            // WS_OUTPUT_LIMIT preserves the historical fixed-size bootstrap
+            // behavior for older direct harnesses.
+            assign(4, deref(lit(WS_OUTPUT_LIMIT))),
+            Stmt::If(binop(BinOp::Eq, var(4), lit(0)),
+                vec![assign(4, lit(OUTPUT_SIZE))],
+                vec![]),
+            Stmt::If(binop(BinOp::Eq, var(0), var(4)),
                 vec![assign(0, lit(0))],
                 vec![]),
             // Phase 9.3h.4 bootstrap closure: the Rust AST seed compiler must

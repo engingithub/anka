@@ -1,0 +1,210 @@
+// =============================================================================
+// Anka64 Phase 10.3 — AOM v1 Relocatable Object Emission
+// =============================================================================
+// No new axioms.  This refines the Phase 10.0 AOM/link contract and the
+// Phase 10.2 AC2 type/ABI layer with the first concrete AOM byte geometry and
+// separate-translation-unit emission rules.  Linking remains Phase 10.4.
+// =============================================================================
+
+import "anka102_ac2_types_abi.kleis"
+import "anka100_aom_link_contract.kleis"
+
+define AOM103_HEADER_SIZE : BitVec64 = bvconst(112,64)
+define AOM103_SYMBOL_SIZE : BitVec64 = bvconst(160,64)
+define AOM103_RELOC_SIZE : BitVec64 = bvconst(48,64)
+define AOM103_CODE_ALIGN : BitVec64 = bvconst(8,64)
+define AOM103_CALL_WIDTH : BitVec64 = bvconst(8,64)
+
+define aom103_version() = bvconst(1,16)
+
+define aom103_code_section_valid(code_size : BitVec64, code_offset : BitVec64) =
+    if code_offset=AOM103_HEADER_SIZE then
+        if bvugt(code_size,bvconst(0,64)) then true else false
+    else false
+
+define aom103_absent_rodata_valid(rodata_size : BitVec64) =
+    if rodata_size=bvconst(0,64) then true else false
+
+define aom103_symbol_record_geometry(record_size : BitVec64) =
+    if record_size=AOM103_SYMBOL_SIZE then true else false
+
+define aom103_relocation_record_geometry(record_size : BitVec64) =
+    if record_size=AOM103_RELOC_SIZE then true else false
+
+define aom103_export_symbol(
+    defined : Bool,
+    code_section : Bool,
+    code_relative_value : Bool
+) =
+    if defined then
+        if code_section then
+            if code_relative_value then true else false
+        else false
+    else false
+
+define aom103_required_import(
+    declared : Bool,
+    called : Bool,
+    defined_in_module : Bool
+) =
+    if declared then
+        if called then
+            if defined_in_module then false else true
+        else false
+    else false
+
+define aom103_uncalled_prototype_omitted(
+    declared : Bool,
+    called : Bool,
+    defined_in_module : Bool
+) =
+    if declared then
+        if called then false
+        else if defined_in_module then false else true
+    else false
+
+define aom103_forward_call_is_local(
+    called_before_definition : Bool,
+    definition_appears_in_same_module : Bool,
+    external_relocation_emitted : Bool
+) =
+    if called_before_definition then
+        if definition_appears_in_same_module then
+            if external_relocation_emitted then false else true
+        else false
+    else false
+
+define aom103_external_call_relocation(
+    target_is_required_import : Bool,
+    relocation_in_code : Bool,
+    width : BitVec64,
+    target_symbol_is_import : Bool
+) =
+    if target_is_required_import then
+        if relocation_in_code then
+            if width=AOM103_CALL_WIDTH then
+                if target_symbol_is_import then true else false
+            else false
+        else false
+    else false
+
+define aom103_signature_preserved(
+    return_type_preserved : Bool,
+    argc_preserved : Bool,
+    parameter_types_preserved : Bool
+) =
+    if return_type_preserved then
+        if argc_preserved then
+            if parameter_types_preserved then true else false
+        else false
+    else false
+
+define aom103_public_signature_portable(
+    scalar_or_scalar_pointer_identity : Bool,
+    translation_unit_local_tag_identity : Bool
+) =
+    if scalar_or_scalar_pointer_identity then
+        if translation_unit_local_tag_identity then false else true
+    else false
+
+define aom103_requires_main() = false
+
+define aom103_is_linked_executable() = false
+
+define aom103_emission_creates_execution_authority() = false
+
+define aom103_relocation_creates_capability() = false
+
+define aom103_mutable_global_supported() = false
+
+define aom103_empty_code_module_publishable() = false
+
+example "AOM103-1 byte format version is one" {
+    assert(aom103_version()=bvconst(1,16))
+}
+
+example "AOM103-2 header is exactly 112 bytes" {
+    assert(AOM103_HEADER_SIZE=bvconst(112,64))
+}
+
+example "AOM103-3 symbol record is exactly 160 bytes" {
+    assert(aom103_symbol_record_geometry(bvconst(160,64))=true)
+}
+
+example "AOM103-4 relocation record is exactly 48 bytes" {
+    assert(aom103_relocation_record_geometry(bvconst(48,64))=true)
+}
+
+example "AOM103-5 nonempty code begins immediately after header" {
+    assert(aom103_code_section_valid(bvconst(64,64),bvconst(112,64))=true)
+}
+
+example "AOM103-6 phase 10.3 may omit rodata when no read-only bytes exist" {
+    assert(aom103_absent_rodata_valid(bvconst(0,64))=true)
+}
+
+example "AOM103-7 defined function is a code export" {
+    assert(aom103_export_symbol(true,true,true)=true)
+}
+
+example "AOM103-8 called undefined prototype becomes required import" {
+    assert(aom103_required_import(true,true,false)=true)
+}
+
+example "AOM103-9 uncalled undefined prototype is omitted" {
+    assert(aom103_uncalled_prototype_omitted(true,false,false)=true)
+}
+
+example "AOM103-10 later same-module definition converts a forward call to local" {
+    assert(aom103_forward_call_is_local(true,true,false)=true)
+}
+
+example "AOM103-11 external call emits typed eight-byte code relocation" {
+    assert(aom103_external_call_relocation(true,true,bvconst(8,64),true)=true)
+}
+
+example "AOM103-12 symbol record preserves AC2 function signature" {
+    assert(aom103_signature_preserved(true,true,true)=true)
+}
+
+example "AOM103-13 public scalar and scalar-pointer signature is cross-module stable" {
+    assert(aom103_public_signature_portable(true,false)=true)
+}
+
+example "AOM103-14 translation-unit-local struct tag identity is not exported as raw type id" {
+    assert(aom103_public_signature_portable(true,true)=false)
+}
+
+example "AOM103-15 object translation unit does not require main" {
+    assert(aom103_requires_main()=false)
+}
+
+example "AOM103-16 AOM is not yet a linked executable" {
+    assert(aom103_is_linked_executable()=false)
+}
+
+example "AOM103-17 object emission creates no execution authority" {
+    assert(aom103_emission_creates_execution_authority()=false)
+}
+
+example "AOM103-18 relocation still creates no Anka capability" {
+    assert(aom103_relocation_creates_capability()=false)
+}
+
+example "AOM103-19 mutable globals remain deferred until writable-data semantics are frozen" {
+    assert(aom103_mutable_global_supported()=false)
+}
+
+example "AOM103-20 empty code module is not publishable in AOM v1" {
+    assert(aom103_empty_code_module_publishable()=false)
+}
+
+example "AOM103-21 concrete external relocation satisfies Phase 10.0 relocation law" {
+    assert(aom_relocation_in_bounds(bvconst(64,64),bvconst(16,64),bvconst(8,64))=true)
+    assert(aom_relocation_valid(true,true,true)=true)
+}
+
+example "AOM103-22 phase 10.2 type rules remain unchanged by object packaging" {
+    assert(ac2102_size_int()=bvconst(8,16))
+    assert(ac2102_register_abi_supported(bvconst(4,8),true,true)=true)
+}

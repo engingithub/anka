@@ -23,6 +23,7 @@ pub mod fabric;
 pub mod placement;
 pub mod dev_shell;
 pub mod dev_compiler;
+pub mod aom;
 pub mod dev_runner;
 pub mod dev_monitor;
 pub mod desc;
@@ -49,6 +50,8 @@ mod socket_tests;
 mod http_tests;
 #[cfg(test)]
 mod ankacc2_tests;
+#[cfg(test)]
+mod aom_tests;
 pub mod multicore;
 pub mod ankad;
 pub mod system_image;

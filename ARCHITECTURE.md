@@ -1453,7 +1453,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions; binary size verified by fixed-point regression |
 | Canonical source | ~17 KB |
-| Tests | 932/932 Rust tests through Phase 10.1 AnkaCC2 stage 1 |
+| Tests | 955/955 Rust tests through closed Phase 10.3 AOM object emission |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -3338,9 +3338,13 @@ client and an adversarial gate before the next one depends on it:
       - R0..R3 scalar/pointer argument ABI; R0 scalar/pointer return
       - array-parameter decay, stack-resident local objects, sizeof(type[/extent])
       - mutable file-scope data rejected while the backend is code-only
-      - 944/944 Rust tests, including 12/12 Phase 10.2 runtime witnesses
       - 23/23 positive Kleis witnesses, 0/14 hostile witnesses accepted
-10.3  AOM relocatable object emission + separate translation units
+10.3  AOM relocatable object emission + separate translation units — CLOSED
+      - AOM v1 byte format frozen; code + optional read-only data + typed symbols/relocations
+      - separate translation units: exports, required imports, local forward-call patching
+      - compile-only object emission remains distinct from linking and execution authority
+      - 955/955 Rust tests, including 11/11 Phase 10.3 runtime witnesses
+      - 22/22 positive Kleis witnesses, 0/15 hostile witnesses accepted
 10.4  ankald static linker + permission-aware linked artifacts
 10.5  source bundles + headers/includes + minimum earned preprocessing
 10.6  AnkaCC2 self-host bootstrap and fixed-point closure
@@ -3596,16 +3600,9 @@ address/dereference executes; typedefs and enum constants participate in typed
 calls; struct/array `sizeof` reflects real layout; byte-sized `char` survives a
 word-register ABI; prototype mismatch, fifth argument, struct-by-value ABI,
 recursive-by-value layout, zero arrays, mutable globals, unresolved prototypes,
-void objects, and unknown typedefs are rejected with stable diagnostics.  After
-the flat-bootstrap-local repair and the `int`→`char` scalar-conversion repair,
-the complete Rust regression suite closes at:
-
-```text
-944 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
-```
-
-Thus all twelve new Phase 10.2 runtime witnesses and the prior 932-test baseline
-pass together.  Phase 10.2 is runtime-closed.
+void objects, and unknown typedefs are rejected with stable diagnostics.  The
+final Cargo closure is **944/944 tests passing**, including all twelve `p102_`
+witnesses, with 0 failures.
 
 The executable formal refinement is already closed independently:
 
@@ -3630,21 +3627,107 @@ It uses at most four parameters per bootstrap function, 61/64 bootstrap
 functions, at most 14/32 flat symbols in any function, no duplicate flat local
 names, and about 368 call sites against CC_B's 512-fixup bound.  The largest
 source integer literal remains 81,920, below CC_B's 131,071 source-literal cap.
-The prior generated-text preflight estimate was about 80,232 bytes against the
-81,920-byte output arena; the redundant address-of branch removed during the
-flat-scope repair only reduces that pressure.  These are bootstrap-shape checks;
-the authoritative runtime gate remains CC_B actually compiling and executing
-Stage 2 under Anka.
+Generated-text size is no longer estimated from source shape.  The
+`p102_ccb_builds_real_ankacc2_stage2` runtime witness now measures the sealed
+artifact returned by the real CC_B build and prints exact `code_bytes`,
+`literal_bytes`, total occupied bytes, free-gap bytes, and the 81,920-byte output
+arena limit.  It also asserts that occupied bytes plus the free gap account for
+the complete arena.  This makes output pressure an executable measurement rather
+than a design-note guess.  The authoritative value is the number printed by the
+real Anka runtime test.
 
 The flat-scope restriction is a property of the *bootstrap compiler*, not an
 AC2 language rule.  A successor compiler must be written in the language of its
-predecessor until the bootstrap edge has been crossed.  The second runtime pass
-then exposed a distinct Stage-2 semantic boundary: byte storage was implemented,
-but scalar assignment compatibility admitted `char`→`int` without the matching
-`int`→`char` narrowing used by `char c = 42`.  That conversion now stores the low
-byte and reloads it zero-extended through the word-register ABI.  With both
-bootstrap and scalar-conversion repairs in place, the 944/944 runtime gate and
-the 23/23 + 0/14 formal gate jointly close Phase 10.2.
+predecessor until the bootstrap edge has been crossed.
+
+#### Phase 10.3 implementation: AOM v1 object emission and translation units
+
+Phase 10.3 replaces the Stage-2 direct-executable publication path with a real
+relocatable object boundary.  `userspace/system/compiler/ankacc2_stage3.c` is
+still compiled by the real self-hosted CC_B lineage, but compiling an AC2
+translation unit with Stage 3 produces an **Anka Object Module (AOM)** rather
+than a runnable image:
+
+```text
+CC_B + ankacc2_stage3.c -> sealed AnkaCC2 stage-3 compiler
+AnkaCC2 stage 3 + one AC2 translation unit -> sealed AOM v1 module
+AOM v1 module != linked executable != execution authority
+```
+
+AOM v1 is now frozen at the byte level.  The format begins with magic
+`ANKAOM1\0`, version 1, and a 112-byte header.  It contains one nonempty
+8-byte-aligned code section, an optional read-only-data section, fixed-width
+160-byte function symbol records, and fixed-width 48-byte typed relocation
+records.  The first relocation kind is an eight-byte `CALL_PC20` code
+relocation.  The Rust `AomModule` parser validates version, total/table geometry,
+section bounds and alignment, symbol shape and uniqueness, public signature
+types, relocation width/kind/bounds, and the requirement that an external call
+relocation target an import record.  Parsing a structurally valid AOM creates no
+capability and grants no execution authority.
+
+Translation-unit semantics are deliberately linker-ready but stop before
+linking.  Function definitions become strong code exports.  A called prototype
+that has no same-module definition becomes a required import with its AC2 return
+and parameter type metadata preserved.  An uncalled prototype is omitted.  A
+forward call whose definition appears later in the same translation unit is
+patched locally and therefore emits no external relocation.  A translation unit
+does not require `main`; `main` becomes relevant only when a later link/load path
+chooses an executable entry contract.  Raw translation-unit-local struct-tag
+identity is not portable public ABI, so Stage 3 rejects public signatures that
+would export such local type identity rather than silently assigning it a
+cross-module meaning.
+
+The Phase-10.3 bootstrap exposed an independent compiler-arena boundary that is
+now an explicit architectural invariant.  The historical canonical/development-
+shell CC_B fixed point retains its exact **81,920-byte (0x14000)** output arena;
+that ABI is not enlarged and its legacy executable/literal geometry remains
+unchanged.  Stage 3 is instead bootstrapped through a separately scoped extended
+CC_B path whose output limit is supplied in the supervised workspace.  Its arena
+is not estimated from source size: it is the largest page-aligned region that
+fits below the fixed compiler-code mapping while preserving the existing child
+stack and trap regions:
+
+```text
+0x30000 compiler-code base
+- 0x12000 output base
+- 0x04000 child stack
+- 0x01000 child trap
+= 0x19000 = 102,400-byte Phase-10 bootstrap output arena
+```
+
+`PhysicalPlacementManager` still chooses the physical extent.  The supplied
+output limit determines the compiler child's virtual output extent, and ankad
+derives the following stack/trap placement from that extent.  The distinction is
+therefore explicit: **placement chooses where an extent lives; the compiler ABI
+still has to state how large that extent is.**  Enlarging the Phase-10 bootstrap
+arena must not mutate the canonical CC_B fixed-point source, ordinary development
+shell compilation, or historical 80-KiB artifact geometry.
+
+Stage 3 adds two stable diagnostics after the Phase-10.2 set:
+
+```text
+15  AOM module cannot be published (for example, empty code section)
+16  public AOM signature uses translation-unit-local/nonportable type identity
+```
+
+The executable formal refinement closes independently at:
+
+```text
+anka103_aom_emission.kleis                  22/22
+anka103_aom_emission_false_witnesses.kleis   0/15 hostile accepted
+```
+
+with no new axioms.  Eleven `p103_` runtime witnesses cover real Stage-3
+bootstrap, export/import behavior, independent caller/callee translation units,
+local forward-call patching, omission of unused prototypes, typed signature
+preservation, rejection of code-empty modules and nonportable public types,
+parser rejection of unknown versions and out-of-bounds relocations, and the
+non-execution of emitted AOM bytes.  Together with the prior suite, Phase 10.3
+closes at **955/955 Rust tests passing, 0 failures**.
+
+Static linking remains exclusively Phase 10.4: no Phase-10.3 component resolves
+imports across modules, applies relocations, creates writable data mappings, or
+publishes a linked executable.
 
 #### Formal scope
 

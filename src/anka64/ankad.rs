@@ -9,9 +9,8 @@
 
 use crate::anka64::isa::*;
 use crate::anka64::os::{SYS_SPAWN, SYS_WAIT, SYS_EXIT};
-use crate::anka64::guest_compiler::{
-    OUTPUT_SIZE, LAYOUT_OUT, LAYOUT_STACK, STACK_SIZE,
-};
+use crate::anka64::guest_compiler::{OUTPUT_SIZE, LAYOUT_OUT, STACK_SIZE};
+use crate::anka64::placement::PLACEMENT_PAGE_SIZE;
 
 /// Where ankad maps the compiler object in its own address space.
 /// SYS_SPAWN.R1 is always this value regardless of whether the
@@ -34,6 +33,23 @@ pub const SUPERVISOR_COMPILER_VADDR: u64 = 0x30000;
 ///   child's virtual space. 0 for CC_A, 0x30000 for CC_B.
 ///   Only affects SpawnLayout.code_vaddr.
 pub fn build_ankad_code(compiler_len: usize, child_code_vaddr: u64) -> Vec<u8> {
+    build_ankad_code_with_output_size(
+        compiler_len,
+        child_code_vaddr,
+        OUTPUT_SIZE as u64,
+    )
+}
+
+/// Build ankad with an explicit compiler output arena size.
+///
+/// The development compiler bridge uses this entry point so physical extent
+/// sizing and child virtual placement are driven by the actual arena granted
+/// for that invocation rather than by the historical OUTPUT_SIZE constant.
+pub fn build_ankad_code_with_output_size(
+    compiler_len: usize,
+    child_code_vaddr: u64,
+    output_size: u64,
+) -> Vec<u8> {
     assert!(compiler_len <= 0x1FFFF,
         "compiler_len {compiler_len:#x} exceeds MOVI range (max 0x1FFFF)");
     assert!(child_code_vaddr % 2 == 0,
@@ -44,18 +60,32 @@ pub fn build_ankad_code(compiler_len: usize, child_code_vaddr: u64) -> Vec<u8> {
 
     // Layout-derived constants for assembly.  All values are loaded
     // via MOVI(half) + ADD(R,R,R) so half must fit in 18-bit signed.
-    const HALF_LAYOUT_OUT: i32   = (LAYOUT_OUT / 2) as i32;
-    const HALF_OUTPUT_SIZE: i32  = (OUTPUT_SIZE / 2) as i32;
-    const HALF_LAYOUT_STACK: i32 = (LAYOUT_STACK / 2) as i32;
-    const HALF_TRAP: i32         = ((LAYOUT_STACK + STACK_SIZE) / 2) as i32;
-    const _: () = assert!(LAYOUT_OUT % 2 == 0);
-    const _: () = assert!(OUTPUT_SIZE % 2 == 0);
-    const _: () = assert!(LAYOUT_STACK % 2 == 0);
-    const _: () = assert!((LAYOUT_STACK + STACK_SIZE) % 2 == 0);
-    const _: () = assert!((LAYOUT_OUT / 2) <= 0x1FFFF);
-    const _: () = assert!((OUTPUT_SIZE / 2) <= 0x1FFFF);
-    const _: () = assert!((LAYOUT_STACK / 2) <= 0x1FFFF);
-    const _: () = assert!(((LAYOUT_STACK + STACK_SIZE) / 2) <= 0x1FFFF);
+    const HALF_LAYOUT_OUT: i32 = (LAYOUT_OUT / 2) as i32;
+    const TRAP_SIZE: u64 = PLACEMENT_PAGE_SIZE;
+    assert!(output_size != 0 && output_size & (PLACEMENT_PAGE_SIZE - 1) == 0,
+        "compiler output arena must be non-zero and page-aligned");
+    let layout_stack = (LAYOUT_OUT as u64)
+        .checked_add(output_size)
+        .expect("compiler output virtual range overflow");
+    let trap_vaddr = layout_stack
+        .checked_add(STACK_SIZE as u64)
+        .expect("compiler stack virtual range overflow");
+    let trap_end = trap_vaddr
+        .checked_add(TRAP_SIZE)
+        .expect("compiler trap virtual range overflow");
+    if child_code_vaddr != 0 {
+        assert!(trap_end <= child_code_vaddr,
+            "compiler output/stack/trap layout overlaps child compiler code");
+    }
+    assert!(output_size % 2 == 0);
+    assert!(layout_stack % 2 == 0);
+    assert!(trap_vaddr % 2 == 0);
+    assert!((output_size / 2) <= 0x1FFFF);
+    assert!((layout_stack / 2) <= 0x1FFFF);
+    assert!((trap_vaddr / 2) <= 0x1FFFF);
+    let half_output_size = (output_size / 2) as i32;
+    let half_layout_stack = (layout_stack / 2) as i32;
+    let half_trap = (trap_vaddr / 2) as i32;
 
     let mut asm = Asm64::new();
 
@@ -81,7 +111,7 @@ pub fn build_ankad_code(compiler_len: usize, child_code_vaddr: u64) -> Vec<u8> {
     asm.add(R3, R3, R3);             // R3 = LAYOUT_OUT
     asm.st(R3, R4, 40);              // parent_vaddr
     asm.st(R9, R4, 48);              // offset = 0
-    asm.movi(R3, HALF_OUTPUT_SIZE);
+    asm.movi(R3, half_output_size);
     asm.add(R3, R3, R3);             // R3 = OUTPUT_SIZE
     asm.st(R3, R4, 56);              // size = OUTPUT_SIZE
     asm.movi(R3, 0x13);
@@ -125,7 +155,7 @@ pub fn build_ankad_code(compiler_len: usize, child_code_vaddr: u64) -> Vec<u8> {
     asm.st(R3, R6, 80);              // child_vaddr
     asm.st(R3, R6, 88);              // parent_vaddr
     asm.st(R9, R6, 96);              // offset = 0
-    asm.movi(R3, HALF_OUTPUT_SIZE);
+    asm.movi(R3, half_output_size);
     asm.add(R3, R3, R3);             // R3 = OUTPUT_SIZE
     asm.st(R3, R6, 104);             // size = OUTPUT_SIZE
     asm.st(R9, R6, 112);             // reserved = 0
@@ -136,12 +166,12 @@ pub fn build_ankad_code(compiler_len: usize, child_code_vaddr: u64) -> Vec<u8> {
     asm.movi(R3, half_code);
     asm.add(R3, R3, R3);             // R3 = child_code_vaddr
     asm.st(R3, R8, 0);               // code_vaddr
-    asm.movi(R3, HALF_LAYOUT_STACK);
+    asm.movi(R3, half_layout_stack);
     asm.add(R3, R3, R3);             // R3 = LAYOUT_STACK
     asm.st(R3, R8, 8);               // stack_vaddr
     asm.movi(R3, STACK_SIZE as i32);
     asm.st(R3, R8, 16);              // stack_size
-    asm.movi(R3, HALF_TRAP);
+    asm.movi(R3, half_trap);
     asm.add(R3, R3, R3);             // R3 = LAYOUT_STACK + STACK_SIZE
     asm.st(R3, R8, 24);              // trap_vaddr
     asm.st(R9, R8, 32);              // reserved = 0

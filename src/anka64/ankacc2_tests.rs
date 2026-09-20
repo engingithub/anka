@@ -16,6 +16,7 @@ use super::dev_compiler::{
     DevelopmentCompileError,
 };
 use super::fabric::Fabric;
+use super::guest_compiler::{OUTPUT_SIZE, SOURCE_SIZE};
 use super::os::{BootImage, BootInfo, Kernel, ProcessResult};
 use super::state::{ObjectKind};
 
@@ -230,7 +231,47 @@ fn assert_v2_rejected(source: &str, expected: u64) {
 #[test]
 fn p102_ccb_builds_real_ankacc2_stage2() {
     let image = stage2_image();
+    let source_bytes = stage2_source().len() as u64;
+    let source_payload_limit = SOURCE_SIZE as u64 - 8;
+    let source_headroom_bytes = source_payload_limit
+        .checked_sub(source_bytes)
+        .expect("stage-2 compiler source must fit in CC_B's length-prefixed source arena");
+    let output_limit = OUTPUT_SIZE as u64;
+
     assert!(image.code_size > 0);
+    assert!(image.code_size <= output_limit,
+        "stage-2 compiler code must fit in CC_B's output arena");
+    assert!(image.lit_start == 0
+            || (image.code_size <= image.lit_start && image.lit_start <= output_limit),
+        "stage-2 compiler output geometry must be ordered and in bounds");
+
+    let literal_bytes = if image.lit_start == 0 {
+        0
+    } else {
+        output_limit - image.lit_start
+    };
+    let occupied_bytes = image.code_size + literal_bytes;
+    let free_gap_bytes = if image.lit_start == 0 {
+        output_limit - image.code_size
+    } else {
+        image.lit_start - image.code_size
+    };
+
+    println!(
+        "p102 Stage-2 CC_B geometry: source_bytes={} source_headroom_bytes={} code_bytes={} literal_bytes={} occupied_bytes={} free_gap_bytes={} output_limit={}",
+        source_bytes,
+        source_headroom_bytes,
+        image.code_size,
+        literal_bytes,
+        occupied_bytes,
+        free_gap_bytes,
+        output_limit,
+    );
+
+    assert_eq!(occupied_bytes + free_gap_bytes, output_limit,
+        "measured Stage-2 output must account for the complete CC_B arena");
+    assert_eq!(image.bytes.len() as u64, image.code_size,
+        "stage-2 bootstrap artifact is currently code-only");
     assert_eq!(image.lit_start, 0,
         "stage-2 compiler remains a direct code-only bootstrap artifact");
     assert_eq!(image.process_slots_observed, 2,

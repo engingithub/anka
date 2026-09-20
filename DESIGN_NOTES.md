@@ -4732,7 +4732,7 @@ maximum flat symbols/function    14 / 32
 flat local-name duplicates        0
 bootstrap call sites            368 / 512 fixup bound
 largest source literal       81,920 / 131,071
-prior generated-text estimate 80,232 / 81,920-byte output arena
+CC_B output geometry          measured by the real `p102_` runtime witness
 ```
 
 This is an important bootstrap lesson: nested-scope semantics belong to AC2,
@@ -4741,10 +4741,13 @@ source language until the successor crosses the bootstrap boundary.  Source
 readability is also constrained by that finite predecessor arena, so compact
 multiline formatting is deliberate rather than accidental.
 
-The generated-text estimate is a preflight bound, not the closure witness.  The
-authoritative gate is still the real runtime path: CC_B must compile Stage 2
-under Anka, Stage 2 must compile/execute the typed witness corpus, and the
-complete Rust regression suite must remain green.
+There is deliberately no generated-text estimate anymore.  The
+`p102_ccb_builds_real_ankacc2_stage2` test reads the actual `CompiledCImage`
+returned by CC_B and calculates exact code bytes, literal bytes, occupied bytes,
+free-gap bytes, and output-arena size.  The test prints those values under
+`--nocapture` and asserts the geometry accounts for the complete 81,920-byte
+arena.  The measurement therefore comes from the same real bootstrap execution
+that is being admitted, not from a source-level approximation.
 
 **Runtime witnesses.** Twelve `p102_` tests cover CC_B building Stage 2,
 compatible prototypes plus four register arguments, pointer/address/dereference
@@ -4753,16 +4756,16 @@ byte-sized `char`, and stable rejection of signature mismatch, five arguments,
 struct-by-value ABI, recursive-by-value layout, zero arrays, mutable globals,
 unresolved prototypes, void objects, and unknown aliases.
 
-**Status.** Implementation and formal gates are complete; the Cargo runtime gate
-first reached 943/944.  The sole failure was narrower than the arithmetic path:
-`char c = 42` failed before `+`/`-` because `typeok()` admitted `char`→`int` but
-not the corresponding Stage-2 scalar narrowing `int`→`char`.  Arithmetic promotion
-was already correct.  Scalar value compatibility is now symmetric for the
-`int`/`char` subset: storing `int` to `char` keeps the low byte, and loading `char`
-zero-extends it into the word-register ABI.  The formal refinement now includes
-that conversion explicitly.  The final full-suite closure count is pending
-execution in the normal Rust toolchain environment.  Phase 10.2 is not CLOSED
-until that runtime result is recorded.
+**Status.** CLOSED.  Implementation and formal gates are complete.  The Cargo
+runtime gate first reached 943/944.  The sole failure was narrower than the
+arithmetic path: `char c = 42` failed before `+`/`-` because `typeok()` admitted
+`char`→`int` but not the corresponding Stage-2 scalar narrowing `int`→`char`.
+Arithmetic promotion was already correct.  Scalar value compatibility is now
+symmetric for the `int`/`char` subset: storing `int` to `char` keeps the low byte,
+and loading `char` zero-extends it into the word-register ABI.  The formal
+refinement includes that conversion explicitly.  The final full-suite closure is
+**944/944 Rust tests passing, 0 failures**, together with 23/23 positive Kleis
+witnesses and 0/14 hostile witnesses accepted.
 
 **Consequence.** Phase 10.3 can introduce AOM as a representation for semantics
 that now already exist: typed functions, exact signatures, stack-local object

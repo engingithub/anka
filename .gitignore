@@ -5,3 +5,5 @@
 src.zip
 .DS_Store
 theories.zip
+.idea/anka.iml
+.idea/modules.xml
