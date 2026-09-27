@@ -1,0 +1,70 @@
+// Every example is deliberately false and must be rejected.
+import "anka105_include_preprocessing.kleis"
+
+example "FALSE-AOM105PP-1 object-like macros are already part of first preprocessor" {
+    assert(aom105pp_profile_supported(true,true,false,false,false,false,false)=true)
+}
+
+example "FALSE-AOM105PP-2 conditional preprocessing is already supported" {
+    assert(aom105pp_profile_supported(true,false,false,true,false,false,false)=true)
+}
+
+example "FALSE-AOM105PP-3 missing include may resolve from host search path" {
+    assert(aom105pp_include_resolution_valid(true,bvconst(0,16),true,false,false,true,true)=true)
+}
+
+example "FALSE-AOM105PP-4 ambiguous include may select one definition" {
+    assert(aom105pp_include_resolution_valid(true,bvconst(2,16),true,true,true,false,false)=true)
+}
+
+example "FALSE-AOM105PP-5 include target outside explicit bundle may be read" {
+    assert(aom105pp_include_resolution_valid(true,bvconst(1,16),true,false,true,false,false)=true)
+}
+
+example "FALSE-AOM105PP-6 active recursive include cycle may continue" {
+    assert(aom105pp_recursive_step_valid(true,true,true)=true)
+}
+
+example "FALSE-AOM105PP-7 include recursion may exceed implementation bound" {
+    assert(aom105pp_recursive_step_valid(false,false,true)=true)
+}
+
+example "FALSE-AOM105PP-8 included header creates a new translation unit" {
+    assert(aom105pp_translation_unit_valid(true,true,true)=true)
+}
+
+example "FALSE-AOM105PP-9 missing include may still emit AOM" {
+    assert(aom105pp_failure_state(true,false,false,false,true,false)=true)
+}
+
+example "FALSE-AOM105PP-10 cyclic include may publish an artifact" {
+    assert(aom105pp_failure_state(false,false,true,false,false,true)=true)
+}
+
+example "FALSE-AOM105PP-11 failed preprocessing may be compiled" {
+    assert(aom105pp_compile_admitted(true,true,true,true,true,true)=true)
+}
+
+example "FALSE-AOM105PP-12 preprocessing may mutate source bytes" {
+    assert(aom105pp_source_digest_after_expand(bvconst(70,64))=bvconst(71,64))
+}
+
+example "FALSE-AOM105PP-13 include name creates authority" {
+    assert(aom105pp_include_name_creates_authority()=true)
+}
+
+example "FALSE-AOM105PP-14 preprocessing creates authority" {
+    assert(aom105pp_preprocessing_creates_authority()=true)
+}
+
+example "FALSE-AOM105PP-15 ambient include search path is part of semantics" {
+    assert(aom105pp_uses_ambient_search_path()=true)
+}
+
+example "FALSE-AOM105PP-16 host may execute the preprocessor" {
+    assert(aom105pp_host_executes_preprocessor()=true)
+}
+
+example "FALSE-AOM105PP-17 same bundle root and profile may produce different bytes" {
+    assert(aom105pp_deterministic_result(true,true,true,false)=true)
+}

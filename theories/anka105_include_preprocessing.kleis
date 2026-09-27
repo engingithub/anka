@@ -1,0 +1,236 @@
+// =============================================================================
+// Anka64 Phase 10.5 — Include-Only Preprocessing Refinement
+// =============================================================================
+// No new axioms.
+//
+// This theory refines anka105_source_bundle.kleis into the minimum source
+// composition semantics currently earned by the Phase-10.6 self-host client.
+// It deliberately does NOT define a general ISO C preprocessor.
+//
+// First-preprocessor commitments:
+// - the only preprocessing transformation initially admitted is include,
+// - an include operand resolves as one exact logical name in the supplied bundle,
+// - there is no current-directory, -I, system-directory, or host-filesystem search,
+// - included bytes remain exact and immutable,
+// - included headers do not become separate translation units,
+// - recursive inclusion must be acyclic and within an explicit implementation bound,
+// - missing, ambiguous, cyclic, or over-bound inclusion is a hard failure,
+// - preprocessing failure emits/publishes no AOM,
+// - same bundle mapping + root + preprocessing profile yields identical bytes,
+// - preprocessing and include names create no authority.
+//
+// Object-like/function-like macros, conditionals, token pasting, stringizing,
+// #line and other cpp behavior remain unearned and therefore unsupported here.
+// =============================================================================
+
+import "anka105_source_bundle.kleis"
+
+define aom105pp_profile_supported(
+    include_directives : Bool,
+    object_like_macros : Bool,
+    function_like_macros : Bool,
+    conditionals : Bool,
+    token_paste : Bool,
+    stringize : Bool,
+    line_directives : Bool
+) =
+    if include_directives then
+        if object_like_macros then false
+        else if function_like_macros then false
+        else if conditionals then false
+        else if token_paste then false
+        else if stringize then false
+        else if line_directives then false
+        else true
+    else false
+
+define aom105pp_include_resolution_valid(
+    parsed_include : Bool,
+    definition_count : BitVec16,
+    exact_logical_name : Bool,
+    target_in_bundle : Bool,
+    target_exact_read_only : Bool,
+    ambient_search_used : Bool,
+    host_filesystem_used : Bool
+) =
+    if parsed_include then
+        if definition_count=bvconst(1,16) then
+            if exact_logical_name then
+                if target_in_bundle then
+                    if target_exact_read_only then
+                        if ambient_search_used then false
+                        else if host_filesystem_used then false
+                        else aom105_lookup_valid(
+                            bvconst(1,16),true,true,true,false,false)
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define aom105pp_recursive_step_valid(
+    target_currently_active : Bool,
+    within_depth_bound : Bool,
+    target_resolved : Bool
+) =
+    if target_currently_active then false
+    else if within_depth_bound then
+        if target_resolved then true else false
+    else false
+
+define aom105pp_translation_unit_valid(
+    one_root_translation_unit : Bool,
+    included_headers_create_translation_units : Bool,
+    one_effective_translation_unit : Bool
+) =
+    if one_root_translation_unit then
+        if included_headers_create_translation_units then false
+        else if one_effective_translation_unit then true else false
+    else false
+
+define aom105pp_failure_state(
+    missing_include : Bool,
+    ambiguous_include : Bool,
+    include_cycle : Bool,
+    depth_bound_exceeded : Bool,
+    aom_emitted : Bool,
+    artifact_published : Bool
+) =
+    if missing_include then
+        if aom_emitted then false else if artifact_published then false else true
+    else if ambiguous_include then
+        if aom_emitted then false else if artifact_published then false else true
+    else if include_cycle then
+        if aom_emitted then false else if artifact_published then false else true
+    else if depth_bound_exceeded then
+        if aom_emitted then false else if artifact_published then false else true
+    else false
+
+define aom105pp_compile_admitted(
+    bundle_valid : Bool,
+    root_valid : Bool,
+    profile_valid : Bool,
+    expansion_complete : Bool,
+    exact_effective_source : Bool,
+    preprocessing_failed : Bool
+) =
+    if bundle_valid then
+        if root_valid then
+            if profile_valid then
+                if expansion_complete then
+                    if exact_effective_source then
+                        if preprocessing_failed then false else true
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define aom105pp_source_digest_after_expand(before : BitVec64) : BitVec64 = before
+
+define aom105pp_include_name_creates_authority() = false
+
+define aom105pp_preprocessing_creates_authority() = false
+
+define aom105pp_uses_ambient_search_path() = false
+
+define aom105pp_host_executes_preprocessor() = false
+
+define aom105pp_deterministic_result(
+    same_bundle_mapping : Bool,
+    same_root_name : Bool,
+    same_profile : Bool,
+    same_effective_source_bytes : Bool
+) =
+    if same_bundle_mapping then
+        if same_root_name then
+            if same_profile then
+                if same_effective_source_bytes then true else false
+            else false
+        else false
+    else false
+
+example "AOM105PP-1 first preprocessor profile is include-only" {
+    assert(aom105pp_profile_supported(true,false,false,false,false,false,false)=true)
+}
+
+example "AOM105PP-2 object-like macros are not yet earned" {
+    assert(aom105pp_profile_supported(true,true,false,false,false,false,false)=false)
+}
+
+example "AOM105PP-3 conditionals are not yet earned" {
+    assert(aom105pp_profile_supported(true,false,false,true,false,false,false)=false)
+}
+
+example "AOM105PP-4 exact unique bundle include resolves" {
+    assert(aom105pp_include_resolution_valid(true,bvconst(1,16),true,true,true,false,false)=true)
+}
+
+example "AOM105PP-5 missing include does not search host filesystem" {
+    assert(aom105pp_include_resolution_valid(true,bvconst(0,16),true,false,false,true,true)=false)
+}
+
+example "AOM105PP-6 ambiguous include is rejected" {
+    assert(aom105pp_include_resolution_valid(true,bvconst(2,16),true,true,true,false,false)=false)
+}
+
+example "AOM105PP-7 fresh resolved include within bound is admissible" {
+    assert(aom105pp_recursive_step_valid(false,true,true)=true)
+}
+
+example "AOM105PP-8 active include cycle is rejected" {
+    assert(aom105pp_recursive_step_valid(true,true,true)=false)
+}
+
+example "AOM105PP-9 include depth bound is enforced" {
+    assert(aom105pp_recursive_step_valid(false,false,true)=false)
+}
+
+example "AOM105PP-10 included headers remain inside one translation unit" {
+    assert(aom105pp_translation_unit_valid(true,false,true)=true)
+}
+
+example "AOM105PP-11 included header may not silently become another translation unit" {
+    assert(aom105pp_translation_unit_valid(true,true,true)=false)
+}
+
+example "AOM105PP-12 missing include emits and publishes nothing" {
+    assert(aom105pp_failure_state(true,false,false,false,false,false)=true)
+}
+
+example "AOM105PP-13 cyclic include emits and publishes nothing" {
+    assert(aom105pp_failure_state(false,false,true,false,false,false)=true)
+}
+
+example "AOM105PP-14 complete exact include expansion admits compilation" {
+    assert(aom105pp_compile_admitted(true,true,true,true,true,false)=true)
+}
+
+example "AOM105PP-15 failed preprocessing may not enter compilation" {
+    assert(aom105pp_compile_admitted(true,true,true,true,true,true)=false)
+}
+
+example "AOM105PP-16 preprocessing does not mutate bundle members" {
+    assert(aom105pp_source_digest_after_expand(bvconst(404,64))=bvconst(404,64))
+}
+
+example "AOM105PP-17 include name creates no authority" {
+    assert(aom105pp_include_name_creates_authority()=false)
+    assert(ac2_header_name_creates_authority()=false)
+}
+
+example "AOM105PP-18 preprocessing creates no authority" {
+    assert(aom105pp_preprocessing_creates_authority()=false)
+}
+
+example "AOM105PP-19 first preprocessor has no ambient include search path" {
+    assert(aom105pp_uses_ambient_search_path()=false)
+}
+
+example "AOM105PP-20 host does not execute preprocessing semantics" {
+    assert(aom105pp_host_executes_preprocessor()=false)
+}
+
+example "AOM105PP-21 same bundle root and profile yield identical effective source" {
+    assert(aom105pp_deterministic_result(true,true,true,true)=true)
+}

@@ -1,0 +1,219 @@
+// =============================================================================
+// Anka64 Phase 10.5 — Source Bundle and Logical-Name Resolution Contract
+// =============================================================================
+// No new axioms.
+//
+// This theory refines the Phase 10.0 AC2 source-bundle commitment into the
+// concrete semantic boundary needed before headers/includes can exist.
+//
+// Phase-10.5 source-bundle commitments:
+// - a bundle is a finite, nonempty collection of exact immutable source bytes,
+// - every member has one canonical, nonempty logical name,
+// - logical names are unique within the bundle,
+// - one exact member is selected as the translation-unit root,
+// - lookup is exact-name lookup over explicitly supplied bundle membership,
+// - lookup never falls back to the host filesystem or ambient search paths,
+// - host paths are ingestion metadata only and are not authoritative names,
+// - names and bundle membership create no Anka authority,
+// - lookup does not mutate source bytes,
+// - the same bundle mapping plus requested logical name resolves identically.
+//
+// Include expansion itself is frozen by anka105_include_preprocessing.kleis.
+// =============================================================================
+
+import "anka100_ac2_profile_contract.kleis"
+
+define aom105_source_entry_valid(
+    exact_bytes : Bool,
+    read_only : Bool,
+    logical_name_nonempty : Bool,
+    logical_name_canonical : Bool,
+    host_path_authoritative : Bool
+) =
+    if exact_bytes then
+        if read_only then
+            if logical_name_nonempty then
+                if logical_name_canonical then
+                    if host_path_authoritative then false else true
+                else false
+            else false
+        else false
+    else false
+
+define aom105_bundle_valid(
+    nonempty : Bool,
+    all_entries_valid : Bool,
+    logical_names_unique : Bool,
+    exact_root_count_one : Bool,
+    explicit_membership_only : Bool,
+    host_c_parse : Bool,
+    host_macro_expand : Bool,
+    host_symbol_resolve : Bool,
+    host_link : Bool
+) =
+    if nonempty then
+        if all_entries_valid then
+            if logical_names_unique then
+                if exact_root_count_one then
+                    if explicit_membership_only then
+                        ac2_source_bundle_valid(
+                            true,true,true,
+                            host_c_parse,
+                            host_macro_expand,
+                            host_symbol_resolve,
+                            host_link)
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define aom105_root_selection_valid(
+    root_name_count : BitVec16,
+    root_in_bundle : Bool,
+    root_exact_bytes : Bool,
+    root_read_only : Bool
+) =
+    if root_name_count=bvconst(1,16) then
+        if root_in_bundle then
+            if root_exact_bytes then
+                if root_read_only then true else false
+            else false
+        else false
+    else false
+
+define aom105_lookup_valid(
+    definition_count : BitVec16,
+    exact_name_match : Bool,
+    target_in_bundle : Bool,
+    target_exact_bytes : Bool,
+    ambient_filesystem_fallback : Bool,
+    host_path_lookup : Bool
+) =
+    if definition_count=bvconst(1,16) then
+        if exact_name_match then
+            if target_in_bundle then
+                if target_exact_bytes then
+                    if ambient_filesystem_fallback then false
+                    else if host_path_lookup then false
+                    else true
+                else false
+            else false
+        else false
+    else false
+
+define aom105_bundle_transport_valid(
+    compiler_can_read_members : Bool,
+    compiler_can_write_members : Bool,
+    compiler_can_read_unlisted_source : Bool
+) =
+    if compiler_can_read_members then
+        if compiler_can_write_members then false
+        else if compiler_can_read_unlisted_source then false
+        else true
+    else false
+
+define aom105_source_name_creates_authority() = false
+
+define aom105_bundle_membership_creates_authority() = false
+
+define aom105_host_path_is_semantic_identity() = false
+
+define aom105_lookup_depends_on_bundle_order() = false
+
+define aom105_source_digest_after_lookup(before : BitVec64) : BitVec64 = before
+
+define aom105_resolution_deterministic(
+    same_bundle_mapping : Bool,
+    same_requested_name : Bool,
+    same_resolved_member : Bool,
+    same_resolved_digest : Bool
+) =
+    if same_bundle_mapping then
+        if same_requested_name then
+            if same_resolved_member then
+                if same_resolved_digest then true else false
+            else false
+        else false
+    else false
+
+example "AOM105B-1 exact immutable canonically named source entry is valid" {
+    assert(aom105_source_entry_valid(true,true,true,true,false)=true)
+}
+
+example "AOM105B-2 host path may not become source identity" {
+    assert(aom105_source_entry_valid(true,true,true,true,true)=false)
+}
+
+example "AOM105B-3 nonempty unique explicit bundle with one root is valid" {
+    assert(aom105_bundle_valid(true,true,true,true,true,false,false,false,false)=true)
+}
+
+example "AOM105B-4 empty source bundle is rejected" {
+    assert(aom105_bundle_valid(false,true,true,true,true,false,false,false,false)=false)
+}
+
+example "AOM105B-5 duplicate logical names invalidate a bundle" {
+    assert(aom105_bundle_valid(true,true,false,true,true,false,false,false,false)=false)
+}
+
+example "AOM105B-6 host preprocessing remains forbidden by the refined bundle" {
+    assert(aom105_bundle_valid(true,true,true,true,true,false,true,false,false)=false)
+}
+
+example "AOM105B-7 root must resolve exactly once inside the bundle" {
+    assert(aom105_root_selection_valid(bvconst(1,16),true,true,true)=true)
+}
+
+example "AOM105B-8 ambiguous root is rejected" {
+    assert(aom105_root_selection_valid(bvconst(2,16),true,true,true)=false)
+}
+
+example "AOM105B-9 exact unique member lookup succeeds" {
+    assert(aom105_lookup_valid(bvconst(1,16),true,true,true,false,false)=true)
+}
+
+example "AOM105B-10 missing member may not fall back to host filesystem" {
+    assert(aom105_lookup_valid(bvconst(0,16),true,false,false,true,true)=false)
+}
+
+example "AOM105B-11 ambiguous logical name is rejected" {
+    assert(aom105_lookup_valid(bvconst(2,16),true,true,true,false,false)=false)
+}
+
+example "AOM105B-12 compiler gets read-only access only to supplied members" {
+    assert(aom105_bundle_transport_valid(true,false,false)=true)
+}
+
+example "AOM105B-13 compiler may not write source-bundle members" {
+    assert(aom105_bundle_transport_valid(true,true,false)=false)
+}
+
+example "AOM105B-14 compiler may not read unlisted ambient source" {
+    assert(aom105_bundle_transport_valid(true,false,true)=false)
+}
+
+example "AOM105B-15 logical source name creates no authority" {
+    assert(aom105_source_name_creates_authority()=false)
+    assert(ac2_source_name_creates_authority()=false)
+}
+
+example "AOM105B-16 bundle membership creates no authority" {
+    assert(aom105_bundle_membership_creates_authority()=false)
+}
+
+example "AOM105B-17 host path is not semantic source identity" {
+    assert(aom105_host_path_is_semantic_identity()=false)
+}
+
+example "AOM105B-18 lookup result does not depend on bundle enumeration order" {
+    assert(aom105_lookup_depends_on_bundle_order()=false)
+}
+
+example "AOM105B-19 lookup does not mutate source bytes" {
+    assert(aom105_source_digest_after_lookup(bvconst(991,64))=bvconst(991,64))
+}
+
+example "AOM105B-20 same bundle mapping and name resolve identically" {
+    assert(aom105_resolution_deterministic(true,true,true,true)=true)
+}

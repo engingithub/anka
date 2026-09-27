@@ -1,0 +1,66 @@
+// Every example is deliberately false and must be rejected.
+import "anka105_source_bundle.kleis"
+
+example "FALSE-AOM105B-1 writable source entry may enter a bundle" {
+    assert(aom105_source_entry_valid(true,false,true,true,false)=true)
+}
+
+example "FALSE-AOM105B-2 host path may define authoritative source identity" {
+    assert(aom105_source_entry_valid(true,true,true,true,true)=true)
+}
+
+example "FALSE-AOM105B-3 empty bundle may compile" {
+    assert(aom105_bundle_valid(false,true,true,true,true,false,false,false,false)=true)
+}
+
+example "FALSE-AOM105B-4 duplicate logical names may be resolved by order" {
+    assert(aom105_bundle_valid(true,true,false,true,true,false,false,false,false)=true)
+}
+
+example "FALSE-AOM105B-5 host macro expansion may preprocess bundle members" {
+    assert(aom105_bundle_valid(true,true,true,true,true,false,true,false,false)=true)
+}
+
+example "FALSE-AOM105B-6 two roots may be silently accepted" {
+    assert(aom105_root_selection_valid(bvconst(2,16),true,true,true)=true)
+}
+
+example "FALSE-AOM105B-7 missing logical name may resolve through host fallback" {
+    assert(aom105_lookup_valid(bvconst(0,16),true,false,false,true,true)=true)
+}
+
+example "FALSE-AOM105B-8 ambiguous logical name may choose one member" {
+    assert(aom105_lookup_valid(bvconst(2,16),true,true,true,false,false)=true)
+}
+
+example "FALSE-AOM105B-9 compiler may mutate supplied source" {
+    assert(aom105_bundle_transport_valid(true,true,false)=true)
+}
+
+example "FALSE-AOM105B-10 compiler may read ambient unlisted source" {
+    assert(aom105_bundle_transport_valid(true,false,true)=true)
+}
+
+example "FALSE-AOM105B-11 logical source name creates authority" {
+    assert(aom105_source_name_creates_authority()=true)
+}
+
+example "FALSE-AOM105B-12 bundle membership itself creates authority" {
+    assert(aom105_bundle_membership_creates_authority()=true)
+}
+
+example "FALSE-AOM105B-13 host path is semantic identity" {
+    assert(aom105_host_path_is_semantic_identity()=true)
+}
+
+example "FALSE-AOM105B-14 lookup may depend on bundle enumeration order" {
+    assert(aom105_lookup_depends_on_bundle_order()=true)
+}
+
+example "FALSE-AOM105B-15 lookup may mutate source digest" {
+    assert(aom105_source_digest_after_lookup(bvconst(41,64))=bvconst(42,64))
+}
+
+example "FALSE-AOM105B-16 same bundle and name may resolve to different member" {
+    assert(aom105_resolution_deterministic(true,true,false,true)=true)
+}

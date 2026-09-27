@@ -227,3 +227,56 @@ AOM bytes -> ankald inside Anka -> completed linked bytes
 
 successful link != execution authority
 ```
+
+## Phase 10.5: explicit source bundles + include-only preprocessing
+
+`ankapp.c` is the first source-composition tool.  Like `ankald`, it is an
+ordinary Anka userspace program bootstrapped by canonical CC_B; the host does
+not execute C preprocessing semantics.
+
+The host-side `SourceBundle` transport contains exact immutable member bytes,
+one exact root logical name, and unique exact logical-name keys.  Host paths may
+be consumed while ingesting development files, but are discarded before bundle
+identity exists.  Logical names are opaque bundle keys rather than filesystem
+paths: no cwd, path normalization, `-I`, system directory, or host fallback is
+part of resolution.
+
+The first preprocessing profile supports only exact quoted inclusion:
+
+```c
+#include "/include/anka/example.h"
+```
+
+The operand is resolved by exact name against the supplied bundle.  Member
+objects and the bundle manifest are sealed/read-only in the `ankapp` process.
+Only the output, recursion workspace, and result transport are writable.
+Active include cycles and include depth beyond 32 are rejected.  Macros,
+conditionals, token pasting, stringizing, line directives, and ambient include
+search remain deliberately unsupported.
+
+`ankapp` result codes are:
+
+```text
+1  invalid source-bundle manifest/root
+2  missing include target
+3  ambiguous/duplicate include target
+4  active include cycle
+5  include depth bound exceeded
+6  unsupported preprocessing directive/profile
+7  effective-source output bound exceeded
+8  malformed include directive
+```
+
+A successful expansion produces one effective translation unit of at most the
+existing AnkaCC2 source payload (`SOURCE_SIZE - 8`, reserving the compiler's length word).  The development helper then
+passes those exact bytes to the existing Stage-3 compiler.  A preprocessing
+failure returns before Stage 3 is invoked, so it cannot emit or publish an AOM.
+
+The corresponding formal gates are:
+
+```text
+anka105_source_bundle.kleis                         20/20
+anka105_source_bundle_false_witnesses.kleis           0/16 hostile accepted
+anka105_include_preprocessing.kleis                 21/21
+anka105_include_preprocessing_false_witnesses.kleis    0/17 hostile accepted
+```

@@ -1453,7 +1453,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | CC_B = CC_C | 46 functions; binary size verified by fixed-point regression |
 | Canonical source | ~17 KB |
-| Tests | 955/955 Rust tests through closed Phase 10.3 AOM object emission |
+| Tests | 967/967 Rust tests through closed Phase 10.4 ankald static linking |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -3345,8 +3345,23 @@ client and an adversarial gate before the next one depends on it:
       - compile-only object emission remains distinct from linking and execution authority
       - 955/955 Rust tests, including 11/11 Phase 10.3 runtime witnesses
       - 22/22 positive Kleis witnesses, 0/15 hostile witnesses accepted
-10.4  ankald static linker + permission-aware linked artifacts
-10.5  source bundles + headers/includes + minimum earned preprocessing
+10.4  ankald static linker + permission-aware linked artifacts — CLOSED
+      - userspace ankald built by canonical CC_B and executed as an ordinary Anka process
+      - ordered AOM v1 inputs, exact typed import/export resolution, CALL_PC20 relocation
+      - deterministic code/RO-data image with transactional publication
+      - successful linking creates no execution or sealing authority
+      - 967/967 Rust tests
+      - 37/37 positive linker Kleis witnesses, 0/28 hostile witnesses accepted
+      - 14/14 positive linker-process ABI witnesses, 0/13 hostile witnesses accepted
+10.5  source bundles + headers/includes + minimum earned preprocessing — FORMAL GATE ESTABLISHED
+      - explicit immutable source bundles with unique canonical logical names
+      - exact root selection; names remain metadata and create no authority
+      - include-only first slice; no ambient host/filesystem lookup
+      - deterministic bounded include expansion; cycle/depth failure
+      - preprocessing failure emits/publishes nothing
+      - 20/20 positive source-bundle witnesses, 0/16 hostile witnesses accepted
+      - 21/21 positive include-preprocessing witnesses, 0/17 hostile witnesses accepted
+      - implementation pending
 10.6  AnkaCC2 self-host bootstrap and fixed-point closure
 10.7  modularize the compiler/toolchain itself under AC2
 10.8  rebuild/refactor Anka userspace with headers, modules, and libraries
@@ -3728,6 +3743,92 @@ closes at **955/955 Rust tests passing, 0 failures**.
 Static linking remains exclusively Phase 10.4: no Phase-10.3 component resolves
 imports across modules, applies relocations, creates writable data mappings, or
 publishes a linked executable.
+
+#### Phase 10.4 closure: userspace `ankald` and permission-aware linked artifacts
+
+Phase 10.4 closes the first real static-link path without moving linker semantics
+onto the host.  `userspace/system/compiler/ankald.c` is compiled by canonical
+CC_B and runs as an ordinary Anka process.  It consumes an ordered set of exact
+AOM v1 objects, resolves required imports to exactly one compatible export,
+rejects duplicate strong definitions and signature mismatches, applies only the
+first earned zero-addend `CALL_PC20` relocation, and constructs deterministic
+linked code/read-only-data geometry.  AOM container headers are not copied into
+the executable image, and out-of-range CALL displacements are rejected rather
+than truncated.
+
+The process transport and publication path preserve the authority distinction
+proved before implementation.  `ankald` receives read-only AOM inputs plus an
+RW scratch/result transport; it does not receive execution or SEAL authority
+over its output.  After successful linker exit, the non-linking publication
+path validates the result metadata, copies exactly the completed image into a
+fresh object, and seals that object transactionally.  Symbol names, entry names,
+relocations, and successful linking remain non-authoritative.
+
+The two executable formal gates close independently at:
+
+```text
+anka104_ankald_static_linker.kleis                  37/37
+anka104_ankald_static_linker_false_witnesses.kleis   0/28 hostile accepted
+anka104_ankald_process_abi.kleis                    14/14
+anka104_ankald_process_abi_false_witnesses.kleis      0/13 hostile accepted
+```
+
+The full runtime regression closes at **967/967 Rust tests passing, 0 failures**.
+The Phase-10.4 witnesses include canonical-CC_B bootstrap of the real userspace
+linker, real Stage-3-produced AOM caller/callee linking, exact forward/backward
+CALL patching, deterministic ordered layout, duplicate/unresolved/signature
+rejection, nonzero-addend rejection, AOM-header exclusion, optional read-only
+data separation, exact sealed publication, and failed-link transactional
+behavior.
+
+#### Phase 10.5 formal gate: source bundles and include-only preprocessing
+
+Phase 10.5 begins formal-first.  Before implementation, the source-composition
+boundary is split into two executable Kleis refinements so source identity/name
+resolution cannot hide inside preprocessing behavior.
+
+The source-bundle contract defines an explicit closed namespace of exact,
+immutable source members with unique canonical logical names and one exact root
+translation unit.  Logical names are lookup metadata rather than capabilities.
+Bundle construction may package host-resident development bytes, but once the
+bundle exists, authoritative resolution has no ambient host filesystem fallback,
+no implicit current-directory authority, and no host include-search semantics.
+The same exact bundle and root must resolve identically.
+
+The first preprocessing slice is deliberately **include-only**.  An include may
+resolve only another member already present in the supplied bundle.  Expansion
+is deterministic and bounded; missing targets, duplicate names, cycles, depth
+violations, or other preprocessing failures emit and publish nothing.  Included
+headers remain part of the same translation unit; this phase does not introduce
+macro expansion, conditional preprocessing, host `-I` search paths, package
+resolution, or any name-derived authority.  Those mechanisms remain unearned
+until a real Anka client demonstrates the need.
+
+The formal gate closes at:
+
+```text
+anka105_source_bundle.kleis                           20/20
+anka105_source_bundle_false_witnesses.kleis             0/16 hostile accepted
+anka105_include_preprocessing.kleis                   21/21
+anka105_include_preprocessing_false_witnesses.kleis      0/17 hostile accepted
+```
+
+The intended implementation pipeline is therefore:
+
+```text
+host development paths/bytes
+  -> explicit immutable source bundle
+  -> exact logical-name resolution inside Anka
+  -> include-only preprocessing inside Anka
+  -> one effective translation unit
+  -> AnkaCC2 Stage 3
+  -> AOM v1
+  -> ankald
+  -> linked artifact
+```
+
+Phase 10.5 implementation is still pending; the formal gate freezes the
+semantics that implementation must realize.
 
 #### Formal scope
 

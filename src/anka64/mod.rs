@@ -25,6 +25,7 @@ pub mod dev_shell;
 pub mod dev_compiler;
 pub mod aom;
 pub mod ankald;
+pub mod source_bundle;
 pub mod dev_runner;
 pub mod dev_monitor;
 pub mod desc;
@@ -55,6 +56,8 @@ mod ankacc2_tests;
 mod aom_tests;
 #[cfg(test)]
 mod ankald_tests;
+#[cfg(test)]
+mod source_bundle_tests;
 pub mod multicore;
 pub mod ankad;
 pub mod system_image;
