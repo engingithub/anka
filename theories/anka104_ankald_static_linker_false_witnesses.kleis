@@ -1,0 +1,128 @@
+// Every example is deliberately false and must be rejected.
+import "anka104_ankald_static_linker.kleis"
+
+example "FALSE-AOM104-1 empty module set may link" {
+    assert(aom104_nonempty_module_set(bvconst(0,16))=true)
+}
+
+example "FALSE-AOM104-2 unresolved required import may resolve" {
+    assert(aom104_import_resolves(true,bvconst(0,8),true,true)=true)
+}
+
+example "FALSE-AOM104-3 two definitions uniquely resolve one import" {
+    assert(aom104_import_resolves(true,bvconst(2,8),true,true)=true)
+}
+
+example "FALSE-AOM104-4 signature mismatch may resolve" {
+    assert(aom104_import_resolves(true,bvconst(1,8),true,false)=true)
+}
+
+example "FALSE-AOM104-5 nonzero addend is silently accepted by first ankald" {
+    assert(aom104_current_relocation_supported(
+        true,bvconst(8,64),true,true,false)=true)
+}
+
+example "FALSE-AOM104-6 relocation patch may extend beyond source code" {
+    assert(aom104_source_patch_address_valid(
+        bvconst(4096,64),bvconst(64,64),bvconst(60,64),bvconst(4156,64))=true)
+}
+
+example "FALSE-AOM104-7 export target may point at end of source code" {
+    assert(aom104_target_address_valid(
+        bvconst(8192,64),bvconst(64,64),bvconst(64,64),bvconst(8256,64))=true)
+}
+
+example "FALSE-AOM104-8 out-of-range forward CALL may be truncated" {
+    assert(aom104_call_displacement_representable(
+        bvconst(0,64),bvconst(8388608,64))=true)
+}
+
+example "FALSE-AOM104-9 out-of-range backward CALL may be truncated" {
+    assert(aom104_call_displacement_representable(
+        bvconst(8388612,64),bvconst(0,64))=true)
+}
+
+example "FALSE-AOM104-10 linker may insert arbitrary extra alignment gap" {
+    assert(aom104_append_layout_valid(
+        bvconst(114,64),bvconst(64,64),bvconst(8,64),bvconst(128,64))=true)
+}
+
+example "FALSE-AOM104-11 ankald may reorder input modules" {
+    assert(aom104_reorders_input_modules()=true)
+}
+
+example "FALSE-AOM104-12 rodata may overlap executable code" {
+    assert(aom104_linked_image_geometry_valid(
+        bvconst(256,64),bvconst(64,64),bvconst(248,64),bvconst(312,64))=true)
+}
+
+example "FALSE-AOM104-13 linked code may be writable and executable" {
+    assert(aom104_output_permissions_valid(
+        false,true,true,false,false,false)=true)
+}
+
+example "FALSE-AOM104-14 linked rodata may be executable" {
+    assert(aom104_output_permissions_valid(
+        true,true,false,true,false,true)=true)
+}
+
+example "FALSE-AOM104-15 ambiguous requested entry may be accepted" {
+    assert(aom104_entry_selection_valid(
+        true,bvconst(2,8),true,true,bvconst(40,64),bvconst(256,64))=true)
+}
+
+example "FALSE-AOM104-16 unresolved link may publish partial output" {
+    assert(aom104_link_publishable(
+        true,true,true,false,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-AOM104-17 failed relocation pass may publish output" {
+    assert(aom104_link_publishable(
+        true,true,true,true,false,true,true,true,true,true)=true)
+}
+
+example "FALSE-AOM104-18 unsealed output may be published" {
+    assert(aom104_link_publishable(
+        true,true,true,true,true,true,true,true,false,true)=true)
+}
+
+example "FALSE-AOM104-19 linker may mutate an input AOM" {
+    assert(aom104_input_digest_after_link(bvconst(7,64))=bvconst(8,64))
+}
+
+example "FALSE-AOM104-20 same ordered inputs may produce different layout" {
+    assert(aom104_deterministic_result(true,true,false,true,true)=true)
+}
+
+example "FALSE-AOM104-21 entry symbol name creates authority" {
+    assert(aom104_entry_name_creates_authority()=true)
+}
+
+example "FALSE-AOM104-22 successful link creates execution authority" {
+    assert(aom104_link_creates_execution_authority()=true)
+}
+
+example "FALSE-AOM104-23 static linking may amplify runtime authority" {
+    assert(aom104_link_amplifies_runtime_authority()=true)
+}
+
+example "FALSE-AOM104-24 required import may resolve to a non-export" {
+    assert(aom104_import_resolves(true,bvconst(1,8),false,true)=true)
+}
+
+example "FALSE-AOM104-25 unsupported relocation kind may be patched" {
+    assert(aom104_current_relocation_supported(
+        true,bvconst(8,64),false,true,true)=true)
+}
+
+example "FALSE-AOM104-26 AOM container header may be copied into executable image" {
+    assert(aom104_copies_aom_header_into_executable()=true)
+}
+
+example "FALSE-AOM104-27 same ordered inputs may produce different patch bytes" {
+    assert(aom104_deterministic_result(true,true,true,false,true)=true)
+}
+
+example "FALSE-AOM104-28 same ordered inputs may produce different final entry" {
+    assert(aom104_deterministic_result(true,true,true,true,false)=true)
+}

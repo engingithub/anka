@@ -1,0 +1,54 @@
+// Every example is deliberately false and must be rejected.
+import "anka104_ankald_process_abi.kleis"
+
+example "FALSE-AOM104ABI-1 empty input sequence may be admitted" {
+    assert(aom104abi_inputs_valid(false,true,true,true,false)=true)
+}
+
+example "FALSE-AOM104ABI-2 ankald may receive writable AOM inputs" {
+    assert(aom104abi_inputs_valid(true,true,true,true,true)=true)
+}
+
+example "FALSE-AOM104ABI-3 output may alias input" {
+    assert(aom104abi_output_authority_valid(false,true,true,true,false,false)=true)
+}
+
+example "FALSE-AOM104ABI-4 output may begin writable and executable" {
+    assert(aom104abi_output_authority_valid(true,true,true,true,false,true)=true)
+}
+
+example "FALSE-AOM104ABI-5 control metadata may be executable" {
+    assert(aom104abi_control_is_metadata(true,true,true,false)=true)
+}
+
+example "FALSE-AOM104ABI-6 control name may create authority" {
+    assert(aom104abi_control_is_metadata(true,true,false,true)=true)
+}
+
+example "FALSE-AOM104ABI-7 linker may hold SEAL authority over output" {
+    assert(aom104abi_output_authority_valid(true,true,true,true,true,false)=true)
+}
+
+example "FALSE-AOM104ABI-8 failed link may publish partial output" {
+    assert(aom104abi_failure_state(true,false,true)=true)
+}
+
+example "FALSE-AOM104ABI-9 success may publish before result is complete" {
+    assert(aom104abi_success_state(true,false,true,true,true,true,false)=true)
+}
+
+example "FALSE-AOM104ABI-10 sealed link result creates execution authority" {
+    assert(aom104abi_success_state(true,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-AOM104ABI-11 input AOM may be mutated" {
+    assert(aom104abi_input_mutated(bvconst(7,64),bvconst(8,64))=false)
+}
+
+example "FALSE-AOM104ABI-12 descriptor order may change" {
+    assert(aom104abi_order_preserved(bvconst(2,16),bvconst(3,16))=true)
+}
+
+example "FALSE-AOM104ABI-13 publisher may seal an inexact scratch extent" {
+    assert(aom104abi_success_state(true,true,true,false,true,true,false)=true)
+}

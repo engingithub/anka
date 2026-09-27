@@ -1,0 +1,164 @@
+// =============================================================================
+// Anka64 Phase 10.4 — ankald ordinary-process bootstrap ABI
+// =============================================================================
+// No new axioms.
+//
+// This is a transport refinement only.  The linker semantics remain those of
+// anka104_ankald_static_linker.kleis.  This gate earns the concrete bootstrap
+// process boundary needed to run ankald as ordinary Anka userspace before the
+// general source-bundle/filesystem work of Phase 10.5 exists.
+//
+// - ordered input descriptors name exact read-only AOM byte objects,
+// - the output is a distinct Active object carrying R/W authority only,
+// - the result/control object carries metadata, never executable authority,
+// - input objects are never writable by ankald,
+// - failure leaves output unsealed/unpublished,
+// - success seals the exact output generation only after complete linking,
+// - sealing output still does not grant execution authority.
+// =============================================================================
+
+import "anka104_ankald_static_linker.kleis"
+
+define aom104abi_inputs_valid(
+    nonempty : Bool,
+    ordered : Bool,
+    exact_bytes : Bool,
+    readable : Bool,
+    writable : Bool
+) =
+    if nonempty then
+        if ordered then
+            if exact_bytes then
+                if readable then
+                    if writable then false else true
+                else false
+            else false
+        else false
+    else false
+
+define aom104abi_output_authority_valid(
+    output_distinct_from_inputs : Bool,
+    active_before_link : Bool,
+    readable : Bool,
+    writable : Bool,
+    linker_has_seal : Bool,
+    executable : Bool
+) =
+    if output_distinct_from_inputs then
+        if active_before_link then
+            if readable then
+                if writable then
+                    if linker_has_seal then false
+                    else if executable then false else true
+                else false
+            else false
+        else false
+    else false
+
+define aom104abi_control_is_metadata(
+    readable : Bool,
+    writable_result_fields : Bool,
+    executable : Bool,
+    names_create_authority : Bool
+) =
+    if readable then
+        if writable_result_fields then
+            if executable then false
+            else if names_create_authority then false else true
+        else false
+    else false
+
+define aom104abi_failure_state(
+    link_failed : Bool,
+    output_sealed : Bool,
+    output_published : Bool
+) =
+    if link_failed then
+        if output_sealed then false
+        else if output_published then false else true
+    else false
+
+define aom104abi_success_state(
+    link_complete : Bool,
+    result_written : Bool,
+    linker_exited : Bool,
+    exact_result_copy : Bool,
+    publisher_sealed_output : Bool,
+    generation_current : Bool,
+    linker_execution_authority_created : Bool
+) =
+    if link_complete then
+        if result_written then
+            if linker_exited then
+                if exact_result_copy then
+                    if publisher_sealed_output then
+                        if generation_current then
+                            if linker_execution_authority_created then false else true
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define aom104abi_input_mutated(before : BitVec64, after : BitVec64) =
+    if before=after then false else true
+
+define aom104abi_order_preserved(request_index : BitVec16, consumed_index : BitVec16) =
+    if request_index=consumed_index then true else false
+
+example "AOM104ABI-1 ordered exact AOM inputs are read-only" {
+    assert(aom104abi_inputs_valid(true,true,true,true,false)=true)
+}
+
+example "AOM104ABI-2 writable AOM input is not admitted" {
+    assert(aom104abi_inputs_valid(true,true,true,true,true)=false)
+}
+
+example "AOM104ABI-3 linker output begins Active with RW but neither SEAL nor X" {
+    assert(aom104abi_output_authority_valid(true,true,true,true,false,false)=true)
+}
+
+example "AOM104ABI-4 executable writable output authority is rejected" {
+    assert(aom104abi_output_authority_valid(true,true,true,true,false,true)=false)
+}
+
+example "AOM104ABI-5 output may not alias an input object" {
+    assert(aom104abi_output_authority_valid(false,true,true,true,false,false)=false)
+}
+
+example "AOM104ABI-6 result control is writable metadata and non-executable" {
+    assert(aom104abi_control_is_metadata(true,true,false,false)=true)
+}
+
+example "AOM104ABI-7 control names create no authority" {
+    assert(aom104abi_control_is_metadata(true,true,false,true)=false)
+}
+
+example "AOM104ABI-8 failed link leaves no sealed or published output" {
+    assert(aom104abi_failure_state(true,false,false)=true)
+}
+
+example "AOM104ABI-9 failed link may not seal output" {
+    assert(aom104abi_failure_state(true,true,false)=false)
+}
+
+example "AOM104ABI-10 publication seals only after complete linker result and exit" {
+    assert(aom104abi_success_state(true,true,true,true,true,true,false)=true)
+}
+
+example "AOM104ABI-11 successful sealing still creates no execution authority" {
+    assert(aom104abi_success_state(true,true,true,true,true,true,true)=false)
+}
+
+example "AOM104ABI-12 input digest is unchanged" {
+    assert(aom104abi_input_mutated(bvconst(77,64),bvconst(77,64))=false)
+}
+
+example "AOM104ABI-13 descriptor sequence is consumed in request order" {
+    assert(aom104abi_order_preserved(bvconst(9,16),bvconst(9,16))=true)
+}
+
+example "AOM104ABI-14 transport does not weaken successful-link authority rule" {
+    assert(aom104_link_creates_execution_authority()=false)
+}

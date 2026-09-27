@@ -18,7 +18,9 @@ use super::state::*;
 use super::os::{SYS_EXEC, SYS_SEAL};
 
 mod canonical_source;
-pub(crate) use canonical_source::{canonical_compiler_source, extended_compiler_source};
+pub(crate) use canonical_source::canonical_compiler_source;
+#[cfg(test)]
+pub(crate) use canonical_source::extended_compiler_source;
 
 pub(crate) const CPU0: AgentId = AgentId(0);
 

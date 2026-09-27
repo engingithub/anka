@@ -1,0 +1,527 @@
+// =============================================================================
+// Anka64 Phase 10.4 — ankald Static Linker Refinement
+// =============================================================================
+// No new axioms.
+//
+// This theory refines the Phase 10.0 AOM/link authority contract through the
+// concrete AOM v1 representation frozen by Phase 10.3.  It specifies the first
+// static ankald linker that Phase 10.4 is allowed to implement.
+//
+// Scope deliberately earned by the current client:
+// - the input is an explicit ordered sequence of valid AOM v1 modules,
+// - required function imports resolve to exactly one signature-compatible
+//   function export,
+// - duplicate strong definitions are rejected globally,
+// - the first linker supports the relocation shape emitted by Stage 3:
+//   code-section, 8-byte, CALL_PC20, zero addend,
+// - module code is laid out deterministically in caller-supplied input order,
+// - optional read-only data is kept outside executable code,
+// - relocation source/target addresses and PC-relative range are validated
+//   before any patch is accepted,
+// - publication is transactional and requires complete, sealed,
+//   current-generation output,
+// - input AOMs are immutable,
+// - linking and entry-symbol selection create no Anka authority.
+//
+// NOTE: AOM v1 calls the relocation CALL_PC20.  The current Anka64 B-format
+// encoding used by CALL stores a signed 22-bit displacement measured in
+// 4-byte instruction words.  ankald therefore range-checks that concrete ISA
+// representation rather than truncating the computed displacement.
+// =============================================================================
+
+import "anka103_aom_emission.kleis"
+
+define AOM104_CODE_ALIGNMENT : BitVec64 = bvconst(8,64)
+define AOM104_CALL_WORD_BYTES : BitVec64 = bvconst(4,64)
+define AOM104_CALL_FORWARD_MAX_BYTES : BitVec64 = bvconst(8388604,64)
+define AOM104_CALL_BACKWARD_MAX_BYTES : BitVec64 = bvconst(8388608,64)
+
+// -----------------------------------------------------------------------------
+// Input/module set and symbol resolution
+// -----------------------------------------------------------------------------
+
+define aom104_nonempty_module_set(module_count : BitVec16) =
+    if bvugt(module_count,bvconst(0,16)) then true else false
+
+define aom104_signature_match(
+    name_equal : Bool,
+    target_is_function : Bool,
+    return_type_equal : Bool,
+    argc_equal : Bool,
+    parameter_types_equal : Bool
+) =
+    if name_equal then
+        if target_is_function then
+            if return_type_equal then
+                if argc_equal then
+                    if parameter_types_equal then true else false
+                else false
+            else false
+        else false
+    else false
+
+define aom104_import_resolves(
+    source_is_required_import : Bool,
+    definition_count : BitVec8,
+    target_is_export : Bool,
+    signature_equal : Bool
+) =
+    if source_is_required_import then
+        if definition_count=bvconst(1,8) then
+            if target_is_export then
+                if signature_equal then true else false
+            else false
+        else false
+    else false
+
+// Global duplicate-strong rejection is inherited from Phase 10.0.
+define aom104_global_definition_set_valid(definition_count : BitVec8) =
+    aom_no_duplicate_strong(definition_count)
+
+// -----------------------------------------------------------------------------
+// Concrete relocation admitted by the first ankald
+// -----------------------------------------------------------------------------
+
+define aom104_current_relocation_supported(
+    relocation_in_code : Bool,
+    width : BitVec64,
+    kind_is_call_pc20 : Bool,
+    target_symbol_is_import : Bool,
+    addend_is_zero : Bool
+) =
+    if relocation_in_code then
+        if width=bvconst(8,64) then
+            if kind_is_call_pc20 then
+                if target_symbol_is_import then
+                    if addend_is_zero then true else false
+                else false
+            else false
+        else false
+    else false
+
+// Source patch address is derived only from a validated code-relative
+// relocation offset.  The inherited Phase 10.0 bounds law is reused directly.
+define aom104_source_patch_address_valid(
+    module_code_base : BitVec64,
+    module_code_size : BitVec64,
+    relocation_offset : BitVec64,
+    patch_address : BitVec64
+) =
+    if bvule(relocation_offset,module_code_size) then
+        if bvule(bvconst(8,64),bvsub(module_code_size,relocation_offset)) then
+            if bvuge(bvadd(module_code_base,relocation_offset),module_code_base) then
+                if patch_address=bvadd(module_code_base,relocation_offset) then true else false
+            else false
+        else false
+    else false
+
+// Export values in AOM v1 are code-relative.  A valid target address is the
+// deterministic linked module base plus the validated export value.
+define aom104_target_address_valid(
+    module_code_base : BitVec64,
+    module_code_size : BitVec64,
+    export_value : BitVec64,
+    target_address : BitVec64
+) =
+    if bvult(export_value,module_code_size) then
+        if bvand(export_value,bvconst(7,64))=bvconst(0,64) then
+            if bvuge(bvadd(module_code_base,export_value),module_code_base) then
+                if target_address=bvadd(module_code_base,export_value) then true else false
+            else false
+        else false
+    else false
+
+// CALL uses a signed 22-bit displacement in 4-byte words.  Source and target
+// addresses must therefore be 4-byte aligned and the byte distance must fit
+// [-2^21*4, (2^21-1)*4].
+define aom104_call_displacement_representable(
+    patch_address : BitVec64,
+    target_address : BitVec64
+) =
+    if bvand(patch_address,bvconst(3,64))=bvconst(0,64) then
+        if bvand(target_address,bvconst(3,64))=bvconst(0,64) then
+            if bvuge(target_address,patch_address) then
+                if bvule(
+                    bvsub(target_address,patch_address),
+                    AOM104_CALL_FORWARD_MAX_BYTES) then true else false
+            else
+                if bvule(
+                    bvsub(patch_address,target_address),
+                    AOM104_CALL_BACKWARD_MAX_BYTES) then true else false
+        else false
+    else false
+
+// -----------------------------------------------------------------------------
+// Deterministic ordered layout
+// -----------------------------------------------------------------------------
+
+define aom104_alignment_power_of_two(alignment : BitVec64) =
+    if bvugt(alignment,bvconst(0,64)) then
+        if bvand(alignment,bvsub(alignment,bvconst(1,64)))=bvconst(0,64)
+            then true else false
+    else false
+
+define aom104_aligned(value : BitVec64, alignment : BitVec64) =
+    if aom104_alignment_power_of_two(alignment) then
+        if bvand(value,bvsub(alignment,bvconst(1,64)))=bvconst(0,64)
+            then true else false
+    else false
+
+// `base` must be the first aligned address at or above cursor.  The
+// base-cursor < alignment condition rules out arbitrary extra gaps.
+define aom104_append_layout_valid(
+    cursor : BitVec64,
+    size : BitVec64,
+    alignment : BitVec64,
+    base : BitVec64
+) =
+    if bvugt(alignment,bvconst(0,64)) then
+        if bvand(alignment,bvsub(alignment,bvconst(1,64)))=bvconst(0,64) then
+            if bvugt(size,bvconst(0,64)) then
+                if bvuge(base,cursor) then
+                    if bvand(base,bvsub(alignment,bvconst(1,64)))=bvconst(0,64) then
+                        if bvult(bvsub(base,cursor),alignment) then
+                            if bvuge(bvadd(base,size),base) then true else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define aom104_cursor_after(base : BitVec64, size : BitVec64) : BitVec64 =
+    bvadd(base,size)
+
+// Input order is part of the linking request.  ankald does not sort modules to
+// obtain a different layout; this makes byte output reproducible for the same
+// ordered input sequence.
+define aom104_input_order_is_semantic() = true
+define aom104_reorders_input_modules() = false
+
+// The AOM container header/tables are link-time metadata.  They are not copied
+// into the runnable image.  Linked executable code begins at image offset zero.
+define aom104_linked_code_base() : BitVec64 = bvconst(0,64)
+define aom104_copies_aom_header_into_executable() = false
+
+// -----------------------------------------------------------------------------
+// Linked executable geometry and permissions
+// -----------------------------------------------------------------------------
+
+// Current Anka executable geometry is code at [0,code_size), with optional
+// literal/rodata at [lit_start,image_size).  A gap is permitted but cannot
+// overlap code.  Code-only artifacts use lit_start=0 and image_size=code_size.
+define aom104_linked_image_geometry_valid(
+    code_size : BitVec64,
+    rodata_size : BitVec64,
+    lit_start : BitVec64,
+    image_size : BitVec64
+) =
+    if bvugt(code_size,bvconst(0,64)) then
+        if rodata_size=bvconst(0,64) then
+            if lit_start=bvconst(0,64) then
+                if image_size=code_size then true else false
+            else false
+        else
+            if bvuge(lit_start,code_size) then
+                if bvuge(bvadd(lit_start,rodata_size),lit_start) then
+                    if image_size=bvadd(lit_start,rodata_size) then true else false
+                else false
+            else false
+    else false
+
+define aom104_output_permissions_valid(
+    has_rodata : Bool,
+    code_executable : Bool,
+    code_writable : Bool,
+    rodata_readable : Bool,
+    rodata_writable : Bool,
+    rodata_executable : Bool
+) =
+    if has_rodata then
+        aom_permissions_valid(
+            code_executable,code_writable,
+            rodata_readable,rodata_writable,rodata_executable)
+    else
+        if code_executable then
+            if code_writable then false else true
+        else false
+
+// -----------------------------------------------------------------------------
+// Entry selection, transactionality, determinism, and authority
+// -----------------------------------------------------------------------------
+
+// The caller supplies an entry symbol name (normally `main` for AC2 programs).
+// The name is metadata, not authority.  The selected symbol must uniquely
+// resolve to an exported function and its final code offset must be in bounds.
+define aom104_entry_selection_valid(
+    entry_requested : Bool,
+    definition_count : BitVec8,
+    target_is_export : Bool,
+    target_is_function : Bool,
+    final_entry_offset : BitVec64,
+    final_code_size : BitVec64
+) =
+    if entry_requested then
+        if definition_count=bvconst(1,8) then
+            if target_is_export then
+                if target_is_function then
+                    if bvult(final_entry_offset,final_code_size) then
+                        if bvand(final_entry_offset,bvconst(7,64))=bvconst(0,64)
+                            then true else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+// A concrete Phase-10.4 link is publishable only after all validation,
+// resolution, relocation, geometry, and permission work has completed.  This
+// refines the Phase-10.0 transaction: no partial result is published.
+define aom104_link_publishable(
+    module_set_nonempty : Bool,
+    all_modules_valid : Bool,
+    no_duplicate_exports : Bool,
+    all_imports_resolved : Bool,
+    all_relocations_applied : Bool,
+    entry_valid : Bool,
+    output_geometry_valid : Bool,
+    output_permissions_valid : Bool,
+    output_sealed : Bool,
+    output_generation_current : Bool
+) =
+    if module_set_nonempty then
+        if all_modules_valid then
+            if no_duplicate_exports then
+                if all_imports_resolved then
+                    if all_relocations_applied then
+                        if entry_valid then
+                            if output_geometry_valid then
+                                if output_permissions_valid then
+                                    aom_link_publishable(
+                                        true,true,true,
+                                        output_sealed,
+                                        output_generation_current)
+                                else false
+                            else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+// The linker is read-only with respect to input AOMs.
+define aom104_input_digest_after_link(before : BitVec64) : BitVec64 = before
+
+// Same ordered inputs plus the same requested entry must determine the same
+// layout, relocation bytes, and final entry.  This is a relation used to reject
+// accidental dependence on hash/map iteration or host enumeration order.
+define aom104_deterministic_result(
+    same_ordered_inputs : Bool,
+    same_requested_entry : Bool,
+    same_layout : Bool,
+    same_patch_bytes : Bool,
+    same_final_entry : Bool
+) =
+    if same_ordered_inputs then
+        if same_requested_entry then
+            if same_layout then
+                if same_patch_bytes then
+                    if same_final_entry then true else false
+                else false
+            else false
+        else true
+    else true
+
+define aom104_entry_name_creates_authority() = false
+define aom104_link_creates_capability() = false
+define aom104_link_creates_execution_authority() = false
+define aom104_link_amplifies_runtime_authority() = false
+
+// =============================================================================
+// Positive witnesses
+// =============================================================================
+
+example "AOM104-1 Phase 10.4 consumes the frozen AOM v1 representation" {
+    assert(aom103_version()=bvconst(1,16))
+    assert(AOM103_HEADER_SIZE=bvconst(112,64))
+}
+
+example "AOM104-2 one input module is a nonempty link set" {
+    assert(aom104_nonempty_module_set(bvconst(1,16))=true)
+}
+
+example "AOM104-3 empty link set is rejected" {
+    assert(aom104_nonempty_module_set(bvconst(0,16))=false)
+}
+
+example "AOM104-4 exact public function signature matches" {
+    assert(aom104_signature_match(true,true,true,true,true)=true)
+}
+
+example "AOM104-5 parameter mismatch is not a link-compatible signature" {
+    assert(aom104_signature_match(true,true,true,true,false)=false)
+}
+
+example "AOM104-6 required import resolves to exactly one compatible export" {
+    assert(aom104_import_resolves(true,bvconst(1,8),true,true)=true)
+}
+
+example "AOM104-7 unresolved required import fails" {
+    assert(aom104_import_resolves(true,bvconst(0,8),true,true)=false)
+}
+
+example "AOM104-8 multiply defined import fails" {
+    assert(aom104_import_resolves(true,bvconst(2,8),true,true)=false)
+}
+
+example "AOM104-9 signature mismatch fails resolution" {
+    assert(aom104_import_resolves(true,bvconst(1,8),true,false)=false)
+}
+
+example "AOM104-10 duplicate strong definition set is invalid" {
+    assert(aom104_global_definition_set_valid(bvconst(2,8))=false)
+}
+
+example "AOM104-11 Stage-3 zero-addend CALL_PC20 relocation is supported" {
+    assert(aom103_external_call_relocation(
+        true,true,bvconst(8,64),true)=true)
+    assert(aom104_current_relocation_supported(
+        true,bvconst(8,64),true,true,true)=true)
+}
+
+example "AOM104-12 nonzero relocation addend is deliberately not in first ankald" {
+    assert(aom104_current_relocation_supported(
+        true,bvconst(8,64),true,true,false)=false)
+}
+
+example "AOM104-13 bounded relocation derives exact linked patch address" {
+    assert(aom104_source_patch_address_valid(
+        bvconst(4096,64),bvconst(128,64),bvconst(16,64),bvconst(4112,64))=true)
+}
+
+example "AOM104-14 export value derives exact linked target address" {
+    assert(aom104_target_address_valid(
+        bvconst(8192,64),bvconst(256,64),bvconst(40,64),bvconst(8232,64))=true)
+}
+
+example "AOM104-15 forward CALL displacement accepts exact signed-22-bit boundary" {
+    assert(aom104_call_displacement_representable(
+        bvconst(0,64),bvconst(8388604,64))=true)
+}
+
+example "AOM104-16 forward CALL displacement rejects one word beyond boundary" {
+    assert(aom104_call_displacement_representable(
+        bvconst(0,64),bvconst(8388608,64))=false)
+}
+
+example "AOM104-17 backward CALL displacement accepts exact signed-22-bit boundary" {
+    assert(aom104_call_displacement_representable(
+        bvconst(8388608,64),bvconst(0,64))=true)
+}
+
+example "AOM104-18 backward CALL displacement rejects one word beyond boundary" {
+    assert(aom104_call_displacement_representable(
+        bvconst(8388612,64),bvconst(0,64))=false)
+}
+
+example "AOM104-19 first linked code module begins at image offset zero" {
+    assert(aom104_append_layout_valid(
+        bvconst(0,64),bvconst(64,64),bvconst(8,64),bvconst(0,64))=true)
+}
+
+example "AOM104-20 linker uses only the minimal required alignment padding" {
+    assert(aom104_append_layout_valid(
+        bvconst(114,64),bvconst(64,64),bvconst(8,64),bvconst(120,64))=true)
+    assert(aom104_append_layout_valid(
+        bvconst(114,64),bvconst(64,64),bvconst(8,64),bvconst(128,64))=false)
+}
+
+example "AOM104-21 accepted append advances to exact section end" {
+    assert(aom104_cursor_after(bvconst(120,64),bvconst(64,64))=bvconst(184,64))
+}
+
+example "AOM104-22 ordered input sequence is semantic and is not reordered" {
+    assert(aom104_input_order_is_semantic()=true)
+    assert(aom104_reorders_input_modules()=false)
+}
+
+example "AOM104-23 linked executable code begins at zero without AOM container header" {
+    assert(aom104_linked_code_base()=bvconst(0,64))
+    assert(aom104_copies_aom_header_into_executable()=false)
+}
+
+example "AOM104-24 code-only linked image has no literal region" {
+    assert(aom104_linked_image_geometry_valid(
+        bvconst(256,64),bvconst(0,64),bvconst(0,64),bvconst(256,64))=true)
+}
+
+example "AOM104-25 linked rodata begins at or after code and determines image end" {
+    assert(aom104_linked_image_geometry_valid(
+        bvconst(256,64),bvconst(64,64),bvconst(272,64),bvconst(336,64))=true)
+}
+
+example "AOM104-26 rodata may not overlap linked code" {
+    assert(aom104_linked_image_geometry_valid(
+        bvconst(256,64),bvconst(64,64),bvconst(248,64),bvconst(312,64))=false)
+}
+
+example "AOM104-27 code-only output remains executable and non-writable" {
+    assert(aom104_output_permissions_valid(
+        false,true,false,false,false,false)=true)
+}
+
+example "AOM104-28 linked rodata remains readable non-writable non-executable" {
+    assert(aom104_output_permissions_valid(
+        true,true,false,true,false,false)=true)
+}
+
+example "AOM104-29 writable executable output is rejected" {
+    assert(aom104_output_permissions_valid(
+        false,true,true,false,false,false)=false)
+}
+
+example "AOM104-30 requested entry uniquely resolves to in-bounds function export" {
+    assert(aom104_entry_selection_valid(
+        true,bvconst(1,8),true,true,bvconst(40,64),bvconst(256,64))=true)
+}
+
+example "AOM104-31 ambiguous requested entry is rejected" {
+    assert(aom104_entry_selection_valid(
+        true,bvconst(2,8),true,true,bvconst(40,64),bvconst(256,64))=false)
+}
+
+example "AOM104-32 complete sealed current-generation link is publishable" {
+    assert(aom104_link_publishable(
+        true,true,true,true,true,true,true,true,true,true)=true)
+}
+
+example "AOM104-33 unresolved link publishes no artifact" {
+    assert(aom104_link_publishable(
+        true,true,true,false,true,true,true,true,true,true)=false)
+}
+
+example "AOM104-34 linker does not mutate input AOMs" {
+    assert(
+        ∀(d : BitVec64).
+        aom104_input_digest_after_link(d)=d
+    )
+}
+
+example "AOM104-35 same ordered inputs and entry produce deterministic result" {
+    assert(aom104_deterministic_result(true,true,true,true,true)=true)
+    assert(aom104_deterministic_result(true,true,false,true,true)=false)
+}
+
+example "AOM104-36 entry name and linking create no authority" {
+    assert(aom104_entry_name_creates_authority()=false)
+    assert(aom104_link_creates_capability()=false)
+    assert(aom104_link_creates_execution_authority()=false)
+    assert(aom104_link_amplifies_runtime_authority()=false)
+}
+
+example "AOM104-37 successful link still requires explicit execution authority" {
+    assert(aom_successful_link_creates_execution_authority()=false)
+    assert(aom_execution_admitted(true,false,true)=false)
+    assert(aom_execution_admitted(true,true,true)=true)
+}

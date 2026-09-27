@@ -186,3 +186,44 @@ Formal gate: 22/22 positive Kleis examples, 0/15 hostile examples accepted, no
 new axioms.  Eleven `p103_` runtime witnesses are added on top of the 944-test
 baseline; a fully green branch should therefore report 955 tests.  Phase 10.3
 remains open until that Cargo result is observed.
+
+## Phase 10.4 bootstrap linker (`ankald`)
+
+`ankald.c` is the first static Anka linker and is intentionally an ordinary
+Anka userspace program.  It consumes the exact ordered AOM v1 byte objects
+emitted by Stage 3, resolves required imports against unique signature-compatible
+exports, performs the zero-addend `CALL_PC20` relocations currently emitted by
+Stage 3, lays code/read-only data out deterministically, and reports the linked
+image geometry plus explicit entry offset.
+
+The Phase-10.4 bootstrap linker itself is compiled by the existing authoritative
+CC_B.  Stage 2 is a deliberately narrow declarations/types/ABI compiler and is
+not a general systems-C implementation; using it to build `ankald` would confuse
+the staged AC2 language milestones with the bootstrap compiler lineage.  CC_B
+therefore remains the bootstrap producer for `ankald` until the AnkaCC2
+self-host/fixed-point closure in Phase 10.6 makes CC2 authoritative.  Large
+control/range constants in `ankald.c` are consequently written as equivalent
+CC_B-representable expressions rather than source integer tokens above CC_B's
+131071 literal ceiling.
+
+The bootstrap process ABI is formalized in
+`theories/anka104_ankald_process_abi.kleis`.  AOM inputs are mapped read-only.
+The linker receives a distinct Active scratch object with RW only, plus a
+non-authoritative control/result object.  In particular, `ankald` is not given
+SEAL or EXECUTE authority over its output: the current `SYS_SEAL` transition
+also grants RX to its caller, which would make successful linking create
+execution authority.  After `ankald` exits successfully, transport/publication
+plumbing copies exactly the reported `image_size` bytes into a fresh exact-size
+object and seals that object without performing symbol resolution or relocation.
+A failed link therefore mutates no caller-owned publication state.
+
+This preserves the Phase-10 authority boundary:
+
+```text
+AOM bytes -> ankald inside Anka -> completed linked bytes
+                                      |
+                                      v
+                          exact-size publication + seal
+
+successful link != execution authority
+```
