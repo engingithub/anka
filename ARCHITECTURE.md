@@ -87,7 +87,7 @@ Canonical Anka source (~17 KB, 46 functions)
   Self-hosted AnkaCC64 (63,808-byte fixed-point compiler)
           │
           ▼
-  29-instruction Anka64 ISA
+  31-instruction Anka64 ISA
           │
           ▼
   Protected capability fabric
@@ -3883,3 +3883,18 @@ produce.
 This makes the HTTP milestone a permanent toolchain regression rather than a
 one-time networking demonstration: if AnkaCC2 cannot rebuild the path from
 userspace source to `Anka64 is alive.`, Phase 10 is not complete.
+
+
+### Phase 10.7 byte-instruction substrate
+
+`ldb` (opcode 0x24) and `stb` (opcode 0x25) use the existing I-format base plus
+signed displacement. They reject effective-address overflow/underflow and require
+one unambiguous mapping with a nonoverflowing object offset. `ldb` submits a
+one-byte READ and zero-extends its result; `stb` submits a one-byte WRITE containing
+only the source register's low eight bits. It requires no READ capability.
+Both preserve flags and use ordinary Fabric lifecycle, generation and permission
+checks. Word instructions retain their existing encodings and behavior.
+The CPU never fetches an enclosing operand word. Fabric validates before reading
+or writing the exact operand span. This is an architectural/simulator transaction
+claim, not a host microarchitecture confidentiality proof. CC2 `char*` lowering
+and the verified-compiler byte application witness remain the next step.

@@ -304,6 +304,8 @@ impl Asm64 {
 
     // Memory
     pub fn ld(&mut self, rd: u8, base: u8, disp: i32) { self.emit_i_named("ld", rd, base, disp); }
+    pub fn ldb(&mut self, rd: u8, base: u8, disp: i32) { self.emit_i_named("ldb", rd, base, disp); }
+    pub fn stb(&mut self, src: u8, base: u8, disp: i32) { self.emit_i_named("stb", src, base, disp); }
     pub fn st(&mut self, src: u8, base: u8, disp: i32) { self.emit_i_named("st", src, base, disp); }
     pub fn lea(&mut self, rd: u8, base: u8, disp: i32) { self.emit_i_named("lea", rd, base, disp); }
     pub fn xchg(&mut self, rd: u8, base: u8, disp: i32) { self.emit_i_named("xchg", rd, base, disp); }
@@ -402,6 +404,8 @@ mod tests {
         roundtrip_i("movi", R3, 0, 0x7EEF);
         roundtrip_i("movi", R3, 0, -100);
         roundtrip_i("ld", R4, R5, 8);
+        roundtrip_i("ldb", R4, R5, 7);
+        roundtrip_i("stb", R6, R7, -1);
         roundtrip_i("st", R6, R7, -16);
     }
 

@@ -1,0 +1,215 @@
+// Proposed CPU byte-data transaction contract, before ISA implementation.
+// No axioms. CPU instruction, request admission, and commit are separate stages.
+// data_span concerns operand data, not instruction fetch or internal metadata.
+// This is not a physical bus/cache/speculation/timing noninterference proof.
+import "anka107_application_pointers.kleis"
+
+// Numeric identity and exact operand range survive CPU-to-Fabric translation.
+define byte107_request_exact(operand_object : BitVec64, request_object : BitVec64,
+    operand_offset : BitVec64, request_offset : BitVec64, request_length : BitVec64,
+    data_offset : BitVec64, data_length : BitVec64) =
+    (operand_object=request_object) ∧ (operand_offset=request_offset) ∧
+    (request_length=bvconst(1,64)) ∧ (data_offset=operand_offset) ∧
+    (data_length=bvconst(1,64))
+
+// Generation and object identity are checked; pointer bits create no authority.
+define byte107_authorized(object : BitVec64, cap_object : BitVec64,
+    generation : BitVec64, cap_generation : BitVec64,
+    offset : BitVec64, extent : BitVec64, base : BitVec64) =
+    (object=cap_object) ∧ (generation=cap_generation) ∧
+    bvule(offset,extent) ∧ bvule(bvconst(1,64),bvsub(extent,offset)) ∧
+    bvule(offset,bvsub(bvsub(bvconst(0,64),bvconst(1,64)),base))
+
+define byte107_environment_valid(mapping_current : Bool, memory_kind : Bool, permission : Bool) =
+    if mapping_current then if memory_kind then permission else false else false
+
+// Store admission needs WRITE, never an implicit READ for enclosing-word RMW.
+define byte107_store_permission(read : Bool, write : Bool) = write
+define byte107_load_permission(read : Bool, write : Bool) = read
+
+// Low byte in a word register; zero-extension and truncation share this mask.
+define byte107_low(value : BitVec64) = bvand(value,bvconst(255,64))
+define byte107_load_result(admitted : BitVec8, byte_value : BitVec64, old_register : BitVec64) =
+    if admitted=bvconst(1,8) then byte107_low(byte_value) else old_register
+
+// Pointwise memory model: all non-target bytes, and all bytes on failure, survive.
+define byte107_store_cell(admitted : BitVec8, target : BitVec64, queried : BitVec64,
+    value : BitVec64, old_byte : BitVec64) =
+    if admitted=bvconst(1,8) then
+        if target=queried then byte107_low(value) else old_byte
+    else old_byte
+
+// Rejected operand requests access no data; one committed operation accesses one byte.
+define byte107_data_span(admitted : BitVec8) =
+    if admitted=bvconst(1,8) then bvconst(1,64) else bvconst(0,64)
+define byte107_rejected_physical_fetch_is_allowed() = false
+define byte107_microarchitectural_confidentiality_is_proven() = false
+
+example "BYTE107-1 exact one byte bridge" {
+    assert(byte107_request_exact(bvconst(7,64),bvconst(7,64),bvconst(15,64),bvconst(15,64),bvconst(1,64),bvconst(15,64),bvconst(1,64)))
+}
+
+example "BYTE107-2 wrong object" {
+    assert(¬(byte107_request_exact(bvconst(7,64),bvconst(8,64),bvconst(15,64),bvconst(15,64),bvconst(1,64),bvconst(15,64),bvconst(1,64))))
+}
+
+example "BYTE107-3 shifted request" {
+    assert(¬(byte107_request_exact(bvconst(7,64),bvconst(7,64),bvconst(15,64),bvconst(14,64),bvconst(1,64),bvconst(15,64),bvconst(1,64))))
+}
+
+example "BYTE107-4 widened request" {
+    assert(¬(byte107_request_exact(bvconst(7,64),bvconst(7,64),bvconst(15,64),bvconst(15,64),bvconst(8,64),bvconst(15,64),bvconst(1,64))))
+}
+
+example "BYTE107-5 aligned down read" {
+    assert(¬(byte107_request_exact(bvconst(7,64),bvconst(7,64),bvconst(15,64),bvconst(15,64),bvconst(1,64),bvconst(8,64),bvconst(1,64))))
+}
+
+example "BYTE107-6 widened data fetch" {
+    assert(¬(byte107_request_exact(bvconst(7,64),bvconst(7,64),bvconst(15,64),bvconst(15,64),bvconst(1,64),bvconst(15,64),bvconst(8,64))))
+}
+
+example "BYTE107-7 zero request" {
+    assert(¬(byte107_request_exact(bvconst(7,64),bvconst(7,64),bvconst(15,64),bvconst(15,64),bvconst(0,64),bvconst(15,64),bvconst(1,64))))
+}
+
+example "BYTE107-8 last object byte allowed" {
+    assert(byte107_authorized(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(15,64),bvconst(16,64),bvconst(4096,64)))
+}
+
+example "BYTE107-9 stale capability" {
+    assert(¬(byte107_authorized(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(2,64),bvconst(15,64),bvconst(16,64),bvconst(4096,64))))
+}
+
+example "BYTE107-10 wrong capability object" {
+    assert(¬(byte107_authorized(bvconst(7,64),bvconst(8,64),bvconst(3,64),bvconst(3,64),bvconst(15,64),bvconst(16,64),bvconst(4096,64))))
+}
+
+example "BYTE107-11 one past rejected" {
+    assert(¬(byte107_authorized(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(16,64),bvconst(16,64),bvconst(4096,64))))
+}
+
+example "BYTE107-12 empty extent" {
+    assert(¬(byte107_authorized(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(15,64),bvconst(0,64),bvconst(4096,64))))
+}
+
+example "BYTE107-13 virtual address wraps" {
+    assert(¬(byte107_authorized(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(15,64),bvconst(16,64),bvsub(bvconst(0,64),bvconst(1,64)))))
+}
+
+example "BYTE107-14 current memory and permission" {
+    assert(byte107_environment_valid(true,true,true)=true)
+}
+
+example "BYTE107-15 stale mapping" {
+    assert(byte107_environment_valid(false,true,true)=false)
+}
+
+example "BYTE107-16 nonmemory object" {
+    assert(byte107_environment_valid(true,false,true)=false)
+}
+
+example "BYTE107-17 missing operation permission" {
+    assert(byte107_environment_valid(true,true,false)=false)
+}
+
+example "BYTE107-18 write only store" {
+    assert(byte107_store_permission(false,true)=true)
+}
+
+example "BYTE107-19 read only cannot store" {
+    assert(byte107_store_permission(true,false)=false)
+}
+
+example "BYTE107-20 write only cannot load" {
+    assert(byte107_load_permission(false,true)=false)
+}
+
+example "BYTE107-21 read only load" {
+    assert(byte107_load_permission(true,false)=true)
+}
+
+example "BYTE107-22 unsigned byte 255" {
+    assert(byte107_load_result(bvconst(1,8),bvconst(255,64),bvconst(99,64))=bvconst(255,64))
+}
+
+example "BYTE107-23 store truncates" {
+    assert(byte107_store_cell(bvconst(1,8),bvconst(15,64),bvconst(15,64),bvconst(511,64),bvconst(12,64))=bvconst(255,64))
+}
+
+example "BYTE107-24 neighbor unchanged" {
+    assert(byte107_store_cell(bvconst(1,8),bvconst(15,64),bvconst(14,64),bvconst(511,64),bvconst(12,64))=bvconst(12,64))
+}
+
+example "BYTE107-25 failed store unchanged" {
+    assert(byte107_store_cell(bvconst(0,8),bvconst(15,64),bvconst(15,64),bvconst(511,64),bvconst(12,64))=bvconst(12,64))
+}
+
+example "BYTE107-26 failed load register unchanged" {
+    assert(byte107_load_result(bvconst(0,8),bvconst(255,64),bvconst(99,64))=bvconst(99,64))
+}
+
+example "BYTE107-27 admitted data span one" {
+    assert(byte107_data_span(bvconst(1,8))=bvconst(1,64))
+}
+
+example "BYTE107-28 rejected data span zero" {
+    assert(byte107_data_span(bvconst(0,8))=bvconst(0,64))
+}
+
+example "BYTE107-29 rejected physical operand fetch forbidden" {
+    assert(byte107_rejected_physical_fetch_is_allowed()=false)
+}
+
+example "BYTE107-30 no side channel proof claimed" {
+    assert(byte107_microarchitectural_confidentiality_is_proven()=false)
+}
+
+example "BYTE107 universal unsigned range" {
+    assert(∀(v : BitVec64). bvule(byte107_low(v),bvconst(255,64)))
+}
+example "BYTE107 universal low byte idempotence" {
+    assert(∀(v : BitVec64). byte107_low(byte107_low(v))=byte107_low(v))
+}
+example "BYTE107 universal rejected store identity" {
+    assert(∀(t : BitVec64). ∀(q : BitVec64). ∀(v : BitVec64). ∀(old : BitVec64).
+        byte107_store_cell(bvconst(0,8),t,q,v,old)=old)
+}
+example "BYTE107 universal neighbor preservation" {
+    assert(∀(t : BitVec64). ∀(q : BitVec64). ∀(v : BitVec64). ∀(old : BitVec64).
+        (t=q) ∨ (byte107_store_cell(bvconst(1,8),t,q,v,old)=old))
+}
+example "BYTE107 universal write does not need read" {
+    assert(∀(r : Bool). byte107_store_permission(r,true)=true)
+}
+
+// These evidence flags must be obtained from the predicates above, not caller policy.
+// Store payload length is checked independently of the declared request length.
+define byte107_store_commit_valid(request_exact : BitVec8, identity_range_valid : BitVec8,
+    environment_valid : BitVec8, payload_length : BitVec64) =
+    (request_exact=bvconst(1,8)) ∧ (identity_range_valid=bvconst(1,8)) ∧
+    (environment_valid=bvconst(1,8)) ∧ (payload_length=bvconst(1,64))
+
+example "BYTE107 complete store evidence" {
+    assert(byte107_store_commit_valid(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64)))
+}
+
+example "BYTE107 missing exact bridge" {
+    assert(¬(byte107_store_commit_valid(bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,64))))
+}
+
+example "BYTE107 missing identity range" {
+    assert(¬(byte107_store_commit_valid(bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,64))))
+}
+
+example "BYTE107 missing environment" {
+    assert(¬(byte107_store_commit_valid(bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,64))))
+}
+
+example "BYTE107 widened payload" {
+    assert(¬(byte107_store_commit_valid(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(8,64))))
+}
+
+example "BYTE107 empty payload" {
+    assert(¬(byte107_store_commit_valid(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64))))
+}

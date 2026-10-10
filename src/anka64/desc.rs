@@ -38,8 +38,12 @@ pub enum Sem {
     Movi,
     /// Load from memory (one read transaction).
     Load,
+    /// Zero-extending one-byte load.
+    LoadByte,
     /// Store to memory (one write transaction).
     Store,
+    /// Store low eight bits in one write transaction.
+    StoreByte,
     /// Atomic exchange (one read-modify-write transaction).
     Xchg,
     /// Compute effective address (no memory transaction).
@@ -181,6 +185,9 @@ pub const INSNS: &[InsnDesc] = &[
     InsnDesc { name: "st",   opcode: 0x21, format: Format::I, operands: Operands::SrcBaseDisp, semantics: Sem::Store, mem: MemEffect::Store, flags: FlagEffect::None },
     InsnDesc { name: "lea",  opcode: 0x22, format: Format::I, operands: Operands::RdBaseDisp,  semantics: Sem::Lea,   mem: MemEffect::None,  flags: FlagEffect::None },
     InsnDesc { name: "xchg", opcode: 0x23, format: Format::I, operands: Operands::RdBaseDisp,  semantics: Sem::Xchg,  mem: MemEffect::Atomic, flags: FlagEffect::None },
+
+    InsnDesc { name: "ldb", opcode: 0x24, format: Format::I, operands: Operands::RdBaseDisp, semantics: Sem::LoadByte, mem: MemEffect::Load, flags: FlagEffect::None },
+    InsnDesc { name: "stb", opcode: 0x25, format: Format::I, operands: Operands::SrcBaseDisp, semantics: Sem::StoreByte, mem: MemEffect::Store, flags: FlagEffect::None },
 
     // ─── B-format control ───────────────────────────────────────
     InsnDesc { name: "b",    opcode: 0x30, format: Format::B, operands: Operands::CondOff,  semantics: Sem::Branch, mem: MemEffect::None, flags: FlagEffect::None },
@@ -445,11 +452,11 @@ mod tests {
     fn memory_instructions_have_correct_semantics() {
         for d in INSNS {
             match d.mem {
-                MemEffect::Load => assert_eq!(d.semantics, Sem::Load, "{} has Load effect but wrong semantics", d.name),
-                MemEffect::Store => assert_eq!(d.semantics, Sem::Store, "{} has Store effect but wrong semantics", d.name),
+                MemEffect::Load => assert!(matches!(d.semantics, Sem::Load | Sem::LoadByte), "{} has Load effect but wrong semantics", d.name),
+                MemEffect::Store => assert!(matches!(d.semantics, Sem::Store | Sem::StoreByte), "{} has Store effect but wrong semantics", d.name),
                 MemEffect::Atomic => assert_eq!(d.semantics, Sem::Xchg, "{} has Atomic effect but wrong semantics", d.name),
                 MemEffect::None => assert!(
-                    !matches!(d.semantics, Sem::Load | Sem::Store | Sem::Xchg),
+                    !matches!(d.semantics, Sem::Load | Sem::LoadByte | Sem::Store | Sem::StoreByte | Sem::Xchg),
                     "{} has no memory effect but Load/Store/Xchg semantics", d.name
                 ),
             }

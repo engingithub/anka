@@ -460,6 +460,24 @@ impl Anka64Core {
                     Err(fault) => return StepResult::Fault(fault),
                 }
             }
+            Sem::LoadByte | Sem::StoreByte => {
+                let kind = if insn.desc.semantics == Sem::LoadByte { AccessKind::Read } else { AccessKind::Write };
+                let request = match self.byte_request(self.r[insn.rs1 as usize], insn.imm, kind) {
+                    Ok(request) => request,
+                    Err(fault) => return StepResult::Fault(fault),
+                };
+                if kind == AccessKind::Read {
+                    match fabric.execute_read(request) {
+                        Ok(bytes) => self.r[insn.rd as usize] = u64::from(bytes[0]),
+                        Err(fault) => return StepResult::Fault(fault),
+                    }
+                } else {
+                    let data = vec![self.r[insn.rd as usize] as u8];
+                    if let Err(fault) = fabric.execute_write(request, data) {
+                        return StepResult::Fault(fault);
+                    }
+                }
+            }
             Sem::Lea => {
                 self.r[insn.rd as usize] =
                     self.r[insn.rs1 as usize].wrapping_add(insn.imm as u64);
@@ -697,6 +715,30 @@ impl Anka64Core {
         }
     }
 
+    /// Resolve only the operand byte; no enclosing-word read or wrapping address.
+    fn byte_request(&self, base: u64, displacement: i64, kind: AccessKind) -> Result<MemoryRequest, FaultRecord> {
+        let address = base.checked_add_signed(displacement);
+        let resolved = address.and_then(|addr| {
+            let mut selected = None;
+            for entry in &self.address_map.entries {
+                if let Some(relative) = addr.checked_sub(entry.virt_base) {
+                    if relative < entry.size {
+                        if selected.is_some() { return None; }
+                        selected = Some((entry.object, entry.obj_offset.checked_add(relative)?));
+                    }
+                }
+            }
+            selected
+        });
+        let (object, offset) = resolved.ok_or_else(|| FaultRecord {
+            agent: self.agent, domain: self.domain, privilege: self.privilege,
+            transaction: TransactionId(0), object: ObjectId(0), generation: None,
+            offset: address.unwrap_or(base), width: Width::Byte, length: 1,
+            kind, pc: Some(self.pc), reason: FaultReason::TranslationFault,
+        })?;
+        Ok(self.make_request(object, offset, Width::Byte, kind))
+    }
+
     fn fabric_read(
         &self,
         fabric: &mut Fabric,
@@ -862,6 +904,111 @@ mod tests {
         fabric.seal_object(text);
         let size = fabric.objects[&text].size;
         fabric.grant(dom, text, 0, size, Permissions::RX);
+    }
+
+    fn byte_fixture(store: bool, permission: Permissions, offset: u64, length: u64)
+        -> (Fabric, ObjectId, DomainId, Anka64Core) {
+        let (mut fabric, text, data, dom, mut core) = setup();
+        fabric.domains.get_mut(&dom).unwrap().capabilities.clear();
+        fabric.grant(dom, data, offset, length, permission);
+        fabric.write_physical(0x10000, &[0x11, 0x22, 0x33]);
+        fabric.write_physical(0x10fff, &[0xff]);
+        let mut asm = Asm64::new();
+        if store { asm.stb(R0, R1, 0); } else { asm.ldb(R0, R1, 0); }
+        load_program(&mut fabric, &asm);
+        seal_text(&mut fabric, text, dom);
+        core.r[R0 as usize] = 0x1ab;
+        core.r[R1 as usize] = 0x8000 + offset;
+        (fabric, data, dom, core)
+    }
+
+    #[test]
+    fn p107_byte_load_last_authorized_byte_zero_extends_exact_transaction() {
+        let (mut fabric, data, _, mut core) = byte_fixture(false, Permissions::READ, 0xfff, 1);
+        assert!(matches!(core.step(&mut fabric), StepResult::Continue));
+        assert_eq!(core.r[R0 as usize], 255);
+        let tx = fabric.transaction(1);
+        assert_eq!(tx.request.object, data);
+        assert_eq!(tx.request.offset, 0xfff);
+        assert_eq!(tx.request.width, Width::Byte);
+        assert_eq!(tx.request.length, 1);
+        assert_eq!(tx.read_data.as_deref(), Some(&[0xff][..]));
+        assert_eq!(tx.state, TxState::Committed);
+    }
+
+    #[test]
+    fn p107_byte_store_write_only_truncates_and_preserves_neighbors() {
+        let (mut fabric, data, _, mut core) = byte_fixture(true, Permissions::WRITE, 1, 1);
+        assert!(matches!(core.step(&mut fabric), StepResult::Continue));
+        assert_eq!(fabric.read_physical(0x10000, 3), &[0x11, 0xab, 0x33]);
+        let tx = fabric.transaction(1);
+        assert_eq!(tx.request.object, data);
+        assert_eq!(tx.request.offset, 1);
+        assert_eq!(tx.request.length, 1);
+        assert_eq!(tx.request.width, Width::Byte);
+        assert_eq!(tx.write_data.as_deref(), Some(&[0xab][..]));
+        assert!(tx.read_data.is_none());
+        assert_eq!(tx.state, TxState::Committed);
+    }
+
+    #[test]
+    fn p107_byte_denied_load_and_store_leave_state_and_no_prepared_data() {
+        for store in [false, true] {
+            let permission = if store { Permissions::READ } else { Permissions::WRITE };
+            let (mut fabric, _, _, mut core) = byte_fixture(store, permission, 1, 1);
+            assert!(matches!(core.step(&mut fabric), StepResult::Fault(_)));
+            assert_eq!(core.r[R0 as usize], 0x1ab);
+            assert_eq!(fabric.read_physical(0x10000, 3), &[0x11, 0x22, 0x33]);
+            let tx = fabric.transaction(1);
+            assert_eq!(tx.state, TxState::Faulted);
+            assert!(tx.read_data.is_none());
+            assert!(tx.physical_address.is_none());
+        }
+    }
+
+    #[test]
+    fn p107_byte_stale_generation_faults_before_backing_read() {
+        let (mut fabric, data, _, mut core) = byte_fixture(false, Permissions::READ, 1, 1);
+        fabric.objects.get_mut(&data).unwrap().generation.0 += 1;
+        assert!(matches!(core.step(&mut fabric), StepResult::Fault(_)));
+        assert_eq!(core.r[R0 as usize], 0x1ab);
+        let tx = fabric.transaction(1);
+        assert_eq!(tx.state, TxState::Faulted);
+        assert!(tx.physical_address.is_none());
+        assert!(tx.read_data.is_none());
+    }
+
+    #[test]
+    fn p107_byte_capability_bound_and_one_past_mapping_reject() {
+        let (mut fabric, _, _, mut core) = byte_fixture(true, Permissions::WRITE, 1, 1);
+        core.r[R1 as usize] = 0x8002;
+        assert!(matches!(core.step(&mut fabric), StepResult::Fault(_)));
+        assert_eq!(fabric.read_physical(0x10000, 3), &[0x11, 0x22, 0x33]);
+        assert!(fabric.transaction(1).physical_address.is_none());
+        let (mut fabric, _, _, mut core) = byte_fixture(false, Permissions::READ, 0xfff, 1);
+        core.r[R1 as usize] = 0x9000;
+        assert!(matches!(core.step(&mut fabric), StepResult::Fault(_)));
+        assert_eq!(core.r[R0 as usize], 0x1ab);
+    }
+
+    #[test]
+    fn p107_byte_address_arithmetic_rejects_overflow_and_underflow() {
+        let (_, _, _, _, core) = setup();
+        assert!(core.byte_request(u64::MAX, 1, AccessKind::Read).is_err());
+        assert!(core.byte_request(0, -1, AccessKind::Write).is_err());
+        let req = core.byte_request(0x8001, -1, AccessKind::Write).unwrap();
+        assert_eq!(req.offset, 0);
+        assert_eq!(req.length, 1);
+    }
+
+    #[test]
+    fn p107_byte_ambiguous_mapping_and_object_offset_overflow_reject() {
+        let (_, _, data, _, mut core) = setup();
+        core.address_map.add(0x8000, 1, data);
+        assert!(core.byte_request(0x8000, 0, AccessKind::Read).is_err());
+        let (_, _, data, _, mut core) = setup();
+        core.address_map.add_at(0x20000, 2, data, u64::MAX);
+        assert!(core.byte_request(0x20001, 0, AccessKind::Write).is_err());
     }
 
     // ═══════════════════════════════════════════════════════════

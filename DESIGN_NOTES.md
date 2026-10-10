@@ -4972,3 +4972,82 @@ file. Keep executable formal contracts in `theories/` and gate runners in
 `scripts/`. Routine patch application instructions and one-off corrections belong
 in delivery messages or commit history. Separate documents require a distinct,
 lasting purpose. This entry supersedes the five Phase 10.6/10.7 patch-note files.
+
+## DN-49: Byte Instructions Must Preserve Exact Fabric Data Spans (Phase 10.7)
+
+**Decision before implementation.** Add native zero-extending byte loads and
+low-byte stores to the ISA, with encodings chosen only after decoder review.
+A CPU instruction is distinct from its Fabric transaction. Operand translation,
+request authorization, and commit must preserve exact object, generation, offset,
+width and operation permission. Existing word instruction encodings and semantics
+remain unchanged; no syscall or new pointer representation is required.
+
+The proposed `anka107_byte_transactions.kleis` contract freezes:
+
+- Exact operand/request object and offset, declared length one, and actual operand
+  data span one. Aligning down or fetching an enclosing word is inadmissible.
+- Exact capability object/generation, current mapping, memory kind, the operation's
+  permission, an in-bounds byte, and nonwrapping virtual base-plus-offset.
+- Zero-extended byte loads (0..255) and stores of only the source's low eight bits.
+  Byte alignment is one. Word alignment rules remain unchanged.
+- Write-only byte stores without an implicit read of an enclosing word. Read-only
+  authority does not permit stores; write-only authority does not permit loads.
+- Pointwise preservation of every non-target byte on successful stores, all memory
+  on rejected stores, and the destination register on rejected loads. This does
+  not prevent the ordinary fault transition or fault-reporting state updates.
+- Zero operand-data span on rejection and one on admission, with no pre-admission
+  backing-data fetch. Store payload length must also be one, independently of the
+  declared request. Exact bridge, identity/range and environment evidence are all
+  required; evidence flags cannot replace actual validation.
+
+This allows access to the final authorized byte of an object without requiring
+permission for an enclosing eight-byte range. A word read/modify/write lowering
+would widen authority requirements and could overwrite a neighboring update.
+Native byte transactions avoid that widening.
+
+**Proof boundary.** These are proposed acceptance predicates and a pointwise byte
+state model, not verification of an implemented decoder or backing-memory path.
+The trace span refers to operand data, not instruction fetch or metadata reads.
+The rejection-fetch predicate requires no backing-data read in the modeled
+transaction path; it does not prove physical cache/bus/speculation/timing
+noninterference. Even a one-byte simulator slice is executed by a host whose
+microarchitecture is outside this model. Physical hardware requires a separate
+fetch-granularity and side-channel contract. No new atomic ordering or memory
+model is established here.
+
+The new suite has **41 positive witnesses**, including universally quantified
+low-byte range/idempotence, neighbor preservation, rejected-store identity and
+write-only admission laws. Its **36 hostile assertions must all be explicitly
+disproved by Z3**. The existing application-pointer and userspace-rebuild suites
+are also rerun by `scripts/check-anka107-gates.py`: the combined gate is 158
+positive witnesses and 143 explicit hostile disproofs. There are no new axioms.
+
+```sh
+python3 scripts/check-anka107-gates.py --kleis /path/to/kleis
+```
+
+**Next implementation gate.** Implement unused byte instruction encodings and
+CPU-to-Fabric width-one requests, with tests of the final object byte, wrong/stale
+identity, denied permissions, exact payload length, neighboring-byte preservation,
+and no operand-data read or mutation before admission. Then lower `char*`
+dereferences in CC2 and extend the concrete verified-compiler application witness.
+A passing theory gate alone does not close this implementation step.
+
+
+**DN-49 implementation checkpoint: CPU byte substrate.** The description table now
+assigns unused I-format opcodes 0x24/0x25 to `ldb`/`stb`; the table-driven decoder,
+assembler and disassembler share them. The generated ISA theory is refreshed.
+Byte operations use checked signed effective addresses and checked object offsets,
+reject ambiguous mappings, and issue one-byte Fabric requests. Loads zero-extend;
+stores truncate without reading adjacent bytes. Rejected loads preserve their
+register, and rejected stores preserve memory. Existing word instructions are
+unchanged. Seven new CPU tests inspect actual transaction width/payload/state and
+cover last-byte access, write-only authority, neighbors, stale generations,
+permission/bounds failures, ambiguous mappings and overflow. All 42 CPU tests
+passed locally. Full-suite validation remains a local follow-up. Compiler byte
+lowering is deferred until this ISA/Fabric checkpoint passes locally.
+
+```sh
+cargo test --lib p107_byte_ -- --test-threads=1
+cargo test -- --test-threads=1
+```

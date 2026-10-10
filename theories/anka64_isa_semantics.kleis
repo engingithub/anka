@@ -29,6 +29,8 @@ define op_ld = bvconst(32, 8)
 define op_st = bvconst(33, 8)
 define op_lea = bvconst(34, 8)
 define op_xchg = bvconst(35, 8)
+define op_ldb = bvconst(36, 8)
+define op_stb = bvconst(37, 8)
 define op_b = bvconst(48, 8)
 define op_call = bvconst(50, 8)
 define op_ret = bvconst(56, 8)
@@ -40,7 +42,7 @@ define op_halt = bvconst(62, 8)
 // ─── Format classification ──────────────────────────
 
 // Format R: add, sub, and, or, xor, shl, shr, asr, mul, cmp, mov
-// Format I: addi, subi, andi, ori, xori, cmpi, movi, ld, st, lea, xchg
+// Format I: addi, subi, andi, ori, xori, cmpi, movi, ld, st, lea, xchg, ldb, stb
 // Format B: b, call
 // Format S: ret, trap, eret, nop, halt
 
@@ -48,9 +50,11 @@ define op_halt = bvconst(62, 8)
 
 define has_load_effect(op : BitVec8) =
     op = op_ld
+    ∨     op = op_ldb
 
 define has_store_effect(op : BitVec8) =
     op = op_st
+    ∨     op = op_stb
 
 define has_atomic_effect(op : BitVec8) =
     op = op_xchg
@@ -175,4 +179,4 @@ example "ALU and self is identity" {
     )
 }
 
-// Total instructions in table: 29
+// Total instructions in table: 31

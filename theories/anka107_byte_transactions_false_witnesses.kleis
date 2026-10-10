@@ -1,0 +1,146 @@
+// Deliberately false; every assertion must be explicitly disproved by Z3.
+import "anka107_byte_transactions.kleis"
+
+example "FALSE-BYTE107-1 exact one byte bridge" {
+    assert(¬(byte107_request_exact(bvconst(7,64),bvconst(7,64),bvconst(15,64),bvconst(15,64),bvconst(1,64),bvconst(15,64),bvconst(1,64))))
+}
+
+example "FALSE-BYTE107-2 wrong object" {
+    assert(byte107_request_exact(bvconst(7,64),bvconst(8,64),bvconst(15,64),bvconst(15,64),bvconst(1,64),bvconst(15,64),bvconst(1,64)))
+}
+
+example "FALSE-BYTE107-3 shifted request" {
+    assert(byte107_request_exact(bvconst(7,64),bvconst(7,64),bvconst(15,64),bvconst(14,64),bvconst(1,64),bvconst(15,64),bvconst(1,64)))
+}
+
+example "FALSE-BYTE107-4 widened request" {
+    assert(byte107_request_exact(bvconst(7,64),bvconst(7,64),bvconst(15,64),bvconst(15,64),bvconst(8,64),bvconst(15,64),bvconst(1,64)))
+}
+
+example "FALSE-BYTE107-5 aligned down read" {
+    assert(byte107_request_exact(bvconst(7,64),bvconst(7,64),bvconst(15,64),bvconst(15,64),bvconst(1,64),bvconst(8,64),bvconst(1,64)))
+}
+
+example "FALSE-BYTE107-6 widened data fetch" {
+    assert(byte107_request_exact(bvconst(7,64),bvconst(7,64),bvconst(15,64),bvconst(15,64),bvconst(1,64),bvconst(15,64),bvconst(8,64)))
+}
+
+example "FALSE-BYTE107-7 zero request" {
+    assert(byte107_request_exact(bvconst(7,64),bvconst(7,64),bvconst(15,64),bvconst(15,64),bvconst(0,64),bvconst(15,64),bvconst(1,64)))
+}
+
+example "FALSE-BYTE107-8 last object byte allowed" {
+    assert(¬(byte107_authorized(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(15,64),bvconst(16,64),bvconst(4096,64))))
+}
+
+example "FALSE-BYTE107-9 stale capability" {
+    assert(byte107_authorized(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(2,64),bvconst(15,64),bvconst(16,64),bvconst(4096,64)))
+}
+
+example "FALSE-BYTE107-10 wrong capability object" {
+    assert(byte107_authorized(bvconst(7,64),bvconst(8,64),bvconst(3,64),bvconst(3,64),bvconst(15,64),bvconst(16,64),bvconst(4096,64)))
+}
+
+example "FALSE-BYTE107-11 one past rejected" {
+    assert(byte107_authorized(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(16,64),bvconst(16,64),bvconst(4096,64)))
+}
+
+example "FALSE-BYTE107-12 empty extent" {
+    assert(byte107_authorized(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(15,64),bvconst(0,64),bvconst(4096,64)))
+}
+
+example "FALSE-BYTE107-13 virtual address wraps" {
+    assert(byte107_authorized(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(15,64),bvconst(16,64),bvsub(bvconst(0,64),bvconst(1,64))))
+}
+
+example "FALSE-BYTE107-14 current memory and permission" {
+    assert(byte107_environment_valid(true,true,true)=false)
+}
+
+example "FALSE-BYTE107-15 stale mapping" {
+    assert(byte107_environment_valid(false,true,true)=true)
+}
+
+example "FALSE-BYTE107-16 nonmemory object" {
+    assert(byte107_environment_valid(true,false,true)=true)
+}
+
+example "FALSE-BYTE107-17 missing operation permission" {
+    assert(byte107_environment_valid(true,true,false)=true)
+}
+
+example "FALSE-BYTE107-18 write only store" {
+    assert(byte107_store_permission(false,true)=false)
+}
+
+example "FALSE-BYTE107-19 read only cannot store" {
+    assert(byte107_store_permission(true,false)=true)
+}
+
+example "FALSE-BYTE107-20 write only cannot load" {
+    assert(byte107_load_permission(false,true)=true)
+}
+
+example "FALSE-BYTE107-21 read only load" {
+    assert(byte107_load_permission(true,false)=false)
+}
+
+example "FALSE-BYTE107-22 unsigned byte 255" {
+    assert(byte107_load_result(bvconst(1,8),bvconst(255,64),bvconst(99,64))=bvconst(0,64))
+}
+
+example "FALSE-BYTE107-23 store truncates" {
+    assert(byte107_store_cell(bvconst(1,8),bvconst(15,64),bvconst(15,64),bvconst(511,64),bvconst(12,64))=bvconst(0,64))
+}
+
+example "FALSE-BYTE107-24 neighbor unchanged" {
+    assert(byte107_store_cell(bvconst(1,8),bvconst(15,64),bvconst(14,64),bvconst(511,64),bvconst(12,64))=bvconst(0,64))
+}
+
+example "FALSE-BYTE107-25 failed store unchanged" {
+    assert(byte107_store_cell(bvconst(0,8),bvconst(15,64),bvconst(15,64),bvconst(511,64),bvconst(12,64))=bvconst(0,64))
+}
+
+example "FALSE-BYTE107-26 failed load register unchanged" {
+    assert(byte107_load_result(bvconst(0,8),bvconst(255,64),bvconst(99,64))=bvconst(0,64))
+}
+
+example "FALSE-BYTE107-27 admitted data span one" {
+    assert(byte107_data_span(bvconst(1,8))=bvconst(0,64))
+}
+
+example "FALSE-BYTE107-28 rejected data span zero" {
+    assert(byte107_data_span(bvconst(0,8))=bvconst(1,64))
+}
+
+example "FALSE-BYTE107-29 rejected physical operand fetch forbidden" {
+    assert(byte107_rejected_physical_fetch_is_allowed()=true)
+}
+
+example "FALSE-BYTE107-30 no side channel proof claimed" {
+    assert(byte107_microarchitectural_confidentiality_is_proven()=true)
+}
+
+example "FALSE-BYTE107 complete store evidence" {
+    assert(¬(byte107_store_commit_valid(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64))))
+}
+
+example "FALSE-BYTE107 missing exact bridge" {
+    assert(byte107_store_commit_valid(bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,64)))
+}
+
+example "FALSE-BYTE107 missing identity range" {
+    assert(byte107_store_commit_valid(bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,64)))
+}
+
+example "FALSE-BYTE107 missing environment" {
+    assert(byte107_store_commit_valid(bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,64)))
+}
+
+example "FALSE-BYTE107 widened payload" {
+    assert(byte107_store_commit_valid(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(8,64)))
+}
+
+example "FALSE-BYTE107 empty payload" {
+    assert(byte107_store_commit_valid(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64)))
+}
