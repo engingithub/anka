@@ -54,7 +54,7 @@ commands:
   load bin <file> [name]         import raw Anka64 bytecode
   run <name|/logical/path>        run via explicit authority + SYS_SPAWN/SYS_WAIT
 
-  cc2 bootstrap [name]           build/cache Stage-3 AnkaCC2; optionally retain exact image
+  cc2 fixed-point [prefix]      build/verify lineage; retain compiler and AOM observations\n  cc2 bootstrap [name]           build/cache Stage-3 AnkaCC2; optionally retain exact image
   cc2 import <host-file> [name]  cache a prebuilt code-only Stage-3 image; optionally retain it
   aom <source.c> [name]          compile one TU through Stage 3 and retain exact AOM bytes
   link <name> <entry> <aom>...   run userspace ankald over retained AOMs
@@ -86,6 +86,7 @@ pub enum DevelopmentMonitorError {
     HostWrite(std::io::ErrorKind),
     Placement(PlacementError),
     CompilerBootstrap(DevelopmentCompileError),
+    FixedPoint(super::cc2_fixed_point::Cc2FixedPointError),
     ToolchainCompile(DevelopmentCompileError),
     Linker(AnkaldError),
     Artifact(DevelopmentShellError),
@@ -105,6 +106,7 @@ impl fmt::Display for DevelopmentMonitorError {
             Self::HostRead(kind) => write!(f, "host read failed: {kind:?}"),
             Self::HostWrite(kind) => write!(f, "host write failed: {kind:?}"),
             Self::Placement(err) => write!(f, "placement setup failed: {err:?}"),
+            Self::FixedPoint(err) => write!(f, "CC2 fixed-point witness failed: {err:?}"),
             Self::CompilerBootstrap(err) => write!(f, "compiler bootstrap failed: {err:?}"),
             Self::ToolchainCompile(err) => write!(f, "toolchain compile failed: {err:?}"),
             Self::Linker(err) => write!(f, "ankald failed: {err:?}"),
@@ -373,6 +375,60 @@ impl DevelopmentShellSession {
         &mut self,
         args: &[String],
     ) -> Result<DevelopmentCommandResult, DevelopmentMonitorError> {
+        if args.len() >= 2 && args[1] == "fixed-point" {
+            if args.len() != 2 && args.len() != 3 {
+                return Err(DevelopmentMonitorError::Usage("cc2 fixed-point [prefix]"));
+            }
+            let prefix = args.get(2).map(String::as_str).unwrap_or("cc2-fp");
+            let names: Vec<String> = ["0", "1", "2", "aom-1", "aom-2"].iter()
+                .map(|suffix| format!("{prefix}-{suffix}")).collect();
+            for name in &names {
+                if self.tool_artifacts.contains_key(name) {
+                    return Err(DevelopmentMonitorError::ToolArtifactAlreadyRegistered(name.clone()));
+                }
+            }
+            // The command explicitly authorizes this lineage experiment. It
+            // rebuilds the seed, ignoring any imported Stage-3 cache.
+            let authority = DeveloperExecutionAuthority::provision();
+            let read_source = |name: &str| fs::read(self.userspace_root.join("system/compiler").join(name))
+                .map_err(|err| DevelopmentMonitorError::HostRead(err.kind()));
+            let compiler = read_source("ankacc2_stage3.c")?;
+            let preprocessor = read_source("ankapp.c")?;
+            let linker = read_source("ankald.c")?;
+            let witness = super::cc2_fixed_point::witness_cc2_fixed_point(
+                Some(&authority), &compiler, &preprocessor, &linker)
+                .map_err(DevelopmentMonitorError::FixedPoint)?;
+            let message = format!(
+                "CC2 fixed point verified: CC2_0 -> CC2_1 -> CC2_2; exact linked bytes and geometry equal (source={} code={} backing={} lit_start={} entry={}); two sealed publications; retained under '{prefix}'",
+                witness.effective_source_bytes, witness.cc2_1.code_size,
+                witness.cc2_1.bytes.len(), witness.cc2_1.lit_start, witness.cc2_1.entry,
+            );
+            let compilers = [
+                (witness.seed.bytes, witness.seed.code_size, witness.seed.lit_start, 0),
+                (witness.cc2_1.bytes, witness.cc2_1.code_size, witness.cc2_1.lit_start, witness.cc2_1.entry),
+                (witness.cc2_2.bytes, witness.cc2_2.code_size, witness.cc2_2.lit_start, witness.cc2_2.entry),
+            ];
+            for (name, (bytes, code_size, lit_start, entry)) in names.iter().zip(compilers) {
+                self.tool_artifacts.insert(name.clone(), DevelopmentToolArtifact {
+                    kind: DevelopmentToolArtifactKind::Compiler, bytes,
+                    code_size: Some(code_size), lit_start: Some(lit_start), entry: Some(entry),
+                });
+            }
+            for (name, bytes) in names[3..].iter().zip([witness.aom_1, witness.aom_2]) {
+                self.tool_artifacts.insert(name.clone(), DevelopmentToolArtifact {
+                    kind: DevelopmentToolArtifactKind::Aom, bytes,
+                    code_size: None, lit_start: None, entry: None,
+                });
+            }
+            Ok(DevelopmentCommandResult::Continue(message))
+        } else {
+            self.command_cc2_debug(args)
+        }
+    }
+
+    fn command_cc2_debug(
+        &mut self, args: &[String],
+    ) -> Result<DevelopmentCommandResult, DevelopmentMonitorError> {
         if args.len() >= 2 && args[1] == "bootstrap" {
             if args.len() != 2 && args.len() != 3 {
                 return Err(DevelopmentMonitorError::Usage("cc2 bootstrap [name]"));
@@ -453,7 +509,7 @@ impl DevelopmentShellSession {
         }
 
         Err(DevelopmentMonitorError::Usage(
-            "cc2 bootstrap [name] | cc2 import <host-file> [name]",
+            "cc2 fixed-point [prefix] | cc2 bootstrap [name] | cc2 import <host-file> [name]",
         ))
     }
 

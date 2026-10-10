@@ -36,6 +36,9 @@ const COMPILER_VIRTUAL_LIMIT: u64 = 0x1000000;
 pub(crate) const DEVELOPMENT_COMPILER_OUTPUT_SIZE: u64 = 0x40000;
 const _: () = assert!(DEVELOPMENT_COMPILER_OUTPUT_SIZE >= OUTPUT_SIZE as u64);
 const _: () = assert!(DEVELOPMENT_COMPILER_OUTPUT_SIZE % PLACEMENT_PAGE_SIZE == 0);
+// Stage-3 bootstrap language-profile control word, checked by q47/q50.
+// It changes parsing admission only; Fabric still authorizes every word access.
+const WS_AC2_BOOTSTRAP_WORD_DEREF: u64 = 68480;
 const COMPILER_QUANTUM: usize = 5_000_000;
 const COMPILER_MAX_ROUNDS: usize = 200;
 
@@ -176,6 +179,19 @@ pub fn compile_c_to_aom_stage3(
     })
 }
 
+/// Compile the exact compiler-source translation unit using the already-earned
+/// Phase-10.6 bootstrap word-address profile. Only the lineage harness calls
+/// this entry point; ordinary AOM compilation keeps the profile disabled.
+pub(crate) fn compile_bootstrap_aom_stage3(
+    compiler_image: &[u8], source: &[u8],
+    _authority: &super::dev_runner::DeveloperExecutionAuthority,
+) -> Result<CompiledAomModule, DevelopmentCompileError> {
+    let raw = compile_c_with_geometry(compiler_image, false, source,
+        DEVELOPMENT_COMPILER_OUTPUT_SIZE, None, true)?;
+    Ok(CompiledAomModule { bytes: raw.bytes,
+        process_slots_observed: raw.process_slots_observed })
+}
+
 /// Bootstrap the self-hosted CC_B image from the Rust AST seed (CC_A).
 ///
 /// This is development tooling, not a host C compiler shortcut: CC_A itself
@@ -220,11 +236,43 @@ pub fn bootstrap_extended_ccb() -> Result<Vec<u8>, DevelopmentCompileError> {
     Ok(ccb.bytes)
 }
 
+/// Execute exact linked compiler bytes at the linker-selected entry. A separate control launcher
+/// CALLs the linker-selected entry with RX(code)/R(literals) authority. The
+/// linked artifact itself is never prefixed, patched, or otherwise mutated.
+pub(crate) fn compile_bootstrap_aom_with_linked_compiler(
+    image: &super::ankald::AnkaldLinkedImage,
+    source: &[u8],
+    _authority: &super::dev_runner::DeveloperExecutionAuthority,
+) -> Result<CompiledAomModule, DevelopmentCompileError> {
+    if image.code_size == 0 || image.code_size > image.bytes.len() as u64
+        || image.entry >= image.code_size || image.entry % 8 != 0
+        || (image.lit_start != 0 && (image.lit_start < image.code_size
+            || image.lit_start >= image.bytes.len() as u64))
+    {
+        return Err(DevelopmentCompileError::InvalidOutputGeometry);
+    }
+    let raw = compile_c_with_geometry(&image.bytes, false, source,
+        DEVELOPMENT_COMPILER_OUTPUT_SIZE, Some(image), true)?;
+    Ok(CompiledAomModule { bytes: raw.bytes,
+        process_slots_observed: raw.process_slots_observed })
+}
+
 fn compile_c_with_compiler_image(
     compiler_image: &[u8],
     seed_at_zero: bool,
     source: &[u8],
     output_limit: u64,
+) -> Result<CompiledCImage, DevelopmentCompileError> {
+    compile_c_with_geometry(compiler_image, seed_at_zero, source, output_limit, None, false)
+}
+
+fn compile_c_with_geometry(
+    compiler_image: &[u8],
+    seed_at_zero: bool,
+    source: &[u8],
+    output_limit: u64,
+    linked: Option<&super::ankald::AnkaldLinkedImage>,
+    bootstrap_source: bool,
 ) -> Result<CompiledCImage, DevelopmentCompileError> {
     if compiler_image.is_empty() {
         return Err(DevelopmentCompileError::EmptyCompilerImage);
@@ -324,10 +372,37 @@ fn compile_c_with_compiler_image(
         return Err(DevelopmentCompileError::InitializationRejected);
     }
 
-    let ankad_code = build_ankad_code_with_layout(
-        compiler_image.len(), layout.parent_code, layout.child_code,
-        output_limit, layout.child_stack, layout.child_trap,
-    );
+    // Match the exact same language profile on CC2_0->CC2_1 and CC2_1->CC2_2.
+    // Fresh workspace zeroing keeps the flag off on all ordinary compile paths.
+    if bootstrap_source && !fabric.initialize_object(
+        workspace_obj, WS_AC2_BOOTSTRAP_WORD_DEREF - LAYOUT_WS as u64,
+        &1u64.to_le_bytes(),
+    ) {
+        return Err(DevelopmentCompileError::InitializationRejected);
+    }
+
+    let ankad_code = if let Some(image) = linked {
+        // AOM main is an ordinary function: CALL must mint its return authority.
+        // Keep the launcher in its own object, outside the compared artifacts.
+        let mut launcher = super::isa::Asm64::new();
+        let target = layout.child_code.checked_add(image.entry)
+            .ok_or(DevelopmentCompileError::InvalidOutputGeometry)?;
+        let word_offset = i32::try_from(target / 4)
+            .map_err(|_| DevelopmentCompileError::InvalidOutputGeometry)?;
+        if target % 8 != 0 || word_offset >= (1 << 19) {
+            return Err(DevelopmentCompileError::InvalidOutputGeometry);
+        }
+        launcher.call(word_offset);
+        launcher.mov(super::isa::R1, super::isa::R0);
+        launcher.movi(super::isa::R0, super::os::SYS_EXIT as i32);
+        launcher.trap(0);
+        launcher.to_bytes()
+    } else {
+        build_ankad_code_with_layout(
+            compiler_image.len(), layout.parent_code, layout.child_code,
+            output_limit, layout.child_stack, layout.child_trap,
+        )
+    };
     if ankad_code.len() as u64 > ANKAD_OBJECT_SIZE
         || !fabric.initialize_object(ankad_obj, 0, &ankad_code)
         || !fabric.seal_object(ankad_obj)
@@ -335,7 +410,7 @@ fn compile_c_with_compiler_image(
         return Err(DevelopmentCompileError::InitializationRejected);
     }
 
-    let info = BootInfo {
+    let mut info = BootInfo {
         image: BootImage {
             obj: ankad_obj,
             code_offset: 0,
@@ -401,6 +476,22 @@ fn compile_c_with_compiler_image(
         trap_vaddr: layout.parent_trap,
     };
 
+    if let Some(image) = linked {
+        info.grants.retain(|grant| grant.obj != compiler_obj);
+        info.grants.push(BootGrant { obj: compiler_obj, offset: 0,
+            size: image.code_size, perms: Permissions::RX });
+        if image.lit_start != 0 {
+            info.grants.push(BootGrant { obj: compiler_obj, offset: image.lit_start,
+                size: image.bytes.len() as u64 - image.lit_start, perms: Permissions::READ });
+        }
+        for map in &mut info.maps {
+            if map.obj == compiler_obj { map.vaddr = layout.child_code; }
+        }
+        info.stack_vaddr = layout.child_stack;
+        info.stack_size = STACK_SIZE as u64;
+        info.trap_vaddr = layout.child_trap;
+    }
+
     let output_phys = placement
         .allocated_extent(output_obj)
         .expect("placed output must remain owned by PM")
@@ -421,7 +512,10 @@ fn compile_c_with_compiler_image(
         return Err(DevelopmentCompileError::SupervisorDidNotExit);
     }
 
-    let wait_tag = init.core.r[R10 as usize];
+    if linked.is_some() && !matches!(init.result, Some(super::os::ProcessResult::Exited(_))) {
+        return Err(DevelopmentCompileError::CompilerFault(1));
+    }
+    let wait_tag = if linked.is_some() { 0 } else { init.core.r[R10 as usize] };
     if wait_tag != 0 {
         return Err(DevelopmentCompileError::CompilerFault(wait_tag));
     }
@@ -479,7 +573,7 @@ fn compile_c_with_compiler_image(
     // With compile-only mode ankad spawns exactly CC_B.  A third slot would be
     // evidence that the produced program was executed during `compile`.
     let process_slots_observed = kernel.processes.len();
-    if process_slots_observed > 2 {
+    if process_slots_observed > if linked.is_some() { 1 } else { 2 } {
         return Err(DevelopmentCompileError::CompileCommandExecutedOutput);
     }
 
@@ -554,6 +648,72 @@ fn compiler_virtual_layout(
 #[cfg(test)]
 mod virtual_layout_tests {
     use super::*;
+    #[test]
+    fn p106_bootstrap_profile_is_enabled_on_both_edges_but_not_ordinary_aom() {
+        use super::super::isa::{Asm64, R0, R1, R2, R3};
+        // A tiny guest compiler observes the control word through Fabric and
+        // emits it as sealed output. No CC_B bootstrap is needed for this ABI
+        // regression: exercise both real execution bridges directly.
+        let mut asm = Asm64::new();
+        asm.movi(R3, (WS_AC2_BOOTSTRAP_WORD_DEREF / 2) as i32);
+        asm.add(R3, R3, R3);
+        asm.ld(R2, R3, 0);
+        asm.movi(R1, (LAYOUT_OUT / 2) as i32);
+        asm.add(R1, R1, R1);
+        asm.st(R2, R1, 0);
+        asm.movi(R3, (WS_OUT_POS / 2) as i32);
+        asm.add(R3, R3, R3);
+        asm.movi(R2, 8);
+        asm.st(R2, R3, 0);
+        asm.movi(R0, super::super::os::SYS_SEAL as i32);
+        asm.trap(0);
+        asm.movi(R1, 0);
+        asm.movi(R0, super::super::os::SYS_EXIT as i32);
+        asm.trap(0);
+        let bytes = asm.to_bytes();
+        let authority = super::super::dev_runner::DeveloperExecutionAuthority::provision();
+        let ordinary = compile_c_to_aom_stage3(&bytes, b"probe").unwrap();
+        assert_eq!(ordinary.bytes, 0u64.to_le_bytes());
+        let first_edge = compile_bootstrap_aom_stage3(&bytes, b"probe", &authority).unwrap();
+        assert_eq!(first_edge.bytes, 1u64.to_le_bytes());
+        let linked = super::super::ankald::AnkaldLinkedImage {
+            code_size: bytes.len() as u64, bytes, lit_start: 0,
+            entry: 0, process_slots_observed: 1,
+        };
+        let second_edge = compile_bootstrap_aom_with_linked_compiler(&linked, b"probe", &authority).unwrap();
+        assert_eq!(second_edge.bytes, 1u64.to_le_bytes());
+    }
+
+    #[test]
+    fn p106_linked_compiler_uses_nonzero_entry_and_protected_return() {
+        use super::super::isa::{Asm64, R0, R1, R2, R3};
+        let mut asm = Asm64::new();
+        asm.halt(); asm.halt(); // Decoys at zero/four; linked entry is eight.
+        asm.movi(R1, (LAYOUT_OUT / 2) as i32);
+        asm.add(R1, R1, R1);
+        asm.movi(R2, 42);
+        asm.st(R2, R1, 0);
+        asm.movi(R3, (WS_OUT_POS / 2) as i32);
+        asm.add(R3, R3, R3);
+        asm.movi(R2, 8);
+        asm.st(R2, R3, 0);
+        asm.movi(R0, 5); // SYS_SEAL(output)
+        asm.trap(0);
+        asm.movi(R0, 0);
+        asm.ret(); // Must consume return authority minted by the launcher CALL.
+        let bytes = asm.to_bytes();
+        let image = super::super::ankald::AnkaldLinkedImage {
+            code_size: bytes.len() as u64, bytes, lit_start: 0,
+            entry: 8, process_slots_observed: 1,
+        };
+        let authority = super::super::dev_runner::DeveloperExecutionAuthority::provision();
+        let result = compile_bootstrap_aom_with_linked_compiler(&image, b"probe", &authority).unwrap();
+        assert_eq!(result.bytes, 42u64.to_le_bytes());
+        assert_eq!(result.process_slots_observed, 1);
+        let mut wrong_entry = image; wrong_entry.entry = 0;
+        assert!(compile_bootstrap_aom_with_linked_compiler(&wrong_entry, b"probe", &authority).is_err());
+    }
+
     #[test]
     fn extended_bootstrap_layout_separates_output_code_stack_and_trap() {
         let size = DEVELOPMENT_COMPILER_OUTPUT_SIZE;
