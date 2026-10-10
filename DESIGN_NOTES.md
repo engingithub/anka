@@ -4772,3 +4772,203 @@ that now already exist: typed functions, exact signatures, stack-local object
 layout, and a clear distinction between code and future data sections.  AOM no
 longer has to invent the type system and object model at the same time it invents
 relocation.
+
+## DN-46: Resolve Known CC_B Calls Before Spending Deferred Fixups (Phase 10.6)
+
+The Stage-3 bootstrap exceeded CC_B's 512-entry deferred-call table even with
+ample output space. Recording every call made ordinary calls to already-known
+functions consume the same finite resource as unresolved forward calls.
+
+The extended bootstrap now looks up the existing function table first. A known
+target is patched immediately after exact arity checking, with the same first
+matching definition and call encoding used by deferred resolution. Only forward
+calls consume deferred entries; the 512-entry bound and canonical compiler source
+remain unchanged. This follows the placement/output-headroom repair rather than
+expanding an unrelated limit.
+
+The formal contract is `theories/anka106_ccb_call_fixups.kleis` and its
+`_false_witnesses.kleis` partner: 6 positive witnesses and 3 explicitly disproved
+hostile assertions. Runtime regressions cover 513 known calls, ordinary forward
+resolution, rejection of 513 unresolved calls, and wrong arity. These changes are
+part of the merged Phase 10.6 baseline and subsequent passing full suites.
+
+## DN-47: Concrete CC2 Fixed Point Includes Publication Identity and Geometry (Phase 10.6)
+
+**Status.** Phase 10.6 is merged to `main`; its local full-suite checkpoint was
+995 passing tests. The later Phase 10.7 checkpoint also exercises this lineage.
+
+`witness_cc2_fixed_point` builds CC2_0 from the exact current Stage-3 source with
+extended CC_B. Guest `ankapp` preprocesses one immutable source bundle on both
+self-host edges. CC2_0 emits AOM_1; guest `ankald` links and publishes sealed
+CC2_1. The exact linked CC2_1 emits AOM_2, which is linked and published as a
+distinct sealed CC2_2. Closure requires identical bytes, code size, literal start,
+and entry. Byte equality alone does not establish provenance (see DN-7).
+
+The first compiler witness uses standalone source and requires preprocessing to
+reproduce its bytes exactly. Include-bearing compiler seeds remain a later
+refinement. Imported Stage-3 caches cannot select a generation in this witness.
+Explicit developer execution authority is required.
+
+A linked compiler's `main` is an ordinary function and may have a nonzero entry.
+A separate sealed launcher CALLs the linker-selected entry, establishes protected
+return authority, and exits with the compiler result. The compiler image is never
+prefixed or patched. Existing physical and virtual placement managers admit the
+mappings; code receives RX and literals R. The spawn ABI remains unchanged.
+
+The compiler source itself needs the earned bootstrap integer-word dereference
+exception. Workspace word 68480 is explicitly enabled on both self-host edges;
+ordinary application compilation leaves it zero. A guest regression reads the
+actual control word and emits sealed output, testing ordinary seed and linked
+compilation as zero and both bootstrap edges as one. This is a narrow compiler
+source profile, not a general application permission.
+
+For application rebuilds, the witness now retains private publication Fabric and
+placement state, original keys, immutable compiler identity, and guest-produced
+preprocessor/linker images. It validates both sealed/current compiler publications
+and rejects altered public observation bytes, keys, or execution geometry before
+application preprocessing. Public observations do not substitute for producer
+evidence. Retained helper images are not yet persistent tool publications.
+
+Existing formal gates cover closure and bootstrap language admission:
+
+| Gate | Positive witnesses | Hostile assertions explicitly disproved |
+|---|---:|---:|
+| `anka106_cc2_self_host_closure` | 26 | 26 |
+| `anka106_ac2_self_host_language` | 26 | 26 |
+
+These establish acceptance contracts, not a proof of every compiler instruction.
+The runtime fixed-point test supplies the concrete generation-chain witness.
+
+```sh
+cargo test --lib p106_concrete_cc2_generation_chain_closes_fixed_point -- --test-threads=1 --nocapture
+```
+
+The development monitor supports `cc2 fixed-point [prefix]`. The default prefix
+is `cc2-fp`; observations are retained under `<prefix>-0`, `<prefix>-1`,
+`<prefix>-2`, `<prefix>-aom-1`, and `<prefix>-aom-2`. `tool-artifacts` lists them;
+`dump cc2-fp-1 cc2-1.bin` exports observation bytes. This observation registry does
+not itself authorize ordinary application execution.
+
+## DN-48: Rebuild Applications With Verified CC2 and Separate Execution Authority (Phase 10.7)
+
+**Checkpoint, 2026-10-10.** On `feat/anka107-userspace-rebuild`, the user reported
+**997 passing tests, zero failures**, run single threaded (864.83 seconds). The
+concrete CC2-backed application witness passes. Phase 10.7 remains open; this is
+a first executable subset of the broader rebuild contract.
+
+### Formal acceptance contract
+
+`theories/anka107_userspace_rebuild.kleis` imports the self-host closure,
+application pointer, and HTTP contracts. Admission requires:
+
+- Concrete fixed-point evidence, the exact sealed/current CC2_1 object and
+  generation, and explicit compiler execution authority.
+- Exact immutable source bundle membership, root, profile, source generation,
+  effective translation unit, and exact current guest preprocessor.
+- Ordinary application profile, valid AOM emission, exact current guest linker,
+  complete linked bytes and geometry, sealed/current output, and permission
+  non-amplification.
+- Host transport and observation only; preprocessing, compilation, linking and
+  symbol resolution execute inside Anka, with no host artifact repair.
+- The exact application artifact key, separate application execution authority,
+  ordinary execution admission, and existing physical/virtual placement admission.
+- Failure publishes no next-stage output and never executes failed output.
+  Earlier successful artifacts may remain.
+- For eventual HTTP closure, exact rebuilt socket and HTTP artifacts actually
+  boot, existing protocol contracts hold, HTTP has no NIC authority, and the
+  exact alive request produces the exact alive response.
+
+Object and generation must both match; filenames and byte equality are
+insufficient. Imported admission flags summarize obligations whose evidence the
+implementation must supply. Setting a Boolean is not a runtime proof. This first
+producer selection is CC2_1; choosing another generation needs policy refinement.
+
+### Typed application pointers
+
+`theories/anka107_application_pointers.kleis` freezes these requirements:
+
+- The typed application profile disables the compiler bootstrap raw integer-word
+  exception. Pointer assignment requires matching pointee types and no implicit
+  integer conversion.
+- IPC/syscall address boundaries require an explicitly declared address contract,
+  exact signature and typed result, preserving Fabric checks. Transporting pointer
+  bits grants no memory authority and does not introduce general casts.
+- Initial pointee scope is `char` (one byte) and `int` (eight bytes). Void,
+  function and aggregate dereference are outside this first profile.
+- Forward movement scales by element size. Division-based preflight rejects
+  multiplication/addition overflow and the result must equal the exact scaled
+  displacement. Zero movement and forming one-past are allowed; dereferencing
+  one-past is rejected.
+- Each access requires a complete typed pointee, exact width, nonwrapping virtual
+  address, an in-bounds nonzero range within one mapping, a current-generation
+  capability, required permissions and natural alignment.
+
+Pointers remain numeric virtual addresses. Region bounds are model obligations;
+no new bounded-pointer representation, pointer metadata, capability format,
+syscall ABI or memory manager is introduced. The model's 0/1 BitVec8 flags express
+solver obligations rather than a runtime ABI. Checked subtraction establishes
+bounds without unchecked endpoint addition. Negative movement, pointer
+subtraction, arbitrary integer casts and broad ISO C conformance remain deferred.
+
+### Implemented executable subset
+
+`rebuild_application` validates the retained fixed-point producer, guest-preprocesses
+an immutable source bundle, compiles with linked CC2_1 under the ordinary profile,
+guest-links `main`, publishes exact sealed bytes, and registers that same
+object/generation. Registration copies metadata only and grants no authority.
+The separate `RebuiltApplication::run` call requires explicit application
+execution authority and uses ordinary SYS_SPAWN/SYS_WAIT. Compilation never runs
+the resulting application.
+
+`userspace/bin/pointer_probe.c` uses typed `int*` loads/stores of a stack word and
+exits with 42. The concrete regression also rejects raw integer dereference,
+missing compiler/application authority, and altered compiler keys, bytes or entry.
+The current Stage-3 parser accepts the syscall intrinsic as an expression; the
+probe places it in a local initializer because bare syscall expression statements
+are not supported by its statement dispatcher.
+
+This first application is standalone, single-AOM, with linked entry zero and an
+explicit exit syscall. Nonzero application entries are rejected before publication;
+compiler entry handling remains the separate protected-call launcher described
+in DN-47. The current ISA supplies word-sized loads/stores, so byte access needs
+an explicit lowering decision before implementation.
+
+### Gates and remaining work
+
+| Phase 10.7 gate | Positive witnesses | Hostile assertions explicitly disproved |
+|---|---:|---:|
+| Application pointers | 57 | 55 |
+| Userspace rebuild | 60 | 52 |
+| Total | 117 | 107 |
+
+All gates passed. Every hostile assertion must be explicitly disproved; parse or
+type errors, unknown solver results, and generic nonzero exits do not qualify.
+These conditional contracts and examples do not prove all C semantics or that
+Rust implements every modeled predicate.
+
+```sh
+python3 scripts/check-anka107-gates.py --kleis /path/to/kleis
+cargo test --lib p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address -- --test-threads=1 --nocapture
+cargo test -- --test-threads=1
+```
+
+The gate runner also accepts `kleis` on PATH with no `--kleis` argument. It needs
+a working standard library and Z3 dependencies and handles deliberately nonzero
+hostile-suite exits only when all expected explicit disproofs are present.
+
+Next work is typed byte access, checked scaled pointer arithmetic, and exact typed
+address-boundary handling, reviewed against the existing Kleis contract before
+implementation. Multi-module rebuild, persistent current tool publications and
+source-generation receipts remain open. Then adapt and rebuild `socket.c` and
+`httpd.c` under the ordinary application profile and apply the deterministic
+socket/HTTP tests to those exact artifacts. Never enable the compiler-only raw-word
+profile to make services compile. The final boot and alive response remain the
+Phase 10 acceptance boundary from DN-41.
+
+### Documentation policy
+
+Keep lasting decisions, validation checkpoints and remaining obligations in this
+file. Keep executable formal contracts in `theories/` and gate runners in
+`scripts/`. Routine patch application instructions and one-off corrections belong
+in delivery messages or commit history. Separate documents require a distinct,
+lasting purpose. This entry supersedes the five Phase 10.6/10.7 patch-note files.

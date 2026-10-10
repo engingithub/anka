@@ -33,7 +33,6 @@ pub enum Cc2FixedPointError {
     },
 }
 
-#[derive(Debug)]
 pub struct Cc2FixedPointWitness {
     pub seed: CompiledCImage,
     pub cc2_1: AnkaldLinkedImage,
@@ -44,6 +43,12 @@ pub struct Cc2FixedPointWitness {
     pub cc2_1_key: LinkedArtifactKey,
     pub cc2_2_key: LinkedArtifactKey,
     pub effective_source_bytes: usize,
+    publication_fabric: Fabric,
+    publication_placement: PhysicalPlacementManager,
+    original_keys: (LinkedArtifactKey, LinkedArtifactKey),
+    compiler_identity: AnkaldLinkedImage,
+    preprocessor: CompiledCImage,
+    linker: CompiledCImage,
 }
 
 /// Byte equality alone is insufficient: entry and segment geometry are part
@@ -128,9 +133,12 @@ pub fn witness_cc2_fixed_point(
             cc2_2_geometry: (cc2_2.code_size, cc2_2.lit_start, cc2_2.entry, cc2_2.bytes.len()),
         });
     }
-    Ok(Cc2FixedPointWitness { seed, cc2_1, cc2_2, aom_1, aom_2,
+    Ok(Cc2FixedPointWitness { compiler_identity: cc2_1.clone(), seed, cc2_1, cc2_2, aom_1, aom_2,
         cc2_1_key: first.key, cc2_2_key: second.key,
-        effective_source_bytes: effective_1.bytes.len() })
+        effective_source_bytes: effective_1.bytes.len(),
+        publication_fabric: fabric,
+        publication_placement: placement, original_keys: (first.key, second.key),
+        preprocessor, linker })
 }
 
 fn verify_publication(
@@ -189,5 +197,28 @@ mod tests {
         assert_ne!(witness.cc2_1_key.object, witness.cc2_2_key.object);
         assert_eq!(witness.cc2_1.process_slots_observed, 1);
         assert_eq!(witness.cc2_2.process_slots_observed, 1);
+    }
+}
+
+impl Cc2FixedPointWitness {
+    pub(crate) fn application_tools(&self) -> Result<(&AnkaldLinkedImage, &CompiledCImage, &CompiledCImage), Cc2FixedPointError> {
+        if (self.cc2_1_key, self.cc2_2_key) != self.original_keys
+            || !linked_compilers_identical(&self.cc2_1, &self.compiler_identity)
+            || !linked_compilers_identical(&self.cc2_2, &self.compiler_identity) {
+            return Err(Cc2FixedPointError::PublicationIdentityChanged);
+        }
+        verify_publication(&self.publication_fabric, &self.publication_placement, self.cc2_1_key, &self.cc2_1)?;
+        verify_publication(&self.publication_fabric, &self.publication_placement, self.cc2_2_key, &self.cc2_2)?;
+        Ok((&self.compiler_identity, &self.preprocessor, &self.linker))
+    }
+}
+
+impl core::fmt::Debug for Cc2FixedPointWitness {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Cc2FixedPointWitness")
+            .field("cc2_1_key", &self.cc2_1_key)
+            .field("cc2_2_key", &self.cc2_2_key)
+            .field("effective_source_bytes", &self.effective_source_bytes)
+            .finish_non_exhaustive()
     }
 }

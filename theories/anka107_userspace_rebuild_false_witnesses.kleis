@@ -1,0 +1,211 @@
+// Deliberately false assertions; every one must be explicitly disproved.
+import "anka107_userspace_rebuild.kleis"
+
+example "FALSE-P107-2 accept unverified fixed point" {
+    assert(rebuild107_producer_valid(false,bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),true,true,true)=true)
+}
+
+example "FALSE-P107-3 accept different compiler object" {
+    assert(rebuild107_producer_valid(true,bvconst(7,64),bvconst(8,64),bvconst(3,64),bvconst(3,64),true,true,true)=true)
+}
+
+example "FALSE-P107-4 accept stale compiler generation" {
+    assert(rebuild107_producer_valid(true,bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(2,64),true,true,true)=true)
+}
+
+example "FALSE-P107-5 accept unsealed compiler" {
+    assert(rebuild107_producer_valid(true,bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),false,true,true)=true)
+}
+
+example "FALSE-P107-6 accept noncurrent compiler" {
+    assert(rebuild107_producer_valid(true,bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),true,false,true)=true)
+}
+
+example "FALSE-P107-7 accept no compiler execution authority" {
+    assert(rebuild107_producer_valid(true,bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),true,true,false)=true)
+}
+
+example "FALSE-P107-8 accept host substitution 0" {
+    assert(rebuild107_host_boundary_valid(true,false,false,false,false)=true)
+}
+
+example "FALSE-P107-9 accept host substitution 1" {
+    assert(rebuild107_host_boundary_valid(false,true,false,false,false)=true)
+}
+
+example "FALSE-P107-10 accept host substitution 2" {
+    assert(rebuild107_host_boundary_valid(false,false,true,false,false)=true)
+}
+
+example "FALSE-P107-11 accept host substitution 3" {
+    assert(rebuild107_host_boundary_valid(false,false,false,true,false)=true)
+}
+
+example "FALSE-P107-12 accept host substitution 4" {
+    assert(rebuild107_host_boundary_valid(false,false,false,false,true)=true)
+}
+
+example "FALSE-P107-15 accept missing bundle105_admitted" {
+    assert(rebuild107_sources_valid(false,true,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-16 accept missing exact_member_bytes" {
+    assert(rebuild107_sources_valid(true,false,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-17 accept missing exact_root" {
+    assert(rebuild107_sources_valid(true,true,false,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-18 accept missing exact_include_profile" {
+    assert(rebuild107_sources_valid(true,true,true,false,true,true,true,true)=true)
+}
+
+example "FALSE-P107-19 accept missing source_generation_current" {
+    assert(rebuild107_sources_valid(true,true,true,true,false,true,true,true)=true)
+}
+
+example "FALSE-P107-20 accept missing preprocessor_artifact_exact_current" {
+    assert(rebuild107_sources_valid(true,true,true,true,true,false,true,true)=true)
+}
+
+example "FALSE-P107-21 accept missing guest_preprocessing_admitted" {
+    assert(rebuild107_sources_valid(true,true,true,true,true,true,false,true)=true)
+}
+
+example "FALSE-P107-22 accept missing effective_source_exact" {
+    assert(rebuild107_sources_valid(true,true,true,true,true,true,true,false)=true)
+}
+
+example "FALSE-P107-24 accept missing exact_producer_admitted" {
+    assert(rebuild107_output_valid(false,true,true,true,true,true,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-25 accept missing sources_admitted" {
+    assert(rebuild107_output_valid(true,false,true,true,true,true,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-26 accept missing typed_application_profile_admitted" {
+    assert(rebuild107_output_valid(true,true,false,true,true,true,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-27 accept missing aom103_valid" {
+    assert(rebuild107_output_valid(true,true,true,false,true,true,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-28 accept missing linker_artifact_exact_current" {
+    assert(rebuild107_output_valid(true,true,true,true,false,true,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-29 accept missing guest_link104_publishable" {
+    assert(rebuild107_output_valid(true,true,true,true,true,false,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-30 accept missing linked_bytes_complete" {
+    assert(rebuild107_output_valid(true,true,true,true,true,true,false,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-31 accept missing linked_geometry_valid" {
+    assert(rebuild107_output_valid(true,true,true,true,true,true,true,false,true,true,true,true)=true)
+}
+
+example "FALSE-P107-32 accept missing output_sealed" {
+    assert(rebuild107_output_valid(true,true,true,true,true,true,true,true,false,true,true,true)=true)
+}
+
+example "FALSE-P107-33 accept missing output_generation_current" {
+    assert(rebuild107_output_valid(true,true,true,true,true,true,true,true,true,false,true,true)=true)
+}
+
+example "FALSE-P107-34 accept missing permissions_nonamplifying" {
+    assert(rebuild107_output_valid(true,true,true,true,true,true,true,true,true,true,false,true)=true)
+}
+
+example "FALSE-P107-35 accept missing host_boundary_admitted" {
+    assert(rebuild107_output_valid(true,true,true,true,true,true,true,true,true,true,true,false)=true)
+}
+
+example "FALSE-P107-37 accept missing rebuild_output_admitted" {
+    assert(rebuild107_run_valid(false,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-38 accept missing exact_artifact_key" {
+    assert(rebuild107_run_valid(true,false,true,true,true,true)=true)
+}
+
+example "FALSE-P107-39 accept missing explicit_application_execution" {
+    assert(rebuild107_run_valid(true,true,false,true,true,true)=true)
+}
+
+example "FALSE-P107-40 accept missing ordinary_execution_admitted" {
+    assert(rebuild107_run_valid(true,true,true,false,true,true)=true)
+}
+
+example "FALSE-P107-41 accept missing physical_placement_admitted" {
+    assert(rebuild107_run_valid(true,true,true,true,false,true)=true)
+}
+
+example "FALSE-P107-42 accept missing virtual_layout_admitted" {
+    assert(rebuild107_run_valid(true,true,true,true,true,false)=true)
+}
+
+example "FALSE-P107-44 accept missing rebuilt_socket_service_admitted" {
+    assert(rebuild107_http_integration_valid(false,true,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-45 accept missing rebuilt_http_service_admitted" {
+    assert(rebuild107_http_integration_valid(true,false,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-46 accept missing exact_rebuilt_artifacts_booted" {
+    assert(rebuild107_http_integration_valid(true,true,false,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-47 accept missing socket_contract_preserved" {
+    assert(rebuild107_http_integration_valid(true,true,true,false,true,true,true,true)=true)
+}
+
+example "FALSE-P107-48 accept missing http_contract_preserved" {
+    assert(rebuild107_http_integration_valid(true,true,true,true,false,true,true,true)=true)
+}
+
+example "FALSE-P107-49 accept missing http_has_no_nic_authority" {
+    assert(rebuild107_http_integration_valid(true,true,true,true,true,false,true,true)=true)
+}
+
+example "FALSE-P107-50 accept missing exact_alive_request" {
+    assert(rebuild107_http_integration_valid(true,true,true,true,true,true,false,true)=true)
+}
+
+example "FALSE-P107-51 accept missing exact_alive_response" {
+    assert(rebuild107_http_integration_valid(true,true,true,true,true,true,true,false)=true)
+}
+
+example "FALSE-P107-52 opposite failed stage publishes nothing" {
+    assert(rebuild107_failed_build_safe(true,false,false)=false)
+}
+
+example "FALSE-P107-53 opposite failed stage publishes output" {
+    assert(rebuild107_failed_build_safe(true,true,false)=true)
+}
+
+example "FALSE-P107-54 opposite failed output executes" {
+    assert(rebuild107_failed_build_safe(true,false,true)=true)
+}
+
+example "FALSE-P107-55 claim rebuild107_names_create_execution_authority" {
+    assert(rebuild107_names_create_execution_authority()=true)
+}
+
+example "FALSE-P107-56 claim rebuild107_pointer_profile_grants_nic_authority" {
+    assert(rebuild107_pointer_profile_grants_nic_authority()=true)
+}
+
+example "FALSE-P107-58 opposite linking does not authorize execution" {
+    assert(aom_successful_link_creates_execution_authority()=true)
+}
+
+example "FALSE-P107-59 opposite ordinary spawn admission still required" {
+    assert(aom_execution_admitted(true,true,false)=true)
+}
+

@@ -1,0 +1,353 @@
+// Phase 10.7 proposed application pointer contract. No new axioms.
+// This freezes requirements BEFORE implementing application pointer lowering.
+// It does not claim the current parser/backend implements these operations.
+// Pointers remain numeric virtual addresses, not new capabilities or bounded
+// pointer objects. Bounds/type facts here are acceptance obligations supplied
+// by the caller/model; every actual access must still traverse Fabric.
+// Scope: byte and word pointees, positive forward element displacement,
+// matched pointer types, explicit typed ABI boundaries. No general ISO C,
+// arbitrary integer casts, void/function/aggregate dereference, pointer
+// subtraction, negative displacement, or permission invention is earned.
+
+import "anka102_ac2_types_abi.kleis"
+import "anka100_aom_link_contract.kleis"
+
+// Applications cannot opt into the 10.6 compiler-only raw-word exception.
+define app107_profile_valid(typed_application_profile : Bool, bootstrap_raw_words : Bool) =
+    if typed_application_profile then
+        if bootstrap_raw_words then false else true
+    else false
+
+define app107_pointer_assignment_valid(both_pointers : Bool, same_pointee : Bool,
+    implicit_integer_conversion : Bool) =
+    if both_pointers then
+        if same_pointee then
+            if implicit_integer_conversion then false else true
+        else false
+    else false
+
+// An explicitly declared IPC/syscall/address ABI may transport pointer bits;
+// this is not a language-wide integer-to-pointer cast or an authority grant.
+define app107_typed_boundary_valid(
+    boundary_declared : Bool,
+    signature_exact : Bool,
+    typed_pointer_result : Bool,
+    explicit_address_contract : Bool,
+    fabric_checks_preserved : Bool
+) =
+    if boundary_declared then
+        if signature_exact then
+            if typed_pointer_result then
+                if explicit_address_contract then
+                    if fabric_checks_preserved then
+                        true
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+// Checked range model; offset=extent is a one-past pointer, not an access.
+define app107_range_valid(offset : BitVec64, extent : BitVec64, width : BitVec64) =
+    bvugt(width,bvconst(0,64)) ∧ bvule(offset,extent) ∧
+    bvule(width,bvsub(extent,offset))
+
+// Division preflight prevents multiplication/addition overflow. This models
+// positive forward movement only. count=0 is allowed; one-past is formable.
+define app107_forward_step_valid(offset : BitVec64, extent : BitVec64,
+    count : BitVec64, element_size : BitVec64) =
+    ((element_size=bvconst(1,64)) ∨ (element_size=bvconst(8,64))) ∧ bvule(offset,extent) ∧
+    bvule(count,bvudiv(bvsub(extent,offset),element_size))
+
+// Actual emitted displacement must equal element-scaled arithmetic, not just
+// pass a range check. The validity guard rejects wrapped arithmetic.
+define app107_forward_result_valid(offset : BitVec64, extent : BitVec64,
+    count : BitVec64, element_size : BitVec64, result : BitVec64) =
+    app107_forward_step_valid(offset,extent,count,element_size) ∧
+    (result=bvadd(offset,bvmul(count,element_size)))
+
+define app107_access_obligations(
+    range_valid : Bool,
+    typed_pointer : Bool,
+    complete_pointee : Bool,
+    pointee_width_exact : Bool,
+    virtual_address_no_wrap : Bool,
+    single_mapping : Bool,
+    capability_generation_current : Bool,
+    required_permission : Bool,
+    natural_alignment : Bool
+) =
+    if range_valid then
+        if typed_pointer then
+            if complete_pointee then
+                if pointee_width_exact then
+                    if virtual_address_no_wrap then
+                        if single_mapping then
+                            if capability_generation_current then
+                                if required_permission then
+                                    if natural_alignment then
+                                        true
+                                    else false
+                                else false
+                            else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+// Only complete char/int pointees are in this first application profile.
+// Admission flags are 0/1 BitVec8 model values, not a runtime ABI extension.
+define app107_access_valid(offset : BitVec64, extent : BitVec64, width : BitVec64,
+    typed_pointer : BitVec8,
+    complete_pointee : BitVec8,
+    pointee_width_exact : BitVec8,
+    virtual_address_no_wrap : BitVec8,
+    single_mapping : BitVec8,
+    capability_generation_current : BitVec8,
+    required_permission : BitVec8,
+    natural_alignment : BitVec8) =
+    ((width=bvconst(1,64)) ∨ (width=bvconst(8,64))) ∧
+    app107_range_valid(offset,extent,width) ∧
+    (typed_pointer=bvconst(1,8)) ∧
+    (complete_pointee=bvconst(1,8)) ∧
+    (pointee_width_exact=bvconst(1,8)) ∧
+    (virtual_address_no_wrap=bvconst(1,8)) ∧
+    (single_mapping=bvconst(1,8)) ∧
+    (capability_generation_current=bvconst(1,8)) ∧
+    (required_permission=bvconst(1,8)) ∧
+    (natural_alignment=bvconst(1,8))
+
+define app107_pointer_bits_create_authority() = false
+define app107_pointer_cast_support_is_claimed() = false
+define app107_load_store_may_bypass_fabric() = false
+
+example "P107-1 typed application profile" {
+    assert(app107_profile_valid(true,false)=true)
+}
+
+example "P107-2 bootstrap exception rejected" {
+    assert(app107_profile_valid(true,true)=false)
+}
+
+example "P107-3 unselected profile rejected" {
+    assert(app107_profile_valid(false,false)=false)
+}
+
+example "P107-4 matching pointer assignment" {
+    assert(app107_pointer_assignment_valid(true,true,false)=true)
+}
+
+example "P107-5 mismatched pointee rejected" {
+    assert(app107_pointer_assignment_valid(true,false,false)=false)
+}
+
+example "P107-6 implicit integer conversion rejected" {
+    assert(app107_pointer_assignment_valid(true,true,true)=false)
+}
+
+example "P107-7 integer dereference rejected" {
+    assert(app107_pointer_assignment_valid(false,true,false)=false)
+}
+
+example "P107-8 complete app107_typed_boundary_valid" {
+    assert(app107_typed_boundary_valid(true,true,true,true,true)=true)
+}
+
+example "P107-9 reject missing boundary_declared" {
+    assert(app107_typed_boundary_valid(false,true,true,true,true)=false)
+}
+
+example "P107-10 reject missing signature_exact" {
+    assert(app107_typed_boundary_valid(true,false,true,true,true)=false)
+}
+
+example "P107-11 reject missing typed_pointer_result" {
+    assert(app107_typed_boundary_valid(true,true,false,true,true)=false)
+}
+
+example "P107-12 reject missing explicit_address_contract" {
+    assert(app107_typed_boundary_valid(true,true,true,false,true)=false)
+}
+
+example "P107-13 reject missing fabric_checks_preserved" {
+    assert(app107_typed_boundary_valid(true,true,true,true,false)=false)
+}
+
+example "P107-14 complete app107_access_obligations" {
+    assert(app107_access_obligations(true,true,true,true,true,true,true,true,true)=true)
+}
+
+example "P107-15 reject missing range_valid" {
+    assert(app107_access_obligations(false,true,true,true,true,true,true,true,true)=false)
+}
+
+example "P107-16 reject missing typed_pointer" {
+    assert(app107_access_obligations(true,false,true,true,true,true,true,true,true)=false)
+}
+
+example "P107-17 reject missing complete_pointee" {
+    assert(app107_access_obligations(true,true,false,true,true,true,true,true,true)=false)
+}
+
+example "P107-18 reject missing pointee_width_exact" {
+    assert(app107_access_obligations(true,true,true,false,true,true,true,true,true)=false)
+}
+
+example "P107-19 reject missing virtual_address_no_wrap" {
+    assert(app107_access_obligations(true,true,true,true,false,true,true,true,true)=false)
+}
+
+example "P107-20 reject missing single_mapping" {
+    assert(app107_access_obligations(true,true,true,true,true,false,true,true,true)=false)
+}
+
+example "P107-21 reject missing capability_generation_current" {
+    assert(app107_access_obligations(true,true,true,true,true,true,false,true,true)=false)
+}
+
+example "P107-22 reject missing required_permission" {
+    assert(app107_access_obligations(true,true,true,true,true,true,true,false,true)=false)
+}
+
+example "P107-23 reject missing natural_alignment" {
+    assert(app107_access_obligations(true,true,true,true,true,true,true,true,false)=false)
+}
+
+example "P107-24 last byte" {
+    assert(app107_range_valid(bvconst(15,64),bvconst(16,64),bvconst(1,64)))
+}
+
+example "P107-25 last word" {
+    assert(app107_range_valid(bvconst(8,64),bvconst(16,64),bvconst(8,64)))
+}
+
+example "P107-26 one past access" {
+    assert(¬app107_range_valid(bvconst(16,64),bvconst(16,64),bvconst(1,64)))
+}
+
+example "P107-27 cross extent" {
+    assert(¬app107_range_valid(bvconst(12,64),bvconst(16,64),bvconst(8,64)))
+}
+
+example "P107-28 zero width" {
+    assert(¬app107_range_valid(bvconst(0,64),bvconst(16,64),bvconst(0,64)))
+}
+
+example "P107-29 offset outside extent" {
+    assert(¬app107_range_valid(bvconst(17,64),bvconst(16,64),bvconst(1,64)))
+}
+
+example "P107-30 huge width wrap attempt" {
+    assert(¬app107_range_valid(bvconst(8,64),bvconst(16,64),bvsub(bvconst(0,64),bvconst(1,64))))
+}
+
+example "P107-31 char pointer byte scaling" {
+    assert(app107_forward_step_valid(bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(1,64)))
+}
+
+example "P107-32 int pointer word scaling" {
+    assert(app107_forward_step_valid(bvconst(0,64),bvconst(16,64),bvconst(2,64),bvconst(8,64)))
+}
+
+example "P107-33 int pointer overrun" {
+    assert(¬app107_forward_step_valid(bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(8,64)))
+}
+
+example "P107-34 multiply wrap attempt" {
+    assert(¬app107_forward_step_valid(bvconst(0,64),bvconst(16,64),bvsub(bvconst(0,64),bvconst(1,64)),bvconst(8,64)))
+}
+
+example "P107-35 zero element size" {
+    assert(¬app107_forward_step_valid(bvconst(0,64),bvconst(16,64),bvconst(1,64),bvconst(0,64)))
+}
+
+example "P107-36 one past zero step" {
+    assert(app107_forward_step_valid(bvconst(16,64),bvconst(16,64),bvconst(0,64),bvconst(8,64)))
+}
+
+example "P107-37 advance past one past" {
+    assert(¬app107_forward_step_valid(bvconst(16,64),bvconst(16,64),bvconst(1,64),bvconst(8,64)))
+}
+
+example "P107-38 access width 1" {
+    assert(app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "P107-39 access width 8" {
+    assert(app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "P107-40 access width 4" {
+    assert(¬app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "P107-41 access width 0" {
+    assert(¬app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "P107-42 app107_pointer_bits_create_authority" {
+    assert(app107_pointer_bits_create_authority()=false)
+}
+
+example "P107-43 app107_pointer_cast_support_is_claimed" {
+    assert(app107_pointer_cast_support_is_claimed()=false)
+}
+
+example "P107-44 app107_load_store_may_bypass_fabric" {
+    assert(app107_load_store_may_bypass_fabric()=false)
+}
+
+
+example "P107-ACCESS-0 reject missing access flag 0" {
+    assert(¬app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "P107-ACCESS-1 reject missing access flag 1" {
+    assert(¬app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "P107-ACCESS-2 reject missing access flag 2" {
+    assert(¬app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "P107-ACCESS-3 reject missing access flag 3" {
+    assert(¬app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "P107-ACCESS-4 reject missing access flag 4" {
+    assert(¬app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "P107-ACCESS-5 reject missing access flag 5" {
+    assert(¬app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "P107-ACCESS-6 reject missing access flag 6" {
+    assert(¬app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "P107-ACCESS-7 reject missing access flag 7" {
+    assert(¬app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "P107-STEP reject unearned pointee size" {
+    assert(¬app107_forward_step_valid(bvconst(0,64),bvconst(16,64),bvconst(1,64),bvconst(4,64)))
+}
+
+example "P107-RESULT-0 element-scaled result" {
+    assert(app107_forward_result_valid(bvconst(8,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(24,64)))
+}
+
+example "P107-RESULT-1 element-scaled result" {
+    assert(¬app107_forward_result_valid(bvconst(8,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(10,64)))
+}
+
+example "P107-RESULT-2 element-scaled result" {
+    assert(app107_forward_result_valid(bvconst(8,64),bvconst(32,64),bvconst(2,64),bvconst(1,64),bvconst(10,64)))
+}
+
+example "P107-RESULT-3 element-scaled result" {
+    assert(¬app107_forward_result_valid(bvconst(8,64),bvconst(32,64),bvconst(2,64),bvconst(1,64),bvconst(24,64)))
+}

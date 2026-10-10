@@ -27,6 +27,7 @@ pub mod aom;
 pub mod ankald;
 pub mod source_bundle;
 pub mod cc2_fixed_point;
+pub mod userspace_rebuild;
 pub mod dev_runner;
 pub mod dev_monitor;
 pub mod desc;

@@ -1,0 +1,223 @@
+// Deliberately false assertions; every one must be explicitly disproved.
+import "anka107_application_pointers.kleis"
+
+example "FALSE-P107-1 opposite typed application profile" {
+    assert(app107_profile_valid(true,false)=false)
+}
+
+example "FALSE-P107-2 opposite bootstrap exception rejected" {
+    assert(app107_profile_valid(true,true)=true)
+}
+
+example "FALSE-P107-3 opposite unselected profile rejected" {
+    assert(app107_profile_valid(false,false)=true)
+}
+
+example "FALSE-P107-4 opposite matching pointer assignment" {
+    assert(app107_pointer_assignment_valid(true,true,false)=false)
+}
+
+example "FALSE-P107-5 opposite mismatched pointee rejected" {
+    assert(app107_pointer_assignment_valid(true,false,false)=true)
+}
+
+example "FALSE-P107-6 opposite implicit integer conversion rejected" {
+    assert(app107_pointer_assignment_valid(true,true,true)=true)
+}
+
+example "FALSE-P107-7 opposite integer dereference rejected" {
+    assert(app107_pointer_assignment_valid(false,true,false)=true)
+}
+
+example "FALSE-P107-9 accept missing boundary_declared" {
+    assert(app107_typed_boundary_valid(false,true,true,true,true)=true)
+}
+
+example "FALSE-P107-10 accept missing signature_exact" {
+    assert(app107_typed_boundary_valid(true,false,true,true,true)=true)
+}
+
+example "FALSE-P107-11 accept missing typed_pointer_result" {
+    assert(app107_typed_boundary_valid(true,true,false,true,true)=true)
+}
+
+example "FALSE-P107-12 accept missing explicit_address_contract" {
+    assert(app107_typed_boundary_valid(true,true,true,false,true)=true)
+}
+
+example "FALSE-P107-13 accept missing fabric_checks_preserved" {
+    assert(app107_typed_boundary_valid(true,true,true,true,false)=true)
+}
+
+example "FALSE-P107-15 accept missing range_valid" {
+    assert(app107_access_obligations(false,true,true,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-16 accept missing typed_pointer" {
+    assert(app107_access_obligations(true,false,true,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-17 accept missing complete_pointee" {
+    assert(app107_access_obligations(true,true,false,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-18 accept missing pointee_width_exact" {
+    assert(app107_access_obligations(true,true,true,false,true,true,true,true,true)=true)
+}
+
+example "FALSE-P107-19 accept missing virtual_address_no_wrap" {
+    assert(app107_access_obligations(true,true,true,true,false,true,true,true,true)=true)
+}
+
+example "FALSE-P107-20 accept missing single_mapping" {
+    assert(app107_access_obligations(true,true,true,true,true,false,true,true,true)=true)
+}
+
+example "FALSE-P107-21 accept missing capability_generation_current" {
+    assert(app107_access_obligations(true,true,true,true,true,true,false,true,true)=true)
+}
+
+example "FALSE-P107-22 accept missing required_permission" {
+    assert(app107_access_obligations(true,true,true,true,true,true,true,false,true)=true)
+}
+
+example "FALSE-P107-23 accept missing natural_alignment" {
+    assert(app107_access_obligations(true,true,true,true,true,true,true,true,false)=true)
+}
+
+example "FALSE-P107-24 opposite last byte" {
+    assert(¬app107_range_valid(bvconst(15,64),bvconst(16,64),bvconst(1,64)))
+}
+
+example "FALSE-P107-25 opposite last word" {
+    assert(¬app107_range_valid(bvconst(8,64),bvconst(16,64),bvconst(8,64)))
+}
+
+example "FALSE-P107-26 opposite one past access" {
+    assert(app107_range_valid(bvconst(16,64),bvconst(16,64),bvconst(1,64)))
+}
+
+example "FALSE-P107-27 opposite cross extent" {
+    assert(app107_range_valid(bvconst(12,64),bvconst(16,64),bvconst(8,64)))
+}
+
+example "FALSE-P107-28 opposite zero width" {
+    assert(app107_range_valid(bvconst(0,64),bvconst(16,64),bvconst(0,64)))
+}
+
+example "FALSE-P107-29 opposite offset outside extent" {
+    assert(app107_range_valid(bvconst(17,64),bvconst(16,64),bvconst(1,64)))
+}
+
+example "FALSE-P107-30 opposite huge width wrap attempt" {
+    assert(app107_range_valid(bvconst(8,64),bvconst(16,64),bvsub(bvconst(0,64),bvconst(1,64))))
+}
+
+example "FALSE-P107-31 opposite char pointer byte scaling" {
+    assert(¬app107_forward_step_valid(bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(1,64)))
+}
+
+example "FALSE-P107-32 opposite int pointer word scaling" {
+    assert(¬app107_forward_step_valid(bvconst(0,64),bvconst(16,64),bvconst(2,64),bvconst(8,64)))
+}
+
+example "FALSE-P107-33 opposite int pointer overrun" {
+    assert(app107_forward_step_valid(bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(8,64)))
+}
+
+example "FALSE-P107-34 opposite multiply wrap attempt" {
+    assert(app107_forward_step_valid(bvconst(0,64),bvconst(16,64),bvsub(bvconst(0,64),bvconst(1,64)),bvconst(8,64)))
+}
+
+example "FALSE-P107-35 opposite zero element size" {
+    assert(app107_forward_step_valid(bvconst(0,64),bvconst(16,64),bvconst(1,64),bvconst(0,64)))
+}
+
+example "FALSE-P107-36 opposite one past zero step" {
+    assert(¬app107_forward_step_valid(bvconst(16,64),bvconst(16,64),bvconst(0,64),bvconst(8,64)))
+}
+
+example "FALSE-P107-37 opposite advance past one past" {
+    assert(app107_forward_step_valid(bvconst(16,64),bvconst(16,64),bvconst(1,64),bvconst(8,64)))
+}
+
+example "FALSE-P107-38 opposite width 1" {
+    assert(¬app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-P107-39 opposite width 8" {
+    assert(¬app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-P107-40 opposite width 4" {
+    assert(app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-P107-41 opposite width 0" {
+    assert(app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-P107-42 claim app107_pointer_bits_create_authority" {
+    assert(app107_pointer_bits_create_authority()=true)
+}
+
+example "FALSE-P107-43 claim app107_pointer_cast_support_is_claimed" {
+    assert(app107_pointer_cast_support_is_claimed()=true)
+}
+
+example "FALSE-P107-44 claim app107_load_store_may_bypass_fabric" {
+    assert(app107_load_store_may_bypass_fabric()=true)
+}
+
+
+example "FALSE-P107-ACCESS-0 accept missing access flag 0" {
+    assert(app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-P107-ACCESS-1 accept missing access flag 1" {
+    assert(app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-P107-ACCESS-2 accept missing access flag 2" {
+    assert(app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-P107-ACCESS-3 accept missing access flag 3" {
+    assert(app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-P107-ACCESS-4 accept missing access flag 4" {
+    assert(app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-P107-ACCESS-5 accept missing access flag 5" {
+    assert(app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-P107-ACCESS-6 accept missing access flag 6" {
+    assert(app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE-P107-ACCESS-7 accept missing access flag 7" {
+    assert(app107_access_valid(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE-P107-STEP admit unearned pointee size" {
+    assert(app107_forward_step_valid(bvconst(0,64),bvconst(16,64),bvconst(1,64),bvconst(4,64)))
+}
+
+example "FALSE-P107-RESULT-0 opposite element-scaled result" {
+    assert(¬app107_forward_result_valid(bvconst(8,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(24,64)))
+}
+
+example "FALSE-P107-RESULT-1 opposite element-scaled result" {
+    assert(app107_forward_result_valid(bvconst(8,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(10,64)))
+}
+
+example "FALSE-P107-RESULT-2 opposite element-scaled result" {
+    assert(¬app107_forward_result_valid(bvconst(8,64),bvconst(32,64),bvconst(2,64),bvconst(1,64),bvconst(10,64)))
+}
+
+example "FALSE-P107-RESULT-3 opposite element-scaled result" {
+    assert(app107_forward_result_valid(bvconst(8,64),bvconst(32,64),bvconst(2,64),bvconst(1,64),bvconst(24,64)))
+}

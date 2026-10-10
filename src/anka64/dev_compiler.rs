@@ -244,6 +244,21 @@ pub(crate) fn compile_bootstrap_aom_with_linked_compiler(
     source: &[u8],
     _authority: &super::dev_runner::DeveloperExecutionAuthority,
 ) -> Result<CompiledAomModule, DevelopmentCompileError> {
+    compile_linked_aom(image, source, true)
+}
+
+/// Ordinary applications never receive the compiler's raw word-address exception.
+pub(crate) fn compile_application_aom_with_linked_compiler(
+    image: &super::ankald::AnkaldLinkedImage,
+    source: &[u8],
+    _authority: &super::dev_runner::DeveloperExecutionAuthority,
+) -> Result<CompiledAomModule, DevelopmentCompileError> {
+    compile_linked_aom(image, source, false)
+}
+
+fn compile_linked_aom(
+    image: &super::ankald::AnkaldLinkedImage, source: &[u8], bootstrap: bool,
+) -> Result<CompiledAomModule, DevelopmentCompileError> {
     if image.code_size == 0 || image.code_size > image.bytes.len() as u64
         || image.entry >= image.code_size || image.entry % 8 != 0
         || (image.lit_start != 0 && (image.lit_start < image.code_size
@@ -252,7 +267,7 @@ pub(crate) fn compile_bootstrap_aom_with_linked_compiler(
         return Err(DevelopmentCompileError::InvalidOutputGeometry);
     }
     let raw = compile_c_with_geometry(&image.bytes, false, source,
-        DEVELOPMENT_COMPILER_OUTPUT_SIZE, Some(image), true)?;
+        DEVELOPMENT_COMPILER_OUTPUT_SIZE, Some(image), bootstrap)?;
     Ok(CompiledAomModule { bytes: raw.bytes,
         process_slots_observed: raw.process_slots_observed })
 }
@@ -682,6 +697,8 @@ mod virtual_layout_tests {
         };
         let second_edge = compile_bootstrap_aom_with_linked_compiler(&linked, b"probe", &authority).unwrap();
         assert_eq!(second_edge.bytes, 1u64.to_le_bytes());
+        let application = compile_application_aom_with_linked_compiler(&linked, b"probe", &authority).unwrap();
+        assert_eq!(application.bytes, 0u64.to_le_bytes());
     }
 
     #[test]

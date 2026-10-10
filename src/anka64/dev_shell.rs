@@ -60,7 +60,7 @@ pub struct ArtifactKey {
 pub enum DevelopmentArtifactKind {
     /// Raw Anka64 bytecode imported from the host filesystem.
     Bytecode,
-    /// C source compiled by the self-hosted CC_B in compile-only mode.
+    /// C source compiled by a guest compiler in compile-only mode.
     CompiledC,
 }
 
@@ -166,6 +166,23 @@ impl DevelopmentArtifactRegistry {
             return Err(DevelopmentShellError::ArtifactWrongObjectKind);
         }
         Ok(artifact)
+    }
+
+    /// Register an existing publication without copying bytes or granting execution.
+    pub(crate) fn register_linked_application(
+        &mut self, fabric: &Fabric, linked: &super::ankald::LinkedArtifact,
+    ) -> Result<(), DevelopmentShellError> {
+        let name = "rebuilt-application";
+        if self.contains_name(name) { return Err(DevelopmentShellError::ArtifactNameAlreadyRegistered); }
+        let artifact = DevelopmentArtifact {
+            key: ArtifactKey { object: linked.key.object, generation: linked.key.generation },
+            logical_size: linked.logical_size, code_size: linked.code_size,
+            lit_start: linked.lit_start, kind: DevelopmentArtifactKind::CompiledC,
+            logical_path: None,
+        };
+        Self::validate_current(fabric, &artifact)?;
+        self.publish(name.into(), artifact);
+        Ok(())
     }
 
     fn publish(&mut self, name: String, artifact: DevelopmentArtifact) {

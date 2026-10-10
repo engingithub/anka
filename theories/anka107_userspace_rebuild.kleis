@@ -1,0 +1,410 @@
+// Phase 10.7 userspace rebuild acceptance contract. No new axioms.
+// Abstract conditional obligations, not a proof of compiler C semantics or a
+// Rust implementation correspondence. Fixed-point evidence must come from the
+// concrete 10.6 witness; no Boolean evidence is manufactured by source names.
+// Host transport/observation is permitted, host language/toolchain semantics
+// are excluded. Existing permissions, linker and preprocessing gates remain
+// authoritative. This phase rebuilds applications under the typed profile.
+
+import "anka106_cc2_self_host_closure.kleis"
+import "anka107_application_pointers.kleis"
+import "anka94g_http_contract.kleis"
+
+// Select the exact sealed/current CC2_1 publication from the verified lineage.
+// Same bytes alone do not authorize a stale or unrelated object generation.
+define rebuild107_producer_valid(fixed_point_verified : Bool,
+    expected_object : BitVec64, presented_object : BitVec64,
+    expected_generation : BitVec64, presented_generation : BitVec64,
+    sealed : Bool, current : Bool, explicit_compiler_execution : Bool) =
+    if fixed_point_verified then
+        if expected_object=presented_object then
+            if expected_generation=presented_generation then
+                if sealed then
+                    if current then
+                        if explicit_compiler_execution then true else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define rebuild107_host_boundary_valid(host_compile : Bool, host_preprocess : Bool,
+    host_link : Bool, host_symbol_resolve : Bool, host_mutates_artifact : Bool) =
+    if host_compile then false
+    else if host_preprocess then false
+    else if host_link then false
+    else if host_symbol_resolve then false
+    else if host_mutates_artifact then false
+    else true
+
+define rebuild107_sources_valid(
+    bundle105_admitted : Bool,
+    exact_member_bytes : Bool,
+    exact_root : Bool,
+    exact_include_profile : Bool,
+    source_generation_current : Bool,
+    preprocessor_artifact_exact_current : Bool,
+    guest_preprocessing_admitted : Bool,
+    effective_source_exact : Bool
+) =
+    if bundle105_admitted then
+        if exact_member_bytes then
+            if exact_root then
+                if exact_include_profile then
+                    if source_generation_current then
+                        if preprocessor_artifact_exact_current then
+                            if guest_preprocessing_admitted then
+                                if effective_source_exact then
+                                    true
+                                else false
+                            else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define rebuild107_output_valid(
+    exact_producer_admitted : Bool,
+    sources_admitted : Bool,
+    typed_application_profile_admitted : Bool,
+    aom103_valid : Bool,
+    linker_artifact_exact_current : Bool,
+    guest_link104_publishable : Bool,
+    linked_bytes_complete : Bool,
+    linked_geometry_valid : Bool,
+    output_sealed : Bool,
+    output_generation_current : Bool,
+    permissions_nonamplifying : Bool,
+    host_boundary_admitted : Bool
+) =
+    if exact_producer_admitted then
+        if sources_admitted then
+            if typed_application_profile_admitted then
+                if aom103_valid then
+                    if linker_artifact_exact_current then
+                        if guest_link104_publishable then
+                            if linked_bytes_complete then
+                                if linked_geometry_valid then
+                                    if output_sealed then
+                                        if output_generation_current then
+                                            if permissions_nonamplifying then
+                                                if host_boundary_admitted then
+                                                    true
+                                                else false
+                                            else false
+                                        else false
+                                    else false
+                                else false
+                            else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define rebuild107_run_valid(
+    rebuild_output_admitted : Bool,
+    exact_artifact_key : Bool,
+    explicit_application_execution : Bool,
+    ordinary_execution_admitted : Bool,
+    physical_placement_admitted : Bool,
+    virtual_layout_admitted : Bool
+) =
+    if rebuild_output_admitted then
+        if exact_artifact_key then
+            if explicit_application_execution then
+                if ordinary_execution_admitted then
+                    if physical_placement_admitted then
+                        if virtual_layout_admitted then
+                            true
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define rebuild107_http_integration_valid(
+    rebuilt_socket_service_admitted : Bool,
+    rebuilt_http_service_admitted : Bool,
+    exact_rebuilt_artifacts_booted : Bool,
+    socket_contract_preserved : Bool,
+    http_contract_preserved : Bool,
+    http_has_no_nic_authority : Bool,
+    exact_alive_request : Bool,
+    exact_alive_response : Bool
+) =
+    if rebuilt_socket_service_admitted then
+        if rebuilt_http_service_admitted then
+            if exact_rebuilt_artifacts_booted then
+                if socket_contract_preserved then
+                    if http_contract_preserved then
+                        if http_has_no_nic_authority then
+                            if exact_alive_request then
+                                if exact_alive_response then
+                                    true
+                                else false
+                            else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+// Failure is pre-publication of the NEXT output; existing successfully built
+// inputs/other units may remain. No success implication is made without failure.
+define rebuild107_failed_build_safe(failed_stage : Bool,
+    next_output_published : Bool, failed_output_executed : Bool) =
+    if failed_stage then
+        if next_output_published then false
+        else if failed_output_executed then false
+        else true
+    else false
+
+define rebuild107_names_create_execution_authority() = false
+define rebuild107_pointer_profile_grants_nic_authority() = false
+
+example "P107-1 exact CC2 publication" {
+    assert(rebuild107_producer_valid(true,bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),true,true,true)=true)
+}
+
+example "P107-2 reject unverified fixed point" {
+    assert(rebuild107_producer_valid(false,bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),true,true,true)=false)
+}
+
+example "P107-3 reject different compiler object" {
+    assert(rebuild107_producer_valid(true,bvconst(7,64),bvconst(8,64),bvconst(3,64),bvconst(3,64),true,true,true)=false)
+}
+
+example "P107-4 reject stale compiler generation" {
+    assert(rebuild107_producer_valid(true,bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(2,64),true,true,true)=false)
+}
+
+example "P107-5 reject unsealed compiler" {
+    assert(rebuild107_producer_valid(true,bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),false,true,true)=false)
+}
+
+example "P107-6 reject noncurrent compiler" {
+    assert(rebuild107_producer_valid(true,bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),true,false,true)=false)
+}
+
+example "P107-7 reject no compiler execution authority" {
+    assert(rebuild107_producer_valid(true,bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),true,true,false)=false)
+}
+
+example "P107-8 reject host substitution 0" {
+    assert(rebuild107_host_boundary_valid(true,false,false,false,false)=false)
+}
+
+example "P107-9 reject host substitution 1" {
+    assert(rebuild107_host_boundary_valid(false,true,false,false,false)=false)
+}
+
+example "P107-10 reject host substitution 2" {
+    assert(rebuild107_host_boundary_valid(false,false,true,false,false)=false)
+}
+
+example "P107-11 reject host substitution 3" {
+    assert(rebuild107_host_boundary_valid(false,false,false,true,false)=false)
+}
+
+example "P107-12 reject host substitution 4" {
+    assert(rebuild107_host_boundary_valid(false,false,false,false,true)=false)
+}
+
+example "P107-13 host transport and observation only" {
+    assert(rebuild107_host_boundary_valid(false,false,false,false,false)=true)
+}
+
+example "P107-14 complete rebuild107_sources_valid" {
+    assert(rebuild107_sources_valid(true,true,true,true,true,true,true,true)=true)
+}
+
+example "P107-15 reject missing bundle105_admitted" {
+    assert(rebuild107_sources_valid(false,true,true,true,true,true,true,true)=false)
+}
+
+example "P107-16 reject missing exact_member_bytes" {
+    assert(rebuild107_sources_valid(true,false,true,true,true,true,true,true)=false)
+}
+
+example "P107-17 reject missing exact_root" {
+    assert(rebuild107_sources_valid(true,true,false,true,true,true,true,true)=false)
+}
+
+example "P107-18 reject missing exact_include_profile" {
+    assert(rebuild107_sources_valid(true,true,true,false,true,true,true,true)=false)
+}
+
+example "P107-19 reject missing source_generation_current" {
+    assert(rebuild107_sources_valid(true,true,true,true,false,true,true,true)=false)
+}
+
+example "P107-20 reject missing preprocessor_artifact_exact_current" {
+    assert(rebuild107_sources_valid(true,true,true,true,true,false,true,true)=false)
+}
+
+example "P107-21 reject missing guest_preprocessing_admitted" {
+    assert(rebuild107_sources_valid(true,true,true,true,true,true,false,true)=false)
+}
+
+example "P107-22 reject missing effective_source_exact" {
+    assert(rebuild107_sources_valid(true,true,true,true,true,true,true,false)=false)
+}
+
+example "P107-23 complete rebuild107_output_valid" {
+    assert(rebuild107_output_valid(true,true,true,true,true,true,true,true,true,true,true,true)=true)
+}
+
+example "P107-24 reject missing exact_producer_admitted" {
+    assert(rebuild107_output_valid(false,true,true,true,true,true,true,true,true,true,true,true)=false)
+}
+
+example "P107-25 reject missing sources_admitted" {
+    assert(rebuild107_output_valid(true,false,true,true,true,true,true,true,true,true,true,true)=false)
+}
+
+example "P107-26 reject missing typed_application_profile_admitted" {
+    assert(rebuild107_output_valid(true,true,false,true,true,true,true,true,true,true,true,true)=false)
+}
+
+example "P107-27 reject missing aom103_valid" {
+    assert(rebuild107_output_valid(true,true,true,false,true,true,true,true,true,true,true,true)=false)
+}
+
+example "P107-28 reject missing linker_artifact_exact_current" {
+    assert(rebuild107_output_valid(true,true,true,true,false,true,true,true,true,true,true,true)=false)
+}
+
+example "P107-29 reject missing guest_link104_publishable" {
+    assert(rebuild107_output_valid(true,true,true,true,true,false,true,true,true,true,true,true)=false)
+}
+
+example "P107-30 reject missing linked_bytes_complete" {
+    assert(rebuild107_output_valid(true,true,true,true,true,true,false,true,true,true,true,true)=false)
+}
+
+example "P107-31 reject missing linked_geometry_valid" {
+    assert(rebuild107_output_valid(true,true,true,true,true,true,true,false,true,true,true,true)=false)
+}
+
+example "P107-32 reject missing output_sealed" {
+    assert(rebuild107_output_valid(true,true,true,true,true,true,true,true,false,true,true,true)=false)
+}
+
+example "P107-33 reject missing output_generation_current" {
+    assert(rebuild107_output_valid(true,true,true,true,true,true,true,true,true,false,true,true)=false)
+}
+
+example "P107-34 reject missing permissions_nonamplifying" {
+    assert(rebuild107_output_valid(true,true,true,true,true,true,true,true,true,true,false,true)=false)
+}
+
+example "P107-35 reject missing host_boundary_admitted" {
+    assert(rebuild107_output_valid(true,true,true,true,true,true,true,true,true,true,true,false)=false)
+}
+
+example "P107-36 complete rebuild107_run_valid" {
+    assert(rebuild107_run_valid(true,true,true,true,true,true)=true)
+}
+
+example "P107-37 reject missing rebuild_output_admitted" {
+    assert(rebuild107_run_valid(false,true,true,true,true,true)=false)
+}
+
+example "P107-38 reject missing exact_artifact_key" {
+    assert(rebuild107_run_valid(true,false,true,true,true,true)=false)
+}
+
+example "P107-39 reject missing explicit_application_execution" {
+    assert(rebuild107_run_valid(true,true,false,true,true,true)=false)
+}
+
+example "P107-40 reject missing ordinary_execution_admitted" {
+    assert(rebuild107_run_valid(true,true,true,false,true,true)=false)
+}
+
+example "P107-41 reject missing physical_placement_admitted" {
+    assert(rebuild107_run_valid(true,true,true,true,false,true)=false)
+}
+
+example "P107-42 reject missing virtual_layout_admitted" {
+    assert(rebuild107_run_valid(true,true,true,true,true,false)=false)
+}
+
+example "P107-43 complete rebuild107_http_integration_valid" {
+    assert(rebuild107_http_integration_valid(true,true,true,true,true,true,true,true)=true)
+}
+
+example "P107-44 reject missing rebuilt_socket_service_admitted" {
+    assert(rebuild107_http_integration_valid(false,true,true,true,true,true,true,true)=false)
+}
+
+example "P107-45 reject missing rebuilt_http_service_admitted" {
+    assert(rebuild107_http_integration_valid(true,false,true,true,true,true,true,true)=false)
+}
+
+example "P107-46 reject missing exact_rebuilt_artifacts_booted" {
+    assert(rebuild107_http_integration_valid(true,true,false,true,true,true,true,true)=false)
+}
+
+example "P107-47 reject missing socket_contract_preserved" {
+    assert(rebuild107_http_integration_valid(true,true,true,false,true,true,true,true)=false)
+}
+
+example "P107-48 reject missing http_contract_preserved" {
+    assert(rebuild107_http_integration_valid(true,true,true,true,false,true,true,true)=false)
+}
+
+example "P107-49 reject missing http_has_no_nic_authority" {
+    assert(rebuild107_http_integration_valid(true,true,true,true,true,false,true,true)=false)
+}
+
+example "P107-50 reject missing exact_alive_request" {
+    assert(rebuild107_http_integration_valid(true,true,true,true,true,true,false,true)=false)
+}
+
+example "P107-51 reject missing exact_alive_response" {
+    assert(rebuild107_http_integration_valid(true,true,true,true,true,true,true,false)=false)
+}
+
+example "P107-52 failed stage publishes nothing" {
+    assert(rebuild107_failed_build_safe(true,false,false)=true)
+}
+
+example "P107-53 failed stage publishes output" {
+    assert(rebuild107_failed_build_safe(true,true,false)=false)
+}
+
+example "P107-54 failed output executes" {
+    assert(rebuild107_failed_build_safe(true,false,true)=false)
+}
+
+example "P107-55 rebuild107_names_create_execution_authority" {
+    assert(rebuild107_names_create_execution_authority()=false)
+}
+
+example "P107-56 rebuild107_pointer_profile_grants_nic_authority" {
+    assert(rebuild107_pointer_profile_grants_nic_authority()=false)
+}
+
+example "P107-57 inherited pointer width" {
+    assert(ac2102_size_pointer()=bvconst(8,16))
+}
+
+example "P107-58 linking does not authorize execution" {
+    assert(aom_successful_link_creates_execution_authority()=false)
+}
+
+example "P107-59 ordinary spawn admission still required" {
+    assert(aom_execution_admitted(true,true,false)=false)
+}
+
+example "P107-60 HTTP still has exact sixteen byte body" {
+    assert(http94g_body_length(true)=bvconst(16,16))
+}
+
