@@ -50,42 +50,35 @@ pub fn build_ankad_code_with_output_size(
     child_code_vaddr: u64,
     output_size: u64,
 ) -> Vec<u8> {
-    assert!(compiler_len <= 0x1FFFF,
-        "compiler_len {compiler_len:#x} exceeds MOVI range (max 0x1FFFF)");
-    assert!(child_code_vaddr % 2 == 0,
-        "child_code_vaddr {child_code_vaddr:#x} must be even (halved for MOVI)");
-    assert!((child_code_vaddr / 2) <= 0x1FFFF,
-        "child_code_vaddr/2 {:#x} exceeds MOVI range (max 0x1FFFF)",
-        child_code_vaddr / 2);
-
-    // Layout-derived constants for assembly.  All values are loaded
-    // via MOVI(half) + ADD(R,R,R) so half must fit in 18-bit signed.
-    const HALF_LAYOUT_OUT: i32 = (LAYOUT_OUT / 2) as i32;
-    const TRAP_SIZE: u64 = PLACEMENT_PAGE_SIZE;
-    assert!(output_size != 0 && output_size & (PLACEMENT_PAGE_SIZE - 1) == 0,
-        "compiler output arena must be non-zero and page-aligned");
-    let layout_stack = (LAYOUT_OUT as u64)
-        .checked_add(output_size)
+    let layout_stack = (LAYOUT_OUT as u64).checked_add(output_size)
         .expect("compiler output virtual range overflow");
-    let trap_vaddr = layout_stack
-        .checked_add(STACK_SIZE as u64)
+    let trap_vaddr = layout_stack.checked_add(STACK_SIZE as u64)
         .expect("compiler stack virtual range overflow");
-    let trap_end = trap_vaddr
-        .checked_add(TRAP_SIZE)
+    let trap_end = trap_vaddr.checked_add(PLACEMENT_PAGE_SIZE)
         .expect("compiler trap virtual range overflow");
-    if child_code_vaddr != 0 {
-        assert!(trap_end <= child_code_vaddr,
-            "compiler output/stack/trap layout overlaps child compiler code");
-    }
-    assert!(output_size % 2 == 0);
-    assert!(layout_stack % 2 == 0);
-    assert!(trap_vaddr % 2 == 0);
-    assert!((output_size / 2) <= 0x1FFFF);
-    assert!((layout_stack / 2) <= 0x1FFFF);
-    assert!((trap_vaddr / 2) <= 0x1FFFF);
-    let half_output_size = (output_size / 2) as i32;
-    let half_layout_stack = (layout_stack / 2) as i32;
-    let half_trap = (trap_vaddr / 2) as i32;
+    assert!(child_code_vaddr % 2 == 0);
+    assert!(child_code_vaddr == 0 || trap_end <= child_code_vaddr,
+        "compiler output/stack/trap layout overlaps child compiler code");
+    build_ankad_code_with_layout(compiler_len, SUPERVISOR_COMPILER_VADDR,
+        child_code_vaddr, output_size, layout_stack, trap_vaddr)
+}
+
+/// Emit the same compiler protocol with independently allocated parent/child
+/// virtual addresses. Callers reserve these extents through the placement
+/// manager before publishing grants or mappings.
+pub(crate) fn build_ankad_code_with_layout(
+    compiler_len: usize,
+    parent_compiler_vaddr: u64,
+    child_code_vaddr: u64,
+    output_size: u64,
+    layout_stack: u64,
+    trap_vaddr: u64,
+) -> Vec<u8> {
+    assert!(compiler_len <= 0x1FFFF, "compiler image exceeds SYS_SPAWN emitter bound");
+    assert!(output_size != 0 && output_size % PLACEMENT_PAGE_SIZE == 0);
+    assert!(layout_stack % PLACEMENT_PAGE_SIZE == 0);
+    assert!(trap_vaddr % PLACEMENT_PAGE_SIZE == 0);
+    const HALF_LAYOUT_OUT: i32 = (LAYOUT_OUT / 2) as i32;
 
     let mut asm = Asm64::new();
 
@@ -111,8 +104,7 @@ pub fn build_ankad_code_with_output_size(
     asm.add(R3, R3, R3);             // R3 = LAYOUT_OUT
     asm.st(R3, R4, 40);              // parent_vaddr
     asm.st(R9, R4, 48);              // offset = 0
-    asm.movi(R3, half_output_size);
-    asm.add(R3, R3, R3);             // R3 = OUTPUT_SIZE
+    emit_layout_value(&mut asm, R3, output_size);
     asm.st(R3, R4, 56);              // size = OUTPUT_SIZE
     asm.movi(R3, 0x13);
     asm.st(R3, R4, 64);              // perms = RWS
@@ -155,31 +147,25 @@ pub fn build_ankad_code_with_output_size(
     asm.st(R3, R6, 80);              // child_vaddr
     asm.st(R3, R6, 88);              // parent_vaddr
     asm.st(R9, R6, 96);              // offset = 0
-    asm.movi(R3, half_output_size);
-    asm.add(R3, R3, R3);             // R3 = OUTPUT_SIZE
+    emit_layout_value(&mut asm, R3, output_size);
     asm.st(R3, R6, 104);             // size = OUTPUT_SIZE
     asm.st(R9, R6, 112);             // reserved = 0
 
     // ── Phase 2g: SpawnLayout ──
     // [code_vaddr, stack_vaddr, stack_size, trap_vaddr, reserved]
-    let half_code = (child_code_vaddr / 2) as i32;
-    asm.movi(R3, half_code);
-    asm.add(R3, R3, R3);             // R3 = child_code_vaddr
+    emit_layout_value(&mut asm, R3, child_code_vaddr);
     asm.st(R3, R8, 0);               // code_vaddr
-    asm.movi(R3, half_layout_stack);
-    asm.add(R3, R3, R3);             // R3 = LAYOUT_STACK
+    emit_layout_value(&mut asm, R3, layout_stack);
     asm.st(R3, R8, 8);               // stack_vaddr
     asm.movi(R3, STACK_SIZE as i32);
     asm.st(R3, R8, 16);              // stack_size
-    asm.movi(R3, half_trap);
-    asm.add(R3, R3, R3);             // R3 = LAYOUT_STACK + STACK_SIZE
+    emit_layout_value(&mut asm, R3, trap_vaddr);
     asm.st(R3, R8, 24);              // trap_vaddr
     asm.st(R9, R8, 32);              // reserved = 0
 
     // ── Phase 3: SYS_SPAWN(R1-R8) ──
-    // R1 = SUPERVISOR_COMPILER_VADDR (parent mapping), always 0x30000
-    asm.movi(R1, 0x18000);
-    asm.add(R1, R1, R1);             // R1 = 0x30000
+    // SYS_SPAWN consumes the compiler mapping in the parent address space.
+    emit_layout_value(&mut asm, R1, parent_compiler_vaddr);
     asm.movi(R2, compiler_len as i32); // R2 = code_size (fits MOVI)
     asm.movi(R3, 0);                 // R3 = lit_start = 0
     asm.movi(R5, 3);                 // R5 = grant_count
@@ -203,4 +189,64 @@ pub fn build_ankad_code_with_output_size(
     asm.trap(0);
 
     asm.to_bytes()
+}
+
+// MOVI has an 18-bit signed immediate. Layout addresses are u64 and must not
+// be truncated when output or code grows past the old doubled-MOVI range.
+fn emit_layout_value(asm: &mut Asm64, register: u8, value: u64) {
+    let first = if value == 0 { 0 } else { (63 - value.leading_zeros()) / 16 };
+    asm.movi(register, ((value >> (first * 16)) & 0xffff) as i32);
+    for chunk in (0..first).rev() {
+        for _ in 0..16 { asm.add(register, register, register); }
+        let part = ((value >> (chunk * 16)) & 0xffff) as i32;
+        if part != 0 { asm.addi(register, register, part); }
+    }
+}
+
+#[cfg(test)]
+mod layout_emission_tests {
+    use super::*;
+    use crate::anka64::core::{Anka64Core, StepResult};
+    use crate::anka64::fabric::Fabric;
+    use crate::anka64::state::{AgentId, ObjectKind, Permissions};
+
+    #[test]
+    fn relocated_supervisor_emits_exact_grants_and_spawn_layout() {
+        let mut bytes = build_ankad_code_with_layout(
+            114_688, 0x52000, 0x52000, 0x40000, 0x6e000, 0x72000);
+        // Stop at SYS_SPAWN after descriptor construction; execute actual ISA
+        // instructions rather than duplicating the immediate encoder in a test.
+        for word in bytes.chunks_exact_mut(4) {
+            if decode(u32::from_le_bytes(word.try_into().unwrap())).desc.name == "trap" {
+                let mut stop = Asm64::new(); stop.halt();
+                word.copy_from_slice(&stop.to_bytes());
+                break;
+            }
+        }
+        let mut fabric = Fabric::new(0x10000);
+        let text = fabric.alloc_object("ankad-test", 0x2000, ObjectKind::Memory);
+        let stack = fabric.alloc_object("stack-test", 0x1000, ObjectKind::Memory);
+        assert!(fabric.place_object(text, 0));
+        assert!(fabric.place_object(stack, 0x3000));
+        assert!(fabric.initialize_object(text, 0, &bytes));
+        assert!(fabric.seal_object(text));
+        let domain = fabric.create_domain();
+        fabric.grant(domain, text, 0, 0x2000, Permissions::RX);
+        fabric.grant(domain, stack, 0, 0x1000, Permissions::RW);
+        let mut core = Anka64Core::new(AgentId(0), domain);
+        core.address_map.add(0, 0x2000, text);
+        core.address_map.add(0x8000, 0x1000, stack);
+        core.r[SP as usize] = 0x9000;
+        assert!(matches!(core.run(&mut fabric, 1000), StepResult::Halted));
+        let word = |vaddr: u64| u64::from_le_bytes(
+            fabric.read_physical(0x3000 + vaddr - 0x8000, 8).try_into().unwrap());
+        assert_eq!(core.r[R1 as usize], 0x52000);
+        assert_eq!(core.r[R2 as usize], 114_688);
+        assert_eq!(word(0x8d00 + 56), 0x40000); // output grant size
+        assert_eq!(word(0x8d00 + 64), 0x13); // RWS remains unchanged
+        assert_eq!(word(0x8e00 + 104), 0x40000); // output map size
+        assert_eq!(word(0x8f00), 0x52000); // child code
+        assert_eq!(word(0x8f00 + 8), 0x6e000); // child stack
+        assert_eq!(word(0x8f00 + 24), 0x72000); // child trap
+    }
 }

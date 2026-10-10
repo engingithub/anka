@@ -1,0 +1,111 @@
+// =============================================================================
+// Anka64 Phase 10.6 — AC2 Self-Host Language Hostile Witnesses
+// =============================================================================
+// Every example in this file is intentionally false and must be disproved.
+// =============================================================================
+
+import "anka106_ac2_self_host_language.kleis"
+
+example "FALSE-AC2106L-1 self-host source may omit binary bitwise AND" {
+    assert(ac2106_expression_profile_present(true,true,true,true,true,true,true,true,true,true,true,false,true,true)=true)
+}
+
+example "FALSE-AC2106L-2 self-host source may omit shift operators" {
+    assert(ac2106_expression_profile_present(true,true,true,true,true,false,false,true,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-AC2106L-3 self-host source may omit while" {
+    assert(ac2106_statement_profile_present(true,true,true,true,true,true,false,true,true)=true)
+}
+
+example "FALSE-AC2106L-4 declarations and statements need not interleave" {
+    assert(ac2106_statement_profile_present(true,false,true,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-AC2106L-5 zero may be true in a bootstrap condition" {
+    assert(ac2106_condition_semantics(false,true)=true)
+}
+
+example "FALSE-AC2106L-6 true if may execute both branches" {
+    assert(ac2106_if_semantics(true,true,true)=true)
+}
+
+example "FALSE-AC2106L-7 false if may execute then branch" {
+    assert(ac2106_if_semantics(false,true,false)=true)
+}
+
+example "FALSE-AC2106L-8 while body may execute when condition is false" {
+    assert(ac2106_while_step_semantics(false,true,false)=true)
+}
+
+example "FALSE-AC2106L-9 while body need not reevaluate its condition" {
+    assert(ac2106_while_step_semantics(true,true,false)=true)
+}
+
+example "FALSE-AC2106L-10 return may fall through to following statement" {
+    assert(ac2106_return_semantics(true,true,true)=true)
+}
+
+example "FALSE-AC2106L-11 arbitrary non-lvalue may receive assignment" {
+    assert(ac2106_assignment_target_valid(false,false,true)=true)
+}
+
+example "FALSE-AC2106L-12 bootstrap raw address syntax creates authority" {
+    assert(ac2106_bootstrap_word_deref_valid(true,true,true,true,true)=true)
+}
+
+example "FALSE-AC2106L-13 raw word dereference may bypass Fabric authorization" {
+    assert(ac2106_bootstrap_word_deref_valid(true,true,true,false,false)=true)
+}
+
+example "FALSE-AC2106L-14 raw address syntax itself is a capability" {
+    assert(ac2106_raw_address_syntax_creates_authority()=true)
+}
+
+example "FALSE-AC2106L-15 addition may bind weaker than shift" {
+    assert(ac2106_addition_binds_no_tighter_than_shift()=true)
+}
+
+example "FALSE-AC2106L-16 equality may bind weaker than bitwise AND" {
+    assert(ac2106_equality_binds_no_tighter_than_bitand()=true)
+}
+
+example "FALSE-AC2106L-17 for statement is already earned" {
+    assert(ac2106_for_statement_supported()=true)
+}
+
+example "FALSE-AC2106L-18 break statement is already earned" {
+    assert(ac2106_break_statement_supported()=true)
+}
+
+example "FALSE-AC2106L-19 division operator is already earned" {
+    assert(ac2106_divide_operator_supported()=true)
+}
+
+example "FALSE-AC2106L-20 logical AND is already earned" {
+    assert(ac2106_logical_and_operator_supported()=true)
+}
+
+example "FALSE-AC2106L-21 greater-than operator is already earned" {
+    assert(ac2106_greater_operator_supported()=true)
+}
+
+example "FALSE-AC2106L-22 changed expression semantics may be used on second self-host edge" {
+    assert(ac2106_self_host_language_edge_valid(false,true,true,true,true,true)=true)
+}
+
+example "FALSE-AC2106L-23 changed statement semantics may be used on second self-host edge" {
+    assert(ac2106_self_host_language_edge_valid(true,false,true,true,true,true)=true)
+}
+
+example "FALSE-AC2106L-24 changed precedence may still close self-host edge" {
+    assert(ac2106_self_host_language_edge_valid(true,true,true,false,true,true)=true)
+}
+
+example "FALSE-AC2106L-25 bootstrap word-deref rule may drift between generations" {
+    assert(ac2106_self_host_language_edge_valid(true,true,true,true,false,true)=true)
+}
+
+example "FALSE-AC2106L-26 stale source generation may use the self-host language edge" {
+    assert(ac2106_self_host_language_edge_valid(true,true,true,true,true,false)=true)
+}

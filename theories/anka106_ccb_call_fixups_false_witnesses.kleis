@@ -1,0 +1,10 @@
+import "anka106_ccb_call_fixups.kleis"
+example "FALSE-CCB106F-1 full table accepts another forward call" {
+    assert(ccb106_call_admitted(bvconst(0,8),bvconst(1,8),bvconst(512,64)))
+}
+example "FALSE-CCB106F-2 direct patch ignores arity" {
+    assert(ccb106_direct_patch(bvconst(1,8),bvconst(0,8)))
+}
+example "FALSE-CCB106F-3 unknown target can be patched directly" {
+    assert(ccb106_direct_patch(bvconst(0,8),bvconst(1,8)))
+}

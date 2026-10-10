@@ -9,7 +9,7 @@
 //! that sealed output.  Importing them into the development registry is a
 //! separate step and still creates no execution authority.
 
-use super::ankad::{build_ankad_code_with_output_size, SUPERVISOR_COMPILER_VADDR};
+use super::ankad::{build_ankad_code_with_layout};
 use super::fabric::Fabric;
 use super::cc;
 use super::guest_compiler::{
@@ -17,46 +17,25 @@ use super::guest_compiler::{
     LAYOUT_OUT, LAYOUT_SRC, LAYOUT_WS, OUTPUT_SIZE, SOURCE_SIZE, STACK_SIZE,
     WS_FUNC_COUNT, WS_LIT_POS, WS_MODE, WS_OUT_POS, WS_OUTPUT_LIMIT, WS_SIZE,
 };
-#[cfg(test)]
 use super::guest_compiler::extended_compiler_source;
 use super::os::{BootError, BootGrant, BootImage, BootInfo, BootMap, Kernel};
-use super::placement::{PhysicalPlacementManager, PlacementError, PLACEMENT_PAGE_SIZE};
+use super::placement::{PhysicalPlacementManager, PlacementError, VirtualLayoutBuilder, PLACEMENT_PAGE_SIZE};
 use super::state::{ObjectId, ObjectKind, ObjectState, Permissions};
 use super::isa::R10;
-
-/// CC_B's relocatable code base inside the compiler child.
-///
-/// The compiler uses PC-relative calls/branches while its data ABI remains at
-/// the canonical source/workspace/output virtual addresses.
-pub const DEVELOPMENT_CCB_CODE_VADDR: u64 = 0x30000;
 
 const DEVELOPMENT_COMPILER_RAM: usize = 0x1000000;
 const DEVELOPMENT_PM_BASE: u64 = 0x10000;
 const DEVELOPMENT_PM_SIZE: u64 = 0x700000;
 const DEVELOPMENT_KERNEL_PHYS_BASE: u64 = 0x800000;
 const ANKAD_OBJECT_SIZE: u64 = 0x2000;
-const ANKAD_STACK_VADDR: u64 = 0x50000;
 const ANKAD_STACK_SIZE: u64 = 0x4000;
-const ANKAD_TRAP_VADDR: u64 = 0x54000;
 const CHILD_TRAP_SIZE: u64 = PLACEMENT_PAGE_SIZE;
-/// Largest page-aligned compiler output arena that fits below the fixed
-/// 0x30000 compiler-code base while still leaving room for child stack+trap.
-/// This is geometry, not a source-size estimate.  Physical placement remains
-/// owned by PhysicalPlacementManager.
-pub(crate) const DEVELOPMENT_COMPILER_OUTPUT_SIZE: u64 =
-    DEVELOPMENT_CCB_CODE_VADDR
-        - LAYOUT_OUT as u64
-        - STACK_SIZE as u64
-        - CHILD_TRAP_SIZE;
+const COMPILER_VIRTUAL_LIMIT: u64 = 0x1000000;
+/// Bounded capacity policy for the extended bootstrap, independent of code
+/// placement. Both processes reserve their suffixes from the actual sizes.
+pub(crate) const DEVELOPMENT_COMPILER_OUTPUT_SIZE: u64 = 0x40000;
 const _: () = assert!(DEVELOPMENT_COMPILER_OUTPUT_SIZE >= OUTPUT_SIZE as u64);
-const _: () = assert!(DEVELOPMENT_COMPILER_OUTPUT_SIZE & (PLACEMENT_PAGE_SIZE - 1) == 0);
-const _: () = assert!(
-    LAYOUT_OUT as u64
-        + DEVELOPMENT_COMPILER_OUTPUT_SIZE
-        + STACK_SIZE as u64
-        + CHILD_TRAP_SIZE
-        == DEVELOPMENT_CCB_CODE_VADDR
-);
+const _: () = assert!(DEVELOPMENT_COMPILER_OUTPUT_SIZE % PLACEMENT_PAGE_SIZE == 0);
 const COMPILER_QUANTUM: usize = 5_000_000;
 const COMPILER_MAX_ROUNDS: usize = 200;
 
@@ -114,24 +93,23 @@ pub fn compile_c_with_ccb(
 ) -> Result<CompiledCImage, DevelopmentCompileError> {
     compile_c_with_compiler_image(
         ccb_image,
-        DEVELOPMENT_CCB_CODE_VADDR,
+        false,
         source,
         OUTPUT_SIZE as u64,
     )
 }
 
-/// Compile through the Phase-10 bootstrap CC_B with the largest arena that
-/// fits below the fixed compiler-code base.  This is intentionally separate
+/// Compile through the Phase-10 bootstrap CC_B with a bounded larger arena
+/// and size-driven virtual placement.  This is intentionally separate
 /// from `compile_c_with_ccb`: the ordinary development shell retains the
 /// historical 80 KiB CC_B artifact geometry.
-#[cfg(test)]
-pub(crate) fn compile_c_with_extended_ccb(
+pub fn compile_c_with_extended_ccb(
     ccb_image: &[u8],
     source: &[u8],
 ) -> Result<CompiledCImage, DevelopmentCompileError> {
     compile_c_with_compiler_image(
         ccb_image,
-        DEVELOPMENT_CCB_CODE_VADDR,
+        false,
         source,
         DEVELOPMENT_COMPILER_OUTPUT_SIZE,
     )
@@ -150,7 +128,7 @@ pub fn compile_c_with_ankacc2_stage1(
 ) -> Result<CompiledCImage, DevelopmentCompileError> {
     compile_c_with_compiler_image(
         compiler_image,
-        DEVELOPMENT_CCB_CODE_VADDR,
+        false,
         source,
         OUTPUT_SIZE as u64,
     )
@@ -168,7 +146,7 @@ pub fn compile_c_with_ankacc2_stage2(
 ) -> Result<CompiledCImage, DevelopmentCompileError> {
     compile_c_with_compiler_image(
         compiler_image,
-        DEVELOPMENT_CCB_CODE_VADDR,
+        false,
         source,
         OUTPUT_SIZE as u64,
     )
@@ -188,7 +166,7 @@ pub fn compile_c_to_aom_stage3(
 ) -> Result<CompiledAomModule, DevelopmentCompileError> {
     let raw = compile_c_with_compiler_image(
         compiler_image,
-        DEVELOPMENT_CCB_CODE_VADDR,
+        false,
         source,
         DEVELOPMENT_COMPILER_OUTPUT_SIZE,
     )?;
@@ -210,7 +188,7 @@ pub fn bootstrap_development_ccb() -> Result<Vec<u8>, DevelopmentCompileError> {
     let canonical_source = canonical_compiler_source();
     let ccb = compile_c_with_compiler_image(
         &cca_image,
-        0,
+        true,
         canonical_source.as_bytes(),
         OUTPUT_SIZE as u64,
     )?;
@@ -226,14 +204,13 @@ pub fn bootstrap_development_ccb() -> Result<Vec<u8>, DevelopmentCompileError> {
 /// Bootstrap the output-limit-aware CC_B used only to build Phase 10.3's
 /// larger AnkaCC2 compiler image.  The ordinary development-shell CC_B above
 /// remains the exact Phase 9.3h fixed point and keeps its 80 KiB ABI.
-#[cfg(test)]
-pub(crate) fn bootstrap_extended_ccb() -> Result<Vec<u8>, DevelopmentCompileError> {
+pub fn bootstrap_extended_ccb() -> Result<Vec<u8>, DevelopmentCompileError> {
     let compiler_prog = build_6b4_compiler();
     let cca_image = cc::compile(&compiler_prog).to_bytes();
     let source = extended_compiler_source();
     let ccb = compile_c_with_compiler_image(
         &cca_image,
-        0,
+        true,
         source.as_bytes(),
         DEVELOPMENT_COMPILER_OUTPUT_SIZE,
     )?;
@@ -245,7 +222,7 @@ pub(crate) fn bootstrap_extended_ccb() -> Result<Vec<u8>, DevelopmentCompileErro
 
 fn compile_c_with_compiler_image(
     compiler_image: &[u8],
-    compiler_code_vaddr: u64,
+    seed_at_zero: bool,
     source: &[u8],
     output_limit: u64,
 ) -> Result<CompiledCImage, DevelopmentCompileError> {
@@ -260,11 +237,11 @@ fn compile_c_with_compiler_image(
     }
     if output_limit < OUTPUT_SIZE as u64
         || output_limit & (PLACEMENT_PAGE_SIZE - 1) != 0
-        || LAYOUT_OUT as u64 + output_limit + STACK_SIZE as u64 + CHILD_TRAP_SIZE
-            > DEVELOPMENT_CCB_CODE_VADDR
     {
         return Err(DevelopmentCompileError::InvalidOutputGeometry);
     }
+
+    let layout = compiler_virtual_layout(compiler_image.len(), seed_at_zero, output_limit)?;
 
     let mut fabric = Fabric::new(DEVELOPMENT_COMPILER_RAM);
     let mut placement = PhysicalPlacementManager::new(
@@ -347,10 +324,9 @@ fn compile_c_with_compiler_image(
         return Err(DevelopmentCompileError::InitializationRejected);
     }
 
-    let ankad_code = build_ankad_code_with_output_size(
-        compiler_image.len(),
-        compiler_code_vaddr,
-        output_limit,
+    let ankad_code = build_ankad_code_with_layout(
+        compiler_image.len(), layout.parent_code, layout.child_code,
+        output_limit, layout.child_stack, layout.child_trap,
     );
     if ankad_code.len() as u64 > ANKAD_OBJECT_SIZE
         || !fabric.initialize_object(ankad_obj, 0, &ankad_code)
@@ -413,16 +389,16 @@ fn compile_c_with_compiler_image(
                 obj_offset: 0,
             },
             BootMap {
-                vaddr: SUPERVISOR_COMPILER_VADDR,
+                vaddr: layout.parent_code,
                 size: compiler_image.len() as u64,
                 obj: compiler_obj,
                 obj_offset: 0,
             },
         ],
         code_vaddr: 0,
-        stack_vaddr: ANKAD_STACK_VADDR,
+        stack_vaddr: layout.parent_stack,
         stack_size: ANKAD_STACK_SIZE,
-        trap_vaddr: ANKAD_TRAP_VADDR,
+        trap_vaddr: layout.parent_trap,
     };
 
     let output_phys = placement
@@ -527,4 +503,74 @@ fn allocate_placed(
         .allocate_and_place_object(fabric, object)
         .map_err(DevelopmentCompileError::Placement)?;
     Ok(object)
+}
+
+#[derive(Debug)]
+struct CompilerVirtualLayout {
+    parent_code: u64,
+    parent_stack: u64,
+    parent_trap: u64,
+    child_code: u64,
+    child_stack: u64,
+    child_trap: u64,
+}
+
+fn compiler_virtual_layout(
+    compiler_len: usize, seed_at_zero: bool, output_size: u64,
+) -> Result<CompilerVirtualLayout, DevelopmentCompileError> {
+    let output_end = (LAYOUT_OUT as u64).checked_add(output_size)
+        .ok_or(DevelopmentCompileError::InvalidOutputGeometry)?;
+    // The occupied ABI prefix includes source, workspace, and the exact output
+    // extent. Reserve every suffix through the existing virtual manager.
+    let mut parent = VirtualLayoutBuilder::after_image(0, output_end, COMPILER_VIRTUAL_LIMIT)
+        .map_err(DevelopmentCompileError::Placement)?;
+    let parent_code = parent.reserve(compiler_len as u64)
+        .map_err(DevelopmentCompileError::Placement)?.base;
+    let parent_stack = parent.reserve(ANKAD_STACK_SIZE)
+        .map_err(DevelopmentCompileError::Placement)?.base;
+    let parent_trap = parent.reserve(CHILD_TRAP_SIZE)
+        .map_err(DevelopmentCompileError::Placement)?.base;
+    let mut child = VirtualLayoutBuilder::after_image(0, output_end, COMPILER_VIRTUAL_LIMIT)
+        .map_err(DevelopmentCompileError::Placement)?;
+    // CC_A uses absolute code addresses and stays below the fixed source ABI.
+    // CC_B/CC2 use relative control flow and can occupy an allocated suffix.
+    let child_code = if seed_at_zero {
+        if compiler_len as u64 > LAYOUT_SRC as u64 {
+            return Err(DevelopmentCompileError::InvalidOutputGeometry);
+        }
+        0
+    } else {
+        child.reserve(compiler_len as u64)
+            .map_err(DevelopmentCompileError::Placement)?.base
+    };
+    let child_stack = child.reserve(STACK_SIZE as u64)
+        .map_err(DevelopmentCompileError::Placement)?.base;
+    let child_trap = child.reserve(CHILD_TRAP_SIZE)
+        .map_err(DevelopmentCompileError::Placement)?.base;
+    Ok(CompilerVirtualLayout { parent_code, parent_stack, parent_trap,
+        child_code, child_stack, child_trap })
+}
+
+#[cfg(test)]
+mod virtual_layout_tests {
+    use super::*;
+    #[test]
+    fn extended_bootstrap_layout_separates_output_code_stack_and_trap() {
+        let size = DEVELOPMENT_COMPILER_OUTPUT_SIZE;
+        let layout = compiler_virtual_layout(114_688, false, size).unwrap();
+        let output_end = LAYOUT_OUT as u64 + size;
+        assert!(output_end <= layout.parent_code);
+        assert!(layout.parent_code + 114_688 <= layout.parent_stack);
+        assert!(layout.parent_stack + ANKAD_STACK_SIZE <= layout.parent_trap);
+        assert!(output_end <= layout.child_code);
+        assert!(layout.child_code + 114_688 <= layout.child_stack);
+        assert!(layout.child_stack + STACK_SIZE as u64 <= layout.child_trap);
+    }
+    #[test]
+    fn seed_layout_keeps_absolute_code_below_source_and_stack_above_output() {
+        let layout = compiler_virtual_layout(0x6000, true, DEVELOPMENT_COMPILER_OUTPUT_SIZE).unwrap();
+        assert_eq!(layout.child_code, 0);
+        assert!(layout.child_stack >= LAYOUT_OUT as u64 + DEVELOPMENT_COMPILER_OUTPUT_SIZE);
+        assert!(compiler_virtual_layout(LAYOUT_SRC as usize + 1, true, OUTPUT_SIZE as u64).is_err());
+    }
 }

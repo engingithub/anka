@@ -1,0 +1,31 @@
+// Extended CC_B only. No new axioms. Resolve a known function directly;
+// retain bounded deferred fixups for not-yet-defined functions.
+import "anka106_compiler_virtual_layout.kleis"
+define ccb106_queue_after(known : BitVec8, before : BitVec64) : BitVec64 =
+    if known=bvconst(1,8) then before else bvadd(before,bvconst(1,64))
+define ccb106_call_admitted(known : BitVec8, arity_matches : BitVec8, before : BitVec64) =
+    (known=bvconst(1,8) ∧ arity_matches=bvconst(1,8))
+    ∨ (known=bvconst(0,8) ∧ bvult(before,bvconst(512,64)))
+define ccb106_direct_patch(known : BitVec8, arity_matches : BitVec8) =
+    bvand(known,arity_matches)=bvconst(1,8)
+example "CCB106F-1 known call leaves full deferred table unchanged" {
+    assert(ccb106_queue_after(bvconst(1,8),bvconst(512,64))=bvconst(512,64))
+    assert(ccb106_call_admitted(bvconst(1,8),bvconst(1,8),bvconst(512,64)))
+}
+example "CCB106F-2 unknown call consumes one deferred entry" {
+    assert(ccb106_queue_after(bvconst(0,8),bvconst(511,64))=bvconst(512,64))
+    assert(ccb106_call_admitted(bvconst(0,8),bvconst(1,8),bvconst(511,64)))
+}
+example "CCB106F-3 unresolved overflow stays rejected" {
+    assert(¬ccb106_call_admitted(bvconst(0,8),bvconst(1,8),bvconst(512,64)))
+}
+example "CCB106F-4 known arity mismatch stays rejected" {
+    assert(¬ccb106_call_admitted(bvconst(1,8),bvconst(0,8),bvconst(0,64)))
+    assert(¬ccb106_direct_patch(bvconst(1,8),bvconst(0,8)))
+}
+example "CCB106F-5 known calls consume no deferred capacity" {
+    assert(∀ n : BitVec64 . ccb106_queue_after(bvconst(1,8),n)=n)
+}
+example "CCB106F-6 unknown target is never directly patched" {
+    assert(¬ccb106_direct_patch(bvconst(0,8),bvconst(1,8)))
+}

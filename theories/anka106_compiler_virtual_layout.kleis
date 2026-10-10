@@ -1,0 +1,40 @@
+// Phase 10.6 compiler invocation geometry. No new axioms.
+// The fixed source/workspace ABI ends at output base 0x12000.
+// Parent and child are separate address spaces. Each independently reserves
+// compiler mapping, stack and trap after the exact granted output extent.
+import "anka93g2_virtual_layout.kleis"
+
+define cc106_suffix_valid(output_size : BitVec64, code_base : BitVec64,
+    code_size : BitVec64, stack_base : BitVec64, trap_base : BitVec64) =
+    vm93g_range_well_formed(bvconst(73728,64),output_size)
+    ∧ vm93g_range_well_formed(code_base,code_size)
+    ∧ vm93g_range_well_formed(stack_base,bvconst(16384,64))
+    ∧ vm93g_range_well_formed(trap_base,bvconst(4096,64))
+    ∧ bvule(bvadd(bvconst(73728,64),output_size),code_base)
+    ∧ bvule(bvadd(code_base,code_size),stack_base)
+    ∧ bvule(bvadd(stack_base,bvconst(16384,64)),trap_base)
+
+example "CC106VM-1 enlarged arena and relocated compiler fit" {
+    assert(cc106_suffix_valid(bvconst(262144,64),bvconst(335872,64),
+        bvconst(114688,64),bvconst(450560,64),bvconst(466944,64)))
+}
+example "CC106VM-2 old parent mapping cannot survive arena enlargement" {
+    assert(¬cc106_suffix_valid(bvconst(262144,64),bvconst(196608,64),
+        bvconst(114688,64),bvconst(450560,64),bvconst(466944,64)))
+}
+example "CC106VM-3 code and output disjoint" {
+    assert(∀ o : BitVec64 . ∀ c : BitVec64 . ∀ n : BitVec64 . ∀ s : BitVec64 . ∀ t : BitVec64 .
+        cc106_suffix_valid(o,c,n,s,t) → vm93g_disjoint(bvconst(73728,64),o,c,n))
+}
+example "CC106VM-4 code and stack disjoint" {
+    assert(∀ o : BitVec64 . ∀ c : BitVec64 . ∀ n : BitVec64 . ∀ s : BitVec64 . ∀ t : BitVec64 .
+        cc106_suffix_valid(o,c,n,s,t) → vm93g_disjoint(c,n,s,bvconst(16384,64)))
+}
+example "CC106VM-5 stack and trap disjoint" {
+    assert(∀ o : BitVec64 . ∀ c : BitVec64 . ∀ n : BitVec64 . ∀ s : BitVec64 . ∀ t : BitVec64 .
+        cc106_suffix_valid(o,c,n,s,t) → vm93g_disjoint(s,bvconst(16384,64),t,bvconst(4096,64)))
+}
+example "CC106VM-6 stale fixed stack overlapping code rejected" {
+    assert(¬cc106_suffix_valid(bvconst(262144,64),bvconst(335872,64),
+        bvconst(114688,64),bvconst(327680,64),bvconst(466944,64)))
+}

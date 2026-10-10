@@ -690,8 +690,9 @@ OPTIONS:
     --help, -h        Print this help
 
 The shell provides compile, raw-bytecode ingress, artifact inspection,
-and ordinary run/spawn commands.  Type 'help' inside the shell for the
-command list.");
+ordinary run/spawn commands, and Phase-10 toolchain debug commands for
+Stage-3 AOM emission, userspace ankald linking, and exact-byte dumping.
+Type 'help' inside the shell for the command list.");
         return;
     }
 

@@ -6,16 +6,28 @@
 //!   `load bin` -> 9.3h.1 transactional ingress
 //!   `compile`  -> 9.3h.2 CC_B compile-only path
 //!   `run`      -> 9.3h.3 explicit execution authority + SYS_SPAWN/SYS_WAIT
+//!   `aom`      -> 10.3 Stage-3 compile-only AOM emission
+//!   `link`     -> 10.4 ordinary userspace ankald linking
+//!   `dump`     -> host-side observation/export of exact toolchain bytes
 //!
 //! The monitor adds no new authority rule.  Entering a development command is
 //! the explicit host/developer act that provisions the corresponding short-
-//! lived development token; the token is never guest authority.
+//! lived development token; the token is never guest authority.  Phase-10
+//! toolchain artifacts are kept in a separate host-side debug store and are
+//! never registered as executable artifacts merely because they were emitted
+//! or linked.
 
+use std::collections::BTreeMap;
 use std::fmt;
+use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use super::dev_compiler::{bootstrap_development_ccb, DevelopmentCompileError};
+use super::ankald::{run_ankald, AnkaldError};
+use super::dev_compiler::{
+    bootstrap_development_ccb, bootstrap_extended_ccb, compile_c_to_aom_stage3,
+    compile_c_with_ccb, compile_c_with_extended_ccb, CompiledCImage, DevelopmentCompileError,
+};
 use super::dev_runner::{
     run_registered_artifact, DeveloperExecutionAuthority, DevelopmentRunError,
 };
@@ -34,23 +46,32 @@ pub const DEVELOPMENT_SHELL_RAM: usize = 0x0200_0000; // 32 MiB
 pub const DEVELOPMENT_SHELL_PM_BASE: u64 = 0x0001_0000;
 pub const DEVELOPMENT_SHELL_PM_SIZE: u64 = 0x0100_0000; // 16 MiB
 
-const BANNER: &str = "Anka64 Development Shell — phase 9.3h\nType 'help' for commands.";
+const BANNER: &str = "Anka64 Development Shell — phase 10 toolchain debug surface\nType 'help' for commands.";
 
 const HELP: &str = "\
 commands:
-  compile <source.c> [name]   compile host C through self-hosted CC_B
-  load bin <file> [name]     import raw Anka64 bytecode
-  run <name|/logical/path>    run via explicit authority + SYS_SPAWN/SYS_WAIT
-  artifacts                  list registered development artifacts
-  objects                    list persistent Fabric objects
-  placements                 list PM allocations and free extents
-  help                       show this help
-  quit | exit                leave the development shell
+  compile <source.c> [name]       compile host C through canonical CC_B
+  load bin <file> [name]         import raw Anka64 bytecode
+  run <name|/logical/path>        run via explicit authority + SYS_SPAWN/SYS_WAIT
+
+  cc2 bootstrap [name]           build/cache Stage-3 AnkaCC2; optionally retain exact image
+  cc2 import <host-file> [name]  cache a prebuilt code-only Stage-3 image; optionally retain it
+  aom <source.c> [name]          compile one TU through Stage 3 and retain exact AOM bytes
+  link <name> <entry> <aom>...   run userspace ankald over retained AOMs
+  tool-artifacts                 list retained AOM/linked debug artifacts
+  dump <name> <host-file>        write exact retained toolchain bytes to a host file
+
+  artifacts                      list registered executable development artifacts
+  objects                        list persistent Fabric objects
+  placements                     list PM allocations and free extents
+  help                           show this help
+  quit | exit                    leave the development shell
 
 source paths may be rooted at userspace/ or relative to the configured
-userspace root.  A compile command never runs its output.  The run command is
-synchronous in phase 9.3h.4 and returns the SYS_WAIT result; there is therefore
-no separate wait/ps command yet.";
+userspace root.  `aom` and `link` expose already-closed Phase 10.3/10.4
+mechanisms only; they do not register or execute their outputs.  `dump` is an
+observation/export operation for exact-byte comparison during later bootstrap
+work.  The ordinary `compile` command still never runs its output.";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DevelopmentMonitorError {
@@ -58,8 +79,15 @@ pub enum DevelopmentMonitorError {
     UnknownCommand(String),
     Usage(&'static str),
     CannotDeriveArtifactName,
+    ToolArtifactAlreadyRegistered(String),
+    ToolArtifactNotFound(String),
+    ToolArtifactWrongKind(String),
+    HostRead(std::io::ErrorKind),
+    HostWrite(std::io::ErrorKind),
     Placement(PlacementError),
     CompilerBootstrap(DevelopmentCompileError),
+    ToolchainCompile(DevelopmentCompileError),
+    Linker(AnkaldError),
     Artifact(DevelopmentShellError),
     Run(DevelopmentRunError),
 }
@@ -71,8 +99,15 @@ impl fmt::Display for DevelopmentMonitorError {
             Self::UnknownCommand(cmd) => write!(f, "unknown command '{cmd}'"),
             Self::Usage(usage) => write!(f, "usage: {usage}"),
             Self::CannotDeriveArtifactName => write!(f, "cannot derive artifact name from path"),
+            Self::ToolArtifactAlreadyRegistered(name) => write!(f, "toolchain artifact '{name}' already exists"),
+            Self::ToolArtifactNotFound(name) => write!(f, "toolchain artifact '{name}' was not found"),
+            Self::ToolArtifactWrongKind(name) => write!(f, "toolchain artifact '{name}' is not an AOM module"),
+            Self::HostRead(kind) => write!(f, "host read failed: {kind:?}"),
+            Self::HostWrite(kind) => write!(f, "host write failed: {kind:?}"),
             Self::Placement(err) => write!(f, "placement setup failed: {err:?}"),
-            Self::CompilerBootstrap(err) => write!(f, "CC_B bootstrap failed: {err:?}"),
+            Self::CompilerBootstrap(err) => write!(f, "compiler bootstrap failed: {err:?}"),
+            Self::ToolchainCompile(err) => write!(f, "toolchain compile failed: {err:?}"),
+            Self::Linker(err) => write!(f, "ankald failed: {err:?}"),
             Self::Artifact(err) => write!(f, "artifact operation failed: {err:?}"),
             Self::Run(err) => write!(f, "run failed: {err:?}"),
         }
@@ -87,17 +122,40 @@ pub enum DevelopmentCommandResult {
     Quit,
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DevelopmentToolArtifactKind {
+    Compiler,
+    Aom,
+    Linked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DevelopmentToolArtifact {
+    kind: DevelopmentToolArtifactKind,
+    bytes: Vec<u8>,
+    code_size: Option<u64>,
+    lit_start: Option<u64>,
+    entry: Option<u64>,
+}
+
 /// Stateful host-development session.
 ///
-/// The persistent state is exactly the 9.3h artifact machine: Fabric, PM, and
-/// registry.  CC_B is lazily bootstrapped on the first `compile` and cached as
-/// host development bytes; user C still runs through the 9.3h.2 CC_B path.
+/// The executable-development state remains the 9.3h artifact machine:
+/// Fabric, PM, and registry.  Phase-10 compiler/AOM/linked bytes live in a
+/// separate host-side observation store and never become executable authority
+/// merely by appearing there.  Compiler images are lazily bootstrapped and
+/// cached for repeated toolchain-debug commands.
 pub struct DevelopmentShellSession {
     userspace_root: PathBuf,
     fabric: Fabric,
     placement: PhysicalPlacementManager,
     loader: DevelopmentArtifactLoader,
     ccb_image: Option<Vec<u8>>,
+    extended_ccb_image: Option<Vec<u8>>,
+    stage3_image: Option<CompiledCImage>,
+    ankald_image: Option<CompiledCImage>,
+    tool_artifacts: BTreeMap<String, DevelopmentToolArtifact>,
 }
 
 impl DevelopmentShellSession {
@@ -113,6 +171,10 @@ impl DevelopmentShellSession {
             placement,
             loader: DevelopmentArtifactLoader::new(DevelopmentMode::Development),
             ccb_image: None,
+            extended_ccb_image: None,
+            stage3_image: None,
+            ankald_image: None,
+            tool_artifacts: BTreeMap::new(),
         })
     }
 
@@ -136,8 +198,9 @@ impl DevelopmentShellSession {
         self.ccb_image.is_some()
     }
 
-    /// Execute one shell line.  No command in this function bypasses a lower
-    /// 9.3h API: parsing is the only new behavior introduced in 9.3h.4.
+    /// Execute one shell line.  The original commands remain thin 9.3h
+    /// wrappers.  Phase-10 debug commands call the already-closed Stage-3 and
+    /// ankald APIs and retain only host-side observation bytes.
     pub fn execute_line(
         &mut self,
         line: &str,
@@ -159,6 +222,14 @@ impl DevelopmentShellSession {
             "compile" => self.command_compile(&args),
             "load" => self.command_load(&args),
             "run" => self.command_run(&args),
+            "cc2" => self.command_cc2(&args),
+            "aom" => self.command_aom(&args),
+            "link" => self.command_link(&args),
+            "dump" => self.command_dump(&args),
+            "tool-artifacts" => {
+                require_arity(&args, 1, "tool-artifacts")?;
+                Ok(DevelopmentCommandResult::Continue(self.format_tool_artifacts()))
+            }
             "artifacts" => {
                 require_arity(&args, 1, "artifacts")?;
                 Ok(DevelopmentCommandResult::Continue(self.format_artifacts()))
@@ -221,13 +292,7 @@ impl DevelopmentShellSession {
             derive_name(&source)?
         };
 
-        let bootstrapped = self.ccb_image.is_none();
-        if self.ccb_image.is_none() {
-            self.ccb_image = Some(
-                bootstrap_development_ccb()
-                    .map_err(DevelopmentMonitorError::CompilerBootstrap)?,
-            );
-        }
+        let bootstrapped = self.ensure_canonical_ccb()?;
         let ccb = self.ccb_image.as_deref().expect("CC_B initialized above");
         let ingress = DeveloperIngressAuthority::provision();
         let key = self.loader.compile_c_file(
@@ -248,6 +313,241 @@ impl DevelopmentShellSession {
             "{prefix}compiled {} as '{}' -> {} (object={} generation={} code={} bytes)",
             source.display(), name, logical, key.object.0, key.generation.0,
             artifact.code_size,
+        )))
+    }
+
+    fn ensure_canonical_ccb(&mut self) -> Result<bool, DevelopmentMonitorError> {
+        let bootstrapped = self.ccb_image.is_none();
+        if self.ccb_image.is_none() {
+            self.ccb_image = Some(
+                bootstrap_development_ccb()
+                    .map_err(DevelopmentMonitorError::CompilerBootstrap)?,
+            );
+        }
+        Ok(bootstrapped)
+    }
+
+    fn ensure_extended_ccb(&mut self) -> Result<bool, DevelopmentMonitorError> {
+        let bootstrapped = self.extended_ccb_image.is_none();
+        if self.extended_ccb_image.is_none() {
+            self.extended_ccb_image = Some(
+                bootstrap_extended_ccb()
+                    .map_err(DevelopmentMonitorError::CompilerBootstrap)?,
+            );
+        }
+        Ok(bootstrapped)
+    }
+
+    fn ensure_stage3(&mut self) -> Result<bool, DevelopmentMonitorError> {
+        let bootstrapped = self.stage3_image.is_none();
+        if self.stage3_image.is_none() {
+            self.ensure_extended_ccb()?;
+            let ccb = self.extended_ccb_image.as_deref()
+                .expect("extended CC_B initialized above");
+            let source = fs::read(self.userspace_root.join("system/compiler/ankacc2_stage3.c"))
+                .map_err(|err| DevelopmentMonitorError::HostRead(err.kind()))?;
+            self.stage3_image = Some(
+                compile_c_with_extended_ccb(ccb, &source)
+                    .map_err(DevelopmentMonitorError::ToolchainCompile)?,
+            );
+        }
+        Ok(bootstrapped)
+    }
+
+    fn ensure_ankald(&mut self) -> Result<bool, DevelopmentMonitorError> {
+        let bootstrapped = self.ankald_image.is_none();
+        if self.ankald_image.is_none() {
+            self.ensure_canonical_ccb()?;
+            let ccb = self.ccb_image.as_deref().expect("canonical CC_B initialized above");
+            let source = fs::read(self.userspace_root.join("system/compiler/ankald.c"))
+                .map_err(|err| DevelopmentMonitorError::HostRead(err.kind()))?;
+            self.ankald_image = Some(
+                compile_c_with_ccb(ccb, &source)
+                    .map_err(DevelopmentMonitorError::ToolchainCompile)?,
+            );
+        }
+        Ok(bootstrapped)
+    }
+
+    fn command_cc2(
+        &mut self,
+        args: &[String],
+    ) -> Result<DevelopmentCommandResult, DevelopmentMonitorError> {
+        if args.len() >= 2 && args[1] == "bootstrap" {
+            if args.len() != 2 && args.len() != 3 {
+                return Err(DevelopmentMonitorError::Usage("cc2 bootstrap [name]"));
+            }
+            if args.len() == 3 && self.tool_artifacts.contains_key(&args[2]) {
+                return Err(DevelopmentMonitorError::ToolArtifactAlreadyRegistered(args[2].clone()));
+            }
+            let bootstrapped = self.ensure_stage3()?;
+            let image = self.stage3_image.as_ref().expect("Stage 3 initialized above");
+            let retained = if args.len() == 3 {
+                let name = args[2].clone();
+                self.tool_artifacts.insert(name.clone(), DevelopmentToolArtifact {
+                    kind: DevelopmentToolArtifactKind::Compiler,
+                    bytes: image.bytes.clone(),
+                    code_size: Some(image.code_size),
+                    lit_start: Some(image.lit_start),
+                    entry: Some(0),
+                });
+                format!("; retained as '{name}'")
+            } else {
+                String::new()
+            };
+            return Ok(DevelopmentCommandResult::Continue(format!(
+                "{}Stage-3 AnkaCC2 ready (code={} bytes backing={} bytes functions={}){}",
+                if bootstrapped { "bootstrapped extended CC_B; " } else { "" },
+                image.code_size,
+                image.bytes.len(),
+                image.function_count,
+                retained,
+            )));
+        }
+
+        if args.len() >= 2 && args[1] == "import" {
+            if args.len() != 3 && args.len() != 4 {
+                return Err(DevelopmentMonitorError::Usage("cc2 import <host-file> [name]"));
+            }
+            if args.len() == 4 && self.tool_artifacts.contains_key(&args[3]) {
+                return Err(DevelopmentMonitorError::ToolArtifactAlreadyRegistered(args[3].clone()));
+            }
+            let path = PathBuf::from(&args[2]);
+            let bytes = fs::read(&path)
+                .map_err(|err| DevelopmentMonitorError::HostRead(err.kind()))?;
+            if bytes.is_empty() {
+                return Err(DevelopmentMonitorError::ToolchainCompile(
+                    DevelopmentCompileError::EmptyCompilerImage,
+                ));
+            }
+            if bytes.len() > 0x1ffff {
+                return Err(DevelopmentMonitorError::ToolchainCompile(
+                    DevelopmentCompileError::CompilerImageTooLarge,
+                ));
+            }
+            let code_size = bytes.len() as u64;
+            self.stage3_image = Some(CompiledCImage {
+                bytes: bytes.clone(),
+                code_size,
+                lit_start: 0,
+                function_count: 0,
+                process_slots_observed: 0,
+            });
+            let retained = if args.len() == 4 {
+                let name = args[3].clone();
+                self.tool_artifacts.insert(name.clone(), DevelopmentToolArtifact {
+                    kind: DevelopmentToolArtifactKind::Compiler,
+                    bytes,
+                    code_size: Some(code_size),
+                    lit_start: Some(0),
+                    entry: Some(0),
+                });
+                format!("; retained as '{name}'")
+            } else {
+                String::new()
+            };
+            return Ok(DevelopmentCommandResult::Continue(format!(
+                "imported Stage-3 AnkaCC2 from {} (code={} bytes; function count not encoded){}",
+                path.display(), code_size, retained,
+            )));
+        }
+
+        Err(DevelopmentMonitorError::Usage(
+            "cc2 bootstrap [name] | cc2 import <host-file> [name]",
+        ))
+    }
+
+    fn command_aom(
+        &mut self,
+        args: &[String],
+    ) -> Result<DevelopmentCommandResult, DevelopmentMonitorError> {
+        if args.len() != 2 && args.len() != 3 {
+            return Err(DevelopmentMonitorError::Usage("aom <source.c> [name]"));
+        }
+        let source_path = self.resolve_host_path(&args[1]);
+        let name = if args.len() == 3 { args[2].clone() } else { derive_name(&source_path)? };
+        if self.tool_artifacts.contains_key(&name) {
+            return Err(DevelopmentMonitorError::ToolArtifactAlreadyRegistered(name));
+        }
+        let source = fs::read(&source_path)
+            .map_err(|err| DevelopmentMonitorError::HostRead(err.kind()))?;
+        let bootstrapped = self.ensure_stage3()?;
+        let stage3 = self.stage3_image.as_ref().expect("Stage 3 initialized above");
+        let compiled = compile_c_to_aom_stage3(&stage3.bytes, &source)
+            .map_err(DevelopmentMonitorError::ToolchainCompile)?;
+        let size = compiled.bytes.len();
+        self.tool_artifacts.insert(name.clone(), DevelopmentToolArtifact {
+            kind: DevelopmentToolArtifactKind::Aom,
+            bytes: compiled.bytes,
+            code_size: None,
+            lit_start: None,
+            entry: None,
+        });
+        Ok(DevelopmentCommandResult::Continue(format!(
+            "{}compiled {} as AOM '{}' ({} bytes)",
+            if bootstrapped { "bootstrapped Stage-3 AnkaCC2; " } else { "" },
+            source_path.display(), name, size,
+        )))
+    }
+
+    fn command_link(
+        &mut self,
+        args: &[String],
+    ) -> Result<DevelopmentCommandResult, DevelopmentMonitorError> {
+        if args.len() < 4 {
+            return Err(DevelopmentMonitorError::Usage("link <name> <entry> <aom>..."));
+        }
+        let name = args[1].clone();
+        if self.tool_artifacts.contains_key(&name) {
+            return Err(DevelopmentMonitorError::ToolArtifactAlreadyRegistered(name));
+        }
+        let entry = args[2].clone();
+        let mut modules = Vec::with_capacity(args.len() - 3);
+        for module_name in &args[3..] {
+            let artifact = self.tool_artifacts.get(module_name)
+                .ok_or_else(|| DevelopmentMonitorError::ToolArtifactNotFound(module_name.clone()))?;
+            if artifact.kind != DevelopmentToolArtifactKind::Aom {
+                return Err(DevelopmentMonitorError::ToolArtifactWrongKind(module_name.clone()));
+            }
+            modules.push(artifact.bytes.clone());
+        }
+        let bootstrapped = self.ensure_ankald()?;
+        let linker = self.ankald_image.as_ref().expect("ankald initialized above");
+        let module_refs: Vec<&[u8]> = modules.iter().map(Vec::as_slice).collect();
+        let linked = run_ankald(&linker.bytes, &module_refs, &entry)
+            .map_err(DevelopmentMonitorError::Linker)?;
+        let size = linked.bytes.len();
+        let code_size = linked.code_size;
+        let lit_start = linked.lit_start;
+        let entry_offset = linked.entry;
+        self.tool_artifacts.insert(name.clone(), DevelopmentToolArtifact {
+            kind: DevelopmentToolArtifactKind::Linked,
+            bytes: linked.bytes,
+            code_size: Some(code_size),
+            lit_start: Some(lit_start),
+            entry: Some(entry_offset),
+        });
+        Ok(DevelopmentCommandResult::Continue(format!(
+            "{}linked '{}' from {} AOM(s) (size={} code={} lit_start={} entry={})",
+            if bootstrapped { "bootstrapped userspace ankald; " } else { "" },
+            name, modules.len(), size, code_size, lit_start, entry_offset,
+        )))
+    }
+
+    fn command_dump(
+        &mut self,
+        args: &[String],
+    ) -> Result<DevelopmentCommandResult, DevelopmentMonitorError> {
+        if args.len() != 3 {
+            return Err(DevelopmentMonitorError::Usage("dump <name> <host-file>"));
+        }
+        let artifact = self.tool_artifacts.get(&args[1])
+            .ok_or_else(|| DevelopmentMonitorError::ToolArtifactNotFound(args[1].clone()))?;
+        let path = PathBuf::from(&args[2]);
+        fs::write(&path, &artifact.bytes)
+            .map_err(|err| DevelopmentMonitorError::HostWrite(err.kind()))?;
+        Ok(DevelopmentCommandResult::Continue(format!(
+            "dumped '{}' -> {} ({} bytes)", args[1], path.display(), artifact.bytes.len(),
         )))
     }
 
@@ -324,6 +624,31 @@ impl DevelopmentShellSession {
         } else {
             self.userspace_root.join(path)
         }
+    }
+
+    fn format_tool_artifacts(&self) -> String {
+        if self.tool_artifacts.is_empty() {
+            return "no retained toolchain artifacts".to_string();
+        }
+        let mut out = String::from("NAME\tKIND\tSIZE\tCODE\tLIT_START\tENTRY");
+        for (name, artifact) in &self.tool_artifacts {
+            let kind = match artifact.kind {
+                DevelopmentToolArtifactKind::Compiler => "compiler",
+                DevelopmentToolArtifactKind::Aom => "AOM",
+                DevelopmentToolArtifactKind::Linked => "linked",
+            };
+            let show = |value: Option<u64>| value
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            out.push_str(&format!(
+                "\n{name}\t{kind}\t{}\t{}\t{}\t{}",
+                artifact.bytes.len(),
+                show(artifact.code_size),
+                show(artifact.lit_start),
+                show(artifact.entry),
+            ));
+        }
+        out
     }
 
     fn format_artifacts(&self) -> String {
@@ -473,7 +798,6 @@ mod tests {
     use super::*;
     use crate::anka64::isa::{Asm64, R0, R1};
     use crate::anka64::os::SYS_EXIT;
-    use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -621,6 +945,106 @@ mod tests {
             if text.contains("exited 23")));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn p10dev_help_exposes_existing_phase10_toolchain_surfaces() {
+        let root = temp_dir("phase10-help");
+        let mut shell = DevelopmentShellSession::new(&root).unwrap();
+        let help = shell.execute_line("help").unwrap();
+        assert!(matches!(help, DevelopmentCommandResult::Continue(text)
+            if text.contains("cc2 bootstrap [name]")
+                && text.contains("cc2 import <host-file> [name]")
+                && text.contains("aom <source.c>")
+                && text.contains("link <name> <entry>")
+                && text.contains("dump <name> <host-file>")));
+        assert!(shell.tool_artifacts.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn p10dev_tool_artifact_observation_is_side_effect_free() {
+        let root = temp_dir("phase10-observe");
+        let mut shell = DevelopmentShellSession::new(&root).unwrap();
+        shell.tool_artifacts.insert("probe".to_string(), DevelopmentToolArtifact {
+            kind: DevelopmentToolArtifactKind::Aom,
+            bytes: vec![1, 2, 3],
+            code_size: None,
+            lit_start: None,
+            entry: None,
+        });
+        let fabric_objects = shell.fabric.objects.len();
+        let placements = shell.placement.allocated_count();
+        let result = shell.execute_line("tool-artifacts").unwrap();
+        assert!(matches!(result, DevelopmentCommandResult::Continue(text)
+            if text.contains("probe") && text.contains("AOM")));
+        assert_eq!(shell.fabric.objects.len(), fabric_objects);
+        assert_eq!(shell.placement.allocated_count(), placements);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn p10dev_imported_stage3_bypasses_bootstrap_cache() {
+        let root = temp_dir("phase10-import-stage3");
+        let compiler = root.join("cc2-0.bin");
+        fs::write(&compiler, [0x11u8, 0x22, 0x33, 0x44]).unwrap();
+
+        let mut shell = DevelopmentShellSession::new(&root).unwrap();
+        let imported = shell.execute_line(&format!(
+            "cc2 import {} cc2-0", compiler.display())).unwrap();
+        assert!(matches!(imported, DevelopmentCommandResult::Continue(text)
+            if text.contains("imported Stage-3 AnkaCC2") && text.contains("cc2-0")));
+        assert!(shell.ccb_image.is_none());
+        assert!(shell.extended_ccb_image.is_none());
+        let image = shell.stage3_image.as_ref().unwrap();
+        assert_eq!(image.bytes, vec![0x11, 0x22, 0x33, 0x44]);
+        assert_eq!(image.code_size, 4);
+        assert_eq!(image.lit_start, 0);
+        assert_eq!(shell.tool_artifacts.get("cc2-0").unwrap().kind,
+            DevelopmentToolArtifactKind::Compiler);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn p10dev_stage3_aom_ankald_and_dump_close_debug_surface() {
+        let userspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("userspace");
+        let tmp = temp_dir("phase10-toolchain");
+        let source = tmp.join("probe.c");
+        let dumped = tmp.join("probe-linked.bin");
+        fs::write(&source, b"int main(){return 42;}").unwrap();
+
+        let mut shell = DevelopmentShellSession::new(&userspace).unwrap();
+        let ready = shell.execute_line("cc2 bootstrap cc2-0").unwrap();
+        assert!(matches!(ready, DevelopmentCommandResult::Continue(text)
+            if text.contains("Stage-3 AnkaCC2 ready") && text.contains("cc2-0")));
+        assert_eq!(shell.tool_artifacts.get("cc2-0").unwrap().kind,
+            DevelopmentToolArtifactKind::Compiler);
+
+        let aom = shell.execute_line(&format!("aom {} probe-aom", source.display())).unwrap();
+        assert!(matches!(aom, DevelopmentCommandResult::Continue(text)
+            if text.contains("AOM 'probe-aom'")));
+        assert_eq!(shell.fabric.objects.len(), 0,
+            "retained AOM bytes are debug observations, not executable Fabric artifacts");
+
+        let linked = shell.execute_line("link probe-linked main probe-aom").unwrap();
+        assert!(matches!(linked, DevelopmentCommandResult::Continue(text)
+            if text.contains("linked 'probe-linked'") && text.contains("entry=")));
+        assert_eq!(shell.fabric.objects.len(), 0,
+            "link debug output is not implicitly published into the executable registry");
+
+        let dumped_result = shell.execute_line(&format!(
+            "dump probe-linked {}", dumped.display())).unwrap();
+        assert!(matches!(dumped_result, DevelopmentCommandResult::Continue(text)
+            if text.contains("dumped 'probe-linked'")));
+        let dumped_bytes = fs::read(&dumped).unwrap();
+        let retained = shell.tool_artifacts.get("probe-linked").unwrap();
+        assert_eq!(dumped_bytes, retained.bytes);
+        assert_eq!(retained.kind, DevelopmentToolArtifactKind::Linked);
+        assert!(retained.code_size.unwrap() > 0);
+        assert_eq!(retained.entry, Some(0));
+
+        fs::remove_dir_all(tmp).unwrap();
     }
 
     #[test]

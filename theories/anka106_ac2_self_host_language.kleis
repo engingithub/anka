@@ -1,0 +1,375 @@
+// =============================================================================
+// Anka64 Phase 10.6 — AC2 Self-Host Language Refinement
+// =============================================================================
+// No new axioms.
+//
+// The first concrete CC2_0 -> CC2_1 experiment exposed a language, rather than
+// provenance/object/link, gap: Stage 3 rejected its own first function before
+// control flow because the current expression parser implements only unary
+// forms plus '+'/'-'.  The exact Stage-3 compiler source requires a deliberately
+// small bootstrap execution language:
+//
+//   expressions: primary/call, word dereference, *, +, -, <<, >>,
+//                <, <=, ==, !=, bitwise &, bitwise |, parentheses
+//   statements:  mixed local declarations/statements, assignment, call
+//                statement, if, if/else, while, return, nested blocks
+//
+// The current compiler source deliberately does NOT require for, do, switch,
+// break, continue, /, %, >, >=, &&, ||, !, or ~.  Those remain unearned.
+//
+// One bootstrap compatibility rule is explicit: the CC_B-shaped compiler source
+// uses integer word addresses with '*' load/store syntax.  Phase 10.6 may admit
+// that syntax only for the bootstrap compiler source.  It does not create or
+// bypass Anka runtime authority: the emitted memory transaction remains subject
+// to the ordinary Fabric mapping/capability checks.  Phase 10.7 may replace the
+// bootstrap representation while modularizing the compiler under AC2.
+// =============================================================================
+
+import "anka102_ac2_types_abi.kleis"
+import "anka106_cc2_self_host_closure.kleis"
+
+define ac2106_expression_profile_present(
+    primary_and_call : Bool,
+    word_dereference : Bool,
+    multiply : Bool,
+    add : Bool,
+    subtract : Bool,
+    shift_left : Bool,
+    shift_right : Bool,
+    less_than : Bool,
+    less_equal : Bool,
+    equal : Bool,
+    not_equal : Bool,
+    bitwise_and : Bool,
+    bitwise_or : Bool,
+    parentheses : Bool
+) =
+    if primary_and_call then
+        if word_dereference then
+            if multiply then
+                if add then
+                    if subtract then
+                        if shift_left then
+                            if shift_right then
+                                if less_than then
+                                    if less_equal then
+                                        if equal then
+                                            if not_equal then
+                                                if bitwise_and then
+                                                    if bitwise_or then
+                                                        if parentheses then true else false
+                                                    else false
+                                                else false
+                                            else false
+                                        else false
+                                    else false
+                                else false
+                            else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define ac2106_statement_profile_present(
+    local_declaration : Bool,
+    mixed_declarations_and_statements : Bool,
+    assignment_statement : Bool,
+    call_statement : Bool,
+    if_statement : Bool,
+    if_else_statement : Bool,
+    while_statement : Bool,
+    return_statement : Bool,
+    nested_blocks : Bool
+) =
+    if local_declaration then
+        if mixed_declarations_and_statements then
+            if assignment_statement then
+                if call_statement then
+                    if if_statement then
+                        if if_else_statement then
+                            if while_statement then
+                                if return_statement then
+                                    if nested_blocks then true else false
+                                else false
+                            else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+// Conditions use the bootstrap compiler's scalar convention: zero is false and
+// any nonzero word is true.  Bitwise '&'/'|' are ordinary eager word operators;
+// they are not host-language short-circuit semantics.
+define ac2106_condition_semantics(zero_is_false : Bool, nonzero_is_true : Bool) =
+    if zero_is_false then
+        if nonzero_is_true then true else false
+    else false
+
+define ac2106_if_semantics(
+    condition_true : Bool,
+    then_executed : Bool,
+    else_executed : Bool
+) =
+    if condition_true then
+        if then_executed then
+            if else_executed then false else true
+        else false
+    else
+        if then_executed then false
+        else if else_executed then true else false
+
+define ac2106_while_step_semantics(
+    condition_true_before : Bool,
+    body_executed : Bool,
+    condition_reevaluated_after_body : Bool
+) =
+    if condition_true_before then
+        if body_executed then
+            if condition_reevaluated_after_body then true else false
+        else false
+    else
+        if body_executed then false else true
+
+define ac2106_return_semantics(
+    return_reached : Bool,
+    value_produced : Bool,
+    following_statement_executed : Bool
+) =
+    if return_reached then
+        if value_produced then
+            if following_statement_executed then false else true
+        else false
+    else false
+
+// Assignment required by the compiler source is intentionally small: a named
+// scalar local or one machine-word dereference.  Arbitrary non-lvalues are not
+// assignment targets in this slice.
+define ac2106_assignment_target_valid(
+    local_scalar : Bool,
+    word_dereference : Bool,
+    non_lvalue_expression : Bool
+) =
+    if non_lvalue_expression then false
+    else if local_scalar then true
+    else if word_dereference then true
+    else false
+
+// Integer word-address dereference is a bootstrap-source compatibility bridge,
+// not an authority primitive.  Runtime access must still traverse the ordinary
+// Anka memory-authorization path.
+define ac2106_bootstrap_word_deref_valid(
+    exact_bootstrap_compiler_source : Bool,
+    operand_is_int_word : Bool,
+    access_is_one_word : Bool,
+    normal_fabric_authorization_still_required : Bool,
+    syntax_creates_authority : Bool
+) =
+    if exact_bootstrap_compiler_source then
+        if operand_is_int_word then
+            if access_is_one_word then
+                if normal_fabric_authorization_still_required then
+                    if syntax_creates_authority then false else true
+                else false
+            else false
+        else false
+    else false
+
+define ac2106_raw_address_syntax_creates_authority() = false
+
+// Precedence ranks for precisely the operators required by the self-host source.
+// Larger rank binds tighter.  Assignment is statement-level in this slice.
+define AC2106_PREC_BITOR : BitVec8 = bvconst(1,8)
+define AC2106_PREC_BITAND : BitVec8 = bvconst(2,8)
+define AC2106_PREC_EQUALITY : BitVec8 = bvconst(3,8)
+define AC2106_PREC_RELATIONAL : BitVec8 = bvconst(4,8)
+define AC2106_PREC_SHIFT : BitVec8 = bvconst(5,8)
+define AC2106_PREC_ADDITIVE : BitVec8 = bvconst(6,8)
+define AC2106_PREC_MULTIPLICATIVE : BitVec8 = bvconst(7,8)
+define AC2106_PREC_UNARY : BitVec8 = bvconst(8,8)
+
+define ac2106_precedence_chain_valid() =
+    if bvugt(AC2106_PREC_UNARY,AC2106_PREC_MULTIPLICATIVE) then
+        if bvugt(AC2106_PREC_MULTIPLICATIVE,AC2106_PREC_ADDITIVE) then
+            if bvugt(AC2106_PREC_ADDITIVE,AC2106_PREC_SHIFT) then
+                if bvugt(AC2106_PREC_SHIFT,AC2106_PREC_RELATIONAL) then
+                    if bvugt(AC2106_PREC_RELATIONAL,AC2106_PREC_EQUALITY) then
+                        if bvugt(AC2106_PREC_EQUALITY,AC2106_PREC_BITAND) then
+                            if bvugt(AC2106_PREC_BITAND,AC2106_PREC_BITOR) then true else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+define ac2106_multiplication_binds_tighter_than_addition() =
+    if bvugt(AC2106_PREC_MULTIPLICATIVE,AC2106_PREC_ADDITIVE) then true else false
+
+define ac2106_addition_binds_tighter_than_shift() =
+    if bvugt(AC2106_PREC_ADDITIVE,AC2106_PREC_SHIFT) then true else false
+
+define ac2106_relational_binds_tighter_than_bitand() =
+    if bvugt(AC2106_PREC_RELATIONAL,AC2106_PREC_BITAND) then true else false
+
+define ac2106_addition_binds_no_tighter_than_shift() =
+    if bvule(AC2106_PREC_ADDITIVE,AC2106_PREC_SHIFT) then true else false
+
+define ac2106_equality_binds_no_tighter_than_bitand() =
+    if bvule(AC2106_PREC_EQUALITY,AC2106_PREC_BITAND) then true else false
+
+// Explicit non-goals of the first self-host language slice.
+define ac2106_for_statement_supported() = false
+define ac2106_do_statement_supported() = false
+define ac2106_break_statement_supported() = false
+define ac2106_continue_statement_supported() = false
+define ac2106_switch_statement_supported() = false
+define ac2106_divide_operator_supported() = false
+define ac2106_modulo_operator_supported() = false
+define ac2106_greater_operator_supported() = false
+define ac2106_greater_equal_operator_supported() = false
+define ac2106_logical_and_operator_supported() = false
+define ac2106_logical_or_operator_supported() = false
+define ac2106_logical_not_operator_supported() = false
+define ac2106_bitwise_not_operator_supported() = false
+
+// Both self-host edges must execute under the exact same language semantics.
+define ac2106_self_host_language_edge_valid(
+    expression_profile_exact : Bool,
+    statement_profile_exact : Bool,
+    condition_semantics_exact : Bool,
+    precedence_exact : Bool,
+    bootstrap_word_deref_rule_exact : Bool,
+    source_generation_exact : Bool
+) =
+    if expression_profile_exact then
+        if statement_profile_exact then
+            if condition_semantics_exact then
+                if precedence_exact then
+                    if bootstrap_word_deref_rule_exact then
+                        if source_generation_exact then true else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+// =============================================================================
+// Positive witnesses
+// =============================================================================
+
+example "AC2106L-1 exact self-host expression profile is admitted" {
+    assert(ac2106_expression_profile_present(true,true,true,true,true,true,true,true,true,true,true,true,true,true)=true)
+}
+
+example "AC2106L-2 binary bitwise AND is required by the first compiler function" {
+    assert(ac2106_expression_profile_present(true,true,true,true,true,true,true,true,true,true,true,false,true,true)=false)
+}
+
+example "AC2106L-3 exact self-host statement profile is admitted" {
+    assert(ac2106_statement_profile_present(true,true,true,true,true,true,true,true,true)=true)
+}
+
+example "AC2106L-4 while is required by the compiler source" {
+    assert(ac2106_statement_profile_present(true,true,true,true,true,true,false,true,true)=false)
+}
+
+example "AC2106L-5 declarations may follow statements inside a block" {
+    assert(ac2106_statement_profile_present(true,true,true,true,true,true,true,true,true)=true)
+}
+
+example "AC2106L-6 zero is false and nonzero is true for bootstrap conditions" {
+    assert(ac2106_condition_semantics(true,true)=true)
+}
+
+example "AC2106L-7 true if-condition executes only the then branch" {
+    assert(ac2106_if_semantics(true,true,false)=true)
+}
+
+example "AC2106L-8 false if-condition with else executes only else" {
+    assert(ac2106_if_semantics(false,false,true)=true)
+}
+
+example "AC2106L-9 true while-condition executes body then reevaluates condition" {
+    assert(ac2106_while_step_semantics(true,true,true)=true)
+}
+
+example "AC2106L-10 false while-condition executes no body" {
+    assert(ac2106_while_step_semantics(false,false,false)=true)
+}
+
+example "AC2106L-11 early return produces value and prevents fallthrough" {
+    assert(ac2106_return_semantics(true,true,false)=true)
+}
+
+example "AC2106L-12 named scalar is a valid assignment target" {
+    assert(ac2106_assignment_target_valid(true,false,false)=true)
+}
+
+example "AC2106L-13 one-word dereference is a valid assignment target" {
+    assert(ac2106_assignment_target_valid(false,true,false)=true)
+}
+
+example "AC2106L-14 arbitrary expression is not an assignment target" {
+    assert(ac2106_assignment_target_valid(false,false,true)=false)
+}
+
+example "AC2106L-15 bootstrap raw-word dereference retains Fabric authorization" {
+    assert(ac2106_bootstrap_word_deref_valid(true,true,true,true,false)=true)
+}
+
+example "AC2106L-16 raw address syntax creates no authority" {
+    assert(ac2106_raw_address_syntax_creates_authority()=false)
+}
+
+example "AC2106L-17 self-host operator precedence chain is exact" {
+    assert(ac2106_precedence_chain_valid()=true)
+}
+
+example "AC2106L-18 multiplication binds tighter than addition" {
+    assert(ac2106_multiplication_binds_tighter_than_addition()=true)
+}
+
+example "AC2106L-19 addition binds tighter than shift" {
+    assert(ac2106_addition_binds_tighter_than_shift()=true)
+}
+
+example "AC2106L-20 relational binds tighter than bitwise AND" {
+    assert(ac2106_relational_binds_tighter_than_bitand()=true)
+}
+
+example "AC2106L-21 for break continue and switch remain unearned" {
+    assert(ac2106_for_statement_supported()=false)
+    assert(ac2106_break_statement_supported()=false)
+    assert(ac2106_continue_statement_supported()=false)
+    assert(ac2106_switch_statement_supported()=false)
+}
+
+example "AC2106L-22 division modulo and logical short-circuit operators remain unearned" {
+    assert(ac2106_divide_operator_supported()=false)
+    assert(ac2106_modulo_operator_supported()=false)
+    assert(ac2106_logical_and_operator_supported()=false)
+    assert(ac2106_logical_or_operator_supported()=false)
+}
+
+example "AC2106L-23 greater comparisons and unary logical/bitwise not remain unearned" {
+    assert(ac2106_greater_operator_supported()=false)
+    assert(ac2106_greater_equal_operator_supported()=false)
+    assert(ac2106_logical_not_operator_supported()=false)
+    assert(ac2106_bitwise_not_operator_supported()=false)
+}
+
+example "AC2106L-24 first self-host edge uses exact language semantics" {
+    assert(ac2106_self_host_language_edge_valid(true,true,true,true,true,true)=true)
+}
+
+example "AC2106L-25 second self-host edge must use the same exact language semantics" {
+    assert(ac2106_self_host_language_edge_valid(true,true,true,true,true,true)=true)
+}
+
+example "AC2106L-26 changed source generation invalidates language edge" {
+    assert(ac2106_self_host_language_edge_valid(true,true,true,true,true,false)=false)
+}

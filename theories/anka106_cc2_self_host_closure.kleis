@@ -1,0 +1,312 @@
+// =============================================================================
+// Anka64 Phase 10.6 — AnkaCC2 Self-Host / Fixed-Point Closure Refinement
+// =============================================================================
+// No new axioms.
+//
+// Phase 10.0 already froze the abstract bootstrap lineage:
+//
+//   CC_B  -> CC2_0
+//   CC2_0 -> CC2_1
+//   CC2_1 -> CC2_2
+//
+// This theory refines that lineage through the concrete machinery earned in
+// Phases 10.3–10.5.  The seed edge remains the bootstrap compilation of the
+// current Stage-3 AnkaCC2 source by CC_B semantics.  Each self-host edge is:
+//
+//   exact source bundle/root/profile
+//       -> include-only preprocessing inside Anka
+//       -> exact producer compiler generation
+//       -> AOM v1 emission
+//       -> deterministic ankald linking/publication
+//       -> sealed next compiler generation
+//
+// Closure is admitted only when the concrete CC2_1 and CC2_2 linked compiler
+// artifacts have identical executable bytes AND identical execution geometry
+// (code size, literal start, entry).  CC2_0 need not equal CC2_1, and the AOM
+// emitted by CC2_0 need not equal the AOM emitted by fixed-point CC2_1.
+//
+// Host byte dumping/comparison is observational only.  Host compilation,
+// preprocessing, symbol resolution, linking, source mutation, linked-byte
+// mutation, or generation selection are not part of the closure semantics.
+// =============================================================================
+
+import "anka100_cc2_bootstrap_contract.kleis"
+import "anka104_ankald_static_linker.kleis"
+import "anka105_include_preprocessing.kleis"
+
+// The extended bootstrap CC_B used to provide Stage-3 headroom is admissible
+// only as an arena-size realization of exact CC_B language/codegen semantics.
+define aom106_seed_producer_valid(
+    bootstrap_edge_exact : Bool,
+    ccb_semantics_exact : Bool,
+    output_arena_extension_only : Bool,
+    exact_stage3_source : Bool,
+    compile_success : Bool,
+    output_sealed : Bool,
+    source_generation_exact : Bool,
+    host_semantics_absent : Bool
+) =
+    if bootstrap_edge_exact then
+        if ccb_semantics_exact then
+            if output_arena_extension_only then
+                if exact_stage3_source then
+                    if compile_success then
+                        if output_sealed then
+                            if source_generation_exact then
+                                if host_semantics_absent then true else false
+                            else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+// One concrete self-host edge.  "preprocess_admitted" means the exact bundle,
+// root and include-only profile passed the Phase-10.5 gate and produced one
+// exact effective translation unit.  "aom_v1_emitted" means the producer
+// compiler emitted the frozen Phase-10.3 object representation.  The linked
+// artifact must complete the Phase-10.4 transactional publication path.
+define aom106_self_host_edge_valid(
+    bootstrap_edge_exact : Bool,
+    same_exact_bundle : Bool,
+    same_exact_root : Bool,
+    same_exact_profile : Bool,
+    preprocess_admitted : Bool,
+    compiler_generation_exact : Bool,
+    compiler_execution_authority_explicit : Bool,
+    aom_v1_emitted : Bool,
+    link_publishable : Bool,
+    linked_output_sealed : Bool,
+    host_semantics_absent : Bool
+) =
+    if bootstrap_edge_exact then
+        if same_exact_bundle then
+            if same_exact_root then
+                if same_exact_profile then
+                    if preprocess_admitted then
+                        if compiler_generation_exact then
+                            if compiler_execution_authority_explicit then
+                                if aom_v1_emitted then
+                                    if link_publishable then
+                                        if linked_output_sealed then
+                                            if host_semantics_absent then true else false
+                                        else false
+                                    else false
+                                else false
+                            else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+// A failed source/preprocess/compile/link edge cannot manufacture the next
+// compiler generation.  When no failure is present this predicate says
+// nothing about success and therefore returns false.
+define aom106_failed_edge_is_transactional(
+    source_failed : Bool,
+    preprocess_failed : Bool,
+    compile_failed : Bool,
+    link_failed : Bool,
+    next_generation_exists : Bool
+) =
+    if source_failed then
+        if next_generation_exists then false else true
+    else if preprocess_failed then
+        if next_generation_exists then false else true
+    else if compile_failed then
+        if next_generation_exists then false else true
+    else if link_failed then
+        if next_generation_exists then false else true
+    else false
+
+// Fixed-point identity is stronger than a byte-vector comparison if execution
+// geometry is carried as artifact metadata rather than encoded in the bytes.
+define aom106_linked_artifact_identical(
+    same_bytes : Bool,
+    same_code_size : Bool,
+    same_literal_start : Bool,
+    same_entry : Bool
+) =
+    if same_bytes then
+        if same_code_size then
+            if same_literal_start then
+                if same_entry then true else false
+            else false
+        else false
+    else false
+
+// Concrete Phase-10.6 closure: the abstract Phase-10.0 lineage must hold, both
+// self-host edges must realize the exact same source-composition contract, and
+// the two post-bootstrap linked compiler artifacts must be identical.
+define aom106_fixed_point_accept(
+    seed_edge_valid : Bool,
+    edge_0_1_valid : Bool,
+    edge_1_2_valid : Bool,
+    exact_generation_provenance : Bool,
+    same_exact_bundle_root_profile : Bool,
+    cc2_1_sealed : Bool,
+    cc2_2_sealed : Bool,
+    linked_artifact_identity : Bool,
+    host_semantics_absent : Bool
+) =
+    if seed_edge_valid then
+        if edge_0_1_valid then
+            if edge_1_2_valid then
+                if exact_generation_provenance then
+                    if same_exact_bundle_root_profile then
+                        if cc2_1_sealed then
+                            if cc2_2_sealed then
+                                if linked_artifact_identity then
+                                    if host_semantics_absent then true else false
+                                else false
+                            else false
+                        else false
+                    else false
+                else false
+            else false
+        else false
+    else false
+
+// The harness may observe and compare exact bytes, but observation is not a
+// language/toolchain semantic and may not modify or choose artifact contents.
+define aom106_host_observation_valid(
+    host_reads_exact_bytes : Bool,
+    host_mutates_source_or_artifact : Bool,
+    host_executes_language_semantics : Bool,
+    host_selects_symbol_resolution_or_layout : Bool
+) =
+    if host_reads_exact_bytes then
+        if host_mutates_source_or_artifact then false
+        else if host_executes_language_semantics then false
+        else if host_selects_symbol_resolution_or_layout then false
+        else true
+    else true
+
+// Successful linking never itself authorizes the next compiler generation to
+// execute.  A separate explicit execution authority is required.
+define aom106_link_creates_next_generation_execution_authority() = false
+
+define aom106_next_generation_requires_explicit_execution_authority() = true
+
+define aom106_source_name_creates_compiler_authority() = false
+
+define aom106_cc2_0_must_equal_cc2_1() = false
+
+define aom106_aom_1_must_equal_aom_2() = false
+
+// =============================================================================
+// Positive witnesses
+// =============================================================================
+
+example "AOM106-1 inherited bootstrap lineage admits CC_B to CC2_0" {
+    assert(cc2_bootstrap_edge(CC2_STAGE_CCB,CC2_STAGE_0)=true)
+}
+
+example "AOM106-2 inherited bootstrap lineage admits CC2_0 to CC2_1" {
+    assert(cc2_bootstrap_edge(CC2_STAGE_0,CC2_STAGE_1)=true)
+}
+
+example "AOM106-3 inherited bootstrap lineage admits CC2_1 to CC2_2" {
+    assert(cc2_bootstrap_edge(CC2_STAGE_1,CC2_STAGE_2)=true)
+}
+
+example "AOM106-4 exact CC_B semantics with arena-only extension may seed CC2_0" {
+    assert(aom106_seed_producer_valid(true,true,true,true,true,true,true,true)=true)
+}
+
+example "AOM106-5 arena extension may not alter CC_B semantics" {
+    assert(aom106_seed_producer_valid(true,false,true,true,true,true,true,true)=false)
+}
+
+example "AOM106-6 first self-host edge uses exact source composition and AOM v1 link" {
+    assert(aom106_self_host_edge_valid(true,true,true,true,true,true,true,true,true,true,true)=true)
+    assert(aom103_version()=bvconst(1,16))
+}
+
+example "AOM106-7 second self-host edge uses the exact producer generation" {
+    assert(aom106_self_host_edge_valid(true,true,true,true,true,true,true,true,true,true,true)=true)
+}
+
+example "AOM106-8 changed source bundle invalidates a self-host edge" {
+    assert(aom106_self_host_edge_valid(true,false,true,true,true,true,true,true,true,true,true)=false)
+}
+
+example "AOM106-9 failed preprocessing cannot create a next compiler generation" {
+    assert(aom106_failed_edge_is_transactional(false,true,false,false,false)=true)
+}
+
+example "AOM106-10 failed compilation cannot create a next compiler generation" {
+    assert(aom106_failed_edge_is_transactional(false,false,true,false,false)=true)
+}
+
+example "AOM106-11 failed link cannot create a next compiler generation" {
+    assert(aom106_failed_edge_is_transactional(false,false,false,true,false)=true)
+}
+
+example "AOM106-12 byte-identical linked compiler with identical geometry is one artifact" {
+    assert(aom106_linked_artifact_identical(true,true,true,true)=true)
+}
+
+example "AOM106-13 equal bytes with different entry do not close artifact identity" {
+    assert(aom106_linked_artifact_identical(true,true,true,false)=false)
+}
+
+example "AOM106-14 exact concrete self-host fixed point is authoritative" {
+    assert(aom106_fixed_point_accept(true,true,true,true,true,true,true,true,true)=true)
+    assert(cc2_fixed_point_accept(true,true,true,true,true,true,true,true,true)=true)
+}
+
+example "AOM106-15 byte-different CC2_1 and CC2_2 do not close Phase 10.6" {
+    assert(aom106_fixed_point_accept(true,true,true,true,true,true,true,false,true)=false)
+}
+
+example "AOM106-16 changed bundle root or profile does not close Phase 10.6" {
+    assert(aom106_fixed_point_accept(true,true,true,true,false,true,true,true,true)=false)
+}
+
+example "AOM106-17 host may observe exact bytes for fixed-point comparison" {
+    assert(aom106_host_observation_valid(true,false,false,false)=true)
+}
+
+example "AOM106-18 host observation may not mutate compiler bytes" {
+    assert(aom106_host_observation_valid(true,true,false,false)=false)
+}
+
+example "AOM106-19 host may not choose linker symbol resolution or layout" {
+    assert(aom106_host_observation_valid(true,false,false,true)=false)
+}
+
+example "AOM106-20 linking does not create authority to execute the next compiler" {
+    assert(aom106_link_creates_next_generation_execution_authority()=false)
+    assert(aom104_link_creates_execution_authority()=false)
+}
+
+example "AOM106-21 each produced compiler requires explicit execution authority" {
+    assert(aom106_next_generation_requires_explicit_execution_authority()=true)
+}
+
+example "AOM106-22 source names remain non-authoritative through bootstrap" {
+    assert(aom106_source_name_creates_compiler_authority()=false)
+    assert(aom105_source_name_creates_authority()=false)
+}
+
+example "AOM106-23 CC2_0 is not required to equal fixed-point CC2_1" {
+    assert(aom106_cc2_0_must_equal_cc2_1()=false)
+    assert(cc2_bootstrap_requires_cc2_0_equal_cc2_1()=false)
+}
+
+example "AOM106-24 AOM emitted by CC2_0 need not equal AOM emitted by fixed-point CC2_1" {
+    assert(aom106_aom_1_must_equal_aom_2()=false)
+}
+
+example "AOM106-25 include preprocessing remains inside the already-earned profile" {
+    assert(aom105pp_profile_supported(true,false,false,false,false,false,false)=true)
+    assert(aom105pp_host_executes_preprocessor()=false)
+}
+
+example "AOM106-26 host compiler preprocessor linker and resolver remain absent" {
+    assert(cc2_host_semantics_absent(false,false,false,false)=true)
+}

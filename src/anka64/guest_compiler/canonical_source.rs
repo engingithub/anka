@@ -810,17 +810,39 @@ pub(crate) fn canonical_compiler_source() -> String {
         "", "", "")
 }
 
+// The canonical fixed-point source remains frozen. The extended bootstrap
+// resolves calls to already-defined functions immediately, preserving the
+// first matching declaration and exact arity used by resolvefixups(). Only
+// genuinely forward calls consume the existing 512-entry deferred table.
+fn extended_stmt_prelude() -> String {
+    let source = canonical_stmt_prelude();
+    let deferred = "addfixup(pos, ns, nl, argc);";
+    assert_eq!(source.matches(deferred).count(), 1);
+    let eager = format!(
+        "int i = 0; int known = 0; int base = 0; \
+         while ((i < *{fc}) & (known == 0)) {{ \
+         base = {ft} + i * 32; \
+         if (nameseq(ns, nl, *base, *(base + 8)) == 1) {{ \
+         if (argc != *(base + 24)) {{ *{e} = 1; }} \
+         else {{ patchcall(pos, *(base + 16)); }} \
+         known = 1; }} \
+         i = i + 1; }} \
+         if (known == 0) {{ addfixup(pos, ns, nl, argc); }} ",
+        fc = WS_FUNC_COUNT, ft = WS_FUNC_TABLE, e = WS_ERROR);
+    source.replacen(deferred, &eager, 1)
+}
+
 /// CC_B source variant used only when bootstrapping a compiler whose own
 /// generated image no longer fits the historical 80 KiB fixed-point arena.
 ///
 /// The canonical source above is intentionally frozen by the Phase 9.3h
-/// fixed-point regression. This variant changes only the compiler entry
+/// fixed-point regression. This variant resolves known calls immediately and changes the entry
 /// point so a supervised harness can supply a larger output frontier through
 /// WS_OUTPUT_LIMIT. A zero word retains the historical 80 KiB behavior.
 pub(crate) fn extended_compiler_source() -> String {
     format!(
         "{}{}{}{}{}{}{}",
-        canonical_stmt_prelude(),
+        extended_stmt_prelude(),
         canonical_compilefuncdef(),
         canonical_findmain(),
         extended_compilermain(),
@@ -1200,4 +1222,57 @@ fn canonical_stmt_prelude() -> String {
         canonical_compilestmt(),
         canonical_compileblock(),
         "")
+}
+
+#[cfg(test)]
+mod extended_call_fixup_tests {
+    use super::*;
+    use crate::anka64::dev_compiler::{
+        bootstrap_extended_ccb, compile_c_with_extended_ccb, DevelopmentCompileError,
+    };
+    use std::sync::OnceLock;
+
+    fn extended_ccb() -> &'static Vec<u8> {
+        static IMAGE: OnceLock<Vec<u8>> = OnceLock::new();
+        IMAGE.get_or_init(|| bootstrap_extended_ccb().expect("extended CC_B bootstrap"))
+    }
+
+    #[test]
+    fn extended_source_keeps_canonical_call_fixups_frozen() {
+        let canonical = canonical_compiler_source();
+        let extended = extended_compiler_source();
+        assert!(!canonical.contains("int known = 0;"));
+        assert!(extended.contains("int known = 0;"));
+        assert!(canonical.contains("if (512 <= cnt)"));
+        assert!(extended.contains("if (512 <= cnt)"));
+        assert!(extended.len() + 8 <= SOURCE_SIZE as usize);
+    }
+
+    #[test]
+    fn extended_ccb_accepts_more_than_512_backward_calls() {
+        let mut source = String::from("int leaf(){return 7;}int main(){int v=0;");
+        for _ in 0..513 { source.push_str("v=leaf();"); }
+        source.push_str("return v;}");
+        let image = compile_c_with_extended_ccb(extended_ccb(), source.as_bytes())
+            .expect("known calls must not exhaust the deferred table");
+        assert!(image.code_size > 0);
+        assert_eq!(image.process_slots_observed, 2);
+    }
+
+    #[test]
+    fn extended_ccb_preserves_forward_resolution_and_rejects_arity_mismatch() {
+        let image = compile_c_with_extended_ccb(extended_ccb(),
+            b"int main(){return later(7);}int later(int x){return x;}")
+            .expect("forward call still resolves after all definitions");
+        assert!(image.code_size > 0);
+        let mut forward = String::from("int main(){int v=0;");
+        for _ in 0..513 { forward.push_str("v=later(7);"); }
+        forward.push_str("return v;}int later(int x){return x;}");
+        assert!(matches!(compile_c_with_extended_ccb(extended_ccb(), forward.as_bytes()),
+            Err(DevelopmentCompileError::CompilerRejected(1))),
+            "the existing bound still rejects 513 unresolved calls");
+        assert!(matches!(compile_c_with_extended_ccb(extended_ccb(),
+            b"int leaf(int x){return x;}int main(){return leaf();}"),
+            Err(DevelopmentCompileError::CompilerRejected(1))));
+    }
 }

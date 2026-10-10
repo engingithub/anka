@@ -1,0 +1,106 @@
+// Every example is deliberately false and must be rejected.
+import "anka106_cc2_self_host_closure.kleis"
+
+example "FALSE-AOM106-1 CC_B may skip directly to CC2_1" {
+    assert(cc2_bootstrap_edge(CC2_STAGE_CCB,CC2_STAGE_1)=true)
+}
+
+example "FALSE-AOM106-2 bootstrap arena extension may change CC_B semantics" {
+    assert(aom106_seed_producer_valid(true,false,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-AOM106-3 changed Stage-3 source may seed authoritative CC2_0" {
+    assert(aom106_seed_producer_valid(true,true,true,false,true,true,true,true)=true)
+}
+
+example "FALSE-AOM106-4 changed source bundle may produce the next compiler generation" {
+    assert(aom106_self_host_edge_valid(true,false,true,true,true,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-AOM106-5 changed root may produce the next compiler generation" {
+    assert(aom106_self_host_edge_valid(true,true,false,true,true,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-AOM106-6 changed preprocessing profile may produce the next compiler generation" {
+    assert(aom106_self_host_edge_valid(true,true,true,false,true,true,true,true,true,true,true)=true)
+}
+
+example "FALSE-AOM106-7 stale compiler generation may produce the next compiler generation" {
+    assert(aom106_self_host_edge_valid(true,true,true,true,true,false,true,true,true,true,true)=true)
+}
+
+example "FALSE-AOM106-8 successful link itself authorizes the next compiler to execute" {
+    assert(aom106_link_creates_next_generation_execution_authority()=true)
+}
+
+example "FALSE-AOM106-9 next compiler generation may execute without explicit authority" {
+    assert(aom106_next_generation_requires_explicit_execution_authority()=false)
+}
+
+example "FALSE-AOM106-10 failed preprocessing may still manufacture a next generation" {
+    assert(aom106_failed_edge_is_transactional(false,true,false,false,true)=true)
+}
+
+example "FALSE-AOM106-11 failed compilation may still manufacture a next generation" {
+    assert(aom106_failed_edge_is_transactional(false,false,true,false,true)=true)
+}
+
+example "FALSE-AOM106-12 failed link may still manufacture a next generation" {
+    assert(aom106_failed_edge_is_transactional(false,false,false,true,true)=true)
+}
+
+example "FALSE-AOM106-13 equal bytes with different code geometry are fixed-point identical" {
+    assert(aom106_linked_artifact_identical(true,false,true,true)=true)
+}
+
+example "FALSE-AOM106-14 equal bytes with different literal geometry are fixed-point identical" {
+    assert(aom106_linked_artifact_identical(true,true,false,true)=true)
+}
+
+example "FALSE-AOM106-15 equal bytes with different entry are fixed-point identical" {
+    assert(aom106_linked_artifact_identical(true,true,true,false)=true)
+}
+
+example "FALSE-AOM106-16 byte-different CC2_1 and CC2_2 close the fixed point" {
+    assert(aom106_fixed_point_accept(true,true,true,true,true,true,true,false,true)=true)
+}
+
+example "FALSE-AOM106-17 changed source composition may close the fixed point" {
+    assert(aom106_fixed_point_accept(true,true,true,true,false,true,true,true,true)=true)
+}
+
+example "FALSE-AOM106-18 unsealed CC2_1 may enter authoritative fixed point" {
+    assert(aom106_fixed_point_accept(true,true,true,true,true,false,true,true,true)=true)
+}
+
+example "FALSE-AOM106-19 host may mutate dumped compiler bytes during comparison" {
+    assert(aom106_host_observation_valid(true,true,false,false)=true)
+}
+
+example "FALSE-AOM106-20 host may execute compiler semantics during observation" {
+    assert(aom106_host_observation_valid(true,false,true,false)=true)
+}
+
+example "FALSE-AOM106-21 host may choose symbol resolution or linked layout" {
+    assert(aom106_host_observation_valid(true,false,false,true)=true)
+}
+
+example "FALSE-AOM106-22 source logical name may create compiler execution authority" {
+    assert(aom106_source_name_creates_compiler_authority()=true)
+}
+
+example "FALSE-AOM106-23 CC2_0 must already equal CC2_1" {
+    assert(aom106_cc2_0_must_equal_cc2_1()=true)
+}
+
+example "FALSE-AOM106-24 bootstrap AOM_1 must equal fixed-point AOM_2" {
+    assert(aom106_aom_1_must_equal_aom_2()=true)
+}
+
+example "FALSE-AOM106-25 host preprocessor may participate in authoritative closure" {
+    assert(cc2_host_semantics_absent(false,true,false,false)=true)
+}
+
+example "FALSE-AOM106-26 host linker may participate in authoritative closure" {
+    assert(cc2_host_semantics_absent(false,false,false,true)=true)
+}

@@ -1,0 +1,13 @@
+import "anka106_compiler_virtual_layout.kleis"
+example "FALSE-CC106VM-1 larger output may retain old compiler mapping" {
+    assert(cc106_suffix_valid(bvconst(262144,64),bvconst(196608,64),
+        bvconst(114688,64),bvconst(450560,64),bvconst(466944,64)))
+}
+example "FALSE-CC106VM-2 code may overlap fixed supervisor stack" {
+    assert(cc106_suffix_valid(bvconst(262144,64),bvconst(335872,64),
+        bvconst(114688,64),bvconst(327680,64),bvconst(466944,64)))
+}
+example "FALSE-CC106VM-3 trap may overlap stack" {
+    assert(cc106_suffix_valid(bvconst(262144,64),bvconst(335872,64),
+        bvconst(114688,64),bvconst(450560,64),bvconst(450560,64)))
+}
