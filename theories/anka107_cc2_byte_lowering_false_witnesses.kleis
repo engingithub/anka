@@ -1,0 +1,156 @@
+// Every assertion is deliberately false and must be explicitly disproved.
+import "anka107_cc2_byte_lowering.kleis"
+
+example "FALSE-LOWER107-1 ordinary typed profile" {
+    assert(¬(lower107_profile(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "FALSE-LOWER107-2 integer dereference" {
+    assert(lower107_profile(bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE-LOWER107-3 incomplete pointee" {
+    assert(lower107_profile(bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE-LOWER107-4 not application profile" {
+    assert(lower107_profile(bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE-LOWER107-5 bootstrap exception" {
+    assert(lower107_profile(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-LOWER107-6 char load" {
+    assert(¬(lower107_shape(bvconst(2,8),bvconst(0,8),bvconst(36,8),bvconst(1,64))))
+}
+
+example "FALSE-LOWER107-7 char store" {
+    assert(¬(lower107_shape(bvconst(2,8),bvconst(1,8),bvconst(37,8),bvconst(1,64))))
+}
+
+example "FALSE-LOWER107-8 int load" {
+    assert(¬(lower107_shape(bvconst(1,8),bvconst(0,8),bvconst(32,8),bvconst(8,64))))
+}
+
+example "FALSE-LOWER107-9 int store" {
+    assert(¬(lower107_shape(bvconst(1,8),bvconst(1,8),bvconst(33,8),bvconst(8,64))))
+}
+
+example "FALSE-LOWER107-10 char word load" {
+    assert(lower107_shape(bvconst(2,8),bvconst(0,8),bvconst(32,8),bvconst(8,64)))
+}
+
+example "FALSE-LOWER107-11 char word store" {
+    assert(lower107_shape(bvconst(2,8),bvconst(1,8),bvconst(33,8),bvconst(8,64)))
+}
+
+example "FALSE-LOWER107-12 byte opcode widened" {
+    assert(lower107_shape(bvconst(2,8),bvconst(0,8),bvconst(36,8),bvconst(8,64)))
+}
+
+example "FALSE-LOWER107-13 int byte load" {
+    assert(lower107_shape(bvconst(1,8),bvconst(0,8),bvconst(36,8),bvconst(1,64)))
+}
+
+example "FALSE-LOWER107-14 int byte store" {
+    assert(lower107_shape(bvconst(1,8),bvconst(1,8),bvconst(37,8),bvconst(1,64)))
+}
+
+example "FALSE-LOWER107-15 load uses store opcode" {
+    assert(lower107_shape(bvconst(2,8),bvconst(0,8),bvconst(37,8),bvconst(1,64)))
+}
+
+example "FALSE-LOWER107-16 store uses load opcode" {
+    assert(lower107_shape(bvconst(2,8),bvconst(1,8),bvconst(36,8),bvconst(1,64)))
+}
+
+example "FALSE-LOWER107-17 void dereference" {
+    assert(lower107_shape(bvconst(3,8),bvconst(0,8),bvconst(36,8),bvconst(1,64)))
+}
+
+example "FALSE-LOWER107-18 unknown pointee" {
+    assert(lower107_shape(bvconst(255,8),bvconst(1,8),bvconst(37,8),bvconst(1,64)))
+}
+
+example "FALSE-LOWER107-19 unknown access" {
+    assert(lower107_shape(bvconst(2,8),bvconst(2,8),bvconst(36,8),bvconst(1,64)))
+}
+
+example "FALSE-LOWER107-20 unknown opcode" {
+    assert(lower107_shape(bvconst(2,8),bvconst(0,8),bvconst(63,8),bvconst(1,64)))
+}
+
+example "FALSE-LOWER107-21 zero width" {
+    assert(lower107_shape(bvconst(2,8),bvconst(1,8),bvconst(37,8),bvconst(0,64)))
+}
+
+example "FALSE-LOWER107-22 unaligned byte address retained" {
+    assert(¬(lower107_address(bvconst(4099,64),bvconst(4099,64))))
+}
+
+example "FALSE-LOWER107-23 align down forbidden" {
+    assert(lower107_address(bvconst(4099,64),bvconst(4096,64)))
+}
+
+example "FALSE-LOWER107-24 shifted address forbidden" {
+    assert(lower107_address(bvconst(4099,64),bvconst(4100,64)))
+}
+
+example "FALSE-LOWER107-25 one exact transaction no new authority" {
+    assert(¬(lower107_effects(bvconst(2,8),bvconst(2,8),bvconst(1,64),bvconst(0,64),bvconst(0,8))))
+}
+
+example "FALSE-LOWER107-26 authority amplification" {
+    assert(lower107_effects(bvconst(2,8),bvconst(3,8),bvconst(1,64),bvconst(0,64),bvconst(0,8)))
+}
+
+example "FALSE-LOWER107-27 extra RMW read" {
+    assert(lower107_effects(bvconst(2,8),bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(0,8)))
+}
+
+example "FALSE-LOWER107-28 no operand transaction" {
+    assert(lower107_effects(bvconst(2,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,8)))
+}
+
+example "FALSE-LOWER107-29 enclosing word access" {
+    assert(lower107_effects(bvconst(2,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,8)))
+}
+
+example "FALSE-LOWER107-30 Fabric bypass" {
+    assert(lower107_effects(bvconst(2,8),bvconst(2,8),bvconst(1,64),bvconst(0,64),bvconst(1,8)))
+}
+
+example "FALSE-LOWER107-31 all lowering obligations" {
+    assert(¬(lower107_accept(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "FALSE-LOWER107-32 missing profile" {
+    assert(lower107_accept(bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-LOWER107-33 missing shape" {
+    assert(lower107_accept(bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-LOWER107-34 missing address" {
+    assert(lower107_accept(bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-LOWER107-35 missing value" {
+    assert(lower107_accept(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-LOWER107-36 missing effects" {
+    assert(lower107_accept(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE-LOWER107-37 missing Fabric contract" {
+    assert(lower107_accept(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE-LOWER107 unsigned high byte" { assert(lower107_value(bvconst(2,8),bvconst(255,64))=bvsub(bvconst(0,64),bvconst(1,64))) }
+
+example "FALSE-LOWER107 store truncates" { assert(lower107_value(bvconst(2,8),bvconst(511,64))=bvconst(511,64)) }
+
+example "FALSE-LOWER107 word unchanged" { assert(lower107_value(bvconst(1,8),bvconst(511,64))=bvconst(255,64)) }

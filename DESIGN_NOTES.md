@@ -5051,3 +5051,117 @@ lowering is deferred until this ISA/Fabric checkpoint passes locally.
 cargo test --lib p107_byte_ -- --test-threads=1
 cargo test -- --test-threads=1
 ```
+
+## DN-50: Typed Pointees Select Exact CC2 Memory Instructions (Phase 10.7)
+
+**Baseline.** The byte ISA/Fabric substrate is merged to `main`; the user reported
+1004 passing tests, zero failures (873.51 seconds, single threaded). Work continues
+on `feat/anka107-cc2-byte-lowering`. Compiler byte lowering is not implemented by
+this formal-only refinement.
+
+The existing application-pointer gate defines typed admission; DN-49 defines the
+byte instruction/Fabric boundary. The new `anka107_cc2_byte_lowering.kleis` connects
+the pointee type and operation to emitted instruction evidence:
+
+| Pointee | Operation | ISA opcode | Operand width |
+|---|---|---:|---:|
+| `char` | load | `ldb`, 0x24 | 1 |
+| `char` | store | `stb`, 0x25 | 1 |
+| `int` | load | `ld`, 0x20 | 8 |
+| `int` | store | `st`, 0x21 | 8 |
+
+The pointee tags in the theory are semantic `int=1`/`char=2`, not the compiler's
+encoded pointer tags. Access tags are load=0/store=1; the description table remains
+the authority for actual opcode encodings. Void and all other unsupported pointees,
+unknown access tags, wrong opcodes and wrong widths are rejected.
+
+The application profile requires a typed pointer and complete pointee, and disables
+the bootstrap integer-word exception. Lowering preserves the exact effective
+operand address, zero-extends byte values into word registers, truncates byte stores
+to the low eight bits, and preserves full word values for `int`. It neither changes
+capability authority nor bypasses Fabric. Exactly one operand-data transaction is
+emitted; enclosing-word access and an extra software read/modify/write read are
+inadmissible. Instruction fetch and metadata reads are outside that operand count.
+
+Profile, instruction shape, address, value rule, effects and Fabric-contract evidence
+are all required for lowering acceptance. These flags summarize actual obligations;
+setting them does not supply evidence or authorize a runtime access. Successful
+lowering does not imply a successful memory access: ordinary Fabric permission,
+generation, mapping, range and lifecycle checks still determine execution. Source
+and emitted effective addresses must independently obey the nonwrapping rules.
+
+The new gate contains **43 positive witnesses** and **40 hostile assertions**, all
+explicitly disproved. Universal laws cover byte projection/range and word value
+preservation. Hostile coverage includes raw integer dereference, bootstrap-profile
+leakage, word operations on bytes, byte operations on words, sign extension of 255,
+store truncation failure, address align-down/shift, added authority, extra operand
+transactions, enclosing-word access and omitted Fabric evidence.
+
+The updated runner executes all four Phase 10.7 theory pairs: **201 positive
+witnesses and 183 explicit hostile disproofs**. No axioms or implementation changes
+are introduced. This is an emitted-evidence acceptance contract, not a formal proof
+that the C compiler implements it, an ISO C semantics proof, or a microarchitectural
+confidentiality claim.
+
+```sh
+python3 scripts/check-anka107-gates.py --kleis /path/to/kleis
+```
+
+**Next implementation.** Make Stage-3 select byte versus word instructions from the
+pointee type in dereference expression and assignment lowering, while retaining the
+restricted application profile. Review local `char` storage too so the end-to-end
+probe does not accidentally widen neighboring-byte accesses. Compile and run a
+byte-pointer probe through the concrete verified CC2_1 chain; assert unsigned values,
+truncation, neighboring-byte preservation and continued raw-address rejection.
+Re-run the fixed point after compiler-source changes. Use placement managers and
+existing exact publication/explicit execution admission. Full Phase 10.7 and HTTP
+closure remain open.
+
+
+**DN-50 implementation checkpoint: CC2 byte lowering.** Stage-3 now selects
+`ldb`/`stb` for `char` dereferences and `ld`/`st` for `int`. Typed dereference is
+limited to those two pointees; the existing compiler-only raw-word exception
+remains guarded by the bootstrap workspace flag, which application compilation
+leaves disabled. Local `char` reads now use `ldb` rather than an enclosing word
+load plus mask. Local initialization and assignment use the shared type-selected
+store helper. Stack spills, ABI slots and pointer values remain word-sized.
+The source shrank from 20,151 to 19,973 bytes, leaving 499 bytes in the 20,472-byte
+bootstrap source payload. Placement and execution authority remain unchanged.
+
+The existing concrete rebuild test now reuses its newly verified CC2_1 producer to
+build `userspace/bin/byte_pointer_probe.c`. It checks the exact published code for
+byte pointer load/store opcodes and absence of widened pointer accesses, then
+expects exit 365: unsigned/truncated pointer value 255, sentinel locals 17 and 51,
+and a narrowed local value 42. Those sentinel locals are separate stack slots;
+physical adjacent-byte preservation is established by the existing CPU substrate
+tests, not by claiming the local slots are packed. Negative sources test mismatched
+pointer types and void-pointer dereference, in addition to existing raw-address,
+producer-identity and explicit-authority checks. The changed compiler source goes
+through the complete fixed-point chain before the application is built.
+
+All 201 positive and 183 hostile Kleis checks passed locally. The Rust test harness
+builds and the exact-publication registration regression passes. The expanded
+bootstrap-backed test and full runtime suite have not been executed in this
+container; prior full bootstrap attempts exhausted its memory. The expected suite
+count remains 1004 because the existing concrete test was extended.
+
+```sh
+cargo test --lib p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address -- --test-threads=1 --nocapture
+cargo test -- --test-threads=1
+```
+
+The passing 1004-test baseline predates this compiler change. This checkpoint is
+pending the local commands above. Scaled pointer arithmetic, multi-module rebuild,
+persistent tool/source receipts and the rebuilt HTTP chain remain open.
+
+
+**DN-50 hostile-source refinement.** The first local run completed the changed
+CC2 fixed point (CC2_1/CC2_2 code and backing 124,744 bytes, entry 122,392) and the
+byte probe/opcode assertions, then failed the void-pointer hostile witness's
+expected error code. A direct local `void *p` declaration is outside q50's
+statement dispatch and returns syntax error 10 before dereference validation.
+The witness now uses the already-supported `typedef void *VP; VP p;` form so it
+can reach q47's unsupported-pointee rejection and require error 9 precisely.
+No compiler change or broadened error matching is introduced. Existing lowering
+gates cover this supported typedef/declaration form. The corrected end-to-end
+witness still needs a local rerun; full-suite validation remains pending.

@@ -111,6 +111,26 @@ mod tests {
         assert_eq!(report.artifact.generation, key.generation);
         assert!(matches!(rebuild_application(&producer, &bundle(b"int main(){int x=40;int p=65536;*p=x;return 0;}"), Some(&authority)), Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
         assert!(matches!(rebuild_application(&producer, &bundle(source), None), Err(RebuildError::CompilerExecutionAuthorityRequired)));
+        // Reuse the same freshly verified compiler lineage for the byte edge.
+        let byte_source = include_bytes!("../../userspace/bin/byte_pointer_probe.c");
+        let mut byte_application = rebuild_application(&producer, &bundle(byte_source), Some(&authority)).unwrap();
+        assert_eq!(byte_application.effective_source(), byte_source);
+        // Observe the exact published code, not a host-generated substitute.
+        let artifact = byte_application.registry.get("rebuilt-application").unwrap();
+        let extent = byte_application.placement.allocated_extent(artifact.key.object).unwrap();
+        let code = byte_application.fabric.read_physical(extent.base, artifact.code_size);
+        let instructions: Vec<_> = code.chunks_exact(4).map(|chunk|
+            super::super::isa::decode(u32::from_le_bytes(chunk.try_into().unwrap()))).collect();
+        use super::super::desc::Sem;
+        assert!(instructions.iter().any(|i| i.desc.semantics == Sem::LoadByte && i.rd == 4 && i.rs1 == 4));
+        assert!(instructions.iter().any(|i| i.desc.semantics == Sem::StoreByte && i.rd == 4 && i.rs1 == 5));
+        assert!(!instructions.iter().any(|i| i.desc.semantics == Sem::Load && i.rd == 4 && i.rs1 == 4));
+        assert!(!instructions.iter().any(|i| i.desc.semantics == Sem::Store && i.rd == 4 && i.rs1 == 5));
+        let byte_report = byte_application.run(Some(&authority)).unwrap();
+        // 255 (unsigned/truncated pointer) + 17 + 51 (neighbors) + 42 (local truncation).
+        assert_eq!(byte_report.child_result, ProcessResult::Exited(365));
+        assert!(matches!(rebuild_application(&producer, &bundle(b"int main(){char x=1;int *p=&x;return 0;}"), Some(&authority)), Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
+        assert!(matches!(rebuild_application(&producer, &bundle(b"typedef void *VP;int main(){VP p;return *p;}"), Some(&authority)), Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
         let original_key = producer.cc2_1_key;
         producer.cc2_1_key = producer.cc2_2_key;
         assert!(matches!(producer.application_tools(), Err(Cc2FixedPointError::PublicationIdentityChanged)));

@@ -3896,5 +3896,7 @@ Both preserve flags and use ordinary Fabric lifecycle, generation and permission
 checks. Word instructions retain their existing encodings and behavior.
 The CPU never fetches an enclosing operand word. Fabric validates before reading
 or writing the exact operand span. This is an architectural/simulator transaction
-claim, not a host microarchitecture confidentiality proof. CC2 `char*` lowering
-and the verified-compiler byte application witness remain the next step.
+claim, not a host microarchitecture confidentiality proof. CC2 now selects these byte instructions for `char*` dereferences and local
+`char` accesses, preserving word instructions for `int*`. The expanded concrete
+CC2_1 byte application witness is implemented but awaits local bootstrap/full-suite
+validation; the last validated runtime baseline is 1004 tests.

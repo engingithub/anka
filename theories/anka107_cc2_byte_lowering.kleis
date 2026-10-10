@@ -1,0 +1,214 @@
+// Phase 10.7 compiler-to-ISA acceptance refinement. No axioms.
+// Type tags below denote pointee types: int=1, char=2, unsupported otherwise.
+// Access tags: load=0, store=1. Actual ISA opcodes are LD=32, ST=33,
+// LDB=36, STB=37. The Rust description table remains the encoding source.
+// This models emitted evidence, not a verified compiler or arbitrary C semantics.
+import "anka107_application_pointers.kleis"
+import "anka107_byte_transactions.kleis"
+
+// Applications never borrow the compiler-only raw-word exception.
+define lower107_profile(typed_pointer : BitVec8, complete_pointee : BitVec8,
+    application_profile : BitVec8, bootstrap_raw_words : BitVec8) =
+    (typed_pointer=bvconst(1,8)) ∧ (complete_pointee=bvconst(1,8)) ∧
+    (application_profile=bvconst(1,8)) ∧ (bootstrap_raw_words=bvconst(0,8))
+
+// Only four shapes are earned. Unknown types/accesses/opcodes are rejected.
+define lower107_shape(pointee : BitVec8, access : BitVec8,
+    opcode : BitVec8, width : BitVec64) =
+    ((pointee=bvconst(2,8)) ∧ (access=bvconst(0,8)) ∧
+        (opcode=bvconst(36,8)) ∧ (width=bvconst(1,64))) ∨
+    ((pointee=bvconst(2,8)) ∧ (access=bvconst(1,8)) ∧
+        (opcode=bvconst(37,8)) ∧ (width=bvconst(1,64))) ∨
+    ((pointee=bvconst(1,8)) ∧ (access=bvconst(0,8)) ∧
+        (opcode=bvconst(32,8)) ∧ (width=bvconst(8,64))) ∨
+    ((pointee=bvconst(1,8)) ∧ (access=bvconst(1,8)) ∧
+        (opcode=bvconst(33,8)) ∧ (width=bvconst(8,64)))
+
+// Exact effective operand address: no align-down, prefix adjustment or widening.
+// An effective-address producer must separately satisfy nonwrapping address rules.
+define lower107_address(source_address : BitVec64, emitted_address : BitVec64) =
+    source_address=emitted_address
+
+// Byte values occupy the low eight bits and are zero-extended in word registers.
+// This value projection is admitted only with a valid shape/profile.
+define lower107_value(pointee : BitVec8, value : BitVec64) =
+    if pointee=bvconst(2,8) then bvand(value,bvconst(255,64)) else value
+
+// Lowering grants no capabilities. Exactly one operand-data transaction is emitted.
+// Extra reads for software RMW are not admissible. Metadata/instruction fetch excluded.
+define lower107_effects(authority_before : BitVec8, authority_after : BitVec8,
+    operand_transactions : BitVec64, enclosing_word_accesses : BitVec64,
+    bypass_fabric : BitVec8) =
+    (authority_before=authority_after) ∧ (operand_transactions=bvconst(1,64)) ∧
+    (enclosing_word_accesses=bvconst(0,64)) ∧ (bypass_fabric=bvconst(0,8))
+
+// Runtime admission remains independent: lowering success cannot authorize a faulting access.
+// Flags represent actual proof/test obligations, never compiler-granted authority.
+define lower107_accept(profile : BitVec8, shape : BitVec8, address : BitVec8,
+    value_rule : BitVec8, effects : BitVec8, fabric_contract : BitVec8) =
+    (profile=bvconst(1,8)) ∧ (shape=bvconst(1,8)) ∧ (address=bvconst(1,8)) ∧
+    (value_rule=bvconst(1,8)) ∧ (effects=bvconst(1,8)) ∧ (fabric_contract=bvconst(1,8))
+
+example "LOWER107-1 ordinary typed profile" {
+    assert(lower107_profile(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "LOWER107-2 integer dereference" {
+    assert(¬(lower107_profile(bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "LOWER107-3 incomplete pointee" {
+    assert(¬(lower107_profile(bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "LOWER107-4 not application profile" {
+    assert(¬(lower107_profile(bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,8))))
+}
+
+example "LOWER107-5 bootstrap exception" {
+    assert(¬(lower107_profile(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "LOWER107-6 char load" {
+    assert(lower107_shape(bvconst(2,8),bvconst(0,8),bvconst(36,8),bvconst(1,64)))
+}
+
+example "LOWER107-7 char store" {
+    assert(lower107_shape(bvconst(2,8),bvconst(1,8),bvconst(37,8),bvconst(1,64)))
+}
+
+example "LOWER107-8 int load" {
+    assert(lower107_shape(bvconst(1,8),bvconst(0,8),bvconst(32,8),bvconst(8,64)))
+}
+
+example "LOWER107-9 int store" {
+    assert(lower107_shape(bvconst(1,8),bvconst(1,8),bvconst(33,8),bvconst(8,64)))
+}
+
+example "LOWER107-10 char word load" {
+    assert(¬(lower107_shape(bvconst(2,8),bvconst(0,8),bvconst(32,8),bvconst(8,64))))
+}
+
+example "LOWER107-11 char word store" {
+    assert(¬(lower107_shape(bvconst(2,8),bvconst(1,8),bvconst(33,8),bvconst(8,64))))
+}
+
+example "LOWER107-12 byte opcode widened" {
+    assert(¬(lower107_shape(bvconst(2,8),bvconst(0,8),bvconst(36,8),bvconst(8,64))))
+}
+
+example "LOWER107-13 int byte load" {
+    assert(¬(lower107_shape(bvconst(1,8),bvconst(0,8),bvconst(36,8),bvconst(1,64))))
+}
+
+example "LOWER107-14 int byte store" {
+    assert(¬(lower107_shape(bvconst(1,8),bvconst(1,8),bvconst(37,8),bvconst(1,64))))
+}
+
+example "LOWER107-15 load uses store opcode" {
+    assert(¬(lower107_shape(bvconst(2,8),bvconst(0,8),bvconst(37,8),bvconst(1,64))))
+}
+
+example "LOWER107-16 store uses load opcode" {
+    assert(¬(lower107_shape(bvconst(2,8),bvconst(1,8),bvconst(36,8),bvconst(1,64))))
+}
+
+example "LOWER107-17 void dereference" {
+    assert(¬(lower107_shape(bvconst(3,8),bvconst(0,8),bvconst(36,8),bvconst(1,64))))
+}
+
+example "LOWER107-18 unknown pointee" {
+    assert(¬(lower107_shape(bvconst(255,8),bvconst(1,8),bvconst(37,8),bvconst(1,64))))
+}
+
+example "LOWER107-19 unknown access" {
+    assert(¬(lower107_shape(bvconst(2,8),bvconst(2,8),bvconst(36,8),bvconst(1,64))))
+}
+
+example "LOWER107-20 unknown opcode" {
+    assert(¬(lower107_shape(bvconst(2,8),bvconst(0,8),bvconst(63,8),bvconst(1,64))))
+}
+
+example "LOWER107-21 zero width" {
+    assert(¬(lower107_shape(bvconst(2,8),bvconst(1,8),bvconst(37,8),bvconst(0,64))))
+}
+
+example "LOWER107-22 unaligned byte address retained" {
+    assert(lower107_address(bvconst(4099,64),bvconst(4099,64)))
+}
+
+example "LOWER107-23 align down forbidden" {
+    assert(¬(lower107_address(bvconst(4099,64),bvconst(4096,64))))
+}
+
+example "LOWER107-24 shifted address forbidden" {
+    assert(¬(lower107_address(bvconst(4099,64),bvconst(4100,64))))
+}
+
+example "LOWER107-25 one exact transaction no new authority" {
+    assert(lower107_effects(bvconst(2,8),bvconst(2,8),bvconst(1,64),bvconst(0,64),bvconst(0,8)))
+}
+
+example "LOWER107-26 authority amplification" {
+    assert(¬(lower107_effects(bvconst(2,8),bvconst(3,8),bvconst(1,64),bvconst(0,64),bvconst(0,8))))
+}
+
+example "LOWER107-27 extra RMW read" {
+    assert(¬(lower107_effects(bvconst(2,8),bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(0,8))))
+}
+
+example "LOWER107-28 no operand transaction" {
+    assert(¬(lower107_effects(bvconst(2,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,8))))
+}
+
+example "LOWER107-29 enclosing word access" {
+    assert(¬(lower107_effects(bvconst(2,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,8))))
+}
+
+example "LOWER107-30 Fabric bypass" {
+    assert(¬(lower107_effects(bvconst(2,8),bvconst(2,8),bvconst(1,64),bvconst(0,64),bvconst(1,8))))
+}
+
+example "LOWER107-31 all lowering obligations" {
+    assert(lower107_accept(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "LOWER107-32 missing profile" {
+    assert(¬(lower107_accept(bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "LOWER107-33 missing shape" {
+    assert(¬(lower107_accept(bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "LOWER107-34 missing address" {
+    assert(¬(lower107_accept(bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "LOWER107-35 missing value" {
+    assert(¬(lower107_accept(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "LOWER107-36 missing effects" {
+    assert(¬(lower107_accept(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "LOWER107-37 missing Fabric contract" {
+    assert(¬(lower107_accept(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "LOWER107 unsigned high byte" { assert(lower107_value(bvconst(2,8),bvconst(255,64))=bvconst(255,64)) }
+
+example "LOWER107 store truncates" { assert(lower107_value(bvconst(2,8),bvconst(511,64))=bvconst(255,64)) }
+
+example "LOWER107 word unchanged" { assert(lower107_value(bvconst(1,8),bvconst(511,64))=bvconst(511,64)) }
+
+example "LOWER107 universal byte projection" {
+    assert(∀(v : BitVec64). lower107_value(bvconst(2,8),v)=bvand(v,bvconst(255,64)))
+}
+example "LOWER107 universal byte range" {
+    assert(∀(v : BitVec64). bvule(lower107_value(bvconst(2,8),v),bvconst(255,64)))
+}
+example "LOWER107 universal word preservation" {
+    assert(∀(v : BitVec64). lower107_value(bvconst(1,8),v)=v)
+}
