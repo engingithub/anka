@@ -1,9 +1,10 @@
 // Phase 10.7 proposed application pointer contract. No new axioms.
 // This freezes requirements BEFORE implementing application pointer lowering.
 // It does not claim the current parser/backend implements these operations.
-// Pointers remain numeric virtual addresses, not new capabilities or bounded
-// pointer objects. Bounds/type facts here are acceptance obligations supplied
-// by the caller/model; every actual access must still traverse Fabric.
+// Historical numeric-address-only representation assumption is superseded by
+// anka107_pointer_metadata.kleis. These arithmetic/type helpers remain useful,
+// but supplied extent facts alone do not establish pointer provenance/lifetime.
+// Metadata contract is proposed; current compiler ABI is not yet changed.
 // Scope: byte and word pointees, positive forward element displacement,
 // matched pointer types, explicit typed ABI boundaries. No general ISO C,
 // arbitrary integer casts, void/function/aggregate dereference, pointer

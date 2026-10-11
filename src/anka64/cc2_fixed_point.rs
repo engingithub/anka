@@ -11,7 +11,7 @@ use super::dev_compiler::{bootstrap_extended_ccb, compile_bootstrap_aom_with_lin
 use super::dev_runner::DeveloperExecutionAuthority;
 use super::fabric::Fabric;
 use super::placement::PhysicalPlacementManager;
-use super::source_bundle::{run_ankapp, AnkaPreprocessError, SourceBundle,
+use super::source_bundle::{ AnkaPreprocessError, SourceBundle,
     SourceBundleError, SourceBundleMember};
 use super::state::ObjectState;
 
@@ -83,7 +83,7 @@ pub fn witness_cc2_fixed_point(
     let linker = compile_c_with_ccb(&ccb, linker_source)
         .map_err(Cc2FixedPointError::Bootstrap)?;
 
-    let effective_1 = run_ankapp(&preprocessor.bytes, &bundle)
+    let effective_1 = super::source_bundle::run_ankapp_with_capacity(&preprocessor.bytes, &bundle,super::dev_compiler::DEVELOPMENT_COMPILER_SOURCE_SIZE-8)
         .map_err(|error| Cc2FixedPointError::Preprocess { generation: 1, error })?;
     // This first witness intentionally supports the current standalone source.
     // An include-bearing seed needs its own preprocessing admission first.
@@ -104,7 +104,7 @@ pub fn witness_cc2_fixed_point(
         .map_err(|error| Cc2FixedPointError::Publish { generation: 1, error })?;
     verify_publication(&fabric, &placement, first.key, &cc2_1)?;
 
-    let effective_2 = run_ankapp(&preprocessor.bytes, &bundle)
+    let effective_2 = super::source_bundle::run_ankapp_with_capacity(&preprocessor.bytes, &bundle,super::dev_compiler::DEVELOPMENT_COMPILER_SOURCE_SIZE-8)
         .map_err(|error| Cc2FixedPointError::Preprocess { generation: 2, error })?;
     if effective_1.bytes != effective_2.bytes {
         return Err(Cc2FixedPointError::EffectiveSourceChanged);

@@ -17,7 +17,7 @@ use super::dev_compiler::{
     DEVELOPMENT_COMPILER_OUTPUT_SIZE,
 };
 
-use super::guest_compiler::SOURCE_SIZE;
+
 
 const ERR_AOM: u64 = 15;
 const ERR_AOM_SIGNATURE: u64 = 16;
@@ -60,7 +60,7 @@ fn module(source: &str) -> AomModule {
 fn p103_ccb_builds_real_ankacc2_stage3() {
     let image = stage3_image();
     let source_bytes = stage3_source().len() as u64;
-    let source_payload_limit = SOURCE_SIZE as u64 - 8;
+    let source_payload_limit = super::dev_compiler::DEVELOPMENT_COMPILER_SOURCE_SIZE - 8;
     let source_headroom_bytes = source_payload_limit
         .checked_sub(source_bytes)
         .expect("stage-3 compiler source must fit in CC_B's length-prefixed source arena");

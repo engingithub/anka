@@ -1266,13 +1266,32 @@ impl Kernel {
         }
         core.address_map.add(layout.stack_vaddr, layout.stack_size, stack_obj);
         core.address_map.add(layout.trap_vaddr, trap_size, trap_obj);
-        core.r[SP as usize] = layout.stack_vaddr + layout.stack_size;
+        core.write_register(SP as usize, layout.stack_vaddr + layout.stack_size);
         core.trap_vector = layout.trap_vaddr;
 
         // --- Additional maps from initial environment ---
         for m in initial_maps {
             core.address_map.add_at(m.vaddr, m.size, m.obj, m.obj_offset);
         }
+
+        // Protected profile is derived from the exact sealed artifact metadata,
+        // never a friendly name or an application-controlled register.
+        let protected=(|| {
+            let object=self.fabric.objects.get(&desc.code_obj).ok_or(())?;
+            if object.state!=ObjectState::Sealed {return Err(());}
+            if desc.code_offset.checked_add(desc.image_size).is_none_or(|n| n>object.size) {return Err(());}
+            let base=self.fabric.translate(desc.code_obj,desc.code_offset).ok_or(())?;
+            let image=self.fabric.read_physical(base,desc.image_size);
+            let code=image.get(..desc.code_size as usize).ok_or(())?;
+            let metadata=if desc.lit_start!=0 {image.get(desc.lit_start as usize..).ok_or(())?}else{&[]};
+            let program=super::pointer_frames::ValidatedPointerProgram::from_image(code,metadata).map_err(|_| ())?;
+            if let Some(program)=program {
+                self.fabric.register_agent(agent,AgentKind::Cpu(CoreId(agent.0)),dom);
+                core.admit_pointer_program(&mut self.fabric,program,layout.code_vaddr,
+                    layout.stack_vaddr,layout.stack_vaddr+layout.stack_size).map_err(|_| ())?;
+            }
+            Ok(())
+        })();
 
         // --- Spawn and capture ownership ---
         let key = self.spawn(core);
@@ -1283,6 +1302,7 @@ impl Kernel {
             stack_extent,
             trap_extent,
         });
+        if protected.is_err() {self.finish_process(key.slot,ProcessResult::ProtectionFault);}
         key
     }
 
@@ -1799,6 +1819,7 @@ impl Kernel {
     /// Transition a process to Zombie with a definitive ProcessResult.
     /// Then depth-first terminate any orphaned descendants.
     pub(crate) fn finish_process(&mut self, slot: usize, result: ProcessResult) {
+        self.processes[slot].core.retire_all_pointer_frames(&mut self.fabric);
         let exit_code = match &result {
             ProcessResult::Exited(code) => *code,
             _ => 0xDEAD,
@@ -2243,8 +2264,8 @@ impl Kernel {
         }
         for (slot, current_epoch) in to_wake {
             self.processes[slot].event_wait = None;
-            self.processes[slot].core.r[R0 as usize] = 0;
-            self.processes[slot].core.r[R1 as usize] = current_epoch;
+            self.processes[slot].core.write_syscall_result(R0 as usize, 0);
+            self.processes[slot].core.write_syscall_result(R1 as usize, current_epoch);
             self.resume_from_trap(slot);
         }
     }
@@ -2272,12 +2293,12 @@ impl Kernel {
                     let ws = self.processes[i].waiting_on.take().unwrap();
                     match ws.kind {
                         WaitKind::Exec => {
-                            self.processes[i].core.r[R0 as usize] = encode_exec_result(&result);
+                            self.processes[i].core.write_syscall_result(R0 as usize, encode_exec_result(&result));
                         }
                         WaitKind::Lifecycle => {
                             let (r0, r1) = encode_wait_result(&result);
-                            self.processes[i].core.r[R0 as usize] = r0;
-                            self.processes[i].core.r[R1 as usize] = r1;
+                            self.processes[i].core.write_syscall_result(R0 as usize, r0);
+                            self.processes[i].core.write_syscall_result(R1 as usize, r1);
                             if let Some(handle_slot) = ws.handle_slot {
                                 self.lifecycle_tables[i][handle_slot].collected = true;
                             }
@@ -2541,18 +2562,17 @@ impl Kernel {
 
                     let secondary = completion.secondary_result();
                     let proc = &mut self.processes[slot];
-                    proc.core.r[R0 as usize] = match completion.status() {
+                    proc.core.write_syscall_result(R0 as usize, match completion.status() {
                         super::state::DeviceCompletionStatus::Success => 0,
                         super::state::DeviceCompletionStatus::DmaFault(_) => u64::MAX,
-                    };
+                    });
                     if let Some(value) = secondary {
-                        proc.core.r[R1 as usize] = value;
+                        proc.core.write_syscall_result(R1 as usize, value);
                     }
-                    let pc = proc.core.event_return()
-                        .expect("matched I/O completion requires outstanding syscall EventFrame");
-                    proc.core.pc = pc;
                     proc.io_wait = None;
-                    proc.core.halted = false;
+                    // The same checked return handles normal and blocked syscalls.
+                    // A corrupt/foreign frame faults the process rather than panicking.
+                    self.resume_from_trap(slot);
                 } else if let Some(entry) = self.processes[slot].async_requests.iter_mut()
                     .find(|r| r.key == dev_key)
                 {
@@ -2563,6 +2583,10 @@ impl Kernel {
     }
 
     fn handle_syscall(&mut self, idx: usize) {
+        if self.processes[idx].core.protected_application() && self.processes[idx].core.r[R0 as usize]!=SYS_EXIT {
+            self.finish_process(idx,ProcessResult::ProtectionFault);return;
+        }
+
         let syscall = self.processes[idx].core.r[R0 as usize];
 
         match syscall {
@@ -2574,7 +2598,7 @@ impl Kernel {
                 self.handle_buffer_write(idx);
             }
             SYS_YIELD => {
-                self.processes[idx].core.r[R0 as usize] = 0;
+                self.processes[idx].core.write_syscall_result(R0 as usize, 0);
                 self.resume_from_trap(idx);
             }
             SYS_SEND => {
@@ -2587,42 +2611,41 @@ impl Kernel {
                 if let Some(dest_slot) = self.resolve_pid(dest_pid) {
                     let route = self.message_route(dest_slot, &from_key);
                     if route == DeliveryRoute::Full {
-                        self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                        self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     } else {
                         let msg = Message { from: from_key, value, cap: None };
                         self.deliver_message(dest_slot, msg, route);
-                        self.processes[idx].core.r[R0 as usize] = 0;
+                        self.processes[idx].core.write_syscall_result(R0 as usize, 0);
                     }
                 } else {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 }
                 self.resume_from_trap(idx);
             }
             SYS_RECV => {
                 if let Some(msg) = self.mailboxes[idx].pop() {
-                    self.processes[idx].core.r[R0 as usize] = msg.value;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, msg.value);
                     // R1 = tag: 1 = ordinary, 2 = cap-bearing
-                    self.processes[idx].core.r[R1 as usize] =
-                        if msg.cap.is_some() { 2 } else { 1 };
+                    self.processes[idx].core.write_syscall_result(R1 as usize, if msg.cap.is_some() { 2 } else { 1 });
                     // R2,R3 = cap handle (slot, generation) or sentinel
                     if let Some(ch) = msg.cap {
-                        self.processes[idx].core.r[R2 as usize] = ch.slot as u64;
-                        self.processes[idx].core.r[R3 as usize] = ch.generation as u64;
+                        self.processes[idx].core.write_syscall_result(R2 as usize, ch.slot as u64);
+                        self.processes[idx].core.write_syscall_result(R3 as usize, ch.generation as u64);
                     } else {
-                        self.processes[idx].core.r[R2 as usize] = u32::MAX as u64;
-                        self.processes[idx].core.r[R3 as usize] = 0;
+                        self.processes[idx].core.write_syscall_result(R2 as usize, u32::MAX as u64);
+                        self.processes[idx].core.write_syscall_result(R3 as usize, 0);
                     }
                     // R4,R5 = sender ProcessKey (slot, generation)
-                    self.processes[idx].core.r[R4 as usize] = msg.from.slot as u64;
-                    self.processes[idx].core.r[R5 as usize] = msg.from.generation as u64;
+                    self.processes[idx].core.write_syscall_result(R4 as usize, msg.from.slot as u64);
+                    self.processes[idx].core.write_syscall_result(R5 as usize, msg.from.generation as u64);
                 } else {
                     // Empty mailbox
-                    self.processes[idx].core.r[R0 as usize] = 0;
-                    self.processes[idx].core.r[R1 as usize] = 0; // tag 0 = empty
-                    self.processes[idx].core.r[R2 as usize] = u32::MAX as u64;
-                    self.processes[idx].core.r[R3 as usize] = 0;
-                    self.processes[idx].core.r[R4 as usize] = 0;
-                    self.processes[idx].core.r[R5 as usize] = 0;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, 0);
+                    self.processes[idx].core.write_syscall_result(R1 as usize, 0); // tag 0 = empty
+                    self.processes[idx].core.write_syscall_result(R2 as usize, u32::MAX as u64);
+                    self.processes[idx].core.write_syscall_result(R3 as usize, 0);
+                    self.processes[idx].core.write_syscall_result(R4 as usize, 0);
+                    self.processes[idx].core.write_syscall_result(R5 as usize, 0);
                 }
                 self.resume_from_trap(idx);
             }
@@ -2713,21 +2736,21 @@ impl Kernel {
 
         // R3 reserved — reject nonzero now to prevent accidental ABI growth.
         if r3 != 0 {
-            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
             self.resume_from_trap(idx);
             return;
         }
 
         // len == 0: success, write nothing, addr not resolved.
         if len == 0 {
-            self.processes[idx].core.r[R0 as usize] = 0;
+            self.processes[idx].core.write_syscall_result(R0 as usize, 0);
             self.resume_from_trap(idx);
             return;
         }
 
         // Resource bound: reject before allocating.
         if len > MAX_WRITE {
-            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
             self.resume_from_trap(idx);
             return;
         }
@@ -2736,7 +2759,7 @@ impl Kernel {
         let addr_end = match addr.checked_add(len - 1) {
             Some(v) => v,
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -2752,7 +2775,7 @@ impl Kernel {
         let (obj_start, off_start) = match self.processes[idx].core.address_map.resolve(addr) {
             Some(r) => r,
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -2760,7 +2783,7 @@ impl Kernel {
         let (obj_end, off_end) = match self.processes[idx].core.address_map.resolve(addr_end) {
             Some(r) => r,
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -2768,7 +2791,7 @@ impl Kernel {
 
         // Same object
         if obj_start != obj_end {
-            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
             self.resume_from_trap(idx);
             return;
         }
@@ -2777,13 +2800,13 @@ impl Kernel {
         let expected_off_end = match off_start.checked_add(len - 1) {
             Some(v) => v,
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return;
             }
         };
         if off_end != expected_off_end {
-            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
             self.resume_from_trap(idx);
             return;
         }
@@ -2794,7 +2817,7 @@ impl Kernel {
         if self.fabric.find_authorizing_cap(
             domain, obj_start, off_start, len, Permissions::READ
         ).is_none() {
-            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
             self.resume_from_trap(idx);
             return;
         }
@@ -2810,7 +2833,7 @@ impl Kernel {
             let (obj, off) = match self.processes[idx].core.address_map.resolve(va) {
                 Some(r) => r,
                 None => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return;
                 }
@@ -2830,7 +2853,7 @@ impl Kernel {
             match self.fabric.execute_read(req) {
                 Ok(bytes) => buf.push(bytes[0]),
                 Err(_) => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return;
                 }
@@ -2840,7 +2863,7 @@ impl Kernel {
         // ── Commit staged output ──────────────────────────────
         // All bytes succeeded.  Append once.
         self.byte_output.extend_from_slice(&buf);
-        self.processes[idx].core.r[R0 as usize] = 0;
+        self.processes[idx].core.write_syscall_result(R0 as usize, 0);
         self.resume_from_trap(idx);
     }
 
@@ -2857,7 +2880,7 @@ impl Kernel {
         let (object, _offset) = match self.processes[idx].core.address_map.resolve(vaddr) {
             Some(r) => r,
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -2871,14 +2894,14 @@ impl Kernel {
         if self.fabric.find_authorizing_cap(
             domain, object, 0, obj_size, Permissions::SEAL
         ).is_none() {
-            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
             self.resume_from_trap(idx);
             return;
         }
 
         // Structural seal: Active → Sealed, generation bumped.
         if !self.fabric.seal_object(object) {
-            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
             self.resume_from_trap(idx);
             return;
         }
@@ -2886,7 +2909,7 @@ impl Kernel {
         // Grant RX at the new generation
         self.fabric.grant(domain, object, 0, obj_size, Permissions::RX);
 
-        self.processes[idx].core.r[R0 as usize] = 0;
+        self.processes[idx].core.write_syscall_result(R0 as usize, 0);
         self.resume_from_trap(idx);
     }
 
@@ -2922,7 +2945,7 @@ impl Kernel {
         let (code_obj, code_offset) = match self.processes[idx].core.address_map.resolve(code_vaddr) {
             Some(r) => r,
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -2932,7 +2955,7 @@ impl Kernel {
             .map(|o| o.state == ObjectState::Sealed)
             .unwrap_or(false);
         if !is_sealed {
-            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
             self.resume_from_trap(idx);
             return None;
         }
@@ -2940,7 +2963,7 @@ impl Kernel {
         let obj_size = match self.fabric.objects.get(&code_obj) {
             Some(o) => o.size,
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -2950,12 +2973,12 @@ impl Kernel {
         let has_literals = lit_start != 0;
         if has_literals {
             if lit_start < code_size {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
             if image_size <= lit_start {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -2968,7 +2991,7 @@ impl Kernel {
         ) {
             Some(cap) => cap.clone(),
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -2982,7 +3005,7 @@ impl Kernel {
             ) {
                 Some(cap) => Some(cap.clone()),
                 None => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return None;
                 }
@@ -2997,7 +3020,7 @@ impl Kernel {
             child_dom, &code_parent, code_offset, code_size, Permissions::RX,
         ).is_none() {
             self.fabric.destroy_domain(child_dom);
-            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
             self.resume_from_trap(idx);
             return None;
         }
@@ -3010,7 +3033,7 @@ impl Kernel {
                 lit_offset, lit_length, Permissions::READ,
             ).is_none() {
                 self.fabric.destroy_domain(child_dom);
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3053,7 +3076,7 @@ impl Kernel {
         if grant_count == 0 && map_count == 0 && layout_addr == 0 {
             if let Some(child_key) = self.create_child(idx) {
                 let handle = self.install_lifecycle(idx, child_key);
-                self.processes[idx].core.r[R0 as usize] = handle.as_u64();
+                self.processes[idx].core.write_syscall_result(R0 as usize, handle.as_u64());
                 self.resume_from_trap(idx);
             }
             return;
@@ -3062,7 +3085,7 @@ impl Kernel {
         // Extended spawn with grants and maps
         if let Some(child_key) = self.create_child_with_env(idx) {
             let handle = self.install_lifecycle(idx, child_key);
-            self.processes[idx].core.r[R0 as usize] = handle.as_u64();
+            self.processes[idx].core.write_syscall_result(R0 as usize, handle.as_u64());
             self.resume_from_trap(idx);
         }
         // On failure, create_child_with_env already set R0=MAX and resumed.
@@ -3098,7 +3121,7 @@ impl Kernel {
 
         // ── Validate counts ──
         if grant_count > MAX_SPAWN_GRANTS || map_count > MAX_SPAWN_MAPS {
-            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
             self.resume_from_trap(idx);
             return None;
         }
@@ -3107,7 +3130,7 @@ impl Kernel {
         let grant_bytes = match grant_count.checked_mul(SPAWN_GRANT_SIZE) {
             Some(v) => v,
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3115,7 +3138,7 @@ impl Kernel {
         let map_bytes = match map_count.checked_mul(SPAWN_MAP_SIZE) {
             Some(v) => v,
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3126,7 +3149,7 @@ impl Kernel {
             match self.read_virtual_bytes(idx, grant_table_addr, grant_bytes) {
                 Some(bytes) => bytes,
                 None => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return None;
                 }
@@ -3140,7 +3163,7 @@ impl Kernel {
             match self.read_virtual_bytes(idx, map_table_addr, map_bytes) {
                 Some(bytes) => bytes,
                 None => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return None;
                 }
@@ -3158,7 +3181,7 @@ impl Kernel {
             let raw_layout = match self.read_virtual_bytes(idx, layout_addr, SPAWN_LAYOUT_SIZE) {
                 Some(bytes) => bytes,
                 None => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return None;
                 }
@@ -3170,21 +3193,21 @@ impl Kernel {
             let reserved    = u64::from_le_bytes(raw_layout[32..40].try_into().unwrap());
 
             if reserved != 0 {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
 
             // Validate resource bounds
             if stack_size < MIN_STACK_SIZE || stack_size > MAX_STACK_SIZE {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
 
             // Validate alignment (page-aligned)
             if stack_vaddr & 0xFFF != 0 || trap_vaddr & 0xFFF != 0 {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3209,7 +3232,7 @@ impl Kernel {
 
             // Reserved field must be zero
             if reserved != 0 {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3218,7 +3241,7 @@ impl Kernel {
             let child_perms = match Permissions::from_bits_checked(perms_raw) {
                 Some(p) => p,
                 None => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return None;
                 }
@@ -3226,7 +3249,7 @@ impl Kernel {
 
             // Size must be nonzero
             if size == 0 {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3236,7 +3259,7 @@ impl Kernel {
             let (obj, map_base) = match self.processes[idx].core.address_map.resolve(parent_vaddr) {
                 Some(r) => r,
                 None => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return None;
                 }
@@ -3246,7 +3269,7 @@ impl Kernel {
             let target_offset = match map_base.checked_add(offset) {
                 Some(v) => v,
                 None => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return None;
                 }
@@ -3259,13 +3282,13 @@ impl Kernel {
             let grant_parent_vaddr = match parent_vaddr.checked_add(offset) {
                 Some(v) => v,
                 None => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return None;
                 }
             };
             if self.resolve_virtual_range(idx, grant_parent_vaddr, size).is_none() {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3277,7 +3300,7 @@ impl Kernel {
             if self.fabric.find_authorizing_cap(
                 parent_domain, obj, target_offset, size, child_perms,
             ).is_none() {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3301,7 +3324,7 @@ impl Kernel {
             let reserved     = u64::from_le_bytes(raw_maps[base+32..base+40].try_into().unwrap());
 
             if reserved != 0 || size == 0 {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3310,7 +3333,7 @@ impl Kernel {
             let (obj, map_base) = match self.processes[idx].core.address_map.resolve(parent_vaddr) {
                 Some(r) => r,
                 None => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return None;
                 }
@@ -3319,7 +3342,7 @@ impl Kernel {
             let target_offset = match map_base.checked_add(offset) {
                 Some(v) => v,
                 None => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return None;
                 }
@@ -3329,13 +3352,13 @@ impl Kernel {
             let map_parent_vaddr = match parent_vaddr.checked_add(offset) {
                 Some(v) => v,
                 None => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return None;
                 }
             };
             if self.resolve_virtual_range(idx, map_parent_vaddr, size).is_none() {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3362,7 +3385,7 @@ impl Kernel {
         let (code_obj, code_offset) = match self.processes[idx].core.address_map.resolve(code_vaddr) {
             Some(r) => r,
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3372,7 +3395,7 @@ impl Kernel {
             .map(|o| o.state == ObjectState::Sealed)
             .unwrap_or(false);
         if !is_sealed {
-            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
             self.resume_from_trap(idx);
             return None;
         }
@@ -3380,7 +3403,7 @@ impl Kernel {
         let obj_size = match self.fabric.objects.get(&code_obj) {
             Some(o) => o.size,
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3390,12 +3413,12 @@ impl Kernel {
         let has_literals = lit_start != 0;
         if has_literals {
             if lit_start < code_size {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
             if image_size <= lit_start {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3408,7 +3431,7 @@ impl Kernel {
         ) {
             Some(cap) => cap.clone(),
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3422,7 +3445,7 @@ impl Kernel {
             ) {
                 Some(cap) => Some(cap.clone()),
                 None => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return None;
                 }
@@ -3438,7 +3461,7 @@ impl Kernel {
         let code_end = match child_layout.code_vaddr.checked_add(code_size) {
             Some(v) => v,
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3450,7 +3473,7 @@ impl Kernel {
             let lit_vaddr = match child_layout.code_vaddr.checked_add(lit_start) {
                 Some(v) => v,
                 None => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return None;
                 }
@@ -3458,7 +3481,7 @@ impl Kernel {
             let lit_end = match lit_vaddr.checked_add(lit_length) {
                 Some(v) => v,
                 None => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return None;
                 }
@@ -3469,7 +3492,7 @@ impl Kernel {
         let stack_end = match child_layout.stack_vaddr.checked_add(child_layout.stack_size) {
             Some(v) => v,
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3479,7 +3502,7 @@ impl Kernel {
         let trap_end = match child_layout.trap_vaddr.checked_add(trap_size) {
             Some(v) => v,
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3490,7 +3513,7 @@ impl Kernel {
             let m_end = match m.vaddr.checked_add(m.size) {
                 Some(v) => v,
                 None => {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return None;
                 }
@@ -3498,7 +3521,7 @@ impl Kernel {
             ranges.push((m.vaddr, m_end));
         }
         if !Self::validate_no_map_overlap(&ranges) {
-            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
             self.resume_from_trap(idx);
             return None;
         }
@@ -3530,7 +3553,7 @@ impl Kernel {
                     .map(|end| end <= code_offset + image_size)
                     .unwrap_or(false);
             if !has_covering_grant && !has_code_rx && !has_lit_r {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3543,7 +3566,7 @@ impl Kernel {
             child_dom, &code_parent, code_offset, code_size, Permissions::RX,
         ).is_none() {
             self.fabric.destroy_domain(child_dom);
-            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
             self.resume_from_trap(idx);
             return None;
         }
@@ -3556,7 +3579,7 @@ impl Kernel {
                 lit_offset, lit_length, Permissions::READ,
             ).is_none() {
                 self.fabric.destroy_domain(child_dom);
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3572,7 +3595,7 @@ impl Kernel {
                 child_dom, &parent_cap, g.offset, g.size, g.perms,
             ).is_none() {
                 self.fabric.destroy_domain(child_dom);
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return None;
             }
@@ -3607,8 +3630,8 @@ impl Kernel {
             Some((s, entry)) => (s, entry.child),
             None => {
                 let (r0, r1) = encode_wait_invalid();
-                self.processes[idx].core.r[R0 as usize] = r0;
-                self.processes[idx].core.r[R1 as usize] = r1;
+                self.processes[idx].core.write_syscall_result(R0 as usize, r0);
+                self.processes[idx].core.write_syscall_result(R1 as usize, r1);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -3619,8 +3642,8 @@ impl Kernel {
             Some(i) => i,
             None => {
                 let (r0, r1) = encode_wait_invalid();
-                self.processes[idx].core.r[R0 as usize] = r0;
-                self.processes[idx].core.r[R1 as usize] = r1;
+                self.processes[idx].core.write_syscall_result(R0 as usize, r0);
+                self.processes[idx].core.write_syscall_result(R1 as usize, r1);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -3632,8 +3655,8 @@ impl Kernel {
                 .expect("zombie process must have a result");
             let (r0, r1) = encode_wait_result(&result);
             self.lifecycle_tables[idx][slot].collected = true;
-            self.processes[idx].core.r[R0 as usize] = r0;
-            self.processes[idx].core.r[R1 as usize] = r1;
+            self.processes[idx].core.write_syscall_result(R0 as usize, r0);
+            self.processes[idx].core.write_syscall_result(R1 as usize, r1);
             self.reclaim_process(child_idx);
             self.resume_from_trap(idx);
             return;
@@ -3673,7 +3696,7 @@ impl Kernel {
         let dev_binding = match self.legacy_block_device {
             Some(b) => b,
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -3681,7 +3704,7 @@ impl Kernel {
 
         // Fail fast: already waiting on I/O.
         if self.processes[idx].io_wait.is_some() {
-            self.processes[idx].core.r[R0 as usize] = u64::MAX;
+            self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
             self.resume_from_trap(idx);
             return;
         }
@@ -3690,14 +3713,14 @@ impl Kernel {
         let block_size = match self.device_registry.lookup(dev_binding) {
             Some(slot) => {
                 let DeviceController::Block(ctrl) = &slot.controller else {
-                    self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                    self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                     self.resume_from_trap(idx);
                     return;
                 };
                 ctrl.storage_ref().block_size()
             }
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -3709,7 +3732,7 @@ impl Kernel {
         {
             Some(r) => r,
             None => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -3750,7 +3773,7 @@ impl Kernel {
                 });
             }
             _ => {
-                self.processes[idx].core.r[R0 as usize] = u64::MAX;
+                self.processes[idx].core.write_syscall_result(R0 as usize, u64::MAX);
                 self.resume_from_trap(idx);
             }
         }
@@ -3782,7 +3805,7 @@ impl Kernel {
         let slot = match u32::try_from(self.processes[idx].core.r[R1 as usize]) {
             Ok(v) => v,
             Err(_) => {
-                self.processes[idx].core.r[R0 as usize] = 1;
+                self.processes[idx].core.write_syscall_result(R0 as usize, 1);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -3790,7 +3813,7 @@ impl Kernel {
         let hgen = match u32::try_from(self.processes[idx].core.r[R2 as usize]) {
             Ok(v) => v,
             Err(_) => {
-                self.processes[idx].core.r[R0 as usize] = 1;
+                self.processes[idx].core.write_syscall_result(R0 as usize, 1);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -3805,7 +3828,7 @@ impl Kernel {
         {
             Some(aid) => aid,
             None => {
-                self.processes[idx].core.r[R0 as usize] = 1;
+                self.processes[idx].core.write_syscall_result(R0 as usize, 1);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -3813,7 +3836,7 @@ impl Kernel {
 
         // Phase 2: preflight — backing authority must exist in domain.
         if !self.fabric.has_authority_id(domain, auth_id) {
-            self.processes[idx].core.r[R0 as usize] = 1;
+            self.processes[idx].core.write_syscall_result(R0 as usize, 1);
             self.resume_from_trap(idx);
             return;
         }
@@ -3830,7 +3853,7 @@ impl Kernel {
         let removed = self.fabric.remove_by_authority_id(domain, removed_aid);
         debug_assert!(removed, "authority present — phase 2 passed");
 
-        self.processes[idx].core.r[R0 as usize] = 0;
+        self.processes[idx].core.write_syscall_result(R0 as usize, 0);
         self.resume_from_trap(idx);
     }
 
@@ -3854,19 +3877,19 @@ impl Kernel {
         // Gate 0: checked ABI decode
         let dest_slot = match usize::try_from(
             match u32::try_from(r1) { Ok(v) => v, Err(_) => {
-                self.processes[idx].core.r[R0 as usize] = 1;
+                self.processes[idx].core.write_syscall_result(R0 as usize, 1);
                 self.resume_from_trap(idx);
                 return;
             }}
         ) { Ok(v) => v, Err(_) => {
-            self.processes[idx].core.r[R0 as usize] = 1;
+            self.processes[idx].core.write_syscall_result(R0 as usize, 1);
             self.resume_from_trap(idx);
             return;
         }};
         let dest_gen = match u32::try_from(r2) {
             Ok(v) => v,
             Err(_) => {
-                self.processes[idx].core.r[R0 as usize] = 1;
+                self.processes[idx].core.write_syscall_result(R0 as usize, 1);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -3878,7 +3901,7 @@ impl Kernel {
         let dest_idx = match self.validate_message_destination(&dest_key) {
             Some(i) => i,
             None => {
-                self.processes[idx].core.r[R0 as usize] = 1;
+                self.processes[idx].core.write_syscall_result(R0 as usize, 1);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -3891,14 +3914,14 @@ impl Kernel {
         };
         let route = self.message_route(dest_idx, &from_key);
         if route == DeliveryRoute::Full {
-            self.processes[idx].core.r[R0 as usize] = 2;
+            self.processes[idx].core.write_syscall_result(R0 as usize, 2);
             self.resume_from_trap(idx);
             return;
         }
 
         let msg = Message { from: from_key, value, cap: None };
         self.deliver_message(dest_idx, msg, route);
-        self.processes[idx].core.r[R0 as usize] = 0;
+        self.processes[idx].core.write_syscall_result(R0 as usize, 0);
         self.resume_from_trap(idx);
     }
 
@@ -4190,7 +4213,7 @@ impl Kernel {
             cap: Some(new_handle),
         };
         self.deliver_message(dest_idx, msg, route);
-        self.processes[idx].core.r[R0 as usize] = 0;
+        self.processes[idx].core.write_syscall_result(R0 as usize, 0);
         self.resume_from_trap(idx);
     }
 
@@ -4343,7 +4366,7 @@ impl Kernel {
         let dev_slot = self.device_registry.lookup_mut(dev_binding)
             .expect("preflight validated binding exists");
         let DeviceController::Block(ctrl) = &mut dev_slot.controller else {
-            self.processes[idx].core.r[R0 as usize] = 5;
+            self.processes[idx].core.write_syscall_result(R0 as usize, 5);
             self.resume_from_trap(idx);
             return;
         };
@@ -4442,12 +4465,12 @@ impl Kernel {
                     key: dev_key,
                     completion: None,
                 });
-                self.processes[idx].core.r[R0 as usize] = 0;
-                self.processes[idx].core.r[R1 as usize] = handle.slot as u64;
-                self.processes[idx].core.r[R2 as usize] = handle.generation;
+                self.processes[idx].core.write_syscall_result(R0 as usize, 0);
+                self.processes[idx].core.write_syscall_result(R1 as usize, handle.slot as u64);
+                self.processes[idx].core.write_syscall_result(R2 as usize, handle.generation);
                 // Extended ABI: R3/R4 = device identity (namespace ticket)
-                self.processes[idx].core.r[R3 as usize] = dev_binding.object.0;
-                self.processes[idx].core.r[R4 as usize] = dev_binding.generation.0;
+                self.processes[idx].core.write_syscall_result(R3 as usize, dev_binding.object.0);
+                self.processes[idx].core.write_syscall_result(R4 as usize, dev_binding.generation.0);
                 self.resume_from_trap(idx);
             }
             _ => {
@@ -4487,7 +4510,7 @@ impl Kernel {
         let slot = match u8::try_from(r1) {
             Ok(v) => v,
             Err(_) => {
-                self.processes[idx].core.r[R0 as usize] = 1;
+                self.processes[idx].core.write_syscall_result(R0 as usize, 1);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -4511,7 +4534,7 @@ impl Kernel {
 
         // ── Gate: not already in IoWait ──
         if self.processes[idx].io_wait.is_some() {
-            self.processes[idx].core.r[R0 as usize] = 2;
+            self.processes[idx].core.write_syscall_result(R0 as usize, 2);
             self.resume_from_trap(idx);
             return;
         }
@@ -4522,16 +4545,16 @@ impl Kernel {
 
         match pos {
             None => {
-                self.processes[idx].core.r[R0 as usize] = 1;
+                self.processes[idx].core.write_syscall_result(R0 as usize, 1);
                 self.resume_from_trap(idx);
             }
             Some(p) => {
                 let entry = &self.processes[idx].async_requests[p];
                 if let Some(status) = entry.completion {
-                    self.processes[idx].core.r[R0 as usize] = match status {
+                    self.processes[idx].core.write_syscall_result(R0 as usize, match status {
                         super::state::DeviceCompletionStatus::Success => 0,
                         super::state::DeviceCompletionStatus::DmaFault(_) => u64::MAX,
-                    };
+                    });
                     self.processes[idx].async_requests.remove(p);
                     self.resume_from_trap(idx);
                 } else {
@@ -4568,7 +4591,7 @@ impl Kernel {
         let cap_slot = match u32::try_from(r1) {
             Ok(v) => v,
             Err(_) => {
-                self.processes[idx].core.r[R0 as usize] = 1;
+                self.processes[idx].core.write_syscall_result(R0 as usize, 1);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -4576,7 +4599,7 @@ impl Kernel {
         let cap_gen = match u32::try_from(r2) {
             Ok(v) => v,
             Err(_) => {
-                self.processes[idx].core.r[R0 as usize] = 1;
+                self.processes[idx].core.write_syscall_result(R0 as usize, 1);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -4588,7 +4611,7 @@ impl Kernel {
         let resolved = match self.resolve_capability(idx, handle) {
             Some(r) => r,
             None => {
-                self.processes[idx].core.r[R0 as usize] = 1;
+                self.processes[idx].core.write_syscall_result(R0 as usize, 1);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -4598,7 +4621,7 @@ impl Kernel {
                 object, object_generation, rights, authority_id, ..
             } => (*object, *object_generation, *rights, *authority_id),
             ResolvedCapability::Memory { .. } => {
-                self.processes[idx].core.r[R0 as usize] = 1;
+                self.processes[idx].core.write_syscall_result(R0 as usize, 1);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -4614,7 +4637,7 @@ impl Kernel {
             dev_rights,
             DeviceRights::EVENT_WAIT,
         ) {
-            self.processes[idx].core.r[R0 as usize] = 4;
+            self.processes[idx].core.write_syscall_result(R0 as usize, 4);
             self.resume_from_trap(idx);
             return;
         }
@@ -4627,7 +4650,7 @@ impl Kernel {
         let current_epoch = match self.device_registry.lookup(binding) {
             Some(slot) => slot.controller.event_sequence(),
             None => {
-                self.processes[idx].core.r[R0 as usize] = 1;
+                self.processes[idx].core.write_syscall_result(R0 as usize, 1);
                 self.resume_from_trap(idx);
                 return;
             }
@@ -4636,8 +4659,8 @@ impl Kernel {
         // ── Atomic check-or-block ──
         if current_epoch != observed_sequence {
             // Epoch already advanced → return immediately
-            self.processes[idx].core.r[R0 as usize] = 0;
-            self.processes[idx].core.r[R1 as usize] = current_epoch;
+            self.processes[idx].core.write_syscall_result(R0 as usize, 0);
+            self.processes[idx].core.write_syscall_result(R1 as usize, current_epoch);
             self.resume_from_trap(idx);
         } else {
             // Epoch unchanged → install DeviceEventWait, remain in syscall.
@@ -5023,24 +5046,24 @@ impl Kernel {
     }
 
     fn fail_nic_tx(&mut self, idx: usize, code: u64) {
-        self.processes[idx].core.r[R0 as usize] = code;
-        self.processes[idx].core.r[R1 as usize] = 0;
+        self.processes[idx].core.write_syscall_result(R0 as usize, code);
+        self.processes[idx].core.write_syscall_result(R1 as usize, 0);
         self.resume_from_trap(idx);
     }
 
     fn fail_nic_rx(&mut self, idx: usize, code: u64) {
-        self.processes[idx].core.r[R0 as usize] = code;
-        self.processes[idx].core.r[R1 as usize] = 0;
+        self.processes[idx].core.write_syscall_result(R0 as usize, code);
+        self.processes[idx].core.write_syscall_result(R1 as usize, 0);
         self.resume_from_trap(idx);
     }
 
     fn fail_dev_submit(&mut self, idx: usize, code: u64) {
-        self.processes[idx].core.r[R0 as usize] = code;
+        self.processes[idx].core.write_syscall_result(R0 as usize, code);
         self.resume_from_trap(idx);
     }
 
     fn fail_send_cap(&mut self, idx: usize, code: u64) {
-        self.processes[idx].core.r[R0 as usize] = code;
+        self.processes[idx].core.write_syscall_result(R0 as usize, code);
         self.resume_from_trap(idx);
     }
 
@@ -5126,35 +5149,35 @@ impl Kernel {
         self.processes[slot].recv_wait = None;
         match outcome {
             RecvOutcome::Message(msg) => {
-                self.processes[slot].core.r[R0 as usize] = msg.value;
+                self.processes[slot].core.write_syscall_result(R0 as usize, msg.value);
                 if msg.cap.is_some() {
-                    self.processes[slot].core.r[R1 as usize] = 2;
+                    self.processes[slot].core.write_syscall_result(R1 as usize, 2);
                     let ch = msg.cap.unwrap();
-                    self.processes[slot].core.r[R2 as usize] = ch.slot as u64;
-                    self.processes[slot].core.r[R3 as usize] = ch.generation as u64;
+                    self.processes[slot].core.write_syscall_result(R2 as usize, ch.slot as u64);
+                    self.processes[slot].core.write_syscall_result(R3 as usize, ch.generation as u64);
                 } else {
-                    self.processes[slot].core.r[R1 as usize] = 1;
-                    self.processes[slot].core.r[R2 as usize] = u32::MAX as u64;
-                    self.processes[slot].core.r[R3 as usize] = 0;
+                    self.processes[slot].core.write_syscall_result(R1 as usize, 1);
+                    self.processes[slot].core.write_syscall_result(R2 as usize, u32::MAX as u64);
+                    self.processes[slot].core.write_syscall_result(R3 as usize, 0);
                 }
-                self.processes[slot].core.r[R4 as usize] = msg.from.slot as u64;
-                self.processes[slot].core.r[R5 as usize] = msg.from.generation as u64;
+                self.processes[slot].core.write_syscall_result(R4 as usize, msg.from.slot as u64);
+                self.processes[slot].core.write_syscall_result(R5 as usize, msg.from.generation as u64);
             }
             RecvOutcome::PeerDied(peer) => {
-                self.processes[slot].core.r[R0 as usize] = 0;
-                self.processes[slot].core.r[R1 as usize] = 3;
-                self.processes[slot].core.r[R2 as usize] = u32::MAX as u64;
-                self.processes[slot].core.r[R3 as usize] = 0;
-                self.processes[slot].core.r[R4 as usize] = peer.slot as u64;
-                self.processes[slot].core.r[R5 as usize] = peer.generation as u64;
+                self.processes[slot].core.write_syscall_result(R0 as usize, 0);
+                self.processes[slot].core.write_syscall_result(R1 as usize, 3);
+                self.processes[slot].core.write_syscall_result(R2 as usize, u32::MAX as u64);
+                self.processes[slot].core.write_syscall_result(R3 as usize, 0);
+                self.processes[slot].core.write_syscall_result(R4 as usize, peer.slot as u64);
+                self.processes[slot].core.write_syscall_result(R5 as usize, peer.generation as u64);
             }
             RecvOutcome::Error => {
-                self.processes[slot].core.r[R0 as usize] = 0;
-                self.processes[slot].core.r[R1 as usize] = 4;
-                self.processes[slot].core.r[R2 as usize] = u32::MAX as u64;
-                self.processes[slot].core.r[R3 as usize] = 0;
-                self.processes[slot].core.r[R4 as usize] = 0;
-                self.processes[slot].core.r[R5 as usize] = 0;
+                self.processes[slot].core.write_syscall_result(R0 as usize, 0);
+                self.processes[slot].core.write_syscall_result(R1 as usize, 4);
+                self.processes[slot].core.write_syscall_result(R2 as usize, u32::MAX as u64);
+                self.processes[slot].core.write_syscall_result(R3 as usize, 0);
+                self.processes[slot].core.write_syscall_result(R4 as usize, 0);
+                self.processes[slot].core.write_syscall_result(R5 as usize, 0);
             }
         }
         self.resume_from_trap(slot);
@@ -5269,9 +5292,11 @@ impl Kernel {
         // handler and now performs the return on behalf of the process.
         //
         // Formal basis: T_eret in anka_interrupts.kleis.
-        proc.core.halted = false;
         if let Some(pc) = proc.core.event_return() {
+            proc.core.halted = false;
             proc.core.pc = pc;
+        } else {
+            self.finish_process(idx, ProcessResult::ProtectionFault);
         }
     }
 }
@@ -5353,6 +5378,26 @@ mod tests {
         core.trap_vector = 0x3FF0;
 
         (core, dom, text, data, stack)
+    }
+
+    #[test]
+    fn p107_event_kernel_rejects_fabricated_header_as_process_fault() {
+        let mut fabric = Fabric::new(0x400000);
+        let (mut core, _, _, _, _) = create_process(&mut fabric, CPU0, "event_fault", 0, 0x10000, 0x20000);
+        core.enable_protected_context().unwrap();
+        // No private image accompanies this hostile public header.
+        core.event_frames.push(EventFrame { return_pc: 4, return_privilege: Privilege::User,
+            interrupts_were_enabled: true, cause: EventCause::Syscall });
+        core.privilege = Privilege::Supervisor;
+        core.halted = true;
+        let words = core.r;
+        let mut kernel = Kernel::new(fabric);
+        kernel.spawn(core);
+        kernel.resume_from_trap(0);
+        assert_eq!(kernel.processes[0].result, Some(ProcessResult::ProtectionFault));
+        assert_eq!(kernel.processes[0].core.r, words);
+        assert!(kernel.processes[0].core.halted);
+        assert_eq!(kernel.processes[0].core.event_frames.len(), 1);
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -8225,11 +8270,21 @@ mod tests {
     /// the request, then invoke drain_completions() and verify
     /// the process is unblocked with R0 = 0 and EventFrame consumed.
     #[test]
-    fn p91d_drain_wake_success() {
+    fn p91d_drain_wake_success() { drain_wake_success(false); }
+
+    #[test]
+    fn p107_event_protected_block_completion_restores_pointer_image() { drain_wake_success(true); }
+
+    fn drain_wake_success(protected: bool) {
         use super::super::block::{BlockRequest, SubmitResult};
         use super::super::state::RequestHandle;
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
+        if protected {
+            let scope = kernel.fabric.scoped_pointers.enter_scope().unwrap();
+            kernel.processes[0].core.register_local_pointer(&mut kernel.fabric, scope, R4, 0x10000, 4, true).unwrap();
+            kernel.processes[0].core.pointer_move(&kernel.fabric, R0, R4).unwrap();
+        }
 
         kernel.device_registry.devices[0].controller.as_block_mut()
             .storage_mut().write_block(0, &[0xDD; 512]);
@@ -8258,7 +8313,7 @@ mod tests {
         // Simulate the suspended syscall state: push an EventFrame
         // and set halted, as if SYS_BLOCK_READ had just executed.
         let saved_pc = kernel.processes[0].core.pc;
-        kernel.processes[0].core.event_frames.push(EventFrame {
+        kernel.processes[0].core.enter_event(EventFrame {
             return_pc: saved_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -8290,6 +8345,11 @@ mod tests {
             "PC must be restored to saved return address");
         assert!(kernel.processes[0].core.event_frames.is_empty(),
             "EventFrame must be consumed by event_return()");
+
+        if protected {
+            assert_eq!(kernel.processes[0].core.pointer_read(&mut kernel.fabric, R4, Width::Byte).unwrap(), vec![0]);
+            assert!(kernel.processes[0].core.pointer_read(&mut kernel.fabric, R0, Width::Byte).is_err());
+        }
 
         // Verify data arrived in guest buffer.
         let buf_data = kernel.fabric.read_physical(0x080000, 512);
@@ -8833,7 +8893,7 @@ mod tests {
 
         // The process is waiting on handle1 (the second request).
         let saved_pc = kernel.processes[0].core.pc;
-        kernel.processes[0].core.event_frames.push(EventFrame {
+        kernel.processes[0].core.enter_event(EventFrame {
             return_pc: saved_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -10496,7 +10556,7 @@ mod tests {
         // Attempt blocking SYS_DEV_SUBMIT (13) with the NONE device cap.
         // This must fail at the device-authority gate with error 4.
         let return_pc = kernel.processes[receiver].core.pc + 4;
-        kernel.processes[receiver].core.event_frames.push(EventFrame {
+        kernel.processes[receiver].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -11961,7 +12021,7 @@ mod tests {
         // Push an EventFrame to simulate the TRAP instruction's effect.
         // In real execution, TRAP pushes this before the kernel intercepts.
         let return_pc = kernel.processes[slot].core.pc + 4;
-        kernel.processes[slot].core.event_frames.push(EventFrame {
+        kernel.processes[slot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -12933,7 +12993,7 @@ mod tests {
         kernel.processes[slot].core.r[R5 as usize] = 0;  // buffer cap gen
 
         let return_pc = kernel.processes[slot].core.pc + 4;
-        kernel.processes[slot].core.event_frames.push(EventFrame {
+        kernel.processes[slot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -13040,7 +13100,7 @@ mod tests {
         kernel.processes[cslot].core.r[R8 as usize] = 0;    // value
 
         let return_pc = kernel.processes[cslot].core.pc + 4;
-        kernel.processes[cslot].core.event_frames.push(EventFrame {
+        kernel.processes[cslot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -13081,7 +13141,7 @@ mod tests {
         kernel.processes[dslot].core.r[R5 as usize] = recv_handle.generation as u64;
 
         let return_pc = kernel.processes[dslot].core.pc + 4;
-        kernel.processes[dslot].core.event_frames.push(EventFrame {
+        kernel.processes[dslot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -13294,7 +13354,7 @@ mod tests {
         kernel.processes[cslot].core.r[R8 as usize] = 0;    // value
 
         let return_pc = kernel.processes[cslot].core.pc + 4;
-        kernel.processes[cslot].core.event_frames.push(EventFrame {
+        kernel.processes[cslot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -13319,7 +13379,7 @@ mod tests {
         kernel.processes[dslot].core.r[R5 as usize] = recv_handle.generation as u64;
 
         let return_pc = kernel.processes[dslot].core.pc + 4;
-        kernel.processes[dslot].core.event_frames.push(EventFrame {
+        kernel.processes[dslot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -13459,7 +13519,7 @@ mod tests {
         kernel.processes[dslot].core.r[R3 as usize] = 42;  // value
 
         let return_pc = kernel.processes[dslot].core.pc + 4;
-        kernel.processes[dslot].core.event_frames.push(EventFrame {
+        kernel.processes[dslot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -13536,7 +13596,7 @@ mod tests {
         kernel.processes[cslot].core.r[R8 as usize] = 0;    // value
 
         let return_pc = kernel.processes[cslot].core.pc + 4;
-        kernel.processes[cslot].core.event_frames.push(EventFrame {
+        kernel.processes[cslot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -13573,7 +13633,7 @@ mod tests {
         kernel.processes[dslot].core.r[R5 as usize] = recv_handle.generation as u64;
 
         let return_pc = kernel.processes[dslot].core.pc + 4;
-        kernel.processes[dslot].core.event_frames.push(EventFrame {
+        kernel.processes[dslot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -13619,7 +13679,7 @@ mod tests {
         kernel.processes[slot].core.r[R2 as usize] = handle.generation as u64;
 
         let return_pc = kernel.processes[slot].core.pc + 4;
-        kernel.processes[slot].core.event_frames.push(EventFrame {
+        kernel.processes[slot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -13652,7 +13712,7 @@ mod tests {
         kernel.processes[slot].core.r[R2 as usize] = 0x1_0000_0000_u64; // gen 0 with high bit
 
         let return_pc = kernel.processes[slot].core.pc + 4;
-        kernel.processes[slot].core.event_frames.push(EventFrame {
+        kernel.processes[slot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -16490,7 +16550,7 @@ mod tests {
         buf_handle: &CapabilityHandle,
     ) -> u64 {
         let return_pc = kernel.processes[slot].core.pc + 4;
-        kernel.processes[slot].core.event_frames.push(EventFrame {
+        kernel.processes[slot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -16520,7 +16580,7 @@ mod tests {
         dev_generation: u64,
     ) -> u64 {
         let return_pc = kernel.processes[proc_slot].core.pc + 4;
-        kernel.processes[proc_slot].core.event_frames.push(EventFrame {
+        kernel.processes[proc_slot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -17245,7 +17305,7 @@ mod tests {
         // ── C enters RECV_WAIT(D) ──
         // Push EventFrame for C's RECV_WAIT
         let return_pc_c = kernel.processes[c].core.pc + 4;
-        kernel.processes[c].core.event_frames.push(EventFrame {
+        kernel.processes[c].core.enter_event(EventFrame {
             return_pc: return_pc_c,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -17509,7 +17569,7 @@ mod tests {
 
         // ── C enters RECV_WAIT(D_g) ──
         let return_pc_c = kernel.processes[c].core.pc + 4;
-        kernel.processes[c].core.event_frames.push(EventFrame {
+        kernel.processes[c].core.enter_event(EventFrame {
             return_pc: return_pc_c,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -17846,7 +17906,7 @@ mod tests {
         kernel.processes[recv_slot].core.r[R8 as usize] = 0xBEEF;
 
         let return_pc = kernel.processes[recv_slot].core.pc + 4;
-        kernel.processes[recv_slot].core.event_frames.push(EventFrame {
+        kernel.processes[recv_slot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -17899,7 +17959,7 @@ mod tests {
         }
 
         let return_pc = kernel.processes[d].core.pc + 4;
-        kernel.processes[d].core.event_frames.push(EventFrame {
+        kernel.processes[d].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -18264,7 +18324,7 @@ mod tests {
 
         // Set up C to call RECV_WAIT(D)
         let return_pc = kernel.processes[c].core.pc + 4;
-        kernel.processes[c].core.event_frames.push(EventFrame {
+        kernel.processes[c].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -18380,7 +18440,7 @@ mod tests {
         kernel.finish_process(key_c.slot, ProcessResult::Exited(0));
 
         let return_pc = kernel.processes[key_d.slot].core.pc + 4;
-        kernel.processes[key_d.slot].core.event_frames.push(EventFrame {
+        kernel.processes[key_d.slot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -18511,7 +18571,7 @@ mod tests {
 
         // Install IoWait on P1 for (A, handle_a)
         let pc_p1 = kernel.processes[0].core.pc;
-        kernel.processes[0].core.event_frames.push(EventFrame {
+        kernel.processes[0].core.enter_event(EventFrame {
             return_pc: pc_p1,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -18524,7 +18584,7 @@ mod tests {
 
         // Install IoWait on P2 for (B, handle_b)
         let pc_p2 = kernel.processes[1].core.pc;
-        kernel.processes[1].core.event_frames.push(EventFrame {
+        kernel.processes[1].core.enter_event(EventFrame {
             return_pc: pc_p2,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -18676,7 +18736,7 @@ mod tests {
         // ── Test 1: R1 overflow (slot > u8::MAX) ──
         // do_dev_wait takes u8, so we issue the raw syscall with R1=256.
         let return_pc = kernel.processes[d].core.pc + 4;
-        kernel.processes[d].core.event_frames.push(EventFrame {
+        kernel.processes[d].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -19114,7 +19174,7 @@ mod tests {
     /// Push a syscall EventFrame and set registers for SYS_DEV_EVENT_WAIT.
     fn push_event_wait_frame(kernel: &mut Kernel, slot: usize, dev_handle: CapabilityHandle, epoch: u64) {
         let return_pc = kernel.processes[slot].core.pc + 4;
-        kernel.processes[slot].core.event_frames.push(EventFrame {
+        kernel.processes[slot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -19136,7 +19196,7 @@ mod tests {
         // Submit a block read and complete it to advance epoch to 1.
         {
             let return_pc = kernel.processes[slot].core.pc + 4;
-            kernel.processes[slot].core.event_frames.push(EventFrame {
+            kernel.processes[slot].core.enter_event(EventFrame {
                 return_pc,
                 return_privilege: Privilege::User,
                 interrupts_were_enabled: true,
@@ -20676,7 +20736,7 @@ mod tests {
         buf_handle: CapabilityHandle,
     ) {
         let return_pc = kernel.processes[slot].core.pc + 4;
-        kernel.processes[slot].core.event_frames.push(EventFrame {
+        kernel.processes[slot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,
@@ -21105,7 +21165,7 @@ mod tests {
         frame_len: u64,
     ) {
         let return_pc = kernel.processes[slot].core.pc + 4;
-        kernel.processes[slot].core.event_frames.push(EventFrame {
+        kernel.processes[slot].core.enter_event(EventFrame {
             return_pc,
             return_privilege: Privilege::User,
             interrupts_were_enabled: true,

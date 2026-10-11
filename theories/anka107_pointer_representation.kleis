@@ -1,0 +1,315 @@
+// Proposed descriptor representation refinement, not an implemented ISA/ABI.
+// Data payload: word0 = (descriptor epoch << 32) | slot; word1 = byte position.
+// In addition, a protected pointer-kind tag binds BOTH words. Untagged integers
+// cannot mint a pointer. Tag enforcement/storage is still an implementation gate.
+// Descriptor table is trusted, domain-scoped, dynamic, immutable while issued.
+// Entries hold allocation id/gen, narrowed lo/hi and rights, not raw addresses.
+// 32-bit descriptor epochs never wrap: exhausted slots retire permanently.
+// Allocation generations remain independent 64-bit values in allocation records.
+// No new axioms. Flat parameters expose lookup/enforcement obligations.
+import "anka107_pointer_metadata.kleis"
+
+define repr107_radix() = bvconst(4294967296,64)
+define repr107_mask() = bvconst(4294967295,64)
+define repr107_handle(slot : BitVec64, epoch : BitVec64) =
+    bvadd(bvmul(epoch,repr107_radix()),slot)
+define repr107_slot(handle : BitVec64) = bvand(handle,repr107_mask())
+define repr107_epoch(handle : BitVec64) = bvudiv(handle,repr107_radix())
+define repr107_components(slot : BitVec64, epoch : BitVec64) =
+    bvugt(slot,bvconst(0,64)) ∧ bvule(slot,repr107_mask()) ∧
+    bvugt(epoch,bvconst(0,64)) ∧ bvule(epoch,repr107_mask())
+
+// The tag is protected state, never a user-writable third integer.
+// Lookup must select the encoded slot, match epoch, and enforce domain binding.
+define repr107_lookup(handle : BitVec64, tagged : BitVec8,
+    slot : BitVec64, epoch : BitVec64, live : BitVec8,
+    caller_domain : BitVec64, entry_domain : BitVec64) =
+    repr107_components(slot,epoch) ∧
+    (repr107_slot(handle)=slot) ∧ (repr107_epoch(handle)=epoch) ∧
+    (tagged=bvconst(1,8)) ∧ (live=bvconst(1,8)) ∧ (caller_domain=entry_domain)
+
+// Publish/reuse a free descriptor slot only with a newer non-wrapped epoch.
+// Entry contents must be initialized and validated BEFORE protected publication.
+define repr107_publish(slot : BitVec64, oldepoch : BitVec64, epoch : BitVec64,
+    oldlive : BitVec8, newlive : BitVec8, trusted_issuer : BitVec8,
+    entry_validated : BitVec8) =
+    repr107_components(slot,epoch) ∧ bvult(oldepoch,repr107_mask()) ∧
+    (epoch=bvadd(oldepoch,bvconst(1,64))) ∧
+    (oldlive=bvconst(0,8)) ∧ (newlive=bvconst(1,8)) ∧
+    (trusted_issuer=bvconst(1,8)) ∧ (entry_validated=bvconst(1,8))
+
+// Existing issued descriptor content cannot be rewritten in place: references
+// share immutable descriptors. Narrowing uses separately published entries.
+define repr107_immutable(id : BitVec64, gen : BitVec64, lo : BitVec64,
+    hi : BitVec64, rights : BitVec64, newid : BitVec64, newgen : BitVec64,
+    newlo : BitVec64, newhi : BitVec64, newrights : BitVec64) =
+    (id=newid) ∧ (gen=newgen) ∧ (lo=newlo) ∧ (hi=newhi) ∧ (rights=newrights)
+
+// ABI/storage transport preserves the ordered pair and the protected tag.
+// A torn or partial ordinary write clears the tag BEFORE the value is usable.
+define repr107_transport(h : BitVec64, pos : BitVec64, tag : BitVec8,
+    outh : BitVec64, outpos : BitVec64, outtag : BitVec8, coherent : BitVec8) =
+    (h=outh) ∧ (pos=outpos) ∧ (tag=bvconst(1,8)) ∧
+    (outtag=bvconst(1,8)) ∧ (coherent=bvconst(1,8))
+define repr107_after_raw_write() = bvconst(0,8)
+
+// Checked arithmetic can only be performed on a valid descriptor pointer.
+// The handle and protected kind survive; only position changes.
+define repr107_advance(h : BitVec64, pos : BitVec64, tag : BitVec8,
+    slot : BitVec64, epoch : BitVec64, live : BitVec8,
+    caller : BitVec64, domain : BitVec64,
+    lo : BitVec64, hi : BitVec64, extent : BitVec64,
+    count : BitVec64, size : BitVec64,
+    outh : BitVec64, outpos : BitVec64, outtag : BitVec8) =
+    repr107_lookup(h,tag,slot,epoch,live,caller,domain) ∧
+    ptr107_step(lo,hi,pos,extent,count,size,outpos) ∧
+    (h=outh) ∧ (outtag=bvconst(1,8))
+
+// Concrete lookup supplies the abstract metadata; allocation-current validation
+// is independent of descriptor-current validation. Fabric remains mandatory.
+define repr107_access(h : BitVec64, pos : BitVec64, tag : BitVec8,
+    slot : BitVec64, epoch : BitVec64, descriptor_live : BitVec8,
+    caller : BitVec64, domain : BitVec64,
+    descriptor_id : BitVec64, descriptor_gen : BitVec64,
+    lo : BitVec64, hi : BitVec64, rights : BitVec64,
+    allocation_id : BitVec64, allocation_gen : BitVec64, allocation_live : BitVec8,
+    base : BitVec64, extent : BitVec64, width : BitVec64, need : BitVec64,
+    fabric : BitVec8, aligned : BitVec8) =
+    repr107_lookup(h,tag,slot,epoch,descriptor_live,caller,domain) ∧
+    ptr107_access(descriptor_id,descriptor_gen,allocation_id,allocation_gen,
+        allocation_live,tag,base,extent,lo,hi,pos,width,rights,need,fabric,aligned)
+
+// Address materialization occurs only after admission and uses the allocation's
+// current checked base plus allocation-relative position. Address is not identity.
+define repr107_address(base : BitVec64, pos : BitVec64) = bvadd(base,pos)
+
+example "REPR107-0 encode two components" {
+    assert(repr107_handle(bvconst(7,64),bvconst(1,64))=bvconst(4294967303,64))
+}
+
+example "REPR107-1 decode slot" {
+    assert(repr107_slot(bvconst(4294967303,64))=bvconst(7,64))
+}
+
+example "REPR107-2 decode epoch" {
+    assert(repr107_epoch(bvconst(4294967303,64))=bvconst(1,64))
+}
+
+example "REPR107-3 live descriptor lookup" {
+    assert(repr107_lookup(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64)))
+}
+
+example "REPR107-4 forged integer pair" {
+    assert(¬(repr107_lookup(bvconst(4294967303,64),bvconst(0,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64))))
+}
+
+example "REPR107-5 wrong slot" {
+    assert(¬(repr107_lookup(bvconst(4294967303,64),bvconst(1,8),bvconst(8,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64))))
+}
+
+example "REPR107-6 stale descriptor epoch" {
+    assert(¬(repr107_lookup(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(4,64),bvconst(4,64))))
+}
+
+example "REPR107-7 released descriptor" {
+    assert(¬(repr107_lookup(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(0,8),bvconst(4,64),bvconst(4,64))))
+}
+
+example "REPR107-8 cross domain handle" {
+    assert(¬(repr107_lookup(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(5,64),bvconst(4,64))))
+}
+
+example "REPR107-9 descriptor reuse" {
+    assert(repr107_publish(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "REPR107-10 live entry overwrite" {
+    assert(¬(repr107_publish(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "REPR107-11 same epoch reuse" {
+    assert(¬(repr107_publish(bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "REPR107-12 epoch exhaustion" {
+    assert(¬(repr107_publish(bvconst(7,64),bvconst(4294967295,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "REPR107-13 untrusted issuer" {
+    assert(¬(repr107_publish(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "REPR107-14 unvalidated entry" {
+    assert(¬(repr107_publish(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "REPR107-15 reserved slot" {
+    assert(¬(repr107_publish(bvconst(0,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "REPR107-16 immutable descriptor" {
+    assert(repr107_immutable(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64)))
+}
+
+example "REPR107-17 allocation rebinding" {
+    assert(¬(repr107_immutable(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(8,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64))))
+}
+
+example "REPR107-18 allocation generation rewrite" {
+    assert(¬(repr107_immutable(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(7,64),bvconst(3,64),bvconst(0,64),bvconst(16,64),bvconst(3,64))))
+}
+
+example "REPR107-19 lower bound rewrite" {
+    assert(¬(repr107_immutable(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(7,64),bvconst(2,64),bvconst(1,64),bvconst(16,64),bvconst(3,64))))
+}
+
+example "REPR107-20 upper bound widening" {
+    assert(¬(repr107_immutable(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(17,64),bvconst(3,64))))
+}
+
+example "REPR107-21 permission rewrite" {
+    assert(¬(repr107_immutable(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(4,64))))
+}
+
+example "REPR107-22 ordered tagged ABI pair" {
+    assert(repr107_transport(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "REPR107-23 swapped ABI words" {
+    assert(¬(repr107_transport(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(8,64),bvconst(8,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "REPR107-24 torn position" {
+    assert(¬(repr107_transport(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(9,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "REPR107-25 tag lost at call" {
+    assert(¬(repr107_transport(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "REPR107-26 incoherent storage" {
+    assert(¬(repr107_transport(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "REPR107-27 raw integers transported" {
+    assert(¬(repr107_transport(bvconst(4294967303,64),bvconst(8,64),bvconst(0,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "REPR107-28 word advance to one past" {
+    assert(repr107_advance(bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(4294967303,64),bvconst(16,64),bvconst(1,8)))
+}
+
+example "REPR107-29 arithmetic rebinds descriptor" {
+    assert(¬(repr107_advance(bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(4294967304,64),bvconst(16,64),bvconst(1,8))))
+}
+
+example "REPR107-30 arithmetic loses scaling" {
+    assert(¬(repr107_advance(bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(4294967303,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "REPR107-31 arithmetic loses tag" {
+    assert(¬(repr107_advance(bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(4294967303,64),bvconst(16,64),bvconst(0,8))))
+}
+
+example "REPR107-32 advance crosses view" {
+    assert(¬(repr107_advance(bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(3,64),bvconst(8,64),bvconst(4294967303,64),bvconst(16,64),bvconst(1,8))))
+}
+
+example "REPR107-33 concrete access refines abstract" {
+    assert(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "REPR107-34 descriptor ABA" {
+    assert(¬(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "REPR107-35 allocation ABA despite live descriptor" {
+    assert(¬(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(3,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "REPR107-36 freed allocation with live descriptor" {
+    assert(¬(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(0,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "REPR107-37 one past access" {
+    assert(¬(repr107_access(bvconst(4294967303,64),bvconst(16,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "REPR107-38 word straddles view" {
+    assert(¬(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(8,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "REPR107-39 Fabric rejected" {
+    assert(¬(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "REPR107-40 untagged access" {
+    assert(¬(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(0,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "REPR107-41 domain mismatch" {
+    assert(¬(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(5,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "REPR107-42 neighbor allocation" {
+    assert(¬(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(10,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "REPR107-43 read with write only" {
+    assert(¬(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(2,64),bvconst(9,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "REPR107 universal slot roundtrip" {
+    assert(∀(s : BitVec64). ∀(e : BitVec64).
+        repr107_components(s,e) → (repr107_slot(repr107_handle(s,e))=s))
+}
+example "REPR107 universal epoch roundtrip" {
+    assert(∀(s : BitVec64). ∀(e : BitVec64).
+        repr107_components(s,e) → (repr107_epoch(repr107_handle(s,e))=e))
+}
+example "REPR107 universal integers cannot pass lookup" {
+    assert(∀(h : BitVec64). ∀(s : BitVec64). ∀(e : BitVec64).
+        ¬repr107_lookup(h,bvconst(0,8),s,e,bvconst(1,8),bvconst(4,64),bvconst(4,64)))
+}
+example "REPR107 ordinary write invalidates pointer kind" {
+    assert(repr107_after_raw_write()=bvconst(0,8))
+}
+
+// Newly issued narrowed descriptors keep original allocation provenance.
+// Source lookup, target publication and same-domain binding must separately pass.
+define repr107_narrow_entry(id : BitVec64, gen : BitVec64, lo : BitVec64,
+    hi : BitVec64, rights : BitVec64, newid : BitVec64, newgen : BitVec64,
+    newlo : BitVec64, newhi : BitVec64, newpos : BitVec64, newrights : BitVec64) =
+    (id=newid) ∧ (gen=newgen) ∧
+    ptr107_narrow(lo,hi,rights,newlo,newhi,newpos,newrights)
+
+// Null carries no descriptor authority and cannot pass ordinary lookup.
+define repr107_null(h : BitVec64, pos : BitVec64, tag : BitVec8) =
+    (h=bvconst(0,64)) ∧ (pos=bvconst(0,64)) ∧ (tag=bvconst(0,8))
+
+example "REPR107 narrow entry retains provenance" { assert(repr107_narrow_entry(bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(32,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(8,64),bvconst(16,64),bvconst(8,64),bvconst(1,64))) }
+
+example "REPR107 narrow cannot change allocation" { assert(¬(repr107_narrow_entry(bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(32,64),bvconst(3,64),bvconst(10,64),bvconst(2,64),bvconst(8,64),bvconst(16,64),bvconst(8,64),bvconst(1,64)))) }
+
+example "REPR107 narrow cannot change lifetime" { assert(¬(repr107_narrow_entry(bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(32,64),bvconst(3,64),bvconst(9,64),bvconst(3,64),bvconst(8,64),bvconst(16,64),bvconst(8,64),bvconst(1,64)))) }
+
+example "REPR107 narrow cannot widen bound" { assert(¬(repr107_narrow_entry(bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(32,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(8,64),bvconst(33,64),bvconst(8,64),bvconst(1,64)))) }
+
+example "REPR107 narrow cannot amplify rights" { assert(¬(repr107_narrow_entry(bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(32,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(8,64),bvconst(16,64),bvconst(8,64),bvconst(7,64)))) }
+
+example "REPR107 canonical null" {
+    assert(repr107_null(bvconst(0,64),bvconst(0,64),bvconst(0,8)))
+}
+example "REPR107 null dereference denied" {
+    assert(¬repr107_lookup(bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(4,64),bvconst(4,64)))
+}
+example "REPR107 universal checked address cannot wrap" {
+    assert(∀(base : BitVec64). ∀(extent : BitVec64). ∀(pos : BitVec64).
+        (ptr107_record_valid(bvconst(1,64),bvconst(1,64),base,extent) ∧ bvule(pos,extent)) →
+        bvuge(repr107_address(base,pos),base))
+}
+
+example "REPR107 universal concrete admission implies abstract admission" {
+    assert(∀(h : BitVec64). ∀(pos : BitVec64). ∀(tag : BitVec8). ∀(slot : BitVec64). ∀(epoch : BitVec64). ∀(dlive : BitVec8). ∀(caller : BitVec64). ∀(domain : BitVec64). ∀(did : BitVec64). ∀(dgen : BitVec64). ∀(lo : BitVec64). ∀(hi : BitVec64). ∀(rights : BitVec64). ∀(aid : BitVec64). ∀(agen : BitVec64). ∀(alive : BitVec8). ∀(base : BitVec64). ∀(extent : BitVec64). ∀(width : BitVec64). ∀(need : BitVec64). ∀(fabric : BitVec8). ∀(aligned : BitVec8).
+        repr107_access(h,pos,tag,slot,epoch,dlive,caller,domain,did,dgen,lo,hi,rights,aid,agen,alive,base,extent,width,need,fabric,aligned) → ptr107_access(did,dgen,aid,agen,alive,tag,base,extent,lo,hi,pos,width,rights,need,fabric,aligned))
+}

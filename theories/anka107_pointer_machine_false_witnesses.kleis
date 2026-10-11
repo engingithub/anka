@@ -1,0 +1,157 @@
+// Explicit Z3 disproof required for each hostile.
+import "anka107_pointer_machine.kleis"
+
+example "FALSE-MACHINE107-1 prepared precommit all checks" { assert(¬(machine107_precommit(bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-MACHINE107-2 authorized not prepared" { assert(machine107_precommit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-3 missing active lease" { assert(machine107_precommit(bvconst(2,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-4 revoked before commit" { assert(machine107_precommit(bvconst(2,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-5 unchecked physical span" { assert(machine107_precommit(bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-6 short typed payload" { assert(machine107_precommit(bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-7 wrong protected key" { assert(machine107_precommit(bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-8 unsynchronized commit" { assert(machine107_precommit(bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))) }
+
+example "FALSE-MACHINE107-9 PMOV from prestate pair" { assert(¬(machine107_pair_transition(bvconst(4,64),bvconst(0,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-MACHINE107-10 unaligned destination pair" { assert(machine107_pair_transition(bvconst(5,64),bvconst(0,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-11 reserved source registers" { assert(machine107_pair_transition(bvconst(4,64),bvconst(13,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-12 PMOV changes allocation descriptor" { assert(machine107_pair_transition(bvconst(4,64),bvconst(0,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967304,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-13 PMOV changes position" { assert(machine107_pair_transition(bvconst(4,64),bvconst(0,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(9,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-14 PMOV drops kind" { assert(machine107_pair_transition(bvconst(4,64),bvconst(0,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(0,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-15 source snapshot torn" { assert(machine107_pair_transition(bvconst(4,64),bvconst(0,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-16 forged source pair" { assert(machine107_pair_transition(bvconst(4,64),bvconst(0,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(0,8))) }
+
+example "FALSE-MACHINE107-17 exact typed Fabric pointer request" { assert(¬(machine107_pointer_request(bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(1,8)))) }
+
+example "FALSE-MACHINE107-18 request object mismatch" { assert(machine107_pointer_request(bvconst(7,64),bvconst(8,64),bvconst(2,64),bvconst(2,64),bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-19 request generation mismatch" { assert(machine107_pointer_request(bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(3,64),bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-20 request offset mismatch" { assert(machine107_pointer_request(bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(16,64),bvconst(32,64),bvconst(64,64),bvconst(16,64),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-21 request cell unaligned" { assert(machine107_pointer_request(bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(8,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-22 split word pointer transaction" { assert(machine107_pointer_request(bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(8,64),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-23 widened pointer transaction" { assert(machine107_pointer_request(bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(24,64),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-24 ordinary bytes pretend typed request" { assert(machine107_pointer_request(bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(0,8))) }
+
+example "FALSE-MACHINE107-25 trusted protected context return" { assert(¬(machine107_context_admit(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-MACHINE107-26 restore wrong thread" { assert(machine107_context_admit(bvconst(1,64),bvconst(2,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-27 restore wrong domain" { assert(machine107_context_admit(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-28 user image restores kind" { assert(machine107_context_admit(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(0,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-29 partial saved image" { assert(machine107_context_admit(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-30 stale event frame" { assert(machine107_context_admit(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(0,8))) }
+
+example "FALSE-MACHINE107-31 bootstrap raw address still Fabric checked" { assert(¬(machine107_raw_address_allowed(bvconst(0,8),bvconst(1,8)))) }
+
+example "FALSE-MACHINE107-32 v2 raw address bypass denied" { assert(machine107_raw_address_allowed(bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107-33 bootstrap cannot bypass Fabric" { assert(machine107_raw_address_allowed(bvconst(0,8),bvconst(0,8))) }
+
+example "FALSE-MACHINE107 pair commits handle" { assert(machine107_pair_word(bvconst(3,8),bvconst(4,64),bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(99,64))=bvconst(4294967304,64)) }
+
+example "FALSE-MACHINE107 pair commits position" { assert(machine107_pair_word(bvconst(3,8),bvconst(4,64),bvconst(5,64),bvconst(4294967303,64),bvconst(8,64),bvconst(99,64))=bvconst(9,64)) }
+
+example "FALSE-MACHINE107 pair preserves other register" { assert(machine107_pair_word(bvconst(3,8),bvconst(4,64),bvconst(6,64),bvconst(4294967303,64),bvconst(8,64),bvconst(99,64))=bvconst(100,64)) }
+
+example "FALSE-MACHINE107 fault preserves handle" { assert(machine107_pair_word(bvconst(4,8),bvconst(4,64),bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(99,64))=bvconst(100,64)) }
+
+example "FALSE-MACHINE107 prepared pair has no effects" { assert(machine107_pair_word(bvconst(2,8),bvconst(4,64),bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(99,64))=bvconst(100,64)) }
+
+example "FALSE-MACHINE107 PMOV commits kind" { assert(machine107_pair_tag(bvconst(3,8),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(0,8))=bvconst(2,8)) }
+
+example "FALSE-MACHINE107 fault preserves pair kind" { assert(machine107_pair_tag(bvconst(4,8),bvconst(4,64),bvconst(4,64),bvconst(0,8),bvconst(1,8))=bvconst(2,8)) }
+
+example "FALSE-MACHINE107 ordinary reg write clears kind" { assert(machine107_raw_reg_tag(bvconst(3,8),bvconst(5,64),bvconst(4,64),bvconst(1,8))=bvconst(1,8)) }
+
+example "FALSE-MACHINE107 faulting load preserves kind" { assert(machine107_raw_reg_tag(bvconst(4,8),bvconst(5,64),bvconst(4,64),bvconst(1,8))=bvconst(2,8)) }
+
+example "FALSE-MACHINE107 raw store invalidates tag" { assert(machine107_raw_mem_tag(bvconst(3,8),bvconst(31,64),bvconst(1,64),bvconst(16,64),bvconst(1,8))=bvconst(1,8)) }
+
+example "FALSE-MACHINE107 fault store preserves tag" { assert(machine107_raw_mem_tag(bvconst(4,8),bvconst(31,64),bvconst(1,64),bvconst(16,64),bvconst(1,8))=bvconst(2,8)) }
+
+example "FALSE-MACHINE107 typed store commits kind" { assert(machine107_typed_tag(bvconst(3,8),bvconst(16,64),bvconst(16,64),bvconst(1,8),bvconst(0,8))=bvconst(2,8)) }
+
+example "FALSE-MACHINE107 typed null clears kind" { assert(machine107_typed_tag(bvconst(3,8),bvconst(16,64),bvconst(16,64),bvconst(0,8),bvconst(1,8))=bvconst(1,8)) }
+
+example "FALSE-MACHINE107 failed typed store keeps kind" { assert(machine107_typed_tag(bvconst(4,8),bvconst(16,64),bvconst(16,64),bvconst(0,8),bvconst(1,8))=bvconst(2,8)) }
+
+example "FALSE-MACHINE107 PSTORE handle low byte first" { assert(machine107_typed_byte(bvconst(3,8),bvconst(16,64),bvconst(16,64),bvconst(258,64),bvconst(772,64),bvconst(99,64))=bvconst(3,64)) }
+
+example "FALSE-MACHINE107 PSTORE handle second byte" { assert(machine107_typed_byte(bvconst(3,8),bvconst(16,64),bvconst(17,64),bvconst(258,64),bvconst(772,64),bvconst(99,64))=bvconst(2,64)) }
+
+example "FALSE-MACHINE107 PSTORE position low byte at eight" { assert(machine107_typed_byte(bvconst(3,8),bvconst(16,64),bvconst(24,64),bvconst(258,64),bvconst(772,64),bvconst(99,64))=bvconst(5,64)) }
+
+example "FALSE-MACHINE107 PSTORE position second byte" { assert(machine107_typed_byte(bvconst(3,8),bvconst(16,64),bvconst(25,64),bvconst(258,64),bvconst(772,64),bvconst(99,64))=bvconst(4,64)) }
+
+example "FALSE-MACHINE107 PSTORE fault preserves byte" { assert(machine107_typed_byte(bvconst(4,8),bvconst(16,64),bvconst(24,64),bvconst(258,64),bvconst(772,64),bvconst(99,64))=bvconst(100,64)) }
+
+example "FALSE-MACHINE107 PSTORE neighbor unchanged" { assert(machine107_typed_byte(bvconst(3,8),bvconst(16,64),bvconst(32,64),bvconst(258,64),bvconst(772,64),bvconst(99,64))=bvconst(100,64)) }
+
+example "FALSE-MACHINE107 trap clears handler kind" { assert(machine107_handler_tag(bvconst(3,8),bvconst(1,8))=bvconst(1,8)) }
+
+example "FALSE-MACHINE107 resume restores protected kind" { assert(machine107_restore_tag(bvconst(3,8),bvconst(1,8),bvconst(0,8))=bvconst(2,8)) }
+
+example "FALSE-MACHINE107 failed resume preserves kind" { assert(machine107_restore_tag(bvconst(4,8),bvconst(0,8),bvconst(1,8))=bvconst(2,8)) }
+
+example "FALSE-MACHINE107 precommit rejection selects fault" { assert(machine107_terminal(bvconst(0,8))=bvconst(5,8)) }
+
+example "FALSE-MACHINE107 in place PADD checked one past" { assert(¬(machine107_padd(bvconst(4,64),bvconst(4,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(4294967303,64),bvconst(16,64),bvconst(1,8)))) }
+
+example "FALSE-MACHINE107 PADD rebind handle" { assert(machine107_padd(bvconst(4,64),bvconst(4,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(4294967304,64),bvconst(16,64),bvconst(1,8))) }
+
+example "FALSE-MACHINE107 PADD wrong scaling" { assert(machine107_padd(bvconst(4,64),bvconst(4,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(4294967303,64),bvconst(2,64),bvconst(1,8))) }
+
+example "FALSE-MACHINE107 PADD out of view" { assert(machine107_padd(bvconst(4,64),bvconst(4,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(3,64),bvconst(8,64),bvconst(4294967303,64),bvconst(16,64),bvconst(1,8))) }
+
+example "FALSE-MACHINE107 PADD descriptor stale" { assert(machine107_padd(bvconst(4,64),bvconst(4,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(4294967303,64),bvconst(16,64),bvconst(1,8))) }
+
+example "FALSE-MACHINE107 trusted issue from published registry" { assert(¬(machine107_issue(bvconst(4,64),bvconst(4294967303,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-MACHINE107 unprivileged issue" { assert(machine107_issue(bvconst(4,64),bvconst(4294967303,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107 issue unpublished entry" { assert(machine107_issue(bvconst(4,64),bvconst(4294967303,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(0,8))) }
+
+example "FALSE-MACHINE107 issue wrong domain" { assert(machine107_issue(bvconst(4,64),bvconst(4294967303,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107 issue position outside view" { assert(machine107_issue(bvconst(4,64),bvconst(4294967303,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(17,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107 revoked precommit selects committed stage" {
+    assert(machine107_checked_stage(bvconst(2,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))=bvconst(3,8))
+}
+example "FALSE-MACHINE107 wrong thread image gains kind" {
+    assert(machine107_checked_restore(bvconst(1,64),bvconst(2,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))=bvconst(1,8))
+}
+
+example "FALSE-MACHINE107 PLOAD committed object snapshot" { assert(¬(machine107_pload(bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(64,64),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-MACHINE107 PLOAD raw bytes cannot create kind" { assert(machine107_pload(bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(0,8),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(64,64),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107 PLOAD reused object tag rejected" { assert(machine107_pload(bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(64,64),bvconst(7,64),bvconst(3,64),bvconst(16,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107 PLOAD wrong cell key" { assert(machine107_pload(bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(64,64),bvconst(7,64),bvconst(2,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107 PLOAD read denied" { assert(machine107_pload(bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(64,64),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(0,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107 PLOAD torn snapshot" { assert(machine107_pload(bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(64,64),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-MACHINE107 PLOAD stale descriptor rejected" { assert(machine107_pload(bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(64,64),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(1,8),bvconst(1,8),bvconst(0,8))) }

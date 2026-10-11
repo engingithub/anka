@@ -1,0 +1,160 @@
+// Every hostile assertion must be explicitly disproved.
+import "anka107_pointer_kind_abi.kleis"
+
+example "FALSE-KIND107-1 valid register pair 0" { assert(¬(kind107_pair(bvconst(0,64)))) }
+
+example "FALSE-KIND107-2 valid register pair 2" { assert(¬(kind107_pair(bvconst(2,64)))) }
+
+example "FALSE-KIND107-3 valid register pair 4" { assert(¬(kind107_pair(bvconst(4,64)))) }
+
+example "FALSE-KIND107-4 valid register pair 6" { assert(¬(kind107_pair(bvconst(6,64)))) }
+
+example "FALSE-KIND107-5 valid register pair 8" { assert(¬(kind107_pair(bvconst(8,64)))) }
+
+example "FALSE-KIND107-6 valid register pair 10" { assert(¬(kind107_pair(bvconst(10,64)))) }
+
+example "FALSE-KIND107-7 reject pair 1" { assert(kind107_pair(bvconst(1,64))) }
+
+example "FALSE-KIND107-8 reject pair 11" { assert(kind107_pair(bvconst(11,64))) }
+
+example "FALSE-KIND107-9 reject pair 12" { assert(kind107_pair(bvconst(12,64))) }
+
+example "FALSE-KIND107-10 reject pair 13" { assert(kind107_pair(bvconst(13,64))) }
+
+example "FALSE-KIND107-11 reject pair 14" { assert(kind107_pair(bvconst(14,64))) }
+
+example "FALSE-KIND107-12 pointer first argument" { assert(¬(kind107_arg(bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(2,64)))) }
+
+example "FALSE-KIND107-13 scalar then aligned pointer" { assert(¬(kind107_arg(bvconst(1,64),bvconst(1,8),bvconst(2,64),bvconst(4,64)))) }
+
+example "FALSE-KIND107-14 two pointer args fit" { assert(¬(kind107_arg(bvconst(2,64),bvconst(1,8),bvconst(2,64),bvconst(4,64)))) }
+
+example "FALSE-KIND107-15 third pointer rejected" { assert(kind107_arg(bvconst(4,64),bvconst(1,8),bvconst(4,64),bvconst(6,64))) }
+
+example "FALSE-KIND107-16 fourth scalar fits" { assert(¬(kind107_arg(bvconst(3,64),bvconst(0,8),bvconst(3,64),bvconst(4,64)))) }
+
+example "FALSE-KIND107-17 fifth scalar rejected" { assert(kind107_arg(bvconst(4,64),bvconst(0,8),bvconst(4,64),bvconst(5,64))) }
+
+example "FALSE-KIND107-18 pointer odd register start rejected" { assert(kind107_arg(bvconst(1,64),bvconst(1,8),bvconst(1,64),bvconst(3,64))) }
+
+example "FALSE-KIND107-19 unknown argument type rejected" { assert(kind107_arg(bvconst(0,64),bvconst(2,8),bvconst(0,64),bvconst(1,64))) }
+
+example "FALSE-KIND107-20 aligned local pointer cell" { assert(¬(kind107_cell(bvconst(16,64),bvconst(32,64)))) }
+
+example "FALSE-KIND107-21 misaligned cell rejected" { assert(kind107_cell(bvconst(8,64),bvconst(32,64))) }
+
+example "FALSE-KIND107-22 truncated cell rejected" { assert(kind107_cell(bvconst(16,64),bvconst(24,64))) }
+
+example "FALSE-KIND107-23 alias resolves same tag key" { assert(¬(kind107_storage_key(bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(7,64),bvconst(2,64),bvconst(16,64)))) }
+
+example "FALSE-KIND107-24 wrong object tag" { assert(kind107_storage_key(bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(8,64),bvconst(2,64),bvconst(16,64))) }
+
+example "FALSE-KIND107-25 stale object tag" { assert(kind107_storage_key(bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(7,64),bvconst(3,64),bvconst(16,64))) }
+
+example "FALSE-KIND107-26 wrong offset tag" { assert(kind107_storage_key(bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(7,64),bvconst(2,64),bvconst(32,64))) }
+
+example "FALSE-KIND107-27 typed spill and reload exact" { assert(¬(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-KIND107-28 changed spill handle" { assert(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967304,64),bvconst(8,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-29 changed spill position" { assert(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(9,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-30 lost spill tag" { assert(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(0,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-31 unaligned spill" { assert(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(8,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-32 untrusted tag mint" { assert(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-33 unvalidated descriptor" { assert(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-34 wrong protected cell key" { assert(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-35 missing Fabric permission" { assert(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-36 torn typed publication" { assert(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))) }
+
+example "FALSE-KIND107-37 canonical null copied" { assert(¬(kind107_transport(bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8)))) }
+
+example "FALSE-KIND107-38 integer pair cannot gain tag" { assert(kind107_transport(bvconst(4294967303,64),bvconst(8,64),bvconst(0,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-39 matching v2 typed call" { assert(¬(kind107_call(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-KIND107-40 bootstrap caller rejected" { assert(kind107_call(bvconst(1,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-41 legacy callee rejected" { assert(kind107_call(bvconst(2,64),bvconst(1,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-42 signature mismatch" { assert(kind107_call(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-43 implicit cross domain call" { assert(kind107_call(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-44 argument lanes overflow" { assert(kind107_call(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(0,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-45 call loses tags" { assert(kind107_call(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-46 unadmitted code" { assert(kind107_call(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(0,8))) }
+
+example "FALSE-KIND107-47 pointer return R0 R1" { assert(¬(kind107_return(bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8)))) }
+
+example "FALSE-KIND107-48 scalar return R0 no pointer kind" { assert(¬(kind107_return(bvconst(0,8),bvconst(0,64),bvconst(1,64),bvconst(0,8)))) }
+
+example "FALSE-KIND107-49 pointer return wrong pair" { assert(kind107_return(bvconst(1,8),bvconst(2,64),bvconst(3,64),bvconst(1,8))) }
+
+example "FALSE-KIND107-50 pointer return loses tag" { assert(kind107_return(bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(0,8))) }
+
+example "FALSE-KIND107-51 scalar result retains stale kind" { assert(kind107_return(bvconst(0,8),bvconst(0,64),bvconst(1,64),bvconst(1,8))) }
+
+example "FALSE-KIND107-52 live scoped spill slot" { assert(¬(kind107_spill(bvconst(4096,64),bvconst(64,64),bvconst(16,64),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(1,8)))) }
+
+example "FALSE-KIND107-53 misaligned frame" { assert(kind107_spill(bvconst(4104,64),bvconst(64,64),bvconst(16,64),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(1,8))) }
+
+example "FALSE-KIND107-54 misaligned frame extent" { assert(kind107_spill(bvconst(4096,64),bvconst(24,64),bvconst(16,64),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(1,8))) }
+
+example "FALSE-KIND107-55 spill outside frame" { assert(kind107_spill(bvconst(4096,64),bvconst(64,64),bvconst(64,64),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(1,8))) }
+
+example "FALSE-KIND107-56 reused frame identity" { assert(kind107_spill(bvconst(4096,64),bvconst(64,64),bvconst(16,64),bvconst(7,64),bvconst(8,64),bvconst(2,64),bvconst(2,64),bvconst(1,8))) }
+
+example "FALSE-KIND107-57 reused frame generation" { assert(kind107_spill(bvconst(4096,64),bvconst(64,64),bvconst(16,64),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(3,64),bvconst(1,8))) }
+
+example "FALSE-KIND107-58 expired frame" { assert(kind107_spill(bvconst(4096,64),bvconst(64,64),bvconst(16,64),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(0,8))) }
+
+example "FALSE-KIND107-59 protected context restore" { assert(¬(kind107_context(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-KIND107-60 wrong thread restore" { assert(kind107_context(bvconst(1,64),bvconst(2,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-61 wrong domain restore" { assert(kind107_context(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(5,64),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-62 user context tag forgery" { assert(kind107_context(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-KIND107-63 incoherent context restore" { assert(kind107_context(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(0,8))) }
+
+example "FALSE-KIND107 write handle clears register kind" { assert(kind107_raw_register(bvconst(4,64),bvconst(4,64),bvconst(1,8))=bvconst(1,8)) }
+
+example "FALSE-KIND107 write position clears register kind" { assert(kind107_raw_register(bvconst(4,64),bvconst(5,64),bvconst(1,8))=bvconst(1,8)) }
+
+example "FALSE-KIND107 unrelated register preserves kind" { assert(kind107_raw_register(bvconst(4,64),bvconst(6,64),bvconst(1,8))=bvconst(0,8)) }
+
+example "FALSE-KIND107 byte write clears memory kind" { assert(kind107_raw_memory(bvconst(31,64),bvconst(1,64),bvconst(16,64),bvconst(1,8))=bvconst(1,8)) }
+
+example "FALSE-KIND107 word crosses pointer cell" { assert(kind107_raw_memory(bvconst(12,64),bvconst(8,64),bvconst(16,64),bvconst(1,8))=bvconst(1,8)) }
+
+example "FALSE-KIND107 DMA spans multiple cells" { assert(kind107_raw_memory(bvconst(0,64),bvconst(64,64),bvconst(32,64),bvconst(1,8))=bvconst(1,8)) }
+
+example "FALSE-KIND107 adjacent write preserves cell" { assert(kind107_raw_memory(bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(1,8))=bvconst(0,8)) }
+
+example "FALSE-KIND107 trusted allocation issues kind" { assert(¬(kind107_mint(bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-KIND107 integer instruction cannot mint kind" { assert(kind107_mint(bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-KIND107 untrusted allocation issuer" { assert(kind107_mint(bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-KIND107 copy from untagged integer" { assert(kind107_mint(bvconst(2,8),bvconst(0,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-KIND107 typed load validates protected source" { assert(¬(kind107_mint(bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,8)))) }
+
+example "FALSE-KIND107 derivation from unvalidated source" { assert(kind107_mint(bvconst(4,8),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8))) }
+
+example "FALSE-KIND107 link verified v2 object" { assert(¬(kind107_link(bvconst(2,64),bvconst(2,64),bvconst(16,64),bvconst(16,64),bvconst(1,8)))) }
+
+example "FALSE-KIND107 link old eight byte pointers rejected" { assert(kind107_link(bvconst(1,64),bvconst(2,64),bvconst(8,64),bvconst(8,64),bvconst(1,8))) }
+
+example "FALSE-KIND107 link mismatched alignment rejected" { assert(kind107_link(bvconst(2,64),bvconst(2,64),bvconst(16,64),bvconst(8,64),bvconst(1,8))) }

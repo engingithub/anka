@@ -1,0 +1,246 @@
+// Every assertion must be explicitly disproved; Unknown is failure.
+import "anka107_pointer_metadata.kleis"
+
+example "FALSE-META107-1 initial allocation" {
+    assert(¬(ptr107_create(bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "FALSE-META107-2 reuse advances generation" {
+    assert(¬(ptr107_create(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "FALSE-META107-3 live slot overwrite" {
+    assert(ptr107_create(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-4 reuse same generation" {
+    assert(ptr107_create(bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-5 generation exhausted" {
+    assert(ptr107_create(bvconst(7,64),bvsub(bvconst(0,64),bvconst(1,64)),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-6 zero identity" {
+    assert(ptr107_create(bvconst(0,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-7 zero extent" {
+    assert(ptr107_create(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-8 placement missing" {
+    assert(ptr107_create(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-9 authority missing" {
+    assert(ptr107_create(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE-META107-10 wrapped extent" {
+    assert(ptr107_create(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvsub(bvconst(0,64),bvconst(8,64)),bvconst(32,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-11 release live allocation" {
+    assert(¬(ptr107_release(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "FALSE-META107-12 double release" {
+    assert(ptr107_release(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(0,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-13 wrong release identity" {
+    assert(ptr107_release(bvconst(7,64),bvconst(2,64),bvconst(8,64),bvconst(2,64),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-14 stale release generation" {
+    assert(ptr107_release(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-15 release without owner" {
+    assert(ptr107_release(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE-META107-16 release leaves live" {
+    assert(ptr107_release(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-17 live pointer" {
+    assert(¬(ptr107_current(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "FALSE-META107-18 dead allocation" {
+    assert(ptr107_current(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-19 reused same address stale pointer" {
+    assert(ptr107_current(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-20 neighbor identity" {
+    assert(ptr107_current(bvconst(8,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-21 integer forged metadata" {
+    assert(ptr107_current(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE-META107-22 adjacent allocations" {
+    assert(¬(ptr107_disjoint(bvconst(4096,64),bvconst(16,64),bvconst(4112,64),bvconst(16,64))))
+}
+
+example "FALSE-META107-23 overlap allocations" {
+    assert(ptr107_disjoint(bvconst(4096,64),bvconst(17,64),bvconst(4112,64),bvconst(16,64)))
+}
+
+example "FALSE-META107-24 byte step" {
+    assert(¬(ptr107_step(bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(32,64),bvconst(15,64),bvconst(1,64),bvconst(15,64))))
+}
+
+example "FALSE-META107-25 word scaled step" {
+    assert(¬(ptr107_step(bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(16,64))))
+}
+
+example "FALSE-META107-26 one past formation" {
+    assert(¬(ptr107_step(bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(16,64))))
+}
+
+example "FALSE-META107-27 beyond narrowed buffer" {
+    assert(ptr107_step(bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(32,64),bvconst(2,64),bvconst(1,64),bvconst(17,64)))
+}
+
+example "FALSE-META107-28 wrapped product" {
+    assert(ptr107_step(bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(32,64),bvconst(2305843009213693952,64),bvconst(8,64),bvconst(0,64)))
+}
+
+example "FALSE-META107-29 wrong scale" {
+    assert(ptr107_step(bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(32,64),bvconst(1,64),bvconst(8,64),bvconst(1,64)))
+}
+
+example "FALSE-META107-30 narrow bounds and rights" {
+    assert(¬(ptr107_narrow(bvconst(0,64),bvconst(32,64),bvconst(3,64),bvconst(8,64),bvconst(16,64),bvconst(8,64),bvconst(1,64))))
+}
+
+example "FALSE-META107-31 widen bounds" {
+    assert(ptr107_narrow(bvconst(8,64),bvconst(16,64),bvconst(1,64),bvconst(0,64),bvconst(32,64),bvconst(8,64),bvconst(1,64)))
+}
+
+example "FALSE-META107-32 amplify rights" {
+    assert(ptr107_narrow(bvconst(0,64),bvconst(32,64),bvconst(1,64),bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(3,64)))
+}
+
+example "FALSE-META107-33 metadata exact transport" {
+    assert(¬(ptr107_transport(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64))))
+}
+
+example "FALSE-META107-34 lost identity" {
+    assert(ptr107_transport(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64),bvconst(0,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64)))
+}
+
+example "FALSE-META107-35 lost generation" {
+    assert(ptr107_transport(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64)))
+}
+
+example "FALSE-META107-36 widened lower bound" {
+    assert(ptr107_transport(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),bvconst(1,64),bvconst(16,64),bvconst(8,64),bvconst(1,64)))
+}
+
+example "FALSE-META107-37 widened upper bound" {
+    assert(ptr107_transport(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(32,64),bvconst(8,64),bvconst(1,64)))
+}
+
+example "FALSE-META107-38 changed position" {
+    assert(ptr107_transport(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(9,64),bvconst(1,64)))
+}
+
+example "FALSE-META107-39 amplified rights" {
+    assert(ptr107_transport(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(3,64)))
+}
+
+example "FALSE-META107-40 last byte access" {
+    assert(¬(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "FALSE-META107-41 one past dereference" {
+    assert(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-42 word straddles view" {
+    assert(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(8,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-43 stale despite current Fabric" {
+    assert(ptr107_access(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-44 released despite mapped memory" {
+    assert(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-45 missing metadata" {
+    assert(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(0,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-46 Fabric denied" {
+    assert(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-47 alignment denied" {
+    assert(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE-META107-48 zero width" {
+    assert(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(0,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-49 unsupported width" {
+    assert(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(4,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-50 view outside allocation" {
+    assert(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(33,64),bvconst(15,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-51 wrong allocation identity" {
+    assert(ptr107_access(bvconst(8,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-52 read through write only" {
+    assert(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(2,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-53 invented rights" {
+    assert(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-META107-54 write only byte store" {
+    assert(¬(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(2,64),bvconst(2,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "FALSE-META107-55 unrelated record preserved" {
+    assert(ptr107_live_cell(bvconst(7,64),bvconst(8,64),bvconst(0,8),bvconst(1,8))=bvconst(0,8))
+}
+
+example "FALSE-META107-56 released record dead" {
+    assert(ptr107_live_cell(bvconst(7,64),bvconst(7,64),bvconst(0,8),bvconst(1,8))=bvconst(1,8))
+}
+
+example "FALSE-META107 advance preserves metadata" {
+    assert(¬(ptr107_advance(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(3,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(3,64))))
+}
+
+example "FALSE-META107 advance cannot rebind allocation" {
+    assert(ptr107_advance(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(3,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(8,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(3,64)))
+}
+
+example "FALSE-META107 advance cannot change lifetime" {
+    assert(ptr107_advance(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(3,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(7,64),bvconst(3,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(3,64)))
+}
+
+example "FALSE-META107 advance cannot widen bounds" {
+    assert(ptr107_advance(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(3,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(17,64),bvconst(16,64),bvconst(3,64)))
+}
+
+example "FALSE-META107 advance cannot change rights" {
+    assert(ptr107_advance(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(3,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(4,64)))
+}

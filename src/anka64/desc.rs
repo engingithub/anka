@@ -28,6 +28,8 @@ pub enum Format {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sem {
+    PointerMove, PointerAdd, PointerLoad, PointerStore, PointerRead, PointerWrite,
+    PointerFrame, PointerLocal, PointerUnframe,
     /// Register-register or register-immediate ALU operation.
     Alu(AluOp),
     /// Compare (ALU subtract, flags only, result discarded).
@@ -131,6 +133,8 @@ pub enum Operands {
     CondOff,
     /// offset
     Off,
+    PointerWidth,
+    ManifestIndex,
     /// #imm8  (trap vector)
     Imm8,
     /// no operands
@@ -190,6 +194,15 @@ pub const INSNS: &[InsnDesc] = &[
     InsnDesc { name: "stb", opcode: 0x25, format: Format::I, operands: Operands::SrcBaseDisp, semantics: Sem::StoreByte, mem: MemEffect::Store, flags: FlagEffect::None },
 
     // ─── B-format control ───────────────────────────────────────
+    InsnDesc { name: "pmov", opcode: 0x26, format: Format::R, operands: Operands::RdRs1, semantics: Sem::PointerMove, mem: MemEffect::None, flags: FlagEffect::None },
+    InsnDesc { name: "padd", opcode: 0x27, format: Format::R, operands: Operands::RdRs1Rs2, semantics: Sem::PointerAdd, mem: MemEffect::None, flags: FlagEffect::None },
+    InsnDesc { name: "pload", opcode: 0x28, format: Format::I, operands: Operands::RdBaseDisp, semantics: Sem::PointerLoad, mem: MemEffect::Load, flags: FlagEffect::None },
+    InsnDesc { name: "pstore", opcode: 0x29, format: Format::I, operands: Operands::SrcBaseDisp, semantics: Sem::PointerStore, mem: MemEffect::Store, flags: FlagEffect::None },
+    InsnDesc { name: "pread", opcode: 0x2A, format: Format::R, operands: Operands::PointerWidth, semantics: Sem::PointerRead, mem: MemEffect::Load, flags: FlagEffect::None },
+    InsnDesc { name: "pwrite", opcode: 0x2B, format: Format::R, operands: Operands::PointerWidth, semantics: Sem::PointerWrite, mem: MemEffect::Store, flags: FlagEffect::None },
+    InsnDesc { name: "pframe", opcode: 0x2C, format: Format::S, operands: Operands::ManifestIndex, semantics: Sem::PointerFrame, mem: MemEffect::None, flags: FlagEffect::None },
+    InsnDesc { name: "plocal", opcode: 0x2D, format: Format::I, operands: Operands::RdImm, semantics: Sem::PointerLocal, mem: MemEffect::None, flags: FlagEffect::None },
+    InsnDesc { name: "punframe", opcode: 0x2E, format: Format::S, operands: Operands::NoOps, semantics: Sem::PointerUnframe, mem: MemEffect::None, flags: FlagEffect::None },
     InsnDesc { name: "b",    opcode: 0x30, format: Format::B, operands: Operands::CondOff,  semantics: Sem::Branch, mem: MemEffect::None, flags: FlagEffect::None },
     InsnDesc { name: "call", opcode: 0x32, format: Format::B, operands: Operands::Off,      semantics: Sem::Call,   mem: MemEffect::None, flags: FlagEffect::None },
 
@@ -426,7 +439,7 @@ mod tests {
         for d in INSNS {
             match d.format {
                 Format::R => assert!(
-                    matches!(d.operands, Operands::RdRs1Rs2 | Operands::RdRs1 | Operands::Rs1Rs2),
+                    matches!(d.operands, Operands::RdRs1Rs2 | Operands::RdRs1 | Operands::Rs1Rs2 | Operands::PointerWidth),
                     "{}: R-format with {:?} operands", d.name, d.operands
                 ),
                 Format::I => assert!(
@@ -441,7 +454,7 @@ mod tests {
                     "{}: B-format with {:?} operands", d.name, d.operands
                 ),
                 Format::S => assert!(
-                    matches!(d.operands, Operands::NoOps | Operands::Imm8),
+                    matches!(d.operands, Operands::NoOps | Operands::Imm8 | Operands::ManifestIndex),
                     "{}: S-format with {:?} operands", d.name, d.operands
                 ),
             }
@@ -452,11 +465,11 @@ mod tests {
     fn memory_instructions_have_correct_semantics() {
         for d in INSNS {
             match d.mem {
-                MemEffect::Load => assert!(matches!(d.semantics, Sem::Load | Sem::LoadByte), "{} has Load effect but wrong semantics", d.name),
-                MemEffect::Store => assert!(matches!(d.semantics, Sem::Store | Sem::StoreByte), "{} has Store effect but wrong semantics", d.name),
+                MemEffect::Load => assert!(matches!(d.semantics, Sem::Load | Sem::LoadByte | Sem::PointerLoad | Sem::PointerRead), "{} has Load effect but wrong semantics", d.name),
+                MemEffect::Store => assert!(matches!(d.semantics, Sem::Store | Sem::StoreByte | Sem::PointerStore | Sem::PointerWrite), "{} has Store effect but wrong semantics", d.name),
                 MemEffect::Atomic => assert_eq!(d.semantics, Sem::Xchg, "{} has Atomic effect but wrong semantics", d.name),
                 MemEffect::None => assert!(
-                    !matches!(d.semantics, Sem::Load | Sem::LoadByte | Sem::Store | Sem::StoreByte | Sem::Xchg),
+                    !matches!(d.semantics, Sem::Load | Sem::LoadByte | Sem::PointerLoad | Sem::PointerRead | Sem::Store | Sem::StoreByte | Sem::PointerStore | Sem::PointerWrite | Sem::Xchg),
                     "{} has no memory effect but Load/Store/Xchg semantics", d.name
                 ),
             }

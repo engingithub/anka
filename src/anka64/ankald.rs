@@ -28,8 +28,8 @@ const ANKALD_PM_BASE: u64 = 0x10000;
 const ANKALD_PM_SIZE: u64 = 0x700000;
 const ANKALD_STACK_SIZE: u64 = 0x4000;
 const ANKALD_TRAP_SIZE: u64 = PLACEMENT_PAGE_SIZE;
-const ANKALD_QUANTUM: usize = 5_000_000;
-const ANKALD_MAX_ROUNDS: usize = 200;
+const ANKALD_QUANTUM: usize = 100_000;
+const ANKALD_MAX_ROUNDS: usize = 10_000;
 
 const CTRL_MODULE_COUNT: usize = 0;
 const CTRL_DESCRIPTOR_VADDR: usize = 8;
@@ -357,7 +357,11 @@ pub fn run_ankald(
     let mut kernel = Kernel::new(fabric);
     kernel.next_phys = kernel_base;
     kernel.boot(&info).map_err(AnkaldError::Boot)?;
-    kernel.run(ANKALD_QUANTUM, ANKALD_MAX_ROUNDS);
+    for _ in 0..ANKALD_MAX_ROUNDS {
+        kernel.run(ANKALD_QUANTUM,1);
+        if kernel.processes.first().is_some_and(|p| p.exited()) {break;}
+        assert!(kernel.fabric.discard_completed_compiler_trace());
+    }
 
     let init = kernel.processes.get(0).ok_or(AnkaldError::LinkerDidNotExit)?;
     if !init.exited() {

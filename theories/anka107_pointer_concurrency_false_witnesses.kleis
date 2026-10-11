@@ -1,0 +1,167 @@
+// Every hostile must be explicitly disproved, never Unknown.
+import "anka107_pointer_concurrency.kleis"
+
+example "FALSE-CONC107-1 CPU admission first" { assert(¬(conc107_admit(bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-CONC107-2 close first rejects CPU" { assert(conc107_admit(bvconst(2,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-3 retired admission denied" { assert(conc107_admit(bvconst(3,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-4 lease not counted" { assert(conc107_admit(bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-5 stale pointer admission" { assert(conc107_admit(bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-6 duplicate ticket admission" { assert(conc107_admit(bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-7 unsynchronized admission" { assert(conc107_admit(bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(0,8))) }
+
+example "FALSE-CONC107-8 close keeps CPU DMA leases" { assert(¬(conc107_close(bvconst(1,8),bvconst(2,8),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-CONC107-9 close drops CPU leases" { assert(conc107_close(bvconst(1,8),bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-10 close drops DMA leases" { assert(conc107_close(bvconst(1,8),bvconst(2,8),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-11 closure changes generation early" { assert(conc107_close(bvconst(1,8),bvconst(2,8),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(8,64),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-12 unauthorized closure" { assert(conc107_close(bvconst(1,8),bvconst(2,8),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-13 closure without serialization" { assert(conc107_close(bvconst(1,8),bvconst(2,8),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,8))) }
+
+example "FALSE-CONC107-14 last lease completion" { assert(¬(conc107_finish(bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-CONC107-15 counter underflow" { assert(conc107_finish(bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-16 completion does not decrement" { assert(conc107_finish(bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-17 duplicate completion" { assert(conc107_finish(bvconst(1,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-18 completion keeps ticket usable" { assert(conc107_finish(bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-19 wrong generation completion" { assert(conc107_finish(bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-20 request only not terminal" { assert(conc107_finish(bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-21 racing count decrement" { assert(conc107_finish(bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))) }
+
+example "FALSE-CONC107-22 drained allocation retires" { assert(¬(conc107_retire(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(1,8)))) }
+
+example "FALSE-CONC107-23 live allocation retirement" { assert(conc107_retire(bvconst(1,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(1,8))) }
+
+example "FALSE-CONC107-24 CPU lease blocks retirement" { assert(conc107_retire(bvconst(2,8),bvconst(3,8),bvconst(1,64),bvconst(0,64),bvconst(1,8))) }
+
+example "FALSE-CONC107-25 DMA lease blocks retirement" { assert(conc107_retire(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(1,64),bvconst(1,8))) }
+
+example "FALSE-CONC107-26 unsynchronized retirement" { assert(conc107_retire(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(0,8))) }
+
+example "FALSE-CONC107-27 retired backing reuse" { assert(¬(conc107_reuse(bvconst(3,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(8,64),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-CONC107-28 closing backing reuse" { assert(conc107_reuse(bvconst(2,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(8,64),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-29 reuse pending CPU" { assert(conc107_reuse(bvconst(3,8),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(7,64),bvconst(8,64),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-30 reuse pending DMA" { assert(conc107_reuse(bvconst(3,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(7,64),bvconst(8,64),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-31 allocation ABA reuse" { assert(conc107_reuse(bvconst(3,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-32 unchecked placement reuse" { assert(conc107_reuse(bvconst(3,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(8,64),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-33 admitted CPU finishes during closure" { assert(¬(conc107_commit(bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-CONC107-34 commit on retired backing" { assert(conc107_commit(bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-35 commit without active ticket" { assert(conc107_commit(bvconst(2,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-36 commit wrong allocation" { assert(conc107_commit(bvconst(2,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-37 Fabric revocation blocks leased commit" { assert(conc107_commit(bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-38 commit race unchecked" { assert(conc107_commit(bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))) }
+
+example "FALSE-CONC107-39 current CPU cache rechecked" { assert(¬(conc107_cache(bvconst(9,64),bvconst(9,64),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-CONC107-40 stale CPU cache" { assert(conc107_cache(bvconst(8,64),bvconst(9,64),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-41 cached live after closure" { assert(conc107_cache(bvconst(9,64),bvconst(9,64),bvconst(2,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-42 cache without authoritative check" { assert(conc107_cache(bvconst(9,64),bvconst(9,64),bvconst(1,8),bvconst(0,8))) }
+
+example "FALSE-CONC107-43 writer invalidates pointer tag" { assert(¬(conc107_begin_write(bvconst(2,64),bvconst(3,64),bvconst(0,8)))) }
+
+example "FALSE-CONC107-44 concurrent writer on odd version" { assert(conc107_begin_write(bvconst(3,64),bvconst(3,64),bvconst(0,8))) }
+
+example "FALSE-CONC107-45 writer fails to advance version" { assert(conc107_begin_write(bvconst(2,64),bvconst(2,64),bvconst(0,8))) }
+
+example "FALSE-CONC107-46 payload write retains valid tag" { assert(conc107_begin_write(bvconst(2,64),bvconst(3,64),bvconst(1,8))) }
+
+example "FALSE-CONC107-47 ordered typed pair publication" { assert(¬(conc107_publish(bvconst(3,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-CONC107-48 publish leaves odd version" { assert(conc107_publish(bvconst(3,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-49 publish partial pair" { assert(conc107_publish(bvconst(3,64),bvconst(4,64),bvconst(0,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-50 ordinary write mints tag" { assert(conc107_publish(bvconst(3,64),bvconst(4,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-51 publish before payload visible" { assert(conc107_publish(bvconst(3,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(0,8))) }
+
+example "FALSE-CONC107-52 coherent pointer snapshot" { assert(¬(conc107_snapshot(bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-CONC107-53 mixed pointer snapshot" { assert(conc107_snapshot(bvconst(4,64),bvconst(6,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-54 writer active snapshot" { assert(conc107_snapshot(bvconst(3,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-55 raw overwritten snapshot" { assert(conc107_snapshot(bvconst(4,64),bvconst(4,64),bvconst(0,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-56 unordered snapshot" { assert(conc107_snapshot(bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-57 storage address reused" { assert(conc107_snapshot(bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(0,8))) }
+
+example "FALSE-CONC107-58 bounded RX DMA grant" { assert(¬(conc107_dma_grant(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(8,64),bvconst(24,64),bvconst(8,64),bvconst(32,64),bvconst(16,64),bvconst(2,64),bvconst(2,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))) }
+
+example "FALSE-CONC107-59 DMA allocation generation mismatch" { assert(conc107_dma_grant(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(8,64),bvconst(24,64),bvconst(8,64),bvconst(32,64),bvconst(16,64),bvconst(2,64),bvconst(2,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))) }
+
+example "FALSE-CONC107-60 DMA on dead allocation" { assert(conc107_dma_grant(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(8,64),bvconst(24,64),bvconst(8,64),bvconst(32,64),bvconst(16,64),bvconst(2,64),bvconst(2,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))) }
+
+example "FALSE-CONC107-61 DMA forged provenance" { assert(conc107_dma_grant(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(0,8),bvconst(8,64),bvconst(24,64),bvconst(8,64),bvconst(32,64),bvconst(16,64),bvconst(2,64),bvconst(2,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))) }
+
+example "FALSE-CONC107-62 DMA crosses narrowed buffer" { assert(conc107_dma_grant(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(8,64),bvconst(24,64),bvconst(8,64),bvconst(32,64),bvconst(17,64),bvconst(2,64),bvconst(2,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))) }
+
+example "FALSE-CONC107-63 zero DMA span" { assert(conc107_dma_grant(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(8,64),bvconst(24,64),bvconst(8,64),bvconst(32,64),bvconst(0,64),bvconst(2,64),bvconst(2,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))) }
+
+example "FALSE-CONC107-64 RX without write rights" { assert(conc107_dma_grant(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(8,64),bvconst(24,64),bvconst(8,64),bvconst(32,64),bvconst(16,64),bvconst(1,64),bvconst(2,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))) }
+
+example "FALSE-CONC107-65 invalid DMA direction" { assert(conc107_dma_grant(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(8,64),bvconst(24,64),bvconst(8,64),bvconst(32,64),bvconst(16,64),bvconst(2,64),bvconst(3,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))) }
+
+example "FALSE-CONC107-66 wrong device grant" { assert(conc107_dma_grant(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(8,64),bvconst(24,64),bvconst(8,64),bvconst(32,64),bvconst(16,64),bvconst(2,64),bvconst(2,64),bvconst(5,64),bvconst(6,64),bvconst(1,8))) }
+
+example "FALSE-CONC107-67 missing Fabric DMA binding" { assert(conc107_dma_grant(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(8,64),bvconst(24,64),bvconst(8,64),bvconst(32,64),bvconst(16,64),bvconst(2,64),bvconst(2,64),bvconst(5,64),bvconst(5,64),bvconst(0,8))) }
+
+example "FALSE-CONC107-68 bounded TX DMA grant" { assert(¬(conc107_dma_grant(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(8,64),bvconst(24,64),bvconst(8,64),bvconst(32,64),bvconst(16,64),bvconst(1,64),bvconst(1,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))) }
+
+example "FALSE-CONC107-69 terminal DMA drained and synchronized" { assert(¬(conc107_dma_terminal(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-CONC107-70 cancel requested device active" { assert(conc107_dma_terminal(bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-71 downstream DMA still in flight" { assert(conc107_dma_terminal(bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-72 DMA synchronization unfinished" { assert(conc107_dma_terminal(bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-73 grant allows future DMA" { assert(conc107_dma_terminal(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))) }
+
+example "FALSE-CONC107-74 unbound cancellation acknowledgment" { assert(conc107_dma_terminal(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))) }
+
+example "FALSE-CONC107 DMA terminal consumes last lease" { assert(¬(conc107_dma_finish(bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-CONC107 cancel request cannot finish lease" { assert(conc107_dma_finish(bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107 equal odd snapshot rejected" { assert(conc107_snapshot(bvconst(3,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107 count saturation cannot admit" { assert(conc107_admit(bvconst(1,8),ptr107_max(),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107 storage version cannot wrap" { assert(conc107_publish(ptr107_max(),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "FALSE-CONC107 DMA bytes mint pointer kind" {
+    assert(conc107_dma_tag(bvconst(1,8),bvconst(1,8))=bvconst(1,8))
+}
+example "FALSE-CONC107 revoked leased commit writes byte" {
+    assert(conc107_write_cell(bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(9,8),bvconst(3,8))=bvconst(9,8))
+}

@@ -66,3 +66,7 @@ pub mod system_image;
 pub mod block;
 pub mod nic;
 pub mod host_net;
+
+pub mod scoped_pointers;
+
+pub mod pointer_frames;

@@ -108,7 +108,20 @@ static ILLEGAL_DESC: InsnDesc = InsnDesc {
 };
 
 impl DecodedInsn {
-    pub fn is_illegal(&self) -> bool { self.desc.opcode == 0xFF }
+    pub fn is_illegal(&self) -> bool {
+        if self.desc.opcode == 0xFF { return true; }
+        let pair=|v:u8| v<=10 && v%2==0;
+        let func=self.raw & 0x3fff;
+        match self.desc.semantics {
+            Sem::PointerMove => !pair(self.rd)||!pair(self.rs1)||self.rs2!=0||func!=0,
+            Sem::PointerAdd => !pair(self.rd)||!pair(self.rs1)||self.rs2>12||func!=0,
+            Sem::PointerLoad|Sem::PointerStore => !pair(self.rd)||!pair(self.rs1),
+            Sem::PointerRead|Sem::PointerWrite => self.rd>12||!pair(self.rs1)||self.rs2!=0||func>3,
+            Sem::PointerLocal => !pair(self.rd)||self.rs1!=0||self.imm<0,
+            Sem::PointerUnframe => self.raw & 0x3ffffff != 0,
+            _=>false,
+        }
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -228,6 +241,8 @@ pub fn disassemble(insn: &DecodedInsn) -> String {
             d.name, insn.imm),
         Operands::Imm8 => format!("{} #{}",
             d.name, insn.imm as u8),
+        Operands::PointerWidth => format!("{} {}, [{}], {}",d.name,REG_NAMES[insn.rd as usize],REG_NAMES[insn.rs1 as usize],1u64 << (insn.raw&3)),
+        Operands::ManifestIndex => format!("{} #{}",d.name,insn.imm),
         Operands::NoOps => d.name.to_string(),
     }
 }
@@ -309,6 +324,25 @@ impl Asm64 {
     pub fn st(&mut self, src: u8, base: u8, disp: i32) { self.emit_i_named("st", src, base, disp); }
     pub fn lea(&mut self, rd: u8, base: u8, disp: i32) { self.emit_i_named("lea", rd, base, disp); }
     pub fn xchg(&mut self, rd: u8, base: u8, disp: i32) { self.emit_i_named("xchg", rd, base, disp); }
+
+    fn emit_pointer_word(&mut self, word: u32) {
+        assert!(!decode(word).is_illegal(), "invalid protected pointer operands");
+        self.words.push(word);
+    }
+    fn assert_pair(r:u8) { assert!(r<=10 && r%2==0,"invalid pointer pair"); }
+    pub fn pmov(&mut self,d:u8,s:u8) { Self::assert_pair(d); Self::assert_pair(s); self.emit_pointer_word(encode_r(0x26,d,s,0)); }
+    pub fn padd(&mut self,d:u8,s:u8,t:u8) { Self::assert_pair(d);Self::assert_pair(s);assert!(t<=12); self.emit_pointer_word(encode_r(0x27,d,s,t)); }
+    pub fn pload(&mut self,d:u8,s:u8,disp:i32) { Self::assert_pair(d);Self::assert_pair(s);assert!(fits_imm18(disp as i64)); self.emit_pointer_word(encode_i(0x28,d,s,disp)); }
+    pub fn pstore(&mut self,d:u8,s:u8,disp:i32) { Self::assert_pair(d);Self::assert_pair(s);assert!(fits_imm18(disp as i64)); self.emit_pointer_word(encode_i(0x29,d,s,disp)); }
+    fn pointer_width(&mut self,op:u8,d:u8,s:u8,width:u64) {
+        assert!(d<=12);Self::assert_pair(s);assert!(matches!(width,1|2|4|8));
+        self.emit_pointer_word(encode_r(op,d,s,0)|width.trailing_zeros());
+    }
+    pub fn pread(&mut self,d:u8,s:u8,width:u64) { self.pointer_width(0x2a,d,s,width); }
+    pub fn pwrite(&mut self,d:u8,s:u8,width:u64) { self.pointer_width(0x2b,d,s,width); }
+    pub fn pframe(&mut self,index:u32) { assert!(index<1<<26);self.emit_pointer_word(encode_s(0x2c,index)); }
+    pub fn plocal(&mut self,d:u8,index:u32) { Self::assert_pair(d);assert!(index<1<<17);self.emit_pointer_word(encode_i(0x2d,d,0,index as i32)); }
+    pub fn punframe(&mut self) { self.emit_pointer_word(encode_s(0x2e,0)); }
 
     // Branch (offset in words relative to this instruction)
     pub fn bcc(&mut self, cond: Cond, word_off: i32) { self.emit_b_named("b", cond as u8, word_off); }
@@ -425,15 +459,41 @@ mod tests {
         roundtrip_s("nop");
     }
 
+    fn canonical_pointer_test_word(d:&InsnDesc) -> Option<u32> {
+        match d.semantics {
+            Sem::PointerMove=>Some(encode_r(d.opcode,4,6,0)),
+            Sem::PointerAdd=>Some(encode_r(d.opcode,4,6,12)),
+            Sem::PointerLoad|Sem::PointerStore=>Some(encode_i(d.opcode,4,6,-17)),
+            Sem::PointerRead|Sem::PointerWrite=>Some(encode_r(d.opcode,12,6,0)|3),
+            Sem::PointerFrame=>Some(encode_s(d.opcode,7)),
+            Sem::PointerLocal=>Some(encode_i(d.opcode,4,0,7)),
+            Sem::PointerUnframe=>Some(encode_s(d.opcode,0)),
+            _=>None,
+        }
+    }
+
+    #[test]
+    fn pointer_fields_reject_reserved_lanes_and_funcs() {
+        for d in 0..16 {for s in 0..16 {for f in 0..5 {
+            let pair=|x:u8|x<=10&&x%2==0;
+            assert_eq!(!decode(encode_r(0x26,d,s,0)|f).is_illegal(),pair(d)&&pair(s)&&f==0);
+            assert_eq!(!decode(encode_r(0x2a,d,s,0)|f).is_illegal(),d<=12&&pair(s)&&f<=3);
+        }}}
+        let mut asm=Asm64::new();asm.pmov(4,6);asm.padd(4,6,12);asm.pload(4,6,-131072);asm.pstore(4,6,131071);
+        for w in [1,2,4,8] {asm.pread(12,6,w);asm.pwrite(12,6,w);}
+        asm.pframe((1<<26)-1);asm.plocal(4,(1<<17)-1);asm.punframe();
+        assert!(asm.words.iter().all(|&w| !decode(w).is_illegal()));
+    }
+
     #[test]
     fn disassemble_roundtrip() {
         let cases: Vec<(&str, u32)> = desc::INSNS.iter().map(|d| {
-            let word = match d.format {
+            let word = canonical_pointer_test_word(d).unwrap_or_else(|| match d.format {
                 Format::R => encode_r(d.opcode, 1, 2, 3),
                 Format::I => encode_i(d.opcode, 1, 2, 42),
                 Format::B => encode_b(d.opcode, Cond::Ne as u8, -5),
                 Format::S => encode_s(d.opcode, 7),
-            };
+            });
             (d.name, word)
         }).collect();
 
@@ -460,12 +520,13 @@ mod tests {
     #[test]
     fn every_desc_entry_assembles_and_decodes() {
         for d in desc::INSNS {
-            let word = match d.format {
+            let word = canonical_pointer_test_word(d).unwrap_or_else(|| match d.format {
                 Format::R => encode_r(d.opcode, 5, 6, 7),
                 Format::I => encode_i(d.opcode, 5, 6, -17),
                 Format::B => encode_b(d.opcode, 3, 10),
                 Format::S => encode_s(d.opcode, 0),
-            };
+            });
+            assert!(!decode(word).is_illegal());
             let decoded = decode(word);
             assert_eq!(
                 decoded.desc.opcode, d.opcode,

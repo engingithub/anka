@@ -14,6 +14,42 @@ use super::desc::{Sem, AluOp, FlagEffect as DescFlagEffect};
 use super::fabric::Fabric;
 use super::isa::*;
 use super::state::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// Trusted execution-context identities are independent of physical CPU agents.
+// Exhaustion fails closed without wrapping or changing the counter.
+static NEXT_CONTEXT_ID: AtomicU64 = AtomicU64::new(1);
+fn fresh_context_id() -> u64 {
+    let mut current = NEXT_CONTEXT_ID.load(Ordering::Relaxed);
+    loop {
+        let next = current.checked_add(1).expect("execution-context identity exhausted");
+        match NEXT_CONTEXT_ID.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return current,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EventRegisterImage {
+    words: [u64; 16],
+    kinds: [Option<super::scoped_pointers::ScopedPointer>; 6],
+    flags: Flags,
+    return_stack: Vec<ReturnAuthority>,
+    halted: bool,
+    frames: Option<super::pointer_frames::FrameState>,
+}
+
+/// Not user memory, and not reconstructible from the public control header.
+#[derive(Debug, Clone)]
+struct SavedEventContext {
+    header: EventFrame,
+    context_id: u64,
+    domain: DomainId,
+    image: Option<EventRegisterImage>,
+    scalar_results: [Option<u64>; 13],
+}
+
 
 // ───────────────────────────────────────────────────────────────────
 // Address map: virtual address → (ObjectId, offset)
@@ -175,6 +211,11 @@ pub enum InterruptTurn {
 
 #[derive(Debug, Clone)]
 pub struct Anka64Core {
+    context_id: u64,
+    protected_context_enabled: bool,
+    saved_event_contexts: Vec<SavedEventContext>,
+    pointer_pairs: [Option<super::scoped_pointers::ScopedPointer>; 6],
+    pointer_frames: Option<super::pointer_frames::FrameState>,
     pub r: [u64; 16],
     pub pc: u64,
     pub flags: Flags,
@@ -199,6 +240,8 @@ pub struct Anka64Core {
     ///
     /// Formal basis: place F in anka_interrupts.kleis.
     /// CONS-2: U+F=1.  CONS-4: F=M.
+    /// Public control headers for existing trusted observers. A header alone cannot
+    /// restore pointer authority; return also checks the private saved-image stack.
     pub event_frames: Vec<EventFrame>,
 
     /// Whether asynchronous interrupt delivery is enabled.
@@ -243,10 +286,296 @@ pub struct Anka64Core {
     pub return_stack: Vec<ReturnAuthority>,
 }
 
+#[derive(Debug)]
+pub(crate) enum PointerMachineError {
+    InvalidPair, MissingKind, Unmapped, Unaligned,
+    Frame(super::pointer_frames::FrameError), ContextMode, Pointer(super::scoped_pointers::PointerError), Fabric(FaultRecord),
+}
+
 impl Anka64Core {
+    /// Ordinary writes never confer pointer kind, even if the new integer is unchanged.
+    pub fn write_register(&mut self, register: usize, value: u64) {
+        assert!(register < 16);
+        if register < 12 { self.pointer_pairs[register / 2] = None; }
+        self.r[register] = value;
+    }
+
+    /// Trusted profile selection. Never upgrade a partial legacy event image.
+    pub(crate) fn enable_protected_context(&mut self) -> Result<(), PointerMachineError> {
+        if !self.protected_context_enabled && !self.event_frames.is_empty() {
+            return Err(PointerMachineError::ContextMode);
+        }
+        self.protected_context_enabled = true;
+        Ok(())
+    }
+
+    pub(crate) fn protected_application(&self) -> bool {
+        self.pointer_frames.is_some() || self.saved_event_contexts.last()
+            .and_then(|s|s.image.as_ref()).is_some_and(|i|i.frames.is_some())
+    }
+
+    /// Explicit scalar syscall result, distinct from handler scratch registers.
+    /// Interrupt frames never export result lanes. No call can mint pointer kind.
+    pub(crate) fn write_syscall_result(&mut self, register: usize, value: u64) {
+        self.write_register(register, value);
+        if register > 12 || self.privilege != Privilege::Supervisor { return; }
+        if let Some(saved) = self.saved_event_contexts.last_mut() {
+            if saved.context_id == self.context_id && saved.domain == self.domain
+                && saved.header.cause == EventCause::Syscall && saved.image.is_some() {
+                saved.scalar_results[register] = Some(value);
+            }
+        }
+    }
+
+    /// Single trusted event-entry primitive, including nested supervisor events.
+    pub(crate) fn enter_event(&mut self, header: EventFrame) {
+        let image = if self.protected_context_enabled {
+            Some(EventRegisterImage { words: self.r, kinds: self.pointer_pairs,
+                flags: self.flags, return_stack: std::mem::take(&mut self.return_stack),
+                halted: self.halted, frames: self.pointer_frames.take() })
+        } else { None };
+        self.saved_event_contexts.push(SavedEventContext { header: header.clone(),
+            context_id: self.context_id, domain: self.domain, image,
+            scalar_results: [None; 13] });
+        self.event_frames.push(header);
+        self.pointer_pairs = [None; 6];
+        self.privilege = Privilege::Supervisor;
+        self.interrupts_enabled = false;
+    }
+
+    /// Trusted loader admission. Manifest bytes cannot be supplied by user registers.
+    pub(crate) fn admit_pointer_program(&mut self, fabric:&mut Fabric,
+        program:super::pointer_frames::ValidatedPointerProgram, code_base:u64,
+        stack_low:u64, stack_high:u64) -> Result<(),PointerMachineError> {
+        use super::pointer_frames::{FrameState,FrameError};
+        let fail=|| PointerMachineError::Frame(FrameError::Geometry);
+        if self.pointer_frames.is_some()||!self.event_frames.is_empty()||!self.return_stack.is_empty()
+            || self.privilege!=Privilege::User||stack_high<=stack_low||stack_low%16!=0||stack_high%16!=0 { return Err(fail()); }
+        let (object,offset)=self.checked_pointer_mapping(code_base,program.code.len() as u64)?;
+        let obj=fabric.objects.get(&object).ok_or_else(fail)?;
+        if obj.state!=ObjectState::Sealed { return Err(fail()); }
+        let generation=obj.generation;
+        let physical=fabric.translate(object,offset).ok_or_else(fail)?;
+        if physical.checked_add(program.code.len() as u64).is_none_or(|n| n>fabric.mem_size() as u64)
+            || fabric.read_physical(physical,program.code.len() as u64)!=program.code { return Err(fail()); }
+        let (stack_object,_)=self.checked_pointer_mapping(stack_low,stack_high-stack_low)?;
+        let (_,code_offset)=self.checked_pointer_mapping(code_base,4)?;
+        let fetch=self.make_request(object,code_offset,Width::Word,AccessKind::Fetch);
+        if !matches!(fabric.authorize(&fetch),super::fabric::AuthResult::Authorized(_)) { return Err(fail()); }
+        if !fabric.protect_pointer_stack(stack_object,self.context_id,self.domain) { return Err(PointerMachineError::Frame(FrameError::Context)); }
+        self.enable_protected_context()?;
+        self.pointer_frames=Some(FrameState { program,context:self.context_id,domain:self.domain,
+            code_object:object,code_generation:generation,code_offset:offset,code_base,stack_low,cursor:stack_high,
+            pending_entry:Some(code_base),active:Vec::new() });
+        self.write_register(SP as usize,stack_high);
+        Ok(())
+    }
+
+    fn frame_current(&self,fabric:&Fabric) -> Result<&super::pointer_frames::FrameState,PointerMachineError> {
+        use super::pointer_frames::FrameError;
+        let state=self.pointer_frames.as_ref().ok_or(PointerMachineError::ContextMode)?;
+        if self.privilege!=Privilege::User||state.context!=self.context_id||state.domain!=self.domain
+            || !fabric.objects.get(&state.code_object).is_some_and(|o| o.generation==state.code_generation && o.state==ObjectState::Sealed)
+            || self.pc.checked_sub(state.code_base).is_none_or(|pc| pc>=state.program.code.len() as u64)
+            || self.checked_pointer_mapping(self.pc,4)?!=(state.code_object,state.code_offset+self.pc-state.code_base) { return Err(PointerMachineError::Frame(FrameError::Context)); }
+        Ok(state)
+    }
+    fn enter_pointer_frame(&mut self,fabric:&mut Fabric,index:usize) -> Result<(),PointerMachineError> {
+        use super::pointer_frames::{FrameError,ActiveFrame};
+        let state=self.frame_current(fabric)?;
+        let frame=state.program.frames.get(index).ok_or(PointerMachineError::Frame(FrameError::Manifest))?;
+        if state.pending_entry!=Some(self.pc)||self.pc!=state.code_base+frame.entry
+            || state.active.iter().any(|f| f.call_depth==self.return_stack.len()) { return Err(PointerMachineError::Frame(FrameError::Control)); }
+        let base=state.cursor.checked_sub(frame.size).filter(|&n| n>=state.stack_low).ok_or(PointerMachineError::Frame(FrameError::Capacity))?;
+        let mut registrations=Vec::new();
+        for local in &frame.locals {
+            let address=base.checked_add(local.offset).ok_or(PointerMachineError::Unmapped)?;
+            let (object,offset)=self.checked_pointer_mapping(address,local.length)?;
+            if local.pointer_slot && offset%16!=0 { return Err(PointerMachineError::Unaligned); }
+            let mut request=self.make_request(object,offset,Width::Byte,AccessKind::Read);
+            request.length=local.length;
+            registrations.push((request,address,local.writable));
+        }
+        let (scope,locals)=fabric.issue_pointer_frame(self.context_id,registrations)?;
+        let active=ActiveFrame { scope,manifest:index,call_depth:self.return_stack.len(),
+            parent_cursor:state.cursor,parent_fp:self.r[FP as usize],return_lr:self.r[LR as usize],locals };
+        let state=self.pointer_frames.as_mut().unwrap();
+        state.active.push(active);state.cursor=base;state.pending_entry=None;
+        self.write_register(SP as usize,base);self.write_register(FP as usize,base);
+        Ok(())
+    }
+    fn lookup_pointer_local(&mut self,fabric:&Fabric,dst:u8,index:usize) -> Result<(),PointerMachineError> {
+        Self::pointer_pair_index(dst)?;
+        let state=self.frame_current(fabric)?;
+        let frame=state.active.last().filter(|f| f.call_depth==self.return_stack.len())
+            .ok_or(PointerMachineError::Frame(super::pointer_frames::FrameError::Control))?;
+        let pointer=*frame.locals.get(index).ok_or(PointerMachineError::Frame(super::pointer_frames::FrameError::Manifest))?;
+        fabric.scoped_pointer_backing(pointer,self.domain)?;
+        self.install_pointer(dst,Some(pointer))
+    }
+    fn leave_pointer_frame(&mut self,fabric:&mut Fabric) -> Result<(),PointerMachineError> {
+        let state=self.frame_current(fabric)?;
+        let frame=state.active.last().ok_or(PointerMachineError::Frame(super::pointer_frames::FrameError::Control))?;
+        if frame.call_depth!=self.return_stack.len() || !state.program.frames[frame.manifest].exits.contains(&(self.pc-state.code_base)) {
+            return Err(PointerMachineError::Frame(super::pointer_frames::FrameError::Control));
+        }
+        fabric.retire_pointer_frame(frame.scope,&frame.locals)?;
+        let frame=self.pointer_frames.as_mut().unwrap().active.pop().unwrap();
+        self.pointer_frames.as_mut().unwrap().cursor=frame.parent_cursor;
+        self.write_register(SP as usize,frame.parent_cursor);self.write_register(FP as usize,frame.parent_fp);
+        self.write_register(LR as usize,frame.return_lr);
+        Ok(())
+    }
+    /// Trusted death/unwind path also retires event-suspended allocations.
+    pub(crate) fn retire_all_pointer_frames(&mut self,fabric:&mut Fabric) {
+        if let Some(mut state)=self.pointer_frames.take() {
+            while let Some(frame)=state.active.pop() { let _=fabric.retire_pointer_frame(frame.scope,&frame.locals); }
+        }
+        for saved in self.saved_event_contexts.iter_mut().rev() {
+            if let Some(state)=saved.image.as_mut().and_then(|i| i.frames.take()) {
+                for frame in state.active.iter().rev() { let _=fabric.retire_pointer_frame(frame.scope,&frame.locals); }
+            }
+        }
+    }
+    fn pointer_address(&self,fabric:&Fabric,start:u8,disp:i64,write:bool) -> Result<u64,PointerMachineError> {
+        let pointer=self.authenticated_pointer(fabric,start)?.ok_or(PointerMachineError::MissingKind)?;
+        let pointer=fabric.scoped_pointers.add(pointer,self.domain.0,disp).map_err(PointerMachineError::Pointer)?;
+        let address=fabric.scoped_pointers.resolve(pointer,self.domain.0,16,write).map_err(PointerMachineError::Pointer)?;
+        if self.checked_pointer_mapping(address,16)?!=fabric.scoped_pointer_backing(pointer,self.domain)? { return Err(PointerMachineError::Unmapped); }
+        Ok(address)
+    }
+    fn pointer_fault(&self,error:PointerMachineError) -> StepResult {
+        if let PointerMachineError::Fabric(fault)=error { return StepResult::Fault(fault); }
+        StepResult::Fault(FaultRecord {agent:self.agent,domain:self.domain,privilege:self.privilege,
+            transaction:TransactionId(0),object:ObjectId(0),generation:None,offset:self.pc,
+            width:Width::Word,length:4,kind:AccessKind::Fetch,pc:Some(self.pc),reason:FaultReason::ControlFlowViolation})
+    }
+
+    fn pointer_pair_index(start: u8) -> Result<usize, PointerMachineError> {
+        if start > 10 || start % 2 != 0 { return Err(PointerMachineError::InvalidPair); }
+        Ok(start as usize / 2)
+    }
+
+    fn captured_pointer(&self, start: u8) -> Result<Option<super::scoped_pointers::ScopedPointer>, PointerMachineError> {
+        let index = Self::pointer_pair_index(start)?;
+        let words = [self.r[start as usize], self.r[start as usize + 1]];
+        match self.pointer_pairs[index] {
+            Some(pointer) if pointer.words() == words => Ok(Some(pointer)),
+            None if words == [0, 0] => Ok(None),
+            _ => Err(PointerMachineError::MissingKind),
+        }
+    }
+
+    /// Trusted issuance/transport primitive; integer payloads cannot call this path.
+    pub(crate) fn install_pointer(&mut self, start: u8, pointer: Option<super::scoped_pointers::ScopedPointer>) -> Result<(), PointerMachineError> {
+        let index = Self::pointer_pair_index(start)?;
+        self.enable_protected_context()?;
+        let words = pointer.map(|p| p.words()).unwrap_or([0, 0]);
+        self.r[start as usize] = words[0];
+        self.r[start as usize + 1] = words[1];
+        self.pointer_pairs[index] = pointer;
+        Ok(())
+    }
+
+    /// Called by the trusted frame/allocation runtime, never by raw integer data.
+    pub(crate) fn register_local_pointer(&mut self, fabric: &mut Fabric, scope: super::scoped_pointers::Scope,
+        dst: u8, address: u64, length: u64, writable: bool) -> Result<(), PointerMachineError> {
+        Self::pointer_pair_index(dst)?;
+        // Reject profile upgrades before issuing any new allocation identity.
+        if !self.protected_context_enabled && !self.event_frames.is_empty() { return Err(PointerMachineError::ContextMode); }
+        let (object, offset) = self.checked_pointer_mapping(address, length)?;
+        let mut request = self.make_request(object, offset, Width::Byte, AccessKind::Read);
+        request.length = length;
+        let pointer = fabric.register_scoped_pointer(scope, request, address, writable)?;
+        self.install_pointer(dst, Some(pointer))
+    }
+
+    fn authenticated_pointer(&self, fabric: &Fabric, start: u8) -> Result<Option<super::scoped_pointers::ScopedPointer>, PointerMachineError> {
+        let pointer = self.captured_pointer(start)?;
+        if let Some(pointer) = pointer {
+            fabric.scoped_pointer_backing(pointer, self.domain)?;
+        }
+        Ok(pointer)
+    }
+
+    pub(crate) fn pointer_move(&mut self, fabric: &Fabric, dst: u8, src: u8) -> Result<(), PointerMachineError> {
+        Self::pointer_pair_index(dst)?;
+        let captured = self.authenticated_pointer(fabric, src)?;
+        self.install_pointer(dst, captured)
+    }
+
+    pub(crate) fn pointer_add(&mut self, fabric: &Fabric, dst: u8, src: u8, delta: i64) -> Result<(), PointerMachineError> {
+        Self::pointer_pair_index(dst)?;
+        let pointer = self.authenticated_pointer(fabric, src)?.ok_or(PointerMachineError::MissingKind)?;
+        let pointer = fabric.scoped_pointers.add(pointer, self.domain.0, delta).map_err(PointerMachineError::Pointer)?;
+        self.install_pointer(dst, Some(pointer))
+    }
+
+    fn checked_pointer_mapping(&self, address: u64, length: u64) -> Result<(ObjectId, u64), PointerMachineError> {
+        let end = address.checked_add(length).filter(|_| length != 0).ok_or(PointerMachineError::Unmapped)?;
+        let mut selected = None;
+        for entry in &self.address_map.entries {
+            let entry_end = entry.virt_base.checked_add(entry.size).ok_or(PointerMachineError::Unmapped)?;
+            if address < entry_end && entry.virt_base < end {
+                if selected.is_some() || address < entry.virt_base || end > entry_end { return Err(PointerMachineError::Unmapped); }
+                let offset = entry.obj_offset.checked_add(address - entry.virt_base).ok_or(PointerMachineError::Unmapped)?;
+                offset.checked_add(length).ok_or(PointerMachineError::Unmapped)?;
+                selected = Some((entry.object, offset));
+            }
+        }
+        selected.ok_or(PointerMachineError::Unmapped)
+    }
+
+    fn pointer_cell_request(&self, address: u64, kind: AccessKind) -> Result<MemoryRequest, PointerMachineError> {
+        let (object, offset) = self.checked_pointer_mapping(address, 16)?;
+        if offset % 16 != 0 { return Err(PointerMachineError::Unaligned); }
+        let mut request = self.make_request(object, offset, Width::Double, kind);
+        request.length = 16;
+        Ok(request)
+    }
+
+    pub(crate) fn pointer_store(&self, fabric: &mut Fabric, src: u8, address: u64) -> Result<(), PointerMachineError> {
+        let captured = self.authenticated_pointer(fabric, src)?;
+        let request = self.pointer_cell_request(address, AccessKind::Write)?;
+        fabric.store_pointer_cell(request, captured).map_err(PointerMachineError::Fabric)
+    }
+
+    pub(crate) fn pointer_load(&mut self, fabric: &mut Fabric, dst: u8, address: u64) -> Result<(), PointerMachineError> {
+        Self::pointer_pair_index(dst)?;
+        let request = self.pointer_cell_request(address, AccessKind::Read)?;
+        let pointer = fabric.load_pointer_cell(request).map_err(PointerMachineError::Fabric)?;
+        if let Some(pointer) = pointer {
+            fabric.scoped_pointer_backing(pointer, self.domain)?;
+        }
+        self.install_pointer(dst, pointer)
+    }
+
+    pub(crate) fn pointer_read(&mut self, fabric: &mut Fabric, start: u8, width: Width) -> Result<Vec<u8>, PointerMachineError> {
+        let pointer = self.authenticated_pointer(fabric, start)?.ok_or(PointerMachineError::MissingKind)?;
+        let address = fabric.scoped_pointers.resolve(pointer, self.domain.0, width.bytes(), false).map_err(PointerMachineError::Pointer)?;
+        let (object, offset) = self.checked_pointer_mapping(address, width.bytes())?;
+        if fabric.scoped_pointer_backing(pointer, self.domain)? != (object, offset) { return Err(PointerMachineError::Unmapped); }
+        let request = self.make_request(object, offset, width, AccessKind::Read);
+        fabric.execute_read(request).map_err(PointerMachineError::Fabric)
+    }
+
+    pub(crate) fn pointer_write(&self, fabric: &mut Fabric, start: u8, width: Width, data: Vec<u8>) -> Result<(), PointerMachineError> {
+        let pointer = self.authenticated_pointer(fabric, start)?.ok_or(PointerMachineError::MissingKind)?;
+        let address = fabric.scoped_pointers.resolve(pointer, self.domain.0, width.bytes(), true).map_err(PointerMachineError::Pointer)?;
+        let (object, offset) = self.checked_pointer_mapping(address, width.bytes())?;
+        if fabric.scoped_pointer_backing(pointer, self.domain)? != (object, offset) { return Err(PointerMachineError::Unmapped); }
+        let request = self.make_request(object, offset, width, AccessKind::Write);
+        fabric.execute_write(request, data).map_err(PointerMachineError::Fabric)
+    }
+
     pub fn new(agent: AgentId, domain: DomainId) -> Self {
         Self {
             r: [0; 16],
+            context_id: fresh_context_id(),
+            protected_context_enabled: false,
+            saved_event_contexts: Vec::new(),
+            pointer_pairs: [None; 6],
+            pointer_frames: None,
             pc: 0,
             flags: Flags::default(),
             agent,
@@ -270,12 +599,40 @@ impl Anka64Core {
     /// primitive corresponding to formal transition T_eret in
     /// anka_interrupts.kleis:  R + F + M → U.
     ///
-    /// Returns Some(return_pc) on success, None if the event-frame stack
-    /// is empty (INT-5: ¬F ⇒ ERET cannot fire).
+    /// Protected mode restores words, kinds, flags and return authority, then
+    /// overlays explicit scalar syscall results. Legacy register behavior remains.
+    /// Owner/domain/depth/header/mode rejection preserves both image and frames.
+    /// Returns Some(return_pc) and restores PC on success; None on rejection,
+    /// including an empty stack (INT-5: ERET requires an outstanding event).
     pub fn event_return(&mut self) -> Option<u64> {
-        let frame = self.event_frames.pop()?;
+        // Peek -> validate -> consume. Rejection mutates neither image nor frames.
+        let header = self.event_frames.last()?;
+        let saved = self.saved_event_contexts.last()?;
+        if self.event_frames.len() != self.saved_event_contexts.len()
+            || saved.context_id != self.context_id || saved.domain != self.domain
+            || saved.header != *header
+            || self.protected_context_enabled != saved.image.is_some() {
+            return None;
+        }
+        if self.pointer_frames.as_ref().is_some_and(|s| !s.active.is_empty()) { return None; }
+        let saved = self.saved_event_contexts.pop().unwrap();
+        let frame = self.event_frames.pop().unwrap();
+        if let Some(image) = saved.image {
+            self.r = image.words;
+            self.pointer_pairs = image.kinds;
+            self.flags = image.flags;
+            self.return_stack = image.return_stack;
+            self.pointer_frames = image.frames;
+            self.halted = image.halted;
+            if frame.cause == EventCause::Syscall {
+                for (register, result) in saved.scalar_results.into_iter().enumerate() {
+                    if let Some(value) = result { self.write_register(register, value); }
+                }
+            }
+        }
         self.privilege = frame.return_privilege;
         self.interrupts_enabled = frame.interrupts_were_enabled;
+        self.pc = frame.return_pc;
         Some(frame.return_pc)
     }
 
@@ -349,7 +706,7 @@ impl Anka64Core {
             }
         };
 
-        self.event_frames.push(EventFrame {
+        self.enter_event(EventFrame {
             return_pc: self.pc,
             return_privilege: self.privilege,
             interrupts_were_enabled: self.interrupts_enabled,
@@ -418,13 +775,43 @@ impl Anka64Core {
         // 3. Execute (semantic dispatch)
         let mut next_pc = self.pc + 4;
 
+        if self.pointer_frames.is_some() && matches!(insn.desc.semantics,Sem::Load|Sem::Store|Sem::LoadByte|Sem::StoreByte|Sem::Xchg) {
+            return self.pointer_fault(PointerMachineError::ContextMode);
+        }
         match insn.desc.semantics {
+            Sem::PointerMove|Sem::PointerAdd|Sem::PointerLoad|Sem::PointerStore|Sem::PointerRead|Sem::PointerWrite|Sem::PointerFrame|Sem::PointerLocal|Sem::PointerUnframe => {
+                if let Err(error)=self.frame_current(fabric) { return self.pointer_fault(error); }
+                let result=(|| {
+                    match insn.desc.semantics {
+                        Sem::PointerMove=>self.pointer_move(fabric,insn.rd,insn.rs1),
+                        Sem::PointerAdd=>self.pointer_add(fabric,insn.rd,insn.rs1,self.r[insn.rs2 as usize] as i64),
+                        Sem::PointerLoad=> { let address=self.pointer_address(fabric,insn.rs1,insn.imm,false)?;self.pointer_load(fabric,insn.rd,address) },
+                        Sem::PointerStore=> { let address=self.pointer_address(fabric,insn.rs1,insn.imm,true)?;self.pointer_store(fabric,insn.rd,address) },
+                        Sem::PointerRead=> {
+                            let width=match insn.raw&3 {0=>Width::Byte,1=>Width::Half,2=>Width::Word,_=>Width::Double};
+                            let bytes=self.pointer_read(fabric,insn.rs1,width)?;
+                            let mut word=[0u8;8];word[..bytes.len()].copy_from_slice(&bytes);
+                            self.write_register(insn.rd as usize,u64::from_le_bytes(word));Ok(())
+                        },
+                        Sem::PointerWrite=> {
+                            let width=match insn.raw&3 {0=>Width::Byte,1=>Width::Half,2=>Width::Word,_=>Width::Double};
+                            let bytes=self.r[insn.rd as usize].to_le_bytes()[..width.bytes() as usize].to_vec();
+                            self.pointer_write(fabric,insn.rs1,width,bytes)
+                        },
+                        Sem::PointerFrame=>self.enter_pointer_frame(fabric,insn.imm as usize),
+                        Sem::PointerLocal=>self.lookup_pointer_local(fabric,insn.rd,insn.imm as usize),
+                        Sem::PointerUnframe=>self.leave_pointer_frame(fabric),
+                        _=>unreachable!(),
+                    }
+                })();
+                if let Err(error)=result {return self.pointer_fault(error);}
+            }
             // ─── ALU: register-register or register-immediate ───
             Sem::Alu(alu_op) => {
                 let a = self.r[insn.rs1 as usize];
                 let b = self.alu_operand_b(&insn);
                 let result = Self::alu_eval(alu_op, a, b);
-                self.r[insn.rd as usize] = result;
+                self.write_register(insn.rd as usize, result);
                 self.update_flags(insn.desc.flags, a, b, result);
             }
 
@@ -437,17 +824,17 @@ impl Anka64Core {
             }
 
             // ─── Move / Load immediate ──────────────────────────
-            Sem::Mov  => { self.r[insn.rd as usize] = self.r[insn.rs1 as usize]; }
-            Sem::Movi => { self.r[insn.rd as usize] = insn.imm as u64; }
+            Sem::Mov  => { self.write_register(insn.rd as usize, self.r[insn.rs1 as usize]); }
+            Sem::Movi => { self.write_register(insn.rd as usize, insn.imm as u64); }
 
             // ─── Memory (one transaction per instruction) ───────
             Sem::Load => {
                 let addr = self.r[insn.rs1 as usize].wrapping_add(insn.imm as u64);
                 match self.fabric_read(fabric, addr, Width::Double, AccessKind::Read) {
                     Ok(bytes) => {
-                        self.r[insn.rd as usize] = u64::from_le_bytes(
+                        self.write_register(insn.rd as usize, u64::from_le_bytes(
                             [bytes[0], bytes[1], bytes[2], bytes[3],
-                             bytes[4], bytes[5], bytes[6], bytes[7]]);
+                             bytes[4], bytes[5], bytes[6], bytes[7]]));
                     }
                     Err(fault) => return StepResult::Fault(fault),
                 }
@@ -468,7 +855,7 @@ impl Anka64Core {
                 };
                 if kind == AccessKind::Read {
                     match fabric.execute_read(request) {
-                        Ok(bytes) => self.r[insn.rd as usize] = u64::from(bytes[0]),
+                        Ok(bytes) => self.write_register(insn.rd as usize, u64::from(bytes[0])),
                         Err(fault) => return StepResult::Fault(fault),
                     }
                 } else {
@@ -479,17 +866,17 @@ impl Anka64Core {
                 }
             }
             Sem::Lea => {
-                self.r[insn.rd as usize] =
-                    self.r[insn.rs1 as usize].wrapping_add(insn.imm as u64);
+                self.write_register(insn.rd as usize,
+                    self.r[insn.rs1 as usize].wrapping_add(insn.imm as u64));
             }
             Sem::Xchg => {
                 let addr = self.r[insn.rs1 as usize].wrapping_add(insn.imm as u64);
                 let new_val = self.r[insn.rd as usize].to_le_bytes().to_vec();
                 match self.fabric_atomic_xchg(fabric, addr, Width::Double, new_val) {
                     Ok(old_bytes) => {
-                        self.r[insn.rd as usize] = u64::from_le_bytes(
+                        self.write_register(insn.rd as usize, u64::from_le_bytes(
                             [old_bytes[0], old_bytes[1], old_bytes[2], old_bytes[3],
-                             old_bytes[4], old_bytes[5], old_bytes[6], old_bytes[7]]);
+                             old_bytes[4], old_bytes[5], old_bytes[6], old_bytes[7]]));
                     }
                     Err(fault) => return StepResult::Fault(fault),
                 }
@@ -502,6 +889,12 @@ impl Anka64Core {
                 }
             }
             Sem::Call => {
+                if let Some(state)=&self.pointer_frames {
+                    let target=(self.pc as i128)+(insn.imm as i128)*4;
+                    if !state.program.frames.iter().any(|f| (state.code_base+f.entry) as i128==target) {
+                        return self.pointer_fault(PointerMachineError::Frame(super::pointer_frames::FrameError::Control));
+                    }
+                }
                 // Mint-or-fault: CALL either mints authority and transfers,
                 // or faults without changing any state.
                 let return_addr = self.pc + 4;
@@ -544,15 +937,19 @@ impl Anka64Core {
                     }
                 };
                 // All resolved — commit atomically:
-                self.r[LR as usize] = return_addr;
+                self.write_register(LR as usize, return_addr);
                 self.return_stack.push(ReturnAuthority {
                     code_object: code_obj,
                     generation: obj_gen,
                     target: return_addr,
                 });
                 next_pc = (self.pc as i64 + insn.imm * 4) as u64;
+                if let Some(state)=self.pointer_frames.as_mut() { state.pending_entry=Some(next_pc); }
             }
             Sem::Ret => {
+                if self.pointer_frames.as_ref().is_some_and(|s| s.active.iter().any(|f| f.call_depth==self.return_stack.len())) {
+                    return self.pointer_fault(PointerMachineError::Frame(super::pointer_frames::FrameError::Control));
+                }
                 // Peek → validate → pop only on success.
                 // Failed RET leaves R unchanged (fault atomicity, N8 analogue).
                 let lr_val = self.r[LR as usize];
@@ -621,7 +1018,7 @@ impl Anka64Core {
             Sem::Trap => {
                 // Formal T_deliver (syscall variant): push EventFrame,
                 // enter Supervisor, mask interrupts, jump to trap_vector.
-                self.event_frames.push(EventFrame {
+                self.enter_event(EventFrame {
                     return_pc: self.pc + 4,
                     return_privilege: self.privilege,
                     interrupts_were_enabled: self.interrupts_enabled,
@@ -892,6 +1289,435 @@ mod tests {
         core.address_map.add(0x8000, 0x1000, data);
 
         (fabric, text, data, dom, core)
+    }
+
+
+    fn protected_frame_fixture() -> (Fabric,Anka64Core,usize) {
+        use super::super::pointer_frames::*;
+        let (mut fabric,text,_,domain,mut core)=setup();
+        let mut asm=Asm64::new();
+        asm.pframe(0);asm.plocal(R4,0);asm.movi(R12,42);asm.pwrite(R12,R4,1);
+        asm.plocal(R8,1);asm.pstore(R4,R8,0);asm.pload(R0,R8,0);
+        let call=asm.here();asm.call(0);
+        asm.pmov(R4,R0);asm.pread(R12,R4,1);
+        let exit0=asm.here() as u64*4;asm.punframe();asm.ret();
+        let entry1=asm.here() as u64*4;
+        asm.words_mut()[call as usize]=(0x32u32<<26)|((entry1 as i32/4-call) as u32&0x3fffff);
+        asm.pframe(1);asm.plocal(R8,0);asm.pstore(R0,R8,0);asm.pload(R4,R8,0);asm.pmov(R0,R4);
+        let exit1=asm.here() as u64*4;asm.punframe();asm.ret();
+        let bytes=asm.to_bytes();
+        let program=ValidatedPointerProgram::validate(&bytes,vec![
+            FrameManifest{entry:0,end:entry1,size:32,exits:vec![exit0],locals:vec![
+                LocalStorage{offset:0,length:4,alignment:1,writable:true,pointer_slot:false},
+                LocalStorage{offset:16,length:16,alignment:16,writable:true,pointer_slot:true}]},
+            FrameManifest{entry:entry1,end:bytes.len() as u64,size:16,exits:vec![exit1],locals:vec![
+                LocalStorage{offset:0,length:16,alignment:16,writable:true,pointer_slot:true}]}]).unwrap();
+        load_program(&mut fabric,&asm);seal_text(&mut fabric,text,domain);
+        fabric.register_agent(core.agent,AgentKind::Cpu(CoreId(0)),domain);
+        core.admit_pointer_program(&mut fabric,program,0,0x8000,0x9000).unwrap();
+        (fabric,core,exit0 as usize/4)
+    }
+
+    #[test]
+    fn p107_encoded_frames_transport_call_spill_and_retire_escape() {
+        let (mut fabric,mut core,exit)=protected_frame_fixture();
+        while core.pc!=(exit as u64)*4 {
+            assert!(matches!(core.step(&mut fabric),StepResult::Continue),"pc={}",core.pc);
+        }
+        assert_eq!(core.r[R12 as usize],42);
+        assert_eq!(core.pointer_frames.as_ref().unwrap().active.len(),1);
+        let escaped=core.captured_pointer(R4).unwrap().unwrap();
+        assert!(matches!(core.step(&mut fabric),StepResult::Continue));
+        assert!(core.pointer_frames.as_ref().unwrap().active.is_empty());
+        assert_eq!(core.r[SP as usize],0x9000);
+        assert!(fabric.scoped_pointer_backing(escaped,core.domain).is_err());
+        assert!(core.pointer_read(&mut fabric,R4,Width::Byte).is_err());
+    }
+    #[test]
+    fn p107_frame_event_image_restores_cursor_and_scope_ownership() {
+        let (mut fabric,mut core,_)=protected_frame_fixture();
+        assert!(matches!(core.step(&mut fabric),StepResult::Continue));
+        let cursor=core.pointer_frames.as_ref().unwrap().cursor;
+        core.enter_event(EventFrame{return_pc:4,return_privilege:Privilege::User,
+            interrupts_were_enabled:true,cause:EventCause::TimerInterrupt});
+        assert!(core.pointer_frames.is_none());
+        assert!(core.enter_pointer_frame(&mut fabric,0).is_err());
+        assert_eq!(core.event_return(),Some(4));
+        assert_eq!(core.pointer_frames.as_ref().unwrap().cursor,cursor);
+        assert!(core.lookup_pointer_local(&fabric,R4,0).is_ok());
+        core.retire_all_pointer_frames(&mut fabric);
+        assert!(core.pointer_read(&mut fabric,R4,Width::Byte).is_err());
+    }
+    #[test]
+    fn p107_frame_capacity_failure_and_duplicate_entry_are_atomic() {
+        let (mut fabric,mut core,_)=protected_frame_fixture();
+        fabric.scoped_pointers=super::super::scoped_pointers::ScopedPointers::new(1);
+        let words=core.r;
+        assert!(core.enter_pointer_frame(&mut fabric,0).is_err());
+        assert_eq!(core.r,words);assert!(core.pointer_frames.as_ref().unwrap().active.is_empty());
+        fabric.scoped_pointers=super::super::scoped_pointers::ScopedPointers::new(4);
+        core.enter_pointer_frame(&mut fabric,0).unwrap();
+        let cursor=core.pointer_frames.as_ref().unwrap().cursor;
+        assert!(core.enter_pointer_frame(&mut fabric,0).is_err());
+        assert_eq!(core.pointer_frames.as_ref().unwrap().cursor,cursor);
+    }
+    #[test]
+    fn p107_interleaved_context_frames_do_not_share_lifo_order() {
+        let mut pointers=super::super::scoped_pointers::ScopedPointers::new(8);
+        let a=pointers.enter_scope_for(7).unwrap();let b=pointers.enter_scope_for(8).unwrap();
+        let p=pointers.register(a,1,100,4,true).unwrap();
+        let q=pointers.register(b,2,200,4,true).unwrap();
+        pointers.leave_scope(a).unwrap();
+        assert!(pointers.resolve(p,1,1,false).is_err());
+        assert_eq!(pointers.resolve(q,2,1,false),Ok(200));
+        pointers.leave_scope(b).unwrap();
+    }
+    #[test]
+    fn p107_manifest_and_pointer_word_hostile_cases_reject() {
+        use super::super::pointer_frames::*;
+        let mut asm=Asm64::new();asm.pframe(0);asm.punframe();asm.ret();
+        let bytes=asm.to_bytes();
+        let good=FrameManifest{entry:0,end:12,size:32,exits:vec![4],locals:vec![LocalStorage{
+            offset:0,length:16,alignment:16,writable:true,pointer_slot:true}]};
+        assert!(ValidatedPointerProgram::validate(&bytes,vec![good.clone()]).is_ok());
+        let mut bad=good.clone();bad.locals.push(bad.locals[0].clone());
+        assert!(ValidatedPointerProgram::validate(&bytes,vec![bad]).is_err());
+        let mut bad=good.clone();bad.locals[0].offset=24;
+        assert!(ValidatedPointerProgram::validate(&bytes,vec![bad]).is_err());
+        let mut bad=good.clone();bad.exits=vec![8];
+        assert!(ValidatedPointerProgram::validate(&bytes,vec![bad]).is_err());
+        for word in [(0x26<<26)|(1<<22),(0x26<<26)|1,(0x2a<<26)|4,(0x2e<<26)|1,(0x2d<<26)|(1<<17)] {
+            assert!(decode(word).is_illegal());
+        }
+    }
+
+    #[test]
+    fn p107_frame_binding_rejects_context_change_and_shared_stack() {
+        let (mut fabric,mut core,_)=protected_frame_fixture();
+        assert!(!fabric.protect_pointer_stack(core.address_map.resolve(0x8000).unwrap().0,core.context_id+1,core.domain));
+        let prior=core.context_id;core.context_id+=1;
+        let registers=core.r;
+        assert!(core.enter_pointer_frame(&mut fabric,0).is_err());
+        assert_eq!(core.r,registers);
+        core.context_id=prior;
+        assert!(core.enter_pointer_frame(&mut fabric,0).is_ok());
+    }
+
+    fn pointer_fixture() -> (Fabric, Anka64Core, super::super::scoped_pointers::Scope) {
+        let (mut fabric, _, _, _, mut core) = setup();
+        let scope = fabric.scoped_pointers.enter_scope().unwrap();
+        core.register_local_pointer(&mut fabric, scope, R4, 0x8100, 4, true).unwrap();
+        (fabric, core, scope)
+    }
+
+    #[test]
+    fn p107_protected_pointer_transport_traverses_spills_and_rejects_escape() {
+        use super::super::scoped_pointers::PointerError;
+        let (mut fabric, mut core, scope) = pointer_fixture();
+        // Simulate typed argument transport and a live-pointer spill across a call.
+        core.pointer_move(&fabric, R0, R4).unwrap();
+        core.pointer_store(&mut fabric, R0, 0x8000).unwrap();
+        for i in 0..4 {
+            core.pointer_add(&fabric, R2, R0, i).unwrap();
+            core.pointer_write(&mut fabric, R2, Width::Byte, vec![10 + i as u8]).unwrap();
+            assert_eq!(core.pointer_read(&mut fabric, R2, Width::Byte).unwrap(), vec![10 + i as u8]);
+        }
+        core.pointer_add(&fabric, R2, R0, 4).unwrap();
+        let before = core.r;
+        assert!(matches!(core.pointer_read(&mut fabric, R2, Width::Byte), Err(PointerMachineError::Pointer(PointerError::Bounds))));
+        assert!(matches!(core.pointer_add(&fabric, R2, R0, 5), Err(PointerMachineError::Pointer(PointerError::Bounds))));
+        assert_eq!(core.r, before);
+        core.write_register(R0 as usize, 99);
+        core.pointer_load(&mut fabric, R4, 0x8000).unwrap();
+        assert_eq!(core.pointer_read(&mut fabric, R4, Width::Byte).unwrap(), vec![10]);
+        fabric.scoped_pointers.leave_scope(scope).unwrap();
+        let before = core.r;
+        assert!(matches!(core.pointer_load(&mut fabric, R4, 0x8000), Err(PointerMachineError::Pointer(PointerError::Stale))));
+        assert_eq!(core.r, before);
+    }
+
+    #[test]
+    fn p107_raw_register_write_cannot_preserve_or_forge_kind() {
+        let (fabric, mut core, _) = pointer_fixture();
+        let words = [core.r[R4 as usize], core.r[R5 as usize]];
+        core.write_register(R5 as usize, words[1]);
+        assert!(matches!(core.pointer_move(&fabric, R0, R4), Err(PointerMachineError::MissingKind)));
+        core.write_register(R4 as usize, words[0]);
+        assert!(matches!(core.pointer_move(&fabric, R0, R4), Err(PointerMachineError::MissingKind)));
+        assert!(matches!(core.pointer_move(&fabric, R13, R4), Err(PointerMachineError::InvalidPair)));
+    }
+
+    #[test]
+    fn p107_raw_memory_alias_write_clears_kind_and_failed_write_preserves_it() {
+        let (mut fabric, mut core, _) = pointer_fixture();
+        core.pointer_store(&mut fabric, R4, 0x8000).unwrap();
+        let (object, _) = core.address_map.resolve(0x8000).unwrap();
+        core.address_map.add(0xa000, 0x1000, object);
+        core.pointer_load(&mut fabric, R0, 0xa000).unwrap();
+        // Failed payload-length validation must not clear the existing cell kind.
+        let req = core.make_request(object, 0, Width::Double, AccessKind::Write);
+        assert!(fabric.execute_write(req, vec![0; 7]).is_err());
+        core.pointer_load(&mut fabric, R0, 0x8000).unwrap();
+        // Even an unchanged byte write through an alias destroys pointer kind.
+        let byte = core.r[R4 as usize].to_le_bytes()[0];
+        core.fabric_write(&mut fabric, 0xa000, Width::Byte, vec![byte]).unwrap();
+        let before = core.r;
+        assert!(matches!(core.pointer_load(&mut fabric, R0, 0x8000), Err(PointerMachineError::Fabric(_))));
+        assert_eq!(core.r, before);
+    }
+
+
+    #[test]
+    fn p107_encoded_cmp_preserves_kind_and_mov_clears_it() {
+        let (mut fabric, text, _, dom, mut core) = setup();
+        let scope = fabric.scoped_pointers.enter_scope().unwrap();
+        core.register_local_pointer(&mut fabric, scope, R4, 0x8100, 4, true).unwrap();
+        let mut asm = Asm64::new();
+        asm.cmp(R4, R4);
+        asm.mov(R5, R5);
+        load_program(&mut fabric, &asm);
+        seal_text(&mut fabric, text, dom);
+        assert!(matches!(core.step(&mut fabric), StepResult::Continue));
+        core.pointer_move(&fabric, R0, R4).unwrap();
+        assert!(matches!(core.step(&mut fabric), StepResult::Continue));
+        assert!(matches!(core.pointer_move(&fabric, R0, R4), Err(PointerMachineError::MissingKind)));
+    }
+
+    #[test]
+    fn p107_dma_span_atomic_and_bootstrap_writes_invalidate_pointer_cells() {
+        let (mut fabric, mut core, _) = pointer_fixture();
+        let (object, _) = core.address_map.resolve(0x8000).unwrap();
+        core.pointer_store(&mut fabric, R4, 0x8000).unwrap();
+        core.pointer_store(&mut fabric, R4, 0x8010).unwrap();
+        let mut request = core.make_request(object, 15, Width::Byte, AccessKind::Write);
+        request.length = 2;
+        request.context.agent = DMA0;
+        fabric.register_agent(DMA0, AgentKind::Dma, core.domain);
+        fabric.execute_write(request, vec![0, core.r[R4 as usize] as u8]).unwrap();
+        for address in [0x8000, 0x8010] {
+            assert!(matches!(core.pointer_load(&mut fabric, R0, address), Err(PointerMachineError::Fabric(f)) if f.reason == FaultReason::NoCapability));
+        }
+        core.pointer_store(&mut fabric, R4, 0x8000).unwrap();
+        let mut request = core.make_request(object, 0, Width::Double, AccessKind::Atomic);
+        fabric.grant(core.domain, object, 0, 0x1000, Permissions::ATOMIC);
+        request.kind = AccessKind::Atomic;
+        fabric.execute_atomic_xchg(request, core.r[R4 as usize].to_le_bytes().to_vec()).unwrap();
+        assert!(core.pointer_load(&mut fabric, R0, 0x8000).is_err());
+        core.pointer_store(&mut fabric, R4, 0x8000).unwrap();
+        fabric.write_physical(0x10000, &core.r[R4 as usize].to_le_bytes());
+        assert!(core.pointer_load(&mut fabric, R0, 0x8000).is_err());
+        core.pointer_store(&mut fabric, R4, 0x8000).unwrap();
+        assert!(fabric.initialize_object(object, 0, &core.r[R4 as usize].to_le_bytes()));
+        assert!(core.pointer_load(&mut fabric, R0, 0x8000).is_err());
+    }
+
+    #[test]
+    fn p107_pointer_backing_regrant_does_not_revive_old_identity() {
+        use super::super::scoped_pointers::PointerError;
+        let (mut fabric, mut core, _) = pointer_fixture();
+        let (object, _) = core.address_map.resolve(0x8100).unwrap();
+        fabric.revoke(object);
+        fabric.objects.get_mut(&object).unwrap().state = ObjectState::Active;
+        fabric.grant(core.domain, object, 0, 0x1000, Permissions::RW);
+        assert!(matches!(core.pointer_read(&mut fabric, R4, Width::Byte), Err(PointerMachineError::Pointer(PointerError::Stale))));
+    }
+
+    #[test]
+    fn p107_pointer_null_transport_and_denied_issuance_are_atomic() {
+        let (mut fabric, mut core, scope) = pointer_fixture();
+        core.pointer_move(&fabric, R0, R2).unwrap();
+        core.pointer_store(&mut fabric, R0, 0x8000).unwrap();
+        core.pointer_load(&mut fabric, R2, 0x8000).unwrap();
+        assert!(matches!(core.pointer_read(&mut fabric, R2, Width::Byte), Err(PointerMachineError::MissingKind)));
+        let words = core.r;
+        fabric.domains.get_mut(&core.domain).unwrap().capabilities.clear();
+        assert!(core.register_local_pointer(&mut fabric, scope, R4, 0x8200, 4, true).is_err());
+        assert_eq!(core.r, words);
+    }
+
+
+    #[test]
+    fn p107_pointer_cells_reject_ambiguous_mapping_without_destination_mutation() {
+        let (mut fabric, mut core, _) = pointer_fixture();
+        core.pointer_store(&mut fabric, R4, 0x8000).unwrap();
+        let (object, _) = core.address_map.resolve(0x8000).unwrap();
+        core.address_map.add_at(0x8008, 8, object, 8);
+        let before = core.r;
+        assert!(matches!(core.pointer_load(&mut fabric, R0, 0x8000), Err(PointerMachineError::Unmapped)));
+        assert_eq!(core.r, before);
+    }
+
+    fn syscall_frame(core: &Anka64Core) -> EventFrame {
+        EventFrame { return_pc: core.pc + 4, return_privilege: core.privilege,
+            interrupts_were_enabled: core.interrupts_enabled, cause: EventCause::Syscall }
+    }
+
+    #[test]
+    fn p107_event_irq_restores_complete_image_and_discards_handler_authority() {
+        let (mut fabric, mut core, scope) = pointer_fixture();
+        core.pc = 0x400;
+        core.trap_vector = 0x900;
+        core.write_register(FP as usize, 0x8880);
+        core.write_register(SP as usize, 0x8900);
+        core.flags = Flags { z: true, n: false, c: true, v: false };
+        core.return_stack.push(ReturnAuthority { code_object: ObjectId(99), generation: Generation(2), target: 0x44 });
+        let user = core.r;
+        core.post_timer_interrupt();
+        assert!(core.deliver_pending());
+        assert!(core.return_stack.is_empty());
+        assert!(matches!(core.pointer_move(&fabric, R0, R4), Err(PointerMachineError::MissingKind)));
+        core.register_local_pointer(&mut fabric, scope, R6, 0x8200, 4, true).unwrap();
+        core.write_syscall_result(R4 as usize, 123); // IRQ must not export this.
+        core.write_register(SP as usize, 0x8000);
+        core.flags = Flags::default();
+        core.return_stack.push(ReturnAuthority { code_object: ObjectId(100), generation: Generation(3), target: 0x88 });
+        core.post_device_interrupt();
+        assert_eq!(core.event_return(), Some(0x400));
+        assert_eq!(core.pc, 0x400);
+        assert_eq!(core.r, user);
+        assert!(core.flags.z && core.flags.c && !core.flags.n && !core.flags.v);
+        assert_eq!(core.return_stack.len(), 1);
+        assert_eq!(core.return_stack[0].target, 0x44);
+        assert_eq!(core.privilege, Privilege::User);
+        assert!(core.interrupts_enabled && core.pending.device);
+        assert_eq!(core.pointer_read(&mut fabric, R4, Width::Byte).unwrap(), vec![0]);
+        assert!(core.pointer_pairs[R6 as usize / 2].is_none());
+    }
+
+    #[test]
+    fn p107_event_syscall_exports_only_explicit_scalars_and_clears_pair_kind() {
+        let (fabric, mut core, _) = pointer_fixture();
+        core.pointer_move(&fabric, R0, R4).unwrap();
+        let user = core.r;
+        core.enter_event(syscall_frame(&core));
+        core.write_register(R8 as usize, 777); // Handler scratch is not a result.
+        core.write_syscall_result(R1 as usize, user[R1 as usize]); // Same bits still clear kind.
+        core.write_syscall_result(FP as usize, 123); // Reserved lanes cannot be exported.
+        assert_eq!(core.event_return(), Some(4));
+        assert_eq!(core.r, user);
+        assert!(matches!(core.pointer_move(&fabric, R2, R0), Err(PointerMachineError::MissingKind)));
+        core.pointer_move(&fabric, R2, R4).unwrap();
+    }
+
+    #[test]
+    fn p107_event_nested_interrupt_restores_handler_then_user_image() {
+        let (fabric, mut core, _) = pointer_fixture();
+        core.pc = 0x400;
+        core.trap_vector = 0x900;
+        let user = core.r;
+        core.post_timer_interrupt();
+        assert!(core.deliver_pending());
+        let pointer = core.saved_event_contexts[0].image.as_ref().unwrap().kinds[2];
+        core.install_pointer(R6, pointer).unwrap(); // Trusted handler-local protected value.
+        core.pc = 0x920;
+        core.interrupts_enabled = true;
+        let handler = core.r;
+        core.post_device_interrupt();
+        assert!(core.deliver_pending());
+        core.write_register(R7 as usize, 444);
+        assert_eq!(core.event_frames.len(), 2);
+        assert_eq!(core.event_return(), Some(0x920));
+        assert_eq!(core.r, handler);
+        assert_eq!(core.privilege, Privilege::Supervisor);
+        core.pointer_move(&fabric, R0, R6).unwrap();
+        assert_eq!(core.event_return(), Some(0x400));
+        assert_eq!(core.r, user);
+        core.pointer_move(&fabric, R0, R4).unwrap();
+    }
+
+    #[test]
+    fn p107_event_wrong_domain_tampered_header_and_replay_are_no_ops() {
+        let (_, mut core, _) = pointer_fixture();
+        core.pc = 0x400;
+        core.trap_vector = 0x900;
+        core.post_timer_interrupt();
+        assert!(core.deliver_pending());
+        let domain = core.domain;
+        let header = core.event_frames[0].clone();
+        let words = core.r;
+        core.domain = DomainId(domain.0 + 1);
+        assert_eq!(core.event_return(), None);
+        assert_eq!(core.r, words);
+        assert_eq!(core.event_frames.len(), 1);
+        assert_eq!(core.saved_event_contexts.len(), 1);
+        assert_eq!(core.pc, 0x900);
+        core.domain = domain;
+        core.event_frames[0].return_pc += 4;
+        assert_eq!(core.event_return(), None);
+        assert_eq!(core.event_frames.len(), 1);
+        core.event_frames[0] = header.clone();
+        assert_eq!(core.event_return(), Some(0x400));
+        core.event_frames.push(header); // Public header alone cannot restore authority.
+        let kinds = core.pointer_pairs;
+        assert_eq!(core.event_return(), None);
+        assert_eq!(core.pointer_pairs, kinds);
+        assert_eq!(core.event_frames.len(), 1);
+    }
+
+    #[test]
+    fn p107_event_context_identity_rejects_other_thread_but_allows_cpu_migration() {
+        let (_, mut core, _) = pointer_fixture();
+        core.post_timer_interrupt();
+        assert!(core.deliver_pending());
+        let mut other = Anka64Core::new(core.agent, core.domain);
+        other.enable_protected_context().unwrap();
+        other.event_frames = core.event_frames.clone();
+        other.saved_event_contexts = core.saved_event_contexts.clone();
+        assert_eq!(other.event_return(), None);
+        assert_eq!(other.event_frames.len(), 1);
+        core.agent = AgentId(42); // Physical agent changes, execution context does not.
+        assert_eq!(core.event_return(), Some(0));
+    }
+
+    #[test]
+    fn p107_event_restore_does_not_revive_expired_allocation() {
+        use super::super::scoped_pointers::PointerError;
+        let (mut fabric, mut core, scope) = pointer_fixture();
+        core.post_timer_interrupt();
+        assert!(core.deliver_pending());
+        fabric.scoped_pointers.leave_scope(scope).unwrap();
+        assert_eq!(core.event_return(), Some(0));
+        assert!(matches!(core.pointer_read(&mut fabric, R4, Width::Byte), Err(PointerMachineError::Pointer(PointerError::Stale))));
+    }
+
+    #[test]
+    fn p107_event_rejects_profile_upgrade_before_issuing_local_pointer() {
+        let (mut fabric, _, _, _, mut core) = setup();
+        let scope = fabric.scoped_pointers.enter_scope().unwrap();
+        core.enter_event(syscall_frame(&core));
+        let words = core.r;
+        assert!(matches!(core.register_local_pointer(&mut fabric, scope, R4, 0x8100, 4, true), Err(PointerMachineError::ContextMode)));
+        assert_eq!(core.r, words);
+        assert_eq!(core.event_return(), Some(4));
+        core.register_local_pointer(&mut fabric, scope, R4, 0x8100, 4, true).unwrap();
+        assert_eq!(core.r[R4 as usize], 0x1_0000_0001);
+    }
+
+    #[test]
+    fn p107_event_encoded_trap_eret_restore_pointer_and_fault_without_pop() {
+        let (mut fabric, text, _, dom, mut core) = setup();
+        let scope = fabric.scoped_pointers.enter_scope().unwrap();
+        core.register_local_pointer(&mut fabric, scope, R4, 0x8100, 4, true).unwrap();
+        let user = core.r;
+        let mut asm = Asm64::new();
+        asm.trap(0); asm.halt();
+        while asm.here() < 64 { asm.nop(); }
+        asm.movi(R4, 99); asm.eret();
+        load_program(&mut fabric, &asm);
+        seal_text(&mut fabric, text, dom);
+        core.trap_vector = 0x100;
+        assert!(matches!(core.step(&mut fabric), StepResult::Continue));
+        assert!(matches!(core.step(&mut fabric), StepResult::Continue));
+        core.event_frames[0].return_pc = 8;
+        let words = core.r;
+        assert!(matches!(core.step(&mut fabric), StepResult::Fault(f) if f.reason == FaultReason::ControlFlowViolation));
+        assert_eq!(core.r, words);
+        assert_eq!(core.event_frames.len(), 1);
+        core.event_frames[0].return_pc = 4;
+        assert!(matches!(core.step(&mut fabric), StepResult::Continue));
+        assert_eq!(core.pc, 4);
+        assert_eq!(core.r, user);
+        core.pointer_move(&fabric, R0, R4).unwrap();
     }
 
     fn load_program(fabric: &mut Fabric, asm: &Asm64) {

@@ -1,0 +1,192 @@
+// Every hostile assertion requires explicit Z3 disproof.
+import "anka107_pointer_representation.kleis"
+
+example "FALSE-REPR107-0 encode two components" {
+    assert(repr107_handle(bvconst(7,64),bvconst(1,64))=bvconst(4294967304,64))
+}
+
+example "FALSE-REPR107-1 decode slot" {
+    assert(repr107_slot(bvconst(4294967303,64))=bvconst(8,64))
+}
+
+example "FALSE-REPR107-2 decode epoch" {
+    assert(repr107_epoch(bvconst(4294967303,64))=bvconst(2,64))
+}
+
+example "FALSE-REPR107-3 live descriptor lookup" {
+    assert(¬(repr107_lookup(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64))))
+}
+
+example "FALSE-REPR107-4 forged integer pair" {
+    assert(repr107_lookup(bvconst(4294967303,64),bvconst(0,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64)))
+}
+
+example "FALSE-REPR107-5 wrong slot" {
+    assert(repr107_lookup(bvconst(4294967303,64),bvconst(1,8),bvconst(8,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64)))
+}
+
+example "FALSE-REPR107-6 stale descriptor epoch" {
+    assert(repr107_lookup(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(4,64),bvconst(4,64)))
+}
+
+example "FALSE-REPR107-7 released descriptor" {
+    assert(repr107_lookup(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(0,8),bvconst(4,64),bvconst(4,64)))
+}
+
+example "FALSE-REPR107-8 cross domain handle" {
+    assert(repr107_lookup(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(5,64),bvconst(4,64)))
+}
+
+example "FALSE-REPR107-9 descriptor reuse" {
+    assert(¬(repr107_publish(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "FALSE-REPR107-10 live entry overwrite" {
+    assert(repr107_publish(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-11 same epoch reuse" {
+    assert(repr107_publish(bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-12 epoch exhaustion" {
+    assert(repr107_publish(bvconst(7,64),bvconst(4294967295,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-13 untrusted issuer" {
+    assert(repr107_publish(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-14 unvalidated entry" {
+    assert(repr107_publish(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE-REPR107-15 reserved slot" {
+    assert(repr107_publish(bvconst(0,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-16 immutable descriptor" {
+    assert(¬(repr107_immutable(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64))))
+}
+
+example "FALSE-REPR107-17 allocation rebinding" {
+    assert(repr107_immutable(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(8,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64)))
+}
+
+example "FALSE-REPR107-18 allocation generation rewrite" {
+    assert(repr107_immutable(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(7,64),bvconst(3,64),bvconst(0,64),bvconst(16,64),bvconst(3,64)))
+}
+
+example "FALSE-REPR107-19 lower bound rewrite" {
+    assert(repr107_immutable(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(7,64),bvconst(2,64),bvconst(1,64),bvconst(16,64),bvconst(3,64)))
+}
+
+example "FALSE-REPR107-20 upper bound widening" {
+    assert(repr107_immutable(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(17,64),bvconst(3,64)))
+}
+
+example "FALSE-REPR107-21 permission rewrite" {
+    assert(repr107_immutable(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(4,64)))
+}
+
+example "FALSE-REPR107-22 ordered tagged ABI pair" {
+    assert(¬(repr107_transport(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "FALSE-REPR107-23 swapped ABI words" {
+    assert(repr107_transport(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(8,64),bvconst(8,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-24 torn position" {
+    assert(repr107_transport(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(9,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-25 tag lost at call" {
+    assert(repr107_transport(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-26 incoherent storage" {
+    assert(repr107_transport(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE-REPR107-27 raw integers transported" {
+    assert(repr107_transport(bvconst(4294967303,64),bvconst(8,64),bvconst(0,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-28 word advance to one past" {
+    assert(¬(repr107_advance(bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(4294967303,64),bvconst(16,64),bvconst(1,8))))
+}
+
+example "FALSE-REPR107-29 arithmetic rebinds descriptor" {
+    assert(repr107_advance(bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(4294967304,64),bvconst(16,64),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-30 arithmetic loses scaling" {
+    assert(repr107_advance(bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(4294967303,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-31 arithmetic loses tag" {
+    assert(repr107_advance(bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(4294967303,64),bvconst(16,64),bvconst(0,8)))
+}
+
+example "FALSE-REPR107-32 advance crosses view" {
+    assert(repr107_advance(bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(3,64),bvconst(8,64),bvconst(4294967303,64),bvconst(16,64),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-33 concrete access refines abstract" {
+    assert(¬(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "FALSE-REPR107-34 descriptor ABA" {
+    assert(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-35 allocation ABA despite live descriptor" {
+    assert(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(3,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-36 freed allocation with live descriptor" {
+    assert(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(0,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-37 one past access" {
+    assert(repr107_access(bvconst(4294967303,64),bvconst(16,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-38 word straddles view" {
+    assert(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(8,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-39 Fabric rejected" {
+    assert(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-40 untagged access" {
+    assert(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(0,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-41 domain mismatch" {
+    assert(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(5,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-42 neighbor allocation" {
+    assert(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(3,64),bvconst(10,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107-43 read with write only" {
+    assert(repr107_access(bvconst(4294967303,64),bvconst(15,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(2,64),bvconst(9,64),bvconst(2,64),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE-REPR107 narrow entry retains provenance" { assert(¬(repr107_narrow_entry(bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(32,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(8,64),bvconst(16,64),bvconst(8,64),bvconst(1,64)))) }
+
+example "FALSE-REPR107 narrow cannot change allocation" { assert(repr107_narrow_entry(bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(32,64),bvconst(3,64),bvconst(10,64),bvconst(2,64),bvconst(8,64),bvconst(16,64),bvconst(8,64),bvconst(1,64))) }
+
+example "FALSE-REPR107 narrow cannot change lifetime" { assert(repr107_narrow_entry(bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(32,64),bvconst(3,64),bvconst(9,64),bvconst(3,64),bvconst(8,64),bvconst(16,64),bvconst(8,64),bvconst(1,64))) }
+
+example "FALSE-REPR107 narrow cannot widen bound" { assert(repr107_narrow_entry(bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(32,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(8,64),bvconst(33,64),bvconst(8,64),bvconst(1,64))) }
+
+example "FALSE-REPR107 narrow cannot amplify rights" { assert(repr107_narrow_entry(bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(32,64),bvconst(3,64),bvconst(9,64),bvconst(2,64),bvconst(8,64),bvconst(16,64),bvconst(8,64),bvconst(7,64))) }
+
+example "FALSE-REPR107 null acquires authority" {
+    assert(repr107_lookup(bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(4,64),bvconst(4,64)))
+}

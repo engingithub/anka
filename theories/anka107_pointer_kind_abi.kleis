@@ -1,0 +1,359 @@
+// Proposed CC2 application pointer ABI v2, not implemented or an existing ABI.
+// Imports semantic representation and concurrency contracts; no new axioms.
+// Pointer size/alignment 16. Payload word0 handle, word1 byte position.
+// Protected tags live in trusted CPU/Fabric side state, inaccessible to data/DMA.
+// CPU pairs: R0/R1,R2/R3,R4/R5,R6/R7,R8/R9,R10/R11. R12 scalar;
+// R13 FP,R14 LR,R15 SP are reserved ordinary architectural registers.
+// Args consume R0..R3 lanes, pointer starts even. No stack arguments in v2 subset.
+// Pointer return R0/R1, scalar R0. Expression pointer temporary R4/R5.
+// All R0..R12 caller-clobbered; live pointers require typed spills across calls.
+// Tagged null is not minted: canonical null remains untagged zero/zero.
+import "anka107_pointer_concurrency.kleis"
+
+define kind107_pair(start : BitVec64) =
+    bvule(start,bvconst(10,64)) ∧ (bvand(start,bvconst(1,64))=bvconst(0,64))
+define kind107_next_pointer_lane(lane : BitVec64) =
+    bvand(bvadd(lane,bvconst(1,64)),bvsub(ptr107_max(),bvconst(1,64)))
+define kind107_arg(lane : BitVec64, pointer : BitVec8,
+    assigned : BitVec64, next : BitVec64) =
+    bvule(lane,bvconst(4,64)) ∧
+    (((pointer=bvconst(1,8)) ∧
+        (assigned=kind107_next_pointer_lane(lane)) ∧ bvule(assigned,bvconst(2,64)) ∧
+        (next=bvadd(assigned,bvconst(2,64)))) ∨
+     ((pointer=bvconst(0,8)) ∧ bvult(lane,bvconst(4,64)) ∧
+        (assigned=lane) ∧ (next=bvadd(lane,bvconst(1,64)))))
+
+define kind107_pointer_size() = bvconst(16,64)
+define kind107_pointer_alignment() = bvconst(16,64)
+
+// Cell keys are (Fabric object identity, generation, aligned object offset),
+// not virtual addresses. All aliases therefore share the protected tag entry.
+define kind107_cell(offset : BitVec64, extent : BitVec64) =
+    (bvand(offset,bvconst(15,64))=bvconst(0,64)) ∧
+    app107_range_valid(offset,extent,bvconst(16,64))
+define kind107_storage_key(object : BitVec64, gen : BitVec64, offset : BitVec64,
+    tagobject : BitVec64, taggen : BitVec64, tagoffset : BitVec64) =
+    (object=tagobject) ∧ (gen=taggen) ∧ (offset=tagoffset)
+
+// Ordinary write to either half clears the pair tag before execution. Other
+// pairs' tags survive. Generic arithmetic/load/MOV cannot copy pointer kind.
+define kind107_raw_register(pair : BitVec64, written : BitVec64, oldtag : BitVec8) =
+    if (written=pair) ∨ (written=bvadd(pair,bvconst(1,64))) then bvconst(0,8) else oldtag
+
+// Checked intervals; tags on ALL overlapping 16-byte cells must be cleared
+// before raw CPU or DMA mutation, independent of virtual alias or byte width.
+define kind107_span(base : BitVec64, length : BitVec64) =
+    bvugt(length,bvconst(0,64)) ∧ bvule(length,bvsub(ptr107_max(),base))
+define kind107_overlap(base : BitVec64, length : BitVec64, cell : BitVec64) =
+    kind107_span(base,length) ∧ kind107_span(cell,bvconst(16,64)) ∧
+    bvult(base,bvadd(cell,bvconst(16,64))) ∧ bvult(cell,bvadd(base,length))
+define kind107_raw_memory(base : BitVec64, length : BitVec64,
+    cell : BitVec64, oldtag : BitVec8) =
+    if kind107_overlap(base,length,cell) then bvconst(0,8) else oldtag
+
+// Valid-null transport is explicit and separate from authenticated pointers.
+define kind107_transport(h : BitVec64, pos : BitVec64, tag : BitVec8,
+    outh : BitVec64, outpos : BitVec64, outtag : BitVec8, coherent : BitVec8) =
+    repr107_transport(h,pos,tag,outh,outpos,outtag,coherent) ∨
+    (repr107_null(h,pos,tag) ∧ repr107_null(outh,outpos,outtag) ∧
+        (coherent=bvconst(1,8)))
+
+// Trusted typed move/load/store/spill/reload operation. Authenticated source
+// metadata, exact pair transport, permission, cell keys and concurrency protocol
+// must ALL pass. No application-accessible set-tag operation is introduced.
+define kind107_typed_storage(h : BitVec64, pos : BitVec64, tag : BitVec8,
+    outh : BitVec64, outpos : BitVec64, outtag : BitVec8,
+    offset : BitVec64, extent : BitVec64, trusted_operation : BitVec8,
+    source_validated : BitVec8, exact_key : BitVec8,
+    fabric_permission : BitVec8, coherent_protocol : BitVec8) =
+    kind107_cell(offset,extent) ∧
+    kind107_transport(h,pos,tag,outh,outpos,outtag,coherent_protocol) ∧
+    (trusted_operation=bvconst(1,8)) ∧ (source_validated=bvconst(1,8)) ∧
+    (exact_key=bvconst(1,8)) ∧ (fabric_permission=bvconst(1,8))
+
+// ABI version + ordered pointer/scalar signature must match exactly.
+// Signature identity refers to canonical typed metadata, not an unchecked hash.
+// Domain transition and raw/syscall v1 bridging require separately verified gates.
+define kind107_call(caller_version : BitVec64, callee_version : BitVec64,
+    caller_signature : BitVec64, callee_signature : BitVec64,
+    current_domain : BitVec64, callee_domain : BitVec64,
+    slots_valid : BitVec8, tags_preserved : BitVec8, code_admitted : BitVec8) =
+    (caller_version=bvconst(2,64)) ∧ (callee_version=bvconst(2,64)) ∧
+    (caller_signature=callee_signature) ∧ (current_domain=callee_domain) ∧
+    (slots_valid=bvconst(1,8)) ∧ (tags_preserved=bvconst(1,8)) ∧
+    (code_admitted=bvconst(1,8))
+
+// Returns use fixed registers; pointer kind must survive both words together.
+define kind107_return(pointer : BitVec8, first : BitVec64, second : BitVec64,
+    pair_validated : BitVec8) =
+    (first=bvconst(0,64)) ∧
+    (((pointer=bvconst(1,8)) ∧ (second=bvconst(1,64)) ∧ (pair_validated=bvconst(1,8))) ∨
+     ((pointer=bvconst(0,8)) ∧ (pair_validated=bvconst(0,8))))
+
+// Frame extent and base align 16. A 16-byte spill slot must fit completely.
+// Lifetime association prevents a slot at a reused stack address regaining kind.
+define kind107_spill(base : BitVec64, extent : BitVec64, offset : BitVec64,
+    saved_scope : BitVec64, current_scope : BitVec64,
+    saved_gen : BitVec64, current_gen : BitVec64, live : BitVec8) =
+    (bvand(base,bvconst(15,64))=bvconst(0,64)) ∧
+    (bvand(extent,bvconst(15,64))=bvconst(0,64)) ∧ kind107_span(base,extent) ∧
+    kind107_cell(offset,extent) ∧ (saved_scope=current_scope) ∧
+    (saved_gen=current_gen) ∧ (live=bvconst(1,8))
+
+// Context switching saves/restores tags with the payload in trusted kernel
+// storage, bound to the same thread and domain. User buffers cannot restore tags.
+define kind107_context(saved_thread : BitVec64, resumed_thread : BitVec64,
+    saved_domain : BitVec64, resumed_domain : BitVec64,
+    protected_image : BitVec8, payload_tags_coherent : BitVec8) =
+    (saved_thread=resumed_thread) ∧ (saved_domain=resumed_domain) ∧
+    (protected_image=bvconst(1,8)) ∧ (payload_tags_coherent=bvconst(1,8))
+
+example "KIND107-1 valid register pair 0" { assert(kind107_pair(bvconst(0,64))) }
+
+example "KIND107-2 valid register pair 2" { assert(kind107_pair(bvconst(2,64))) }
+
+example "KIND107-3 valid register pair 4" { assert(kind107_pair(bvconst(4,64))) }
+
+example "KIND107-4 valid register pair 6" { assert(kind107_pair(bvconst(6,64))) }
+
+example "KIND107-5 valid register pair 8" { assert(kind107_pair(bvconst(8,64))) }
+
+example "KIND107-6 valid register pair 10" { assert(kind107_pair(bvconst(10,64))) }
+
+example "KIND107-7 reject pair 1" { assert(¬(kind107_pair(bvconst(1,64)))) }
+
+example "KIND107-8 reject pair 11" { assert(¬(kind107_pair(bvconst(11,64)))) }
+
+example "KIND107-9 reject pair 12" { assert(¬(kind107_pair(bvconst(12,64)))) }
+
+example "KIND107-10 reject pair 13" { assert(¬(kind107_pair(bvconst(13,64)))) }
+
+example "KIND107-11 reject pair 14" { assert(¬(kind107_pair(bvconst(14,64)))) }
+
+example "KIND107-12 pointer first argument" { assert(kind107_arg(bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(2,64))) }
+
+example "KIND107-13 scalar then aligned pointer" { assert(kind107_arg(bvconst(1,64),bvconst(1,8),bvconst(2,64),bvconst(4,64))) }
+
+example "KIND107-14 two pointer args fit" { assert(kind107_arg(bvconst(2,64),bvconst(1,8),bvconst(2,64),bvconst(4,64))) }
+
+example "KIND107-15 third pointer rejected" { assert(¬(kind107_arg(bvconst(4,64),bvconst(1,8),bvconst(4,64),bvconst(6,64)))) }
+
+example "KIND107-16 fourth scalar fits" { assert(kind107_arg(bvconst(3,64),bvconst(0,8),bvconst(3,64),bvconst(4,64))) }
+
+example "KIND107-17 fifth scalar rejected" { assert(¬(kind107_arg(bvconst(4,64),bvconst(0,8),bvconst(4,64),bvconst(5,64)))) }
+
+example "KIND107-18 pointer odd register start rejected" { assert(¬(kind107_arg(bvconst(1,64),bvconst(1,8),bvconst(1,64),bvconst(3,64)))) }
+
+example "KIND107-19 unknown argument type rejected" { assert(¬(kind107_arg(bvconst(0,64),bvconst(2,8),bvconst(0,64),bvconst(1,64)))) }
+
+example "KIND107-20 aligned local pointer cell" { assert(kind107_cell(bvconst(16,64),bvconst(32,64))) }
+
+example "KIND107-21 misaligned cell rejected" { assert(¬(kind107_cell(bvconst(8,64),bvconst(32,64)))) }
+
+example "KIND107-22 truncated cell rejected" { assert(¬(kind107_cell(bvconst(16,64),bvconst(24,64)))) }
+
+example "KIND107-23 alias resolves same tag key" { assert(kind107_storage_key(bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(7,64),bvconst(2,64),bvconst(16,64))) }
+
+example "KIND107-24 wrong object tag" { assert(¬(kind107_storage_key(bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(8,64),bvconst(2,64),bvconst(16,64)))) }
+
+example "KIND107-25 stale object tag" { assert(¬(kind107_storage_key(bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(7,64),bvconst(3,64),bvconst(16,64)))) }
+
+example "KIND107-26 wrong offset tag" { assert(¬(kind107_storage_key(bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(7,64),bvconst(2,64),bvconst(32,64)))) }
+
+example "KIND107-27 typed spill and reload exact" { assert(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "KIND107-28 changed spill handle" { assert(¬(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967304,64),bvconst(8,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "KIND107-29 changed spill position" { assert(¬(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(9,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "KIND107-30 lost spill tag" { assert(¬(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(0,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "KIND107-31 unaligned spill" { assert(¬(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(8,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "KIND107-32 untrusted tag mint" { assert(¬(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "KIND107-33 unvalidated descriptor" { assert(¬(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "KIND107-34 wrong protected cell key" { assert(¬(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "KIND107-35 missing Fabric permission" { assert(¬(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))) }
+
+example "KIND107-36 torn typed publication" { assert(¬(kind107_typed_storage(bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))) }
+
+example "KIND107-37 canonical null copied" { assert(kind107_transport(bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8))) }
+
+example "KIND107-38 integer pair cannot gain tag" { assert(¬(kind107_transport(bvconst(4294967303,64),bvconst(8,64),bvconst(0,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(1,8)))) }
+
+example "KIND107-39 matching v2 typed call" { assert(kind107_call(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "KIND107-40 bootstrap caller rejected" { assert(¬(kind107_call(bvconst(1,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "KIND107-41 legacy callee rejected" { assert(¬(kind107_call(bvconst(2,64),bvconst(1,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "KIND107-42 signature mismatch" { assert(¬(kind107_call(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "KIND107-43 implicit cross domain call" { assert(¬(kind107_call(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "KIND107-44 argument lanes overflow" { assert(¬(kind107_call(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(0,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "KIND107-45 call loses tags" { assert(¬(kind107_call(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(0,8),bvconst(1,8)))) }
+
+example "KIND107-46 unadmitted code" { assert(¬(kind107_call(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(0,8)))) }
+
+example "KIND107-47 pointer return R0 R1" { assert(kind107_return(bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8))) }
+
+example "KIND107-48 scalar return R0 no pointer kind" { assert(kind107_return(bvconst(0,8),bvconst(0,64),bvconst(1,64),bvconst(0,8))) }
+
+example "KIND107-49 pointer return wrong pair" { assert(¬(kind107_return(bvconst(1,8),bvconst(2,64),bvconst(3,64),bvconst(1,8)))) }
+
+example "KIND107-50 pointer return loses tag" { assert(¬(kind107_return(bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(0,8)))) }
+
+example "KIND107-51 scalar result retains stale kind" { assert(¬(kind107_return(bvconst(0,8),bvconst(0,64),bvconst(1,64),bvconst(1,8)))) }
+
+example "KIND107-52 live scoped spill slot" { assert(kind107_spill(bvconst(4096,64),bvconst(64,64),bvconst(16,64),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(1,8))) }
+
+example "KIND107-53 misaligned frame" { assert(¬(kind107_spill(bvconst(4104,64),bvconst(64,64),bvconst(16,64),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(1,8)))) }
+
+example "KIND107-54 misaligned frame extent" { assert(¬(kind107_spill(bvconst(4096,64),bvconst(24,64),bvconst(16,64),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(1,8)))) }
+
+example "KIND107-55 spill outside frame" { assert(¬(kind107_spill(bvconst(4096,64),bvconst(64,64),bvconst(64,64),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(1,8)))) }
+
+example "KIND107-56 reused frame identity" { assert(¬(kind107_spill(bvconst(4096,64),bvconst(64,64),bvconst(16,64),bvconst(7,64),bvconst(8,64),bvconst(2,64),bvconst(2,64),bvconst(1,8)))) }
+
+example "KIND107-57 reused frame generation" { assert(¬(kind107_spill(bvconst(4096,64),bvconst(64,64),bvconst(16,64),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(3,64),bvconst(1,8)))) }
+
+example "KIND107-58 expired frame" { assert(¬(kind107_spill(bvconst(4096,64),bvconst(64,64),bvconst(16,64),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(0,8)))) }
+
+example "KIND107-59 protected context restore" { assert(kind107_context(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8))) }
+
+example "KIND107-60 wrong thread restore" { assert(¬(kind107_context(bvconst(1,64),bvconst(2,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8)))) }
+
+example "KIND107-61 wrong domain restore" { assert(¬(kind107_context(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(5,64),bvconst(1,8),bvconst(1,8)))) }
+
+example "KIND107-62 user context tag forgery" { assert(¬(kind107_context(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(0,8),bvconst(1,8)))) }
+
+example "KIND107-63 incoherent context restore" { assert(¬(kind107_context(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(0,8)))) }
+
+example "KIND107 write handle clears register kind" { assert(kind107_raw_register(bvconst(4,64),bvconst(4,64),bvconst(1,8))=bvconst(0,8)) }
+
+example "KIND107 write position clears register kind" { assert(kind107_raw_register(bvconst(4,64),bvconst(5,64),bvconst(1,8))=bvconst(0,8)) }
+
+example "KIND107 unrelated register preserves kind" { assert(kind107_raw_register(bvconst(4,64),bvconst(6,64),bvconst(1,8))=bvconst(1,8)) }
+
+example "KIND107 byte write clears memory kind" { assert(kind107_raw_memory(bvconst(31,64),bvconst(1,64),bvconst(16,64),bvconst(1,8))=bvconst(0,8)) }
+
+example "KIND107 word crosses pointer cell" { assert(kind107_raw_memory(bvconst(12,64),bvconst(8,64),bvconst(16,64),bvconst(1,8))=bvconst(0,8)) }
+
+example "KIND107 DMA spans multiple cells" { assert(kind107_raw_memory(bvconst(0,64),bvconst(64,64),bvconst(32,64),bvconst(1,8))=bvconst(0,8)) }
+
+example "KIND107 adjacent write preserves cell" { assert(kind107_raw_memory(bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(1,8))=bvconst(1,8)) }
+
+example "KIND107 universal ordinary register write cannot mint kind" {
+    assert(∀(p : BitVec64). ∀(w : BitVec64).
+        kind107_raw_register(p,w,bvconst(0,8))=bvconst(0,8))
+}
+example "KIND107 universal either register half invalidates kind" {
+    assert(∀(p : BitVec64). kind107_pair(p) →
+        (kind107_raw_register(p,bvadd(p,bvconst(1,64)),bvconst(1,8))=bvconst(0,8)))
+}
+example "KIND107 universal overlapping raw write clears kind" {
+    assert(∀(b : BitVec64). ∀(len : BitVec64). ∀(cell : BitVec64). ∀(tag : BitVec8).
+        kind107_overlap(b,len,cell) → (kind107_raw_memory(b,len,cell,tag)=bvconst(0,8)))
+}
+example "KIND107 universal typed nonnull transport refines representation" {
+    assert(∀(h : BitVec64). ∀(pos : BitVec64). ∀(oh : BitVec64). ∀(op : BitVec64). ∀(ot : BitVec8).
+        kind107_transport(h,pos,bvconst(1,8),oh,op,ot,bvconst(1,8)) →
+        repr107_transport(h,pos,bvconst(1,8),oh,op,ot,bvconst(1,8)))
+}
+example "KIND107 universal pointer argument fits four lanes" {
+    assert(∀(lane : BitVec64). ∀(assigned : BitVec64). ∀(next : BitVec64).
+        kind107_arg(lane,bvconst(1,8),assigned,next) →
+        (bvule(next,bvconst(4,64)) ∧ (bvand(assigned,bvconst(1,64))=bvconst(0,64))))
+}
+
+// Protected tag creation allowlist: 1 trusted descriptor issuance;
+// 2 typed pair copy; 3 typed load; 4 checked derivation. Opcode identities
+// are semantic operation classes, not assigned ISA instruction numbers.
+// Generic integer operations (class 0) cannot set pointer-kind state.
+define kind107_mint(operation : BitVec8, source_tag : BitVec8,
+    source_validated : BitVec8, trusted_issuer : BitVec8,
+    descriptor_validated : BitVec8) =
+    ((operation=bvconst(1,8)) ∧ (trusted_issuer=bvconst(1,8)) ∧
+        (descriptor_validated=bvconst(1,8))) ∨
+    (((operation=bvconst(2,8)) ∨ (operation=bvconst(3,8)) ∨ (operation=bvconst(4,8))) ∧
+        (source_tag=bvconst(1,8)) ∧ (source_validated=bvconst(1,8)))
+
+// Call entry keeps kind ONLY for a pointer argument in the verified signature.
+// Null incoming kind remains zero; nonargument/scratch pairs are cleared.
+define kind107_entry_tag(pointer_argument : BitVec8,
+    verified_lane : BitVec8, incoming_tag : BitVec8) =
+    if (pointer_argument=bvconst(1,8)) ∧ (verified_lane=bvconst(1,8))
+    then incoming_tag else bvconst(0,8)
+
+// Representation/type-layout compatibility belongs in artifact/link metadata.
+// Reject v1 pointer objects even when a numeric function signature happens to fit.
+define kind107_link(object_abi : BitVec64, linked_abi : BitVec64,
+    pointer_size : BitVec64, pointer_align : BitVec64,
+    typed_metadata_verified : BitVec8) =
+    (object_abi=bvconst(2,64)) ∧ (linked_abi=bvconst(2,64)) ∧
+    (pointer_size=kind107_pointer_size()) ∧
+    (pointer_align=kind107_pointer_alignment()) ∧ (typed_metadata_verified=bvconst(1,8))
+
+example "KIND107 trusted allocation issues kind" { assert(kind107_mint(bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))) }
+
+example "KIND107 integer instruction cannot mint kind" { assert(¬(kind107_mint(bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "KIND107 untrusted allocation issuer" { assert(¬(kind107_mint(bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(1,8)))) }
+
+example "KIND107 copy from untagged integer" { assert(¬(kind107_mint(bvconst(2,8),bvconst(0,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))) }
+
+example "KIND107 typed load validates protected source" { assert(kind107_mint(bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,8))) }
+
+example "KIND107 derivation from unvalidated source" { assert(¬(kind107_mint(bvconst(4,8),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))) }
+
+example "KIND107 link verified v2 object" { assert(kind107_link(bvconst(2,64),bvconst(2,64),bvconst(16,64),bvconst(16,64),bvconst(1,8))) }
+
+example "KIND107 link old eight byte pointers rejected" { assert(¬(kind107_link(bvconst(1,64),bvconst(2,64),bvconst(8,64),bvconst(8,64),bvconst(1,8)))) }
+
+example "KIND107 link mismatched alignment rejected" { assert(¬(kind107_link(bvconst(2,64),bvconst(2,64),bvconst(16,64),bvconst(8,64),bvconst(1,8)))) }
+
+example "KIND107 universal untyped call lane has no kind" {
+    assert(∀(t : BitVec8). kind107_entry_tag(bvconst(0,8),bvconst(1,8),t)=bvconst(0,8))
+}
+example "KIND107 universal scratch pair cleared on call entry" {
+    assert(∀(t : BitVec8). kind107_entry_tag(bvconst(1,8),bvconst(0,8),t)=bvconst(0,8))
+}
+example "KIND107 universal ordinary operations cannot mint tags" {
+    assert(∀(t : BitVec8). ∀(valid : BitVec8). ∀(issuer : BitVec8). ∀(desc : BitVec8).
+        ¬kind107_mint(bvconst(0,8),t,valid,issuer,desc))
+}
+example "KIND107 ABI two pointer signature allocation" {
+    assert(kind107_arg(bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(2,64)) ∧
+        kind107_arg(bvconst(2,64),bvconst(1,8),bvconst(2,64),bvconst(4,64)))
+}
+example "KIND107 ABI int pointer int exceeds register subset" {
+    assert(kind107_arg(bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(1,64)) ∧
+        kind107_arg(bvconst(1,64),bvconst(1,8),bvconst(2,64),bvconst(4,64)) ∧
+        ¬kind107_arg(bvconst(4,64),bvconst(0,8),bvconst(4,64),bvconst(5,64)))
+}
+
+// Concrete pointer argument lowering composes lane assignment with actual
+// handle/position/kind transport, not merely a caller-supplied preservation flag.
+define kind107_pointer_argument(lane : BitVec64, assigned : BitVec64, next : BitVec64,
+    h : BitVec64, pos : BitVec64, tag : BitVec8,
+    outh : BitVec64, outpos : BitVec64, outtag : BitVec8, coherent : BitVec8) =
+    kind107_arg(lane,bvconst(1,8),assigned,next) ∧
+    kind107_transport(h,pos,tag,outh,outpos,outtag,coherent)
+example "KIND107 universal argument lowering refines protected representation" {
+    assert(∀(lane : BitVec64). ∀(assigned : BitVec64). ∀(next : BitVec64).
+        ∀(h : BitVec64). ∀(pos : BitVec64). ∀(oh : BitVec64). ∀(op : BitVec64). ∀(ot : BitVec8).
+        kind107_pointer_argument(lane,assigned,next,h,pos,bvconst(1,8),oh,op,ot,bvconst(1,8)) →
+        repr107_transport(h,pos,bvconst(1,8),oh,op,ot,bvconst(1,8)))
+}
+example "KIND107 universal typed spill refines protected representation" {
+    assert(∀(h : BitVec64). ∀(pos : BitVec64). ∀(oh : BitVec64). ∀(op : BitVec64).
+        ∀(ot : BitVec8). ∀(offset : BitVec64). ∀(extent : BitVec64).
+        kind107_typed_storage(h,pos,bvconst(1,8),oh,op,ot,offset,extent,
+            bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)) →
+        repr107_transport(h,pos,bvconst(1,8),oh,op,ot,bvconst(1,8)))
+}

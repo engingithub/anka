@@ -74,7 +74,14 @@ pub(crate) fn build_ankad_code_with_layout(
     layout_stack: u64,
     trap_vaddr: u64,
 ) -> Vec<u8> {
-    assert!(compiler_len <= 0x1FFFF, "compiler image exceeds SYS_SPAWN emitter bound");
+    build_ankad_code_with_source(compiler_len,parent_compiler_vaddr,child_code_vaddr,
+        output_size,layout_stack,trap_vaddr,0x7000,0x5000)
+}
+
+pub(crate) fn build_ankad_code_with_source(compiler_len:usize,parent_compiler_vaddr:u64,
+    child_code_vaddr:u64,output_size:u64,layout_stack:u64,trap_vaddr:u64,
+    source_vaddr:u64,source_size:u64) -> Vec<u8> {
+    assert!(compiler_len<=0x40000,"compiler image exceeds bounded output arena");
     assert!(output_size != 0 && output_size % PLACEMENT_PAGE_SIZE == 0);
     assert!(layout_stack % PLACEMENT_PAGE_SIZE == 0);
     assert!(trap_vaddr % PLACEMENT_PAGE_SIZE == 0);
@@ -90,10 +97,10 @@ pub(crate) fn build_ankad_code_with_layout(
 
     // ── Phase 2a: Grant[0] — source = R ──
     // [parent_vaddr, offset, size, perms, reserved]
-    asm.movi(R3, 0x07000);
+    emit_layout_value(&mut asm,R3,source_vaddr);
     asm.st(R3, R4, 0);               // parent_vaddr = 0x07000
     asm.st(R9, R4, 8);               // offset = 0
-    asm.movi(R3, 0x5000);
+    emit_layout_value(&mut asm,R3,source_size);
     asm.st(R3, R4, 16);              // size = SOURCE_SIZE
     asm.movi(R3, 1);
     asm.st(R3, R4, 24);              // perms = READ
@@ -123,11 +130,11 @@ pub(crate) fn build_ankad_code_with_layout(
 
     // ── Phase 2d: Map[0] — source (identity mapping) ──
     // [child_vaddr, parent_vaddr, offset, size, reserved]
-    asm.movi(R3, 0x07000);
+    emit_layout_value(&mut asm,R3,source_vaddr);
     asm.st(R3, R6, 0);               // child_vaddr = 0x07000
     asm.st(R3, R6, 8);               // parent_vaddr = 0x07000
     asm.st(R9, R6, 16);              // offset = 0
-    asm.movi(R3, 0x5000);
+    emit_layout_value(&mut asm,R3,source_size);
     asm.st(R3, R6, 24);              // size = SOURCE_SIZE
     asm.st(R9, R6, 32);              // reserved = 0
 
@@ -166,7 +173,7 @@ pub(crate) fn build_ankad_code_with_layout(
     // ── Phase 3: SYS_SPAWN(R1-R8) ──
     // SYS_SPAWN consumes the compiler mapping in the parent address space.
     emit_layout_value(&mut asm, R1, parent_compiler_vaddr);
-    asm.movi(R2, compiler_len as i32); // R2 = code_size (fits MOVI)
+    emit_layout_value(&mut asm,R2,compiler_len as u64); // R2 = code_size (fits MOVI)
     asm.movi(R3, 0);                 // R3 = lit_start = 0
     asm.movi(R5, 3);                 // R5 = grant_count
     asm.movi(R7, 3);                 // R7 = map_count
@@ -236,7 +243,7 @@ mod layout_emission_tests {
         let mut core = Anka64Core::new(AgentId(0), domain);
         core.address_map.add(0, 0x2000, text);
         core.address_map.add(0x8000, 0x1000, stack);
-        core.r[SP as usize] = 0x9000;
+        core.write_register(SP as usize, 0x9000);
         assert!(matches!(core.run(&mut fabric, 1000), StepResult::Halted));
         let word = |vaddr: u64| u64::from_le_bytes(
             fabric.read_physical(0x3000 + vaddr - 0x8000, 8).try_into().unwrap());

@@ -1,0 +1,48 @@
+// Every assertion must be explicitly disproved.
+import "anka107_pointer_artifact.kleis"
+
+example "FALSE sealed exact v2 artifact" { assert(¬(artifact107_admit(bvconst(2,64),bvconst(256,64),bvconst(256,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE wrong version" { assert(¬(¬(artifact107_admit(bvconst(1,64),bvconst(256,64),bvconst(256,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE wrong code extent" { assert(¬(¬(artifact107_admit(bvconst(2,64),bvconst(256,64),bvconst(248,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE empty manifests" { assert(¬(¬(artifact107_admit(bvconst(2,64),bvconst(256,64),bvconst(256,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE manifest exhaustion" { assert(¬(¬(artifact107_admit(bvconst(2,64),bvconst(256,64),bvconst(256,64),bvconst(4097,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE writable artifact" { assert(¬(¬(artifact107_admit(bvconst(2,64),bvconst(256,64),bvconst(256,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE stale artifact" { assert(¬(¬(artifact107_admit(bvconst(2,64),bvconst(256,64),bvconst(256,64),bvconst(2,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE substitute code" { assert(¬(¬(artifact107_admit(bvconst(2,64),bvconst(256,64),bvconst(256,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE malformed manifest" { assert(¬(¬(artifact107_admit(bvconst(2,64),bvconst(256,64),bvconst(256,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))))) }
+
+example "FALSE trailing metadata" { assert(¬(¬(artifact107_admit(bvconst(2,64),bvconst(256,64),bvconst(256,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))) }
+
+example "FALSE expanded source fits" { assert(¬(artifact107_source(bvconst(1048576,64),bvconst(32768,64),bvconst(30000,64),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE source overruns header capacity" { assert(¬(¬(artifact107_source(bvconst(1048576,64),bvconst(32768,64),bvconst(32761,64),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE source mapping missing" { assert(¬(¬(artifact107_source(bvconst(1048576,64),bvconst(32768,64),bvconst(30000,64),bvconst(0,8),bvconst(1,8))))) }
+
+example "FALSE source overlaps workspace" { assert(¬(¬(artifact107_source(bvconst(1048576,64),bvconst(32768,64),bvconst(30000,64),bvconst(1,8),bvconst(0,8))))) }
+
+example "FALSE all admitted source lengths fit" { assert(¬(∀(base : BitVec64). ∀(size : BitVec64). ∀(length : BitVec64). artifact107_source(base,size,length,bvconst(1,8),bvconst(1,8)) → (bvuge(bvadd(length,bvconst(8,64)),length) ∧ bvule(bvadd(length,bvconst(8,64)),size)))) }
+
+example "FALSE protected scalar exit" { assert(¬(artifact107_syscall(bvconst(1,8),bvconst(0,64)))) }
+
+example "FALSE protected raw address syscall denied" { assert(¬(¬(artifact107_syscall(bvconst(1,8),bvconst(1,64))))) }
+
+example "FALSE legacy syscall retains admission" { assert(¬(artifact107_syscall(bvconst(0,8),bvconst(1,64)))) }
+
+example "FALSE checked word traversal" { assert(¬(artifact107_word_chain(bvconst(0,64),bvconst(1,64)))) }
+
+example "FALSE wrapping scale cannot be admitted" { assert(¬(¬(artifact107_word_chain(bvconst(0,64),bvconst(2305843009213693952,64))))) }
+
+example "FALSE every checked scaling step is nonwrapping" { assert(¬(∀(p : BitVec64). ∀(d : BitVec64). artifact107_step(p,d) → bvuge(bvadd(p,d),p))) }
+
+example "FALSE signed minimum cannot be negated" { assert(¬(¬(artifact107_negatable(bvshl(bvconst(1,64),bvconst(63,64)))))) }
+
+example "FALSE negative one may be negated" { assert(¬(artifact107_negatable(bvsub(bvconst(0,64),bvconst(1,64))))) }

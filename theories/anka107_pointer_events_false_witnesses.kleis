@@ -1,0 +1,62 @@
+// Every assertion must be explicitly disproved. No Unknown accepted.
+import "anka107_pointer_events.kleis"
+
+example "FALSE-EVENT107 owned protected frame" { assert(¬(event107_admit(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE-EVENT107 owned legacy frame" { assert(¬(event107_admit(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8)))) }
+
+example "FALSE-EVENT107 wrong context" { assert(¬(¬(event107_admit(bvconst(7,64),bvconst(8,64),bvconst(3,64),bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE-EVENT107 wrong domain" { assert(¬(¬(event107_admit(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE-EVENT107 missing private frame" { assert(¬(¬(event107_admit(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE-EVENT107 fabricated public frame" { assert(¬(¬(event107_admit(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE-EVENT107 tampered header" { assert(¬(¬(event107_admit(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE-EVENT107 mode downgrade" { assert(¬(¬(event107_admit(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))))) }
+
+example "FALSE-EVENT107 mode upgrade" { assert(¬(¬(event107_admit(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(0,8))))) }
+
+example "FALSE-EVENT107 invalid mode" { assert(¬(¬(event107_admit(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),bvconst(2,8))))) }
+
+example "FALSE-EVENT107 entry clears handler kind" { assert(¬(event107_entry_tag(bvconst(1,8))=bvconst(0,8))) }
+
+example "FALSE-EVENT107 IRQ restores payload despite output mask" { assert(¬(event107_word(bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(16,64),bvconst(4,64),bvconst(11,64),bvconst(22,64),bvconst(33,64))=bvconst(11,64))) }
+
+example "FALSE-EVENT107 IRQ restores pointer kind" { assert(¬(event107_tag(bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(16,64),bvconst(4,64),bvconst(1,8),bvconst(0,8))=bvconst(1,8))) }
+
+example "FALSE-EVENT107 syscall scalar result overlay" { assert(¬(event107_word(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(16,64),bvconst(4,64),bvconst(11,64),bvconst(22,64),bvconst(33,64))=bvconst(22,64))) }
+
+example "FALSE-EVENT107 syscall even output clears pair" { assert(¬(event107_tag(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(16,64),bvconst(4,64),bvconst(1,8),bvconst(0,8))=bvconst(0,8))) }
+
+example "FALSE-EVENT107 syscall odd output clears pair" { assert(¬(event107_tag(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(32,64),bvconst(4,64),bvconst(1,8),bvconst(0,8))=bvconst(0,8))) }
+
+example "FALSE-EVENT107 syscall unrelated pair survives" { assert(¬(event107_tag(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(4,64),bvconst(1,8),bvconst(0,8))=bvconst(1,8))) }
+
+example "FALSE-EVENT107 syscall untouched word restores" { assert(¬(event107_word(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(4,64),bvconst(11,64),bvconst(22,64),bvconst(33,64))=bvconst(11,64))) }
+
+example "FALSE-EVENT107 reserved output lane rejected" { assert(¬(¬(event107_output_lane(bvconst(13,64))))) }
+
+example "FALSE-EVENT107 reserved word restored" { assert(¬(event107_word(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(8192,64),bvconst(13,64),bvconst(11,64),bvconst(22,64),bvconst(33,64))=bvconst(11,64))) }
+
+example "FALSE-EVENT107 legacy payload passthrough" { assert(¬(event107_word(bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(4,64),bvconst(11,64),bvconst(22,64),bvconst(33,64))=bvconst(33,64))) }
+
+example "FALSE-EVENT107 failed restore payload no-op" { assert(¬(event107_word(bvconst(0,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(4,64),bvconst(11,64),bvconst(22,64),bvconst(33,64))=bvconst(33,64))) }
+
+example "FALSE-EVENT107 failed restore kind no-op" { assert(¬(event107_tag(bvconst(0,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,8))=bvconst(0,8))) }
+
+example "FALSE-EVENT107 consume exactly one frame" { assert(¬(event107_depth(bvconst(1,8),bvconst(2,64))=bvconst(1,64))) }
+
+example "FALSE-EVENT107 failed restore consumes nothing" { assert(¬(event107_depth(bvconst(0,8),bvconst(2,64))=bvconst(2,64))) }
+
+example "FALSE-EVENT107 restore flags and return authority" { assert(¬(event107_control(bvconst(1,8),bvconst(1,8),bvconst(11,64),bvconst(33,64))=bvconst(11,64))) }
+
+example "FALSE-EVENT107 failed restore control no-op" { assert(¬(event107_control(bvconst(0,8),bvconst(1,8),bvconst(11,64),bvconst(33,64))=bvconst(33,64))) }
+
+example "FALSE-EVENT107 all rejected payloads unchanged" { assert(¬(∀(mask : BitVec64). ∀(register : BitVec64). ∀(saved : BitVec64). ∀(result : BitVec64). ∀(current : BitVec64). event107_word(bvconst(0,8),bvconst(1,8),bvconst(1,8),mask,register,saved,result,current)=current)) }
+
+example "FALSE-EVENT107 all rejected tags unchanged" { assert(¬(∀(mask : BitVec64). ∀(pair : BitVec64). ∀(saved : BitVec8). ∀(current : BitVec8). event107_tag(bvconst(0,8),bvconst(1,8),bvconst(1,8),mask,pair,saved,current)=current)) }
+
+example "FALSE-EVENT107 all IRQ tags restored" { assert(¬(∀(mask : BitVec64). ∀(pair : BitVec64). ∀(saved : BitVec8). ∀(current : BitVec8). event107_tag(bvconst(1,8),bvconst(1,8),bvconst(0,8),mask,pair,saved,current)=saved)) }

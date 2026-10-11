@@ -1,0 +1,366 @@
+// Proposed Phase 10.7 semantic contract; no new axioms, no runtime claim.
+// Pointer = allocation identity + generation + narrowed view + position + rights.
+// Flat parameters describe records; they do not prescribe a machine ABI.
+// Metadata authenticity is an enforcement obligation, not proved by Bool flags.
+// Allocation records are dynamic. Never recover provenance by address lookup.
+// One record may describe a heap allocation or a scoped stack/local allocation.
+// Parent Fabric object identity/generation must additionally pass existing gates.
+// Allocation invalidation and access must be serialized in implementation.
+// Zero-sized allocations, negative steps, pointer subtraction and borrowing
+// remain outside this initial profile. No wraparound generation reuse.
+import "anka107_application_pointers.kleis"
+
+define ptr107_max() = bvsub(bvconst(0,64),bvconst(1,64))
+
+// Representable exclusive allocation end; reserve identity/generation zero.
+define ptr107_record_valid(id : BitVec64, gen : BitVec64,
+    base : BitVec64, extent : BitVec64) =
+    ¬(id=bvconst(0,64)) ∧ ¬(gen=bvconst(0,64)) ∧
+    bvugt(extent,bvconst(0,64)) ∧ bvule(extent,bvsub(ptr107_max(),base))
+
+// Heap placement must also establish disjointness against ALL live records.
+// This is a pairwise obligation, not a concrete table implementation.
+define ptr107_disjoint(a : BitVec64, an : BitVec64, b : BitVec64, bn : BitVec64) =
+    bvugt(an,bvconst(0,64)) ∧ bvugt(bn,bvconst(0,64)) ∧
+    bvule(an,bvsub(ptr107_max(),a)) ∧ bvule(bn,bvsub(ptr107_max(),b)) ∧
+    (bvule(bvadd(a,an),b) ∨ bvule(bvadd(b,bn),a))
+
+define ptr107_create(id : BitVec64, oldgen : BitVec64, newgen : BitVec64,
+    oldlive : BitVec8, newlive : BitVec8, base : BitVec64, extent : BitVec64,
+    placement_checked : BitVec8, fabric_authorized : BitVec8) =
+    (oldlive=bvconst(0,8)) ∧ (newlive=bvconst(1,8)) ∧ bvult(oldgen,ptr107_max()) ∧
+    (newgen=bvadd(oldgen,bvconst(1,64))) ∧
+    ptr107_record_valid(id,newgen,base,extent) ∧ (placement_checked=bvconst(1,8)) ∧ (fabric_authorized=bvconst(1,8))
+
+// Release requires matching provenance and allocation-owner authority.
+// Interior/narrowed application pointers do not themselves confer release rights.
+define ptr107_release(id : BitVec64, gen : BitVec64,
+    supplied_id : BitVec64, supplied_gen : BitVec64,
+    oldlive : BitVec8, newlive : BitVec8, owner_authorized : BitVec8) =
+    ¬(id=bvconst(0,64)) ∧ ¬(gen=bvconst(0,64)) ∧
+    (id=supplied_id) ∧ (gen=supplied_gen) ∧ (oldlive=bvconst(1,8)) ∧ (newlive=bvconst(0,8)) ∧ (owner_authorized=bvconst(1,8))
+
+define ptr107_current(pid : BitVec64, pgen : BitVec64,
+    id : BitVec64, gen : BitVec64, live : BitVec8, authentic : BitVec8) =
+    ¬(id=bvconst(0,64)) ∧ ¬(gen=bvconst(0,64)) ∧
+    (pid=id) ∧ (pgen=gen) ∧ (live=bvconst(1,8)) ∧ (authentic=bvconst(1,8))
+
+// lo/hi/position are allocation-relative byte offsets; hi is exclusive.
+define ptr107_view(lo : BitVec64, hi : BitVec64, pos : BitVec64, extent : BitVec64) =
+    bvule(lo,pos) ∧ bvule(pos,hi) ∧ bvule(hi,extent)
+
+// Copy/store/load/pass/return all use this same metadata-preservation relation.
+// Rights mask: READ=1, WRITE=2. Transport cannot amplify or silently drop metadata.
+define ptr107_transport(id : BitVec64, gen : BitVec64, lo : BitVec64,
+    hi : BitVec64, pos : BitVec64, rights : BitVec64,
+    outid : BitVec64, outgen : BitVec64, outlo : BitVec64,
+    outhi : BitVec64, outpos : BitVec64, outrights : BitVec64) =
+    (id=outid) ∧ (gen=outgen) ∧ (lo=outlo) ∧ (hi=outhi) ∧
+    (pos=outpos) ∧ (rights=outrights)
+
+// Forward displacement retains identity/view/rights and checks exact scaling.
+define ptr107_step(lo : BitVec64, hi : BitVec64, pos : BitVec64,
+    extent : BitVec64, count : BitVec64, size : BitVec64, result : BitVec64) =
+    ptr107_view(lo,hi,pos,extent) ∧
+    app107_forward_result_valid(pos,hi,count,size,result)
+
+// Full arithmetic transition: metadata retained, only checked position changes.
+define ptr107_advance(id : BitVec64, gen : BitVec64, lo : BitVec64,
+    hi : BitVec64, pos : BitVec64, rights : BitVec64, extent : BitVec64,
+    count : BitVec64, size : BitVec64,
+    outid : BitVec64, outgen : BitVec64, outlo : BitVec64,
+    outhi : BitVec64, outpos : BitVec64, outrights : BitVec64) =
+    ptr107_step(lo,hi,pos,extent,count,size,outpos) ∧
+    ptr107_transport(id,gen,lo,hi,outpos,rights,
+        outid,outgen,outlo,outhi,outpos,outrights)
+
+// Derive a narrower view and attenuate rights. Identity/generation stay unchanged.
+define ptr107_narrow(lo : BitVec64, hi : BitVec64, rights : BitVec64,
+    newlo : BitVec64, newhi : BitVec64, newpos : BitVec64, newrights : BitVec64) =
+    bvule(lo,newlo) ∧ bvule(newlo,newpos) ∧ bvule(newpos,newhi) ∧
+    bvule(newhi,hi) ∧ (bvand(newrights,rights)=newrights) ∧
+    bvule(rights,bvconst(3,64)) ∧ bvule(newrights,bvconst(3,64))
+
+// Compose original allocation provenance, narrowed bounds and Fabric admission.
+// width is exact language operand width (1 or 8), need is READ or WRITE.
+// Current Fabric authority alone cannot rehabilitate an old allocation pointer.
+define ptr107_access(pid : BitVec64, pgen : BitVec64,
+    id : BitVec64, gen : BitVec64, live : BitVec8, authentic : BitVec8,
+    base : BitVec64, extent : BitVec64, lo : BitVec64, hi : BitVec64,
+    pos : BitVec64, width : BitVec64, rights : BitVec64, need : BitVec64,
+    fabric_admitted : BitVec8, alignment_valid : BitVec8) =
+    ptr107_current(pid,pgen,id,gen,live,authentic) ∧
+    ptr107_record_valid(id,gen,base,extent) ∧ ptr107_view(lo,hi,pos,extent) ∧
+    app107_range_valid(pos,hi,width) ∧
+    ((width=bvconst(1,64)) ∨ (width=bvconst(8,64))) ∧
+    ((need=bvconst(1,64)) ∨ (need=bvconst(2,64))) ∧
+    bvule(rights,bvconst(3,64)) ∧ (bvand(rights,need)=need) ∧
+    (fabric_admitted=bvconst(1,8)) ∧ (alignment_valid=bvconst(1,8))
+
+// Pointwise frame rule for unrelated allocation records during release/reuse.
+define ptr107_live_cell(target : BitVec64, queried : BitVec64,
+    newlive : BitVec8, oldlive : BitVec8) = if target=queried then newlive else oldlive
+
+// Lowering failure must occur before any operand-memory transaction.
+define ptr107_operand_transactions(admitted : BitVec8) =
+    if admitted=bvconst(1,8) then bvconst(1,64) else bvconst(0,64)
+
+example "META107-1 initial allocation" {
+    assert(ptr107_create(bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "META107-2 reuse advances generation" {
+    assert(ptr107_create(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "META107-3 live slot overwrite" {
+    assert(¬(ptr107_create(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-4 reuse same generation" {
+    assert(¬(ptr107_create(bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-5 generation exhausted" {
+    assert(¬(ptr107_create(bvconst(7,64),bvsub(bvconst(0,64),bvconst(1,64)),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-6 zero identity" {
+    assert(¬(ptr107_create(bvconst(0,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-7 zero extent" {
+    assert(¬(ptr107_create(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-8 placement missing" {
+    assert(¬(ptr107_create(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "META107-9 authority missing" {
+    assert(¬(ptr107_create(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "META107-10 wrapped extent" {
+    assert(¬(ptr107_create(bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvsub(bvconst(0,64),bvconst(8,64)),bvconst(32,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-11 release live allocation" {
+    assert(ptr107_release(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "META107-12 double release" {
+    assert(¬(ptr107_release(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(0,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "META107-13 wrong release identity" {
+    assert(¬(ptr107_release(bvconst(7,64),bvconst(2,64),bvconst(8,64),bvconst(2,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "META107-14 stale release generation" {
+    assert(¬(ptr107_release(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "META107-15 release without owner" {
+    assert(¬(ptr107_release(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(0,8),bvconst(0,8))))
+}
+
+example "META107-16 release leaves live" {
+    assert(¬(ptr107_release(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-17 live pointer" {
+    assert(ptr107_current(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "META107-18 dead allocation" {
+    assert(¬(ptr107_current(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "META107-19 reused same address stale pointer" {
+    assert(¬(ptr107_current(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-20 neighbor identity" {
+    assert(¬(ptr107_current(bvconst(8,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-21 integer forged metadata" {
+    assert(¬(ptr107_current(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "META107-22 adjacent allocations" {
+    assert(ptr107_disjoint(bvconst(4096,64),bvconst(16,64),bvconst(4112,64),bvconst(16,64)))
+}
+
+example "META107-23 overlap allocations" {
+    assert(¬(ptr107_disjoint(bvconst(4096,64),bvconst(17,64),bvconst(4112,64),bvconst(16,64))))
+}
+
+example "META107-24 byte step" {
+    assert(ptr107_step(bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(32,64),bvconst(15,64),bvconst(1,64),bvconst(15,64)))
+}
+
+example "META107-25 word scaled step" {
+    assert(ptr107_step(bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(16,64)))
+}
+
+example "META107-26 one past formation" {
+    assert(ptr107_step(bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(32,64),bvconst(1,64),bvconst(1,64),bvconst(16,64)))
+}
+
+example "META107-27 beyond narrowed buffer" {
+    assert(¬(ptr107_step(bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(32,64),bvconst(2,64),bvconst(1,64),bvconst(17,64))))
+}
+
+example "META107-28 wrapped product" {
+    assert(¬(ptr107_step(bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(32,64),bvconst(2305843009213693952,64),bvconst(8,64),bvconst(0,64))))
+}
+
+example "META107-29 wrong scale" {
+    assert(¬(ptr107_step(bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(32,64),bvconst(1,64),bvconst(8,64),bvconst(1,64))))
+}
+
+example "META107-30 narrow bounds and rights" {
+    assert(ptr107_narrow(bvconst(0,64),bvconst(32,64),bvconst(3,64),bvconst(8,64),bvconst(16,64),bvconst(8,64),bvconst(1,64)))
+}
+
+example "META107-31 widen bounds" {
+    assert(¬(ptr107_narrow(bvconst(8,64),bvconst(16,64),bvconst(1,64),bvconst(0,64),bvconst(32,64),bvconst(8,64),bvconst(1,64))))
+}
+
+example "META107-32 amplify rights" {
+    assert(¬(ptr107_narrow(bvconst(0,64),bvconst(32,64),bvconst(1,64),bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(3,64))))
+}
+
+example "META107-33 metadata exact transport" {
+    assert(ptr107_transport(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64)))
+}
+
+example "META107-34 lost identity" {
+    assert(¬(ptr107_transport(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64),bvconst(0,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64))))
+}
+
+example "META107-35 lost generation" {
+    assert(¬(ptr107_transport(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64))))
+}
+
+example "META107-36 widened lower bound" {
+    assert(¬(ptr107_transport(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),bvconst(1,64),bvconst(16,64),bvconst(8,64),bvconst(1,64))))
+}
+
+example "META107-37 widened upper bound" {
+    assert(¬(ptr107_transport(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(32,64),bvconst(8,64),bvconst(1,64))))
+}
+
+example "META107-38 changed position" {
+    assert(¬(ptr107_transport(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(9,64),bvconst(1,64))))
+}
+
+example "META107-39 amplified rights" {
+    assert(¬(ptr107_transport(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(3,64))))
+}
+
+example "META107-40 last byte access" {
+    assert(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "META107-41 one past dereference" {
+    assert(¬(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-42 word straddles view" {
+    assert(¬(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(8,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-43 stale despite current Fabric" {
+    assert(¬(ptr107_access(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-44 released despite mapped memory" {
+    assert(¬(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-45 missing metadata" {
+    assert(¬(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(0,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-46 Fabric denied" {
+    assert(¬(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "META107-47 alignment denied" {
+    assert(¬(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "META107-48 zero width" {
+    assert(¬(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(0,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-49 unsupported width" {
+    assert(¬(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(4,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-50 view outside allocation" {
+    assert(¬(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(33,64),bvconst(15,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-51 wrong allocation identity" {
+    assert(¬(ptr107_access(bvconst(8,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-52 read through write only" {
+    assert(¬(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(2,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-53 invented rights" {
+    assert(¬(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "META107-54 write only byte store" {
+    assert(ptr107_access(bvconst(7,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(32,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(1,64),bvconst(2,64),bvconst(2,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "META107-55 unrelated record preserved" {
+    assert(ptr107_live_cell(bvconst(7,64),bvconst(8,64),bvconst(0,8),bvconst(1,8))=bvconst(1,8))
+}
+
+example "META107-56 released record dead" {
+    assert(ptr107_live_cell(bvconst(7,64),bvconst(7,64),bvconst(0,8),bvconst(1,8))=bvconst(0,8))
+}
+
+example "META107 universal unrelated release frame" {
+    assert(∀(t : BitVec64). ∀(q : BitVec64). 
+        (¬(t=q)) → (ptr107_live_cell(t,q,bvconst(0,8),bvconst(1,8))=bvconst(1,8)))
+}
+example "META107 universal rejected access has no operand transaction" {
+    assert(ptr107_operand_transactions(bvconst(0,8))=bvconst(0,64))
+}
+example "META107 universal expired references fail" {
+    assert(∀(p : BitVec64). ∀(pg : BitVec64). ∀(id : BitVec64). ∀(g : BitVec64).
+        ¬ptr107_current(p,pg,id,g,bvconst(0,8),bvconst(1,8)))
+}
+example "META107 universal reused generation cannot match old pointer" {
+    assert(∀(id : BitVec64). ∀(old : BitVec64). ∀(fresh : BitVec64).
+        (¬(old=fresh)) → ¬ptr107_current(id,old,id,fresh,bvconst(1,8),bvconst(1,8)))
+}
+
+example "META107 advance preserves metadata" {
+    assert(ptr107_advance(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(3,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(3,64)))
+}
+
+example "META107 advance cannot rebind allocation" {
+    assert(¬(ptr107_advance(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(3,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(8,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(3,64))))
+}
+
+example "META107 advance cannot change lifetime" {
+    assert(¬(ptr107_advance(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(3,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(7,64),bvconst(3,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(3,64))))
+}
+
+example "META107 advance cannot widen bounds" {
+    assert(¬(ptr107_advance(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(3,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(17,64),bvconst(16,64),bvconst(3,64))))
+}
+
+example "META107 advance cannot change rights" {
+    assert(¬(ptr107_advance(bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(3,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(7,64),bvconst(2,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(4,64))))
+}

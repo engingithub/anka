@@ -911,9 +911,12 @@ fn extended_compilermain() -> String {
          int outlimit = *{outlimit}; \
          if (outlimit == 0) {{ outlimit = {outsize}; }} \
          int src = {layout_src}; \
+         if (*68488 != 0) {{ src = *68488; }} \
+         int limit = {srclimit}; \
+         if (*68496 != 0) {{ limit = *68496; }} \
          int slen = *src; \
          int sbase = src + 8; \
-         if ({srclimit} < slen) {{ return 0 - 1; }} \
+         if (limit < slen) {{ return 0 - 1; }} \
          *{pos} = 0; \
          *{sl} = slen; \
          *{tb} = sbase; \

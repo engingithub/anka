@@ -78,6 +78,10 @@ impl FabricTimer {
 // ───────────────────────────────────────────────────────────────────
 
 pub struct Fabric {
+    pub(crate) scoped_pointers: super::scoped_pointers::ScopedPointers,
+    pointer_stack_objects: BTreeMap<ObjectId,(u64,DomainId)>,
+    pointer_backings: BTreeMap<u64, (ObjectId, Generation, u64)>,
+    pointer_cells: BTreeMap<(ObjectId, Generation, u64), super::scoped_pointers::ScopedPointer>,
     pub objects: BTreeMap<ObjectId, Object>,
     pub domains: BTreeMap<DomainId, DomainState>,
     pub agents: BTreeMap<AgentId, AgentState>,
@@ -97,6 +101,10 @@ pub struct Fabric {
 impl Fabric {
     pub fn new(mem_size: usize) -> Self {
         Self {
+            scoped_pointers: super::scoped_pointers::ScopedPointers::new(4096),
+            pointer_stack_objects: Default::default(),
+            pointer_cells: BTreeMap::new(),
+            pointer_backings: BTreeMap::new(),
             objects: BTreeMap::new(),
             domains: BTreeMap::new(),
             agents: BTreeMap::new(),
@@ -194,6 +202,9 @@ impl Fabric {
             }
         }
 
+        if self.placement.get(&id).copied() != Some(physical_base) {
+            self.pointer_cells.retain(|(object, _, _), _| *object != id);
+        }
         self.placement.insert(id, physical_base);
         true
     }
@@ -219,6 +230,7 @@ impl Fabric {
     /// All capabilities minted at the old generation become stale.
     /// Generation is monotonic (I8).
     pub fn revoke(&mut self, id: ObjectId) {
+        self.pointer_cells.retain(|(object, _, _), _| *object != id);
         if let Some(obj) = self.objects.get_mut(&id) {
             obj.generation = obj.generation.next();
             obj.state = ObjectState::Revoked;
@@ -293,6 +305,7 @@ impl Fabric {
             Some(e) if e <= self.memory.len() => e,
             _ => return false,
         };
+        self.clear_pointer_cells_physical(phys_base as u64, size as u64);
         for i in phys_base..end {
             self.memory[i] = 0;
         }
@@ -324,6 +337,7 @@ impl Fabric {
     /// Destroy an object: remove from objects table and placement map.
     /// Does NOT zero physical memory — caller must scrub separately.
     pub fn destroy_object(&mut self, id: ObjectId) {
+        self.pointer_stack_objects.remove(&id);
         self.objects.remove(&id);
         self.placement.remove(&id);
     }
@@ -379,8 +393,9 @@ impl Fabric {
     /// Must be called before recycled extents are granted to new domains.
     pub fn zero_physical(&mut self, base: u64, size: u64) {
         let start = base as usize;
-        let end = (base + size) as usize;
+        let Some(end) = base.checked_add(size).and_then(|end| usize::try_from(end).ok()) else { return; };
         if end <= self.memory.len() {
+            self.clear_pointer_cells_physical(base, size);
             self.memory[start..end].fill(0);
         }
     }
@@ -401,6 +416,7 @@ impl Fabric {
         length: u64,
         perms: Permissions,
     ) -> Option<Capability64> {
+        if self.pointer_stack_objects.get(&object).is_some_and(|&(_,owner)|owner!=domain) { return None; }
         let obj = self.objects.get(&object)?;
         if obj.kind != ObjectKind::Memory { return None; }
         match obj.state {
@@ -451,6 +467,7 @@ impl Fabric {
         perms: Permissions,
         authority_id: AuthorityId,
     ) -> Option<Capability64> {
+        if self.pointer_stack_objects.get(&object).is_some_and(|&(_,owner)|owner!=domain) { return None; }
         let obj = self.objects.get(&object)?;
         if obj.kind != ObjectKind::Memory { return None; }
         // AuthorityId cross-kind uniqueness
@@ -558,6 +575,7 @@ impl Fabric {
             entry.cap.clone()
         };
 
+        if self.pointer_stack_objects.get(&parent.object()).is_some_and(|&(_,owner)|owner!=dst_domain) { return None; }
         // Kind boundary: require Memory
         let obj = self.objects.get(&parent.object())?;
         if obj.kind != ObjectKind::Memory { return None; }
@@ -673,6 +691,7 @@ impl Fabric {
         child_length: u64,
         child_perms: Permissions,
     ) -> Option<Capability64> {
+        if self.pointer_stack_objects.get(&parent.object()).is_some_and(|&(_,owner)|owner!=domain) { return None; }
         // Kind boundary: require Memory
         let obj = self.objects.get(&parent.object())?;
         if obj.kind != ObjectKind::Memory { return None; }
@@ -720,6 +739,7 @@ impl Fabric {
         length: u64,
         perms: Permissions,
     ) -> Option<DomainId> {
+        if self.pointer_stack_objects.contains_key(&object) { return None; }
         // Kind boundary: require Memory
         let obj = self.objects.get(&object)?;
         if obj.kind != ObjectKind::Memory { return None; }
@@ -836,6 +856,7 @@ impl Fabric {
         length: u64,
         perms: Permissions,
     ) -> Option<DomainId> {
+        if self.pointer_stack_objects.contains_key(&object) { return None; }
         // Find the exact authority entry
         let parent = {
             let dom = self.domains.get(&source_domain)?;
@@ -889,12 +910,10 @@ impl Fabric {
             Some(&b) => b,
             None => return false,
         };
-        let base = (phys_base + offset) as usize;
-        for (i, &byte) in data.iter().enumerate() {
-            if base + i < self.memory.len() {
-                self.memory[base + i] = byte;
-            }
-        }
+        let Some(base) = phys_base.checked_add(offset).and_then(|p| usize::try_from(p).ok()) else { return false; };
+        let Some(end) = base.checked_add(data.len()).filter(|e| *e <= self.memory.len()) else { return false; };
+        self.clear_pointer_cells_physical(base as u64, len);
+        self.memory[base..end].copy_from_slice(data);
         true
     }
 
@@ -949,6 +968,12 @@ impl Fabric {
     /// The function signature takes (domain, request).
     /// It does NOT take AgentId or CoreId (I1, I2).
     pub fn authorize(&self, request: &MemoryRequest) -> AuthResult {
+        if let Some(&(_,owner))=self.pointer_stack_objects.get(&request.object) {
+            if owner!=request.context.domain || !self.agents.get(&request.context.agent)
+                .is_some_and(|a|a.domain==owner && matches!(a.kind,AgentKind::Cpu(_))) {
+                return AuthResult::Denied(FaultReason::WrongPermission);
+            }
+        }
         let domain = match self.domains.get(&request.context.domain) {
             Some(d) => d,
             None => return AuthResult::Denied(FaultReason::NoCapability),
@@ -1158,6 +1183,7 @@ impl Fabric {
         match self.transactions[idx].request.kind {
             AccessKind::Write | AccessKind::Atomic => {
                 // Payload presence and length already validated by precommit.
+                self.clear_pointer_cells_physical(base as u64, (end - base) as u64);
                 let data = self.transactions[idx].write_data.as_ref().unwrap();
                 self.memory[base..end].copy_from_slice(data);
             }
@@ -1286,7 +1312,8 @@ impl Fabric {
         // Precommit passed — safe to read old value.
         let old_value = self.memory[base..end].to_vec();
 
-        // Write new value.  Payload presence and length already validated.
+        // Write new value. Payload and kind invalidation commit together.
+        self.clear_pointer_cells_physical(base as u64, (end - base) as u64);
         let data = self.transactions[idx].write_data.as_ref().unwrap();
         self.memory[base..end].copy_from_slice(data);
         self.transactions[idx].state = TxState::Committed;
@@ -1294,7 +1321,170 @@ impl Fabric {
         Ok(old_value)
     }
 
+
+    pub(crate) fn protect_pointer_stack(&mut self, object:ObjectId,owner:u64,domain:DomainId) -> bool {
+        if self.pointer_stack_objects.get(&object).is_some_and(|&binding|binding!=(owner,domain)) {return false;}
+        if self.domains.values().any(|d|d.id!=domain&&d.capabilities.iter().any(|e|e.cap.object()==object)) {return false;}
+        // Existing exported/device authority cannot be retroactively declared drained.
+        for agent in self.agents.values() {
+            if !matches!(agent.kind,AgentKind::Cpu(_)) {
+                if self.domains.get(&agent.domain).is_some_and(|d| d.capabilities.iter().any(|e| e.cap.object()==object)) { return false; }
+            }
+        }
+        if self.domains.values().any(|d| d.capabilities.iter().any(|e|
+            e.cap.object()==object && !self.agents.values().any(|a| a.domain==d.id && matches!(a.kind,AgentKind::Cpu(_))))) { return false; }
+        self.pointer_stack_objects.insert(object,(owner,domain));
+        true
+    }
+
+    pub(crate) fn issue_pointer_frame(&mut self, owner:u64, registrations:Vec<(MemoryRequest,u64,bool)>)
+        -> Result<(super::scoped_pointers::Scope,Vec<super::scoped_pointers::ScopedPointer>),super::core::PointerMachineError> {
+        // No token is exposed before all admissions succeed. Rollback is only
+        // private metadata; no transaction or guest operand has been committed.
+        let prior=self.scoped_pointers.clone();
+        let backings=self.pointer_backings.clone();
+        let result=(|| {
+            let scope=self.scoped_pointers.enter_scope_for(owner).map_err(super::core::PointerMachineError::Pointer)?;
+            let mut pointers=Vec::new();
+            for (request,address,writable) in registrations {
+                pointers.push(self.register_scoped_pointer(scope,request,address,writable)?);
+            }
+            Ok((scope,pointers))
+        })();
+        if result.is_err() { self.scoped_pointers=prior;self.pointer_backings=backings; }
+        else if let Ok((_,locals))=&result {
+            for &pointer in locals {
+                if let Some(&(object,_,offset))=self.pointer_backings.get(&pointer.words()[0]) {
+                    if let (Some(base),Some((_,length)))=(self.translate(object,offset),self.scoped_pointers.storage_span(pointer)) {
+                        self.clear_pointer_cells_physical(base,length);
+                    }
+                }
+            }
+        }
+        result
+    }
+    pub(crate) fn retire_pointer_frame(&mut self, scope:super::scoped_pointers::Scope,
+        locals:&[super::scoped_pointers::ScopedPointer]) -> Result<(),super::core::PointerMachineError> {
+        self.scoped_pointers.leave_scope(scope).map_err(super::core::PointerMachineError::Pointer)?;
+        // Escaped register/cell tokens remain opaque but lifetime authentication
+        // rejects them. Remove kind only in cells belonging to retiring storage.
+        for pointer in locals {
+            let length=self.scoped_pointers.storage_span(*pointer).map(|(_,n)| n).unwrap_or(0);
+            if let Some((object,generation,offset))=self.pointer_backings.remove(&pointer.words()[0]) {
+                self.pointer_cells.retain(|(o,g,at),_| *o!=object||*g!=generation||
+                    !(*at>=offset && *at-offset<length));
+            }
+        }
+        Ok(())
+    }
+
+    /// Trusted scoped registration binds the lifetime to actual Fabric identity.
+    pub(crate) fn register_scoped_pointer(&mut self, scope: super::scoped_pointers::Scope,
+        request: MemoryRequest, address: u64, writable: bool)
+        -> Result<super::scoped_pointers::ScopedPointer, super::core::PointerMachineError> {
+        use super::core::PointerMachineError as E;
+        if request.length == 0 { return Err(E::Pointer(super::scoped_pointers::PointerError::InvalidRange)); }
+        let mut checked = request.clone();
+        checked.kind = AccessKind::Read;
+        let generation = match self.authorize(&checked) {
+            AuthResult::Authorized(generation) => generation,
+            AuthResult::Denied(reason) => return Err(E::Fabric(self.pointer_cell_fault(&checked, reason))),
+        };
+        if writable {
+            checked.kind = AccessKind::Write;
+            if let AuthResult::Denied(reason) = self.authorize(&checked) {
+                return Err(E::Fabric(self.pointer_cell_fault(&checked, reason)));
+            }
+        }
+        let phys = self.translate(request.object, request.offset).ok_or(E::Unmapped)?;
+        if phys.checked_add(request.length).is_none_or(|end| end > self.memory.len() as u64) { return Err(E::Unmapped); }
+        let pointer = self.scoped_pointers.register(scope, request.context.domain.0, address, request.length, writable).map_err(E::Pointer)?;
+        // Bounded table: discard old generations of reused descriptor slots.
+        let slot = pointer.words()[0] as u32;
+        self.pointer_backings.retain(|handle, _| *handle as u32 != slot);
+        self.pointer_backings.insert(pointer.words()[0], (request.object, generation, request.offset));
+        Ok(pointer)
+    }
+
+    pub(crate) fn scoped_pointer_backing(&self, pointer: super::scoped_pointers::ScopedPointer, domain: DomainId)
+        -> Result<(ObjectId, u64), super::core::PointerMachineError> {
+        use super::core::PointerMachineError as E;
+        self.scoped_pointers.add(pointer, domain.0, 0).map_err(E::Pointer)?;
+        let (object, generation, offset) = self.pointer_backings.get(&pointer.words()[0]).copied().ok_or(E::MissingKind)?;
+        if self.objects.get(&object).is_none_or(|o| o.generation != generation || !matches!(o.state, ObjectState::Active | ObjectState::Sealed)) {
+            return Err(E::Pointer(super::scoped_pointers::PointerError::Stale));
+        }
+        Ok((object, offset.checked_add(pointer.words()[1]).ok_or(E::Unmapped)?))
+    }
+
+    /// All successful byte writers, including DMA/atomic/bootstrap, share this barrier.
+    fn clear_pointer_cells_physical(&mut self, base: u64, length: u64) {
+        if length == 0 { return; }
+        let end = base.checked_add(length).expect("validated physical span");
+        let placement = &self.placement;
+        self.pointer_cells.retain(|(object, _, offset), _| {
+            let Some(cell) = placement.get(object).and_then(|p| p.checked_add(*offset)) else { return false; };
+            let Some(cell_end) = cell.checked_add(16) else { return false; };
+            !(base < cell_end && cell < end)
+        });
+    }
+
+    /// Serialized coherent pointer store. Source kind is an opaque trusted token.
+    /// Ordinary writes can clear kind but cannot create it.
+    pub(crate) fn store_pointer_cell(&mut self, request: MemoryRequest,
+        pointer: Option<super::scoped_pointers::ScopedPointer>) -> Result<(), FaultRecord> {
+        if let Some(pointer) = pointer {
+            self.scoped_pointer_backing(pointer, request.context.domain).map_err(|_| self.pointer_cell_fault(&request, FaultReason::NoCapability))?;
+        }
+        let key = self.checked_pointer_cell(&request, AccessKind::Write)?;
+        let words = pointer.map(|p| p.words()).unwrap_or([0, 0]);
+        let mut bytes = words[0].to_le_bytes().to_vec();
+        bytes.extend_from_slice(&words[1].to_le_bytes());
+        self.execute_write(request, bytes)?;
+        if let Some(pointer) = pointer { self.pointer_cells.insert(key, pointer); }
+        Ok(())
+    }
+
+    /// Payload and protected kind are observed under the same exclusive Fabric borrow.
+    pub(crate) fn load_pointer_cell(&mut self, request: MemoryRequest)
+        -> Result<Option<super::scoped_pointers::ScopedPointer>, FaultRecord> {
+        let key = self.checked_pointer_cell(&request, AccessKind::Read)?;
+        let bytes = self.execute_read(request.clone())?;
+        if let Some(pointer) = self.pointer_cells.get(&key).copied() {
+            let words = pointer.words();
+            if bytes[..8] == words[0].to_le_bytes() && bytes[8..] == words[1].to_le_bytes() {
+                return Ok(Some(pointer));
+            }
+        } else if bytes.iter().all(|b| *b == 0) { return Ok(None); }
+        Err(self.pointer_cell_fault(&request, FaultReason::NoCapability))
+    }
+
+    fn checked_pointer_cell(&self, request: &MemoryRequest, kind: AccessKind)
+        -> Result<(ObjectId, Generation, u64), FaultRecord> {
+        if request.kind != kind || request.length != 16 || request.offset % 16 != 0 {
+            return Err(self.pointer_cell_fault(request, FaultReason::InvalidSpan));
+        }
+        let object = self.objects.get(&request.object)
+            .ok_or_else(|| self.pointer_cell_fault(request, FaultReason::InvalidObject))?;
+        Ok((request.object, object.generation, request.offset))
+    }
+
+    fn pointer_cell_fault(&self, request: &MemoryRequest, reason: FaultReason) -> FaultRecord {
+        FaultRecord { agent: request.context.agent, domain: request.context.domain,
+            privilege: request.context.privilege, transaction: TransactionId(0),
+            object: request.object, generation: self.objects.get(&request.object).map(|o| o.generation),
+            offset: request.offset, width: request.width, length: request.length,
+            kind: request.kind, pc: None, reason }
+    }
+
     // ───────────────── Observation ───────────────────────────────
+
+    /// CPU-only transient compiler harness: no device ledger retains vector
+    /// indices. Drop terminal diagnostic history, preserving monotonic Tx IDs.
+    pub(crate) fn discard_completed_compiler_trace(&mut self) -> bool {
+        if self.transactions.iter().any(|t| !t.state.is_terminal()) {return false;}
+        self.transactions.clear();true
+    }
 
     pub fn transaction(&self, idx: usize) -> &Transaction {
         &self.transactions[idx]
@@ -1308,6 +1498,10 @@ impl Fabric {
 
     pub fn write_physical(&mut self, addr: u64, data: &[u8]) {
         let a = addr as usize;
+        // Validate the complete trusted bootstrap span before changing tags.
+        let end = a.checked_add(data.len()).expect("physical write span overflow");
+        assert!(end <= self.memory.len(), "physical write outside RAM");
+        self.clear_pointer_cells_physical(addr, data.len() as u64);
         for (i, &b) in data.iter().enumerate() {
             self.memory[a + i] = b;
         }
@@ -1409,6 +1603,37 @@ mod tests {
     // ═══════════════════════════════════════════════════════════
     // Basic operations
     // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn protected_stack_refuses_later_sharing_and_device_access() {
+        let (mut fabric,object,domain)=setup_basic();
+        fabric.register_agent(CPU0,AgentKind::Cpu(CoreId(0)),domain);
+        assert!(fabric.protect_pointer_stack(object,7,domain));
+        let parent=fabric.find_authorizing_cap(domain,object,0,8,Permissions::READ).unwrap().clone();
+        let other=fabric.create_domain();
+        assert!(fabric.grant(other,object,0,8,Permissions::READ).is_none());
+        assert!(fabric.derive(other,&parent,0,8,Permissions::READ).is_none());
+        assert!(fabric.delegate_dma_span(domain,object,0,8,Permissions::READ).is_none());
+        fabric.register_agent(AgentId(99),AgentKind::Dma,domain);
+        assert!(matches!(fabric.authorize(&read_req(AgentId(99),domain,object,0)),AuthResult::Denied(_)));
+        assert!(matches!(fabric.authorize(&read_req(CPU0,domain,object,0)),AuthResult::Authorized(_)));
+    }
+
+    #[test]
+    fn compiler_trace_collection_preserves_active_transactions_and_ids() {
+        let mut fabric=Fabric::new(4096);
+        let object=fabric.alloc_object("trace",8,ObjectKind::Memory);
+        fabric.place_object(object,0);
+        let domain=fabric.create_domain();fabric.grant(domain,object,0,8,Permissions::RW);
+        let request=read_req(CPU0,domain,object,0);
+        let index=fabric.submit(request,None);let first=fabric.transaction(index).id;
+        assert!(!fabric.discard_completed_compiler_trace());
+        fabric.advance(index);fabric.advance(index);fabric.advance(index);
+        assert!(fabric.discard_completed_compiler_trace());
+        let next=fabric.submit(request,None);
+        assert!(fabric.transaction(next).id.0>first.0);
+        assert_eq!(fabric.read_physical(0,8),&[0;8]);
+    }
 
     #[test]
     fn basic_commit() {

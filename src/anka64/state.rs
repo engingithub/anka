@@ -533,7 +533,7 @@ pub enum EventCause {
 /// Corresponds to formal place F in the interrupt Petri net.
 /// Formal invariants: CONS-2 (U+F=1), CONS-4 (F=M), INT-1 (H⇒F),
 /// INT-4 (ERET consumes exactly one frame), INT-5 (¬F⇒ERET disabled).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventFrame {
     /// PC to resume at (instruction after TRAP, or next instruction
     /// after asynchronous delivery).

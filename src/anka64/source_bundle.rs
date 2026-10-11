@@ -46,8 +46,8 @@ const ANKAPP_PM_BASE: u64 = 0x10000;
 const ANKAPP_PM_SIZE: u64 = 0x700000;
 const ANKAPP_STACK_SIZE: u64 = 0x4000;
 const ANKAPP_TRAP_SIZE: u64 = PLACEMENT_PAGE_SIZE;
-const ANKAPP_QUANTUM: usize = 5_000_000;
-const ANKAPP_MAX_ROUNDS: usize = 200;
+const ANKAPP_QUANTUM: usize = 100_000;
+const ANKAPP_MAX_ROUNDS: usize = 10_000;
 
 const MAN_MEMBER_COUNT: usize = 0;
 const MAN_DESCRIPTOR_VADDR: usize = 8;
@@ -282,6 +282,10 @@ pub fn run_ankapp(
     preprocessor_image: &[u8],
     bundle: &SourceBundle,
 ) -> Result<PreprocessedSource, AnkaPreprocessError> {
+    run_ankapp_with_capacity(preprocessor_image,bundle,EFFECTIVE_SOURCE_CAPACITY)
+}
+pub(crate) fn run_ankapp_with_capacity(preprocessor_image:&[u8],bundle:&SourceBundle,
+    capacity:u64) -> Result<PreprocessedSource,AnkaPreprocessError> {
     if preprocessor_image.is_empty() {
         return Err(AnkaPreprocessError::EmptyPreprocessorImage);
     }
@@ -304,7 +308,7 @@ pub fn run_ankapp(
         member_backing.push(backing);
         member_maps.push(vlb.reserve(backing).map_err(AnkaPreprocessError::VirtualLayout)?);
     }
-    let output_map = vlb.reserve(EFFECTIVE_SOURCE_CAPACITY)
+    let output_map = vlb.reserve(capacity)
         .map_err(AnkaPreprocessError::VirtualLayout)?;
     let workspace_map = vlb.reserve(WORKSPACE_SIZE)
         .map_err(AnkaPreprocessError::VirtualLayout)?;
@@ -326,7 +330,7 @@ pub fn run_ankapp(
     put_u64(&mut manifest, MAN_MEMBER_COUNT, bundle.len() as u64);
     put_u64(&mut manifest, MAN_DESCRIPTOR_VADDR, descriptor_vaddr);
     put_u64(&mut manifest, MAN_OUTPUT_VADDR, output_map.base);
-    put_u64(&mut manifest, MAN_OUTPUT_CAPACITY, EFFECTIVE_SOURCE_CAPACITY);
+    put_u64(&mut manifest, MAN_OUTPUT_CAPACITY, capacity);
     put_u64(&mut manifest, MAN_WORKSPACE_VADDR, workspace_map.base);
     put_u64(&mut manifest, MAN_WORKSPACE_CAPACITY, WORKSPACE_SIZE);
     put_u64(&mut manifest, MAN_RESULT_VADDR, result_map.base);
@@ -354,7 +358,7 @@ pub fn run_ankapp(
 
     let code_obj = allocate_placed(&mut fabric, &mut placement, "ankapp-code", preprocessor_image.len() as u64)?;
     let manifest_obj = allocate_placed(&mut fabric, &mut placement, "ankapp-manifest", manifest_size)?;
-    let output_obj = allocate_placed(&mut fabric, &mut placement, "ankapp-output", EFFECTIVE_SOURCE_CAPACITY)?;
+    let output_obj = allocate_placed(&mut fabric, &mut placement, "ankapp-output", capacity)?;
     let workspace_obj = allocate_placed(&mut fabric, &mut placement, "ankapp-workspace", WORKSPACE_SIZE)?;
     let result_obj = allocate_placed(&mut fabric, &mut placement, "ankapp-result", RESULT_SIZE)?;
     let mut member_objects = Vec::with_capacity(bundle.len());
@@ -413,13 +417,13 @@ pub fn run_ankapp(
 
     let mut grants = vec![
         BootGrant { obj: manifest_obj, offset: 0, size: manifest_size, perms: Permissions::READ },
-        BootGrant { obj: output_obj, offset: 0, size: EFFECTIVE_SOURCE_CAPACITY, perms: Permissions::RW },
+        BootGrant { obj: output_obj, offset: 0, size: capacity, perms: Permissions::RW },
         BootGrant { obj: workspace_obj, offset: 0, size: WORKSPACE_SIZE, perms: Permissions::RW },
         BootGrant { obj: result_obj, offset: 0, size: RESULT_SIZE, perms: Permissions::RW },
     ];
     let mut maps = vec![
         BootMap { vaddr: ANKAPP_MANIFEST_VADDR, size: manifest_size, obj: manifest_obj, obj_offset: 0 },
-        BootMap { vaddr: output_map.base, size: EFFECTIVE_SOURCE_CAPACITY, obj: output_obj, obj_offset: 0 },
+        BootMap { vaddr: output_map.base, size: capacity, obj: output_obj, obj_offset: 0 },
         BootMap { vaddr: workspace_map.base, size: WORKSPACE_SIZE, obj: workspace_obj, obj_offset: 0 },
         BootMap { vaddr: result_map.base, size: RESULT_SIZE, obj: result_obj, obj_offset: 0 },
     ];
@@ -460,7 +464,11 @@ pub fn run_ankapp(
     let mut kernel = Kernel::new(fabric);
     kernel.next_phys = kernel_base;
     kernel.boot(&info).map_err(AnkaPreprocessError::Boot)?;
-    kernel.run(ANKAPP_QUANTUM, ANKAPP_MAX_ROUNDS);
+    for _ in 0..ANKAPP_MAX_ROUNDS {
+        kernel.run(ANKAPP_QUANTUM,1);
+        if kernel.processes.first().is_some_and(|p| p.exited()) {break;}
+        assert!(kernel.fabric.discard_completed_compiler_trace());
+    }
 
     let init = kernel.processes.get(0).ok_or(AnkaPreprocessError::PreprocessorDidNotExit)?;
     if !init.exited() {
@@ -500,7 +508,7 @@ pub fn run_ankapp(
     }
 
     let output_len = read_u64_physical(&kernel.fabric, result_phys, RESULT_OUTPUT_LEN);
-    if output_len > EFFECTIVE_SOURCE_CAPACITY {
+    if output_len > capacity {
         return Err(AnkaPreprocessError::InvalidResultGeometry);
     }
     let bytes = kernel.fabric.read_physical(output_phys, output_len).to_vec();

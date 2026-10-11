@@ -9,7 +9,7 @@
 //! that sealed output.  Importing them into the development registry is a
 //! separate step and still creates no execution authority.
 
-use super::ankad::{build_ankad_code_with_layout};
+use super::ankad::{build_ankad_code_with_source};
 use super::fabric::Fabric;
 use super::cc;
 use super::guest_compiler::{
@@ -34,13 +34,14 @@ const COMPILER_VIRTUAL_LIMIT: u64 = 0x1000000;
 /// Bounded capacity policy for the extended bootstrap, independent of code
 /// placement. Both processes reserve their suffixes from the actual sizes.
 pub(crate) const DEVELOPMENT_COMPILER_OUTPUT_SIZE: u64 = 0x40000;
+pub(crate) const DEVELOPMENT_COMPILER_SOURCE_SIZE:u64=0x10000;
 const _: () = assert!(DEVELOPMENT_COMPILER_OUTPUT_SIZE >= OUTPUT_SIZE as u64);
 const _: () = assert!(DEVELOPMENT_COMPILER_OUTPUT_SIZE % PLACEMENT_PAGE_SIZE == 0);
 // Stage-3 bootstrap language-profile control word, checked by q47/q50.
 // It changes parsing admission only; Fabric still authorizes every word access.
 const WS_AC2_BOOTSTRAP_WORD_DEREF: u64 = 68480;
-const COMPILER_QUANTUM: usize = 5_000_000;
-const COMPILER_MAX_ROUNDS: usize = 200;
+const COMPILER_QUANTUM: usize = 100_000;
+const COMPILER_MAX_ROUNDS: usize = 10_000;
 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,7 +188,7 @@ pub(crate) fn compile_bootstrap_aom_stage3(
     _authority: &super::dev_runner::DeveloperExecutionAuthority,
 ) -> Result<CompiledAomModule, DevelopmentCompileError> {
     let raw = compile_c_with_geometry(compiler_image, false, source,
-        DEVELOPMENT_COMPILER_OUTPUT_SIZE, None, true)?;
+        DEVELOPMENT_COMPILER_OUTPUT_SIZE, None, 1)?;
     Ok(CompiledAomModule { bytes: raw.bytes,
         process_slots_observed: raw.process_slots_observed })
 }
@@ -244,7 +245,7 @@ pub(crate) fn compile_bootstrap_aom_with_linked_compiler(
     source: &[u8],
     _authority: &super::dev_runner::DeveloperExecutionAuthority,
 ) -> Result<CompiledAomModule, DevelopmentCompileError> {
-    compile_linked_aom(image, source, true)
+    compile_linked_aom(image, source, 1)
 }
 
 /// Ordinary applications never receive the compiler's raw word-address exception.
@@ -253,11 +254,17 @@ pub(crate) fn compile_application_aom_with_linked_compiler(
     source: &[u8],
     _authority: &super::dev_runner::DeveloperExecutionAuthority,
 ) -> Result<CompiledAomModule, DevelopmentCompileError> {
-    compile_linked_aom(image, source, false)
+    compile_linked_aom(image, source, 0)
+}
+
+pub(crate) fn compile_protected_application_aom_with_linked_compiler(
+    image:&super::ankald::AnkaldLinkedImage,source:&[u8],
+    _authority:&super::dev_runner::DeveloperExecutionAuthority) -> Result<CompiledAomModule,DevelopmentCompileError> {
+    compile_linked_aom(image,source,2)
 }
 
 fn compile_linked_aom(
-    image: &super::ankald::AnkaldLinkedImage, source: &[u8], bootstrap: bool,
+    image: &super::ankald::AnkaldLinkedImage, source: &[u8], profile: u64,
 ) -> Result<CompiledAomModule, DevelopmentCompileError> {
     if image.code_size == 0 || image.code_size > image.bytes.len() as u64
         || image.entry >= image.code_size || image.entry % 8 != 0
@@ -267,7 +274,7 @@ fn compile_linked_aom(
         return Err(DevelopmentCompileError::InvalidOutputGeometry);
     }
     let raw = compile_c_with_geometry(&image.bytes, false, source,
-        DEVELOPMENT_COMPILER_OUTPUT_SIZE, Some(image), bootstrap)?;
+        DEVELOPMENT_COMPILER_OUTPUT_SIZE, Some(image), profile)?;
     Ok(CompiledAomModule { bytes: raw.bytes,
         process_slots_observed: raw.process_slots_observed })
 }
@@ -278,7 +285,7 @@ fn compile_c_with_compiler_image(
     source: &[u8],
     output_limit: u64,
 ) -> Result<CompiledCImage, DevelopmentCompileError> {
-    compile_c_with_geometry(compiler_image, seed_at_zero, source, output_limit, None, false)
+    compile_c_with_geometry(compiler_image, seed_at_zero, source, output_limit, None, 0)
 }
 
 fn compile_c_with_geometry(
@@ -287,15 +294,15 @@ fn compile_c_with_geometry(
     source: &[u8],
     output_limit: u64,
     linked: Option<&super::ankald::AnkaldLinkedImage>,
-    bootstrap_source: bool,
+    compiler_profile: u64,
 ) -> Result<CompiledCImage, DevelopmentCompileError> {
     if compiler_image.is_empty() {
         return Err(DevelopmentCompileError::EmptyCompilerImage);
     }
-    if compiler_image.len() > 0x1FFFF {
+    if compiler_image.len() > DEVELOPMENT_COMPILER_OUTPUT_SIZE as usize {
         return Err(DevelopmentCompileError::CompilerImageTooLarge);
     }
-    if source.len().saturating_add(8) > SOURCE_SIZE as usize {
+    if source.len().saturating_add(8) > DEVELOPMENT_COMPILER_SOURCE_SIZE as usize || (seed_at_zero && source.len().saturating_add(8) > SOURCE_SIZE as usize) {
         return Err(DevelopmentCompileError::SourceTooLarge);
     }
     if output_limit < OUTPUT_SIZE as u64
@@ -304,7 +311,10 @@ fn compile_c_with_geometry(
         return Err(DevelopmentCompileError::InvalidOutputGeometry);
     }
 
-    let layout = compiler_virtual_layout(compiler_image.len(), seed_at_zero, output_limit)?;
+    let source_size=if source.len()+8>SOURCE_SIZE as usize {
+        ((source.len() as u64+8+PLACEMENT_PAGE_SIZE-1)/PLACEMENT_PAGE_SIZE)*PLACEMENT_PAGE_SIZE
+    } else { SOURCE_SIZE as u64 };
+    let layout = compiler_virtual_layout_with_source(compiler_image.len(), seed_at_zero, output_limit,source_size)?;
 
     let mut fabric = Fabric::new(DEVELOPMENT_COMPILER_RAM);
     let mut placement = PhysicalPlacementManager::new(
@@ -319,7 +329,7 @@ fn compile_c_with_geometry(
         &mut fabric, &mut placement, "dev-compiler", compiler_image.len() as u64,
     )?;
     let source_obj = allocate_placed(
-        &mut fabric, &mut placement, "dev-c-source", SOURCE_SIZE as u64,
+        &mut fabric, &mut placement, "dev-c-source", source_size,
     )?;
     let output_obj = allocate_placed(
         &mut fabric,
@@ -389,13 +399,20 @@ fn compile_c_with_geometry(
 
     // Match the exact same language profile on CC2_0->CC2_1 and CC2_1->CC2_2.
     // Fresh workspace zeroing keeps the flag off on all ordinary compile paths.
-    if bootstrap_source && !fabric.initialize_object(
+    if !fabric.initialize_object(
         workspace_obj, WS_AC2_BOOTSTRAP_WORD_DEREF - LAYOUT_WS as u64,
-        &1u64.to_le_bytes(),
+        &compiler_profile.to_le_bytes(),
     ) {
         return Err(DevelopmentCompileError::InitializationRejected);
     }
 
+    if source_size>SOURCE_SIZE as u64 {
+        for (at,value) in [(68488u64,layout.source_base),(68496,source_size-8)] {
+            if !fabric.initialize_object(workspace_obj,at-LAYOUT_WS as u64,&value.to_le_bytes()) {
+                return Err(DevelopmentCompileError::InitializationRejected);
+            }
+        }
+    }
     let ankad_code = if let Some(image) = linked {
         // AOM main is an ordinary function: CALL must mint its return authority.
         // Keep the launcher in its own object, outside the compared artifacts.
@@ -413,9 +430,9 @@ fn compile_c_with_geometry(
         launcher.trap(0);
         launcher.to_bytes()
     } else {
-        build_ankad_code_with_layout(
+        build_ankad_code_with_source(
             compiler_image.len(), layout.parent_code, layout.child_code,
-            output_limit, layout.child_stack, layout.child_trap,
+            output_limit, layout.child_stack, layout.child_trap, layout.source_base,source_size,
         )
     };
     if ankad_code.len() as u64 > ANKAD_OBJECT_SIZE
@@ -443,7 +460,7 @@ fn compile_c_with_geometry(
             BootGrant {
                 obj: source_obj,
                 offset: 0,
-                size: SOURCE_SIZE as u64,
+                size: source_size,
                 perms: Permissions::READ,
             },
             BootGrant {
@@ -461,8 +478,8 @@ fn compile_c_with_geometry(
         ],
         maps: vec![
             BootMap {
-                vaddr: LAYOUT_SRC as u64,
-                size: SOURCE_SIZE as u64,
+                vaddr: layout.source_base,
+                size: source_size,
                 obj: source_obj,
                 obj_offset: 0,
             },
@@ -519,7 +536,13 @@ fn compile_c_with_geometry(
     let mut kernel = Kernel::new(fabric);
     kernel.next_phys = DEVELOPMENT_KERNEL_PHYS_BASE;
     kernel.boot(&info).map_err(DevelopmentCompileError::Boot)?;
-    kernel.run(COMPILER_QUANTUM, COMPILER_MAX_ROUNDS);
+    // Compiler machines have no devices or asynchronous transaction handles.
+    // Bound retained diagnostic history without changing transaction execution.
+    for _ in 0..COMPILER_MAX_ROUNDS {
+        kernel.run(COMPILER_QUANTUM,1);
+        if kernel.processes.first().is_some_and(|p| p.exited()) {break;}
+        assert!(kernel.fabric.discard_completed_compiler_trace());
+    }
 
     let init = kernel.processes.get(0)
         .ok_or(DevelopmentCompileError::SupervisorDidNotExit)?;
@@ -542,6 +565,7 @@ fn compile_c_with_geometry(
 
     let ws_error = read_ws(0x18);
     if ws_error != 0 {
+        eprintln!("compiler source position={}",read_ws(0));
         let out_pos = read_ws((WS_OUT_POS - LAYOUT_WS) as u64);
         let lit_pos = read_ws((WS_LIT_POS - LAYOUT_WS) as u64);
         let function_count = read_ws((WS_FUNC_COUNT - LAYOUT_WS) as u64);
@@ -574,7 +598,10 @@ fn compile_c_with_geometry(
         return Err(DevelopmentCompileError::InvalidOutputGeometry);
     }
 
-    let lit_start = if raw_lit_pos == output_limit {
+    // Protected AOM emission uses the downward frontier for private compiler
+    // metadata scratch. Its complete serialized output is [0, out_pos),
+    // including the manifest and symbol tables; scratch is not artifact bytes.
+    let lit_start = if compiler_profile == 2 || raw_lit_pos == output_limit {
         0
     } else {
         if raw_lit_pos < out_pos {
@@ -616,6 +643,7 @@ fn allocate_placed(
 
 #[derive(Debug)]
 struct CompilerVirtualLayout {
+    source_base: u64,
     parent_code: u64,
     parent_stack: u64,
     parent_trap: u64,
@@ -627,12 +655,18 @@ struct CompilerVirtualLayout {
 fn compiler_virtual_layout(
     compiler_len: usize, seed_at_zero: bool, output_size: u64,
 ) -> Result<CompilerVirtualLayout, DevelopmentCompileError> {
+    compiler_virtual_layout_with_source(compiler_len,seed_at_zero,output_size,SOURCE_SIZE as u64)
+}
+fn compiler_virtual_layout_with_source(compiler_len:usize,seed_at_zero:bool,output_size:u64,source_size:u64)
+    -> Result<CompilerVirtualLayout,DevelopmentCompileError> {
     let output_end = (LAYOUT_OUT as u64).checked_add(output_size)
         .ok_or(DevelopmentCompileError::InvalidOutputGeometry)?;
     // The occupied ABI prefix includes source, workspace, and the exact output
     // extent. Reserve every suffix through the existing virtual manager.
     let mut parent = VirtualLayoutBuilder::after_image(0, output_end, COMPILER_VIRTUAL_LIMIT)
         .map_err(DevelopmentCompileError::Placement)?;
+    let source_base=if source_size>SOURCE_SIZE as u64 { parent.reserve(source_size)
+        .map_err(DevelopmentCompileError::Placement)?.base } else { LAYOUT_SRC as u64 };
     let parent_code = parent.reserve(compiler_len as u64)
         .map_err(DevelopmentCompileError::Placement)?.base;
     let parent_stack = parent.reserve(ANKAD_STACK_SIZE)
@@ -641,6 +675,7 @@ fn compiler_virtual_layout(
         .map_err(DevelopmentCompileError::Placement)?.base;
     let mut child = VirtualLayoutBuilder::after_image(0, output_end, COMPILER_VIRTUAL_LIMIT)
         .map_err(DevelopmentCompileError::Placement)?;
+    if source_size>SOURCE_SIZE as u64 { child.reserve(source_size).map_err(DevelopmentCompileError::Placement)?; }
     // CC_A uses absolute code addresses and stays below the fixed source ABI.
     // CC_B/CC2 use relative control flow and can occupy an allocated suffix.
     let child_code = if seed_at_zero {
@@ -656,7 +691,7 @@ fn compiler_virtual_layout(
         .map_err(DevelopmentCompileError::Placement)?.base;
     let child_trap = child.reserve(CHILD_TRAP_SIZE)
         .map_err(DevelopmentCompileError::Placement)?.base;
-    Ok(CompilerVirtualLayout { parent_code, parent_stack, parent_trap,
+    Ok(CompilerVirtualLayout { source_base,parent_code, parent_stack, parent_trap,
         child_code, child_stack, child_trap })
 }
 
@@ -732,6 +767,24 @@ mod virtual_layout_tests {
     }
 
     #[test]
+    fn protected_aom_transport_excludes_downward_compiler_scratch() {
+        use super::super::isa::{Asm64,R0,R1,R2,R3};
+        let mut asm=Asm64::new();
+        asm.movi(R1,(LAYOUT_OUT/2) as i32);asm.add(R1,R1,R1);
+        asm.movi(R2,42);asm.st(R2,R1,0);
+        asm.movi(R3,(WS_OUT_POS/2) as i32);asm.add(R3,R3,R3);
+        asm.movi(R2,8);asm.st(R2,R3,0);
+        asm.movi(R3,(WS_LIT_POS/2) as i32);asm.add(R3,R3,R3);
+        asm.movi(R2,131048);asm.add(R2,R2,R2);asm.st(R2,R3,0);
+        asm.movi(R0,5);asm.trap(0);asm.movi(R0,0);asm.ret();
+        let bytes=asm.to_bytes();
+        let image=super::super::ankald::AnkaldLinkedImage{code_size:bytes.len() as u64,bytes,lit_start:0,entry:0,process_slots_observed:1};
+        let authority=super::super::dev_runner::DeveloperExecutionAuthority::provision();
+        let result=compile_protected_application_aom_with_linked_compiler(&image,b"probe",&authority).unwrap();
+        assert_eq!(result.bytes,42u64.to_le_bytes());
+    }
+
+    #[test]
     fn extended_bootstrap_layout_separates_output_code_stack_and_trap() {
         let size = DEVELOPMENT_COMPILER_OUTPUT_SIZE;
         let layout = compiler_virtual_layout(114_688, false, size).unwrap();
@@ -742,6 +795,13 @@ mod virtual_layout_tests {
         assert!(output_end <= layout.child_code);
         assert!(layout.child_code + 114_688 <= layout.child_stack);
         assert!(layout.child_stack + STACK_SIZE as u64 <= layout.child_trap);
+    }
+    #[test]
+    fn enlarged_exact_source_is_disjoint_from_compiler_and_output() {
+        let layout=compiler_virtual_layout_with_source(180_000,false,DEVELOPMENT_COMPILER_OUTPUT_SIZE,DEVELOPMENT_COMPILER_SOURCE_SIZE).unwrap();
+        assert!(layout.source_base>=LAYOUT_OUT as u64+DEVELOPMENT_COMPILER_OUTPUT_SIZE);
+        assert!(layout.source_base+DEVELOPMENT_COMPILER_SOURCE_SIZE<=layout.parent_code);
+        assert!(layout.source_base+DEVELOPMENT_COMPILER_SOURCE_SIZE<=layout.child_code);
     }
     #[test]
     fn seed_layout_keeps_absolute_code_below_source_and_stack_above_output() {

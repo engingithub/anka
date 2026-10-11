@@ -1,0 +1,362 @@
+// Proposed Core/Fabric transition refinement, no implementation or new axioms.
+// Pointwise next-state functions model actual payload/tag effects, not just
+// acceptance flags. Source operands are captured from PRE-state before mutation.
+// Semantic classes PMOV/PADD/PLOAD/PSTORE/PREAD/PWRITE are not assigned opcodes.
+// Fabric tag+payload commit is serialized; precommit rejection is a data no-op.
+// Control/fault metadata may change on rejection, operand state may not.
+import "anka107_pointer_kind_abi.kleis"
+
+// Only terminal COMMITTED=3 may expose operand effects. Prepared=2 is not commit.
+define machine107_committed(stage : BitVec8) = stage=bvconst(3,8)
+define machine107_precommit(stage : BitVec8, live_ticket : BitVec8,
+    fabric_current : BitVec8, checked_span : BitVec8, payload_exact : BitVec8,
+    protected_key : BitVec8, serialized : BitVec8) =
+    (stage=bvconst(2,8)) ∧ (live_ticket=bvconst(1,8)) ∧
+    (fabric_current=bvconst(1,8)) ∧ (checked_span=bvconst(1,8)) ∧
+    (payload_exact=bvconst(1,8)) ∧ (protected_key=bvconst(1,8)) ∧
+    (serialized=bvconst(1,8))
+define machine107_terminal(precommit_ok : BitVec8) =
+    if precommit_ok=bvconst(1,8) then bvconst(3,8) else bvconst(4,8)
+
+// PMOV/PLOAD/PADD destination data: replace both words at ONE transition.
+// Captured handle/position are PRE-state source or checked PADD result.
+define machine107_pair_word(stage : BitVec8, dst : BitVec64, queried : BitVec64,
+    captured_handle : BitVec64, captured_pos : BitVec64, old : BitVec64) =
+    if machine107_committed(stage) then
+        if queried=dst then captured_handle else
+        if queried=bvadd(dst,bvconst(1,64)) then captured_pos else old
+    else old
+define machine107_pair_tag(stage : BitVec8, dst : BitVec64, queried_pair : BitVec64,
+    captured_tag : BitVec8, oldtag : BitVec8) =
+    if machine107_committed(stage) then
+        if queried_pair=dst then captured_tag else oldtag
+    else oldtag
+
+// Pair effects can be selected only after validating operand pair identities,
+// actual metadata transport, and serialized source snapshot.
+define machine107_pair_transition(dst : BitVec64, src : BitVec64,
+    h : BitVec64, pos : BitVec64, tag : BitVec8,
+    outh : BitVec64, outpos : BitVec64, outtag : BitVec8,
+    source_snapshot : BitVec8, source_authenticated : BitVec8) =
+    kind107_pair(dst) ∧ kind107_pair(src) ∧
+    kind107_transport(h,pos,tag,outh,outpos,outtag,source_snapshot) ∧
+    (source_authenticated=bvconst(1,8))
+
+// Ordinary Core/OS register writes use a common barrier, including loads,
+// syscall results, event completions and atomic-exchange results. CMP has no
+// destination write and must not call this barrier.
+define machine107_raw_reg_word(stage : BitVec8, dst : BitVec64, query : BitVec64,
+    value : BitVec64, old : BitVec64) =
+    if machine107_committed(stage) then if dst=query then value else old else old
+define machine107_raw_reg_tag(stage : BitVec8, dst : BitVec64,
+    pair : BitVec64, oldtag : BitVec8) =
+    if machine107_committed(stage) then kind107_raw_register(pair,dst,oldtag) else oldtag
+
+// PSTORE exact payload order is little endian: handle bytes 0..7, pos 8..15.
+// Typed READ/WRITE admission requires one contiguous object span of length 16;
+// two separately committed eight-byte transactions are NOT equivalent.
+define machine107_pointer_request(object : BitVec64, expected_object : BitVec64,
+    gen : BitVec64, expected_gen : BitVec64,
+    offset : BitVec64, expected_offset : BitVec64, extent : BitVec64,
+    length : BitVec64, typed_kind : BitVec8) =
+    (object=expected_object) ∧ (gen=expected_gen) ∧ (offset=expected_offset) ∧
+    kind107_cell(offset,extent) ∧ (length=bvconst(16,64)) ∧
+    (typed_kind=bvconst(1,8))
+define machine107_payload_byte(h : BitVec64, pos : BitVec64, index : BitVec64) =
+    if bvult(index,bvconst(8,64))
+    then bvand(bvlshr(h,bvmul(index,bvconst(8,64))),bvconst(255,64))
+    else bvand(bvlshr(pos,bvmul(bvsub(index,bvconst(8,64)),bvconst(8,64))),bvconst(255,64))
+define machine107_typed_byte(stage : BitVec8, offset : BitVec64, query : BitVec64,
+    h : BitVec64, pos : BitVec64, old : BitVec64) =
+    if machine107_committed(stage) then
+        if bvuge(query,offset) ∧ bvult(bvsub(query,offset),bvconst(16,64))
+        then machine107_payload_byte(h,pos,bvsub(query,offset)) else old
+    else old
+define machine107_typed_tag(stage : BitVec8, cell : BitVec64, querycell : BitVec64,
+    source_tag : BitVec8, oldtag : BitVec8) =
+    if machine107_committed(stage) then if cell=querycell then source_tag else oldtag else oldtag
+
+// Generic Store/StoreByte/Atomic/DMA paths clear all overlapping tag cells in
+// the SAME serialized mutation; failed precommit changes neither tags nor bytes.
+define machine107_raw_mem_tag(stage : BitVec8, offset : BitVec64, length : BitVec64,
+    querycell : BitVec64, oldtag : BitVec8) =
+    if machine107_committed(stage)
+    then kind107_raw_memory(offset,length,querycell,oldtag) else oldtag
+
+// V2 application cannot bypass pointer checks with legacy raw-address operands.
+// Kernel/bootstrap policy is separate and still requires Fabric admission.
+define machine107_raw_address_allowed(application_v2 : BitVec8, fabric : BitVec8) =
+    (application_v2=bvconst(0,8)) ∧ (fabric=bvconst(1,8))
+
+// Protected context image must have current thread/domain binding and coherent
+// payload+tags before any return-state effects. Failure preserves prior state.
+define machine107_restore_tag(stage : BitVec8, image_tag : BitVec8, oldtag : BitVec8) =
+    if machine107_committed(stage) then image_tag else oldtag
+// Trap entry captures user pair state then clears handler-visible tags; resume
+// uses protected saved image, not user-writable event-frame payload.
+define machine107_handler_tag(stage : BitVec8, oldtag : BitVec8) =
+    if machine107_committed(stage) then bvconst(0,8) else oldtag
+// The complete payload+tag image remains inaccessible to user or DMA memory.
+define machine107_context_admit(saved_thread : BitVec64, thread : BitVec64,
+    saved_domain : BitVec64, domain : BitVec64,
+    protected_image : BitVec8, coherent : BitVec8, return_frame_current : BitVec8) =
+    kind107_context(saved_thread,thread,saved_domain,domain,protected_image,coherent) ∧
+    (return_frame_current=bvconst(1,8))
+
+example "MACHINE107-1 prepared precommit all checks" { assert(machine107_precommit(bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "MACHINE107-2 authorized not prepared" { assert(¬(machine107_precommit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107-3 missing active lease" { assert(¬(machine107_precommit(bvconst(2,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107-4 revoked before commit" { assert(¬(machine107_precommit(bvconst(2,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107-5 unchecked physical span" { assert(¬(machine107_precommit(bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107-6 short typed payload" { assert(¬(machine107_precommit(bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107-7 wrong protected key" { assert(¬(machine107_precommit(bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))) }
+
+example "MACHINE107-8 unsynchronized commit" { assert(¬(machine107_precommit(bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))) }
+
+example "MACHINE107-9 PMOV from prestate pair" { assert(machine107_pair_transition(bvconst(4,64),bvconst(0,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "MACHINE107-10 unaligned destination pair" { assert(¬(machine107_pair_transition(bvconst(5,64),bvconst(0,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107-11 reserved source registers" { assert(¬(machine107_pair_transition(bvconst(4,64),bvconst(13,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107-12 PMOV changes allocation descriptor" { assert(¬(machine107_pair_transition(bvconst(4,64),bvconst(0,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967304,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107-13 PMOV changes position" { assert(¬(machine107_pair_transition(bvconst(4,64),bvconst(0,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(9,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107-14 PMOV drops kind" { assert(¬(machine107_pair_transition(bvconst(4,64),bvconst(0,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(0,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107-15 source snapshot torn" { assert(¬(machine107_pair_transition(bvconst(4,64),bvconst(0,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(0,8),bvconst(1,8)))) }
+
+example "MACHINE107-16 forged source pair" { assert(¬(machine107_pair_transition(bvconst(4,64),bvconst(0,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(0,8)))) }
+
+example "MACHINE107-17 exact typed Fabric pointer request" { assert(machine107_pointer_request(bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(1,8))) }
+
+example "MACHINE107-18 request object mismatch" { assert(¬(machine107_pointer_request(bvconst(7,64),bvconst(8,64),bvconst(2,64),bvconst(2,64),bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(1,8)))) }
+
+example "MACHINE107-19 request generation mismatch" { assert(¬(machine107_pointer_request(bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(3,64),bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(1,8)))) }
+
+example "MACHINE107-20 request offset mismatch" { assert(¬(machine107_pointer_request(bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(16,64),bvconst(32,64),bvconst(64,64),bvconst(16,64),bvconst(1,8)))) }
+
+example "MACHINE107-21 request cell unaligned" { assert(¬(machine107_pointer_request(bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(8,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(1,8)))) }
+
+example "MACHINE107-22 split word pointer transaction" { assert(¬(machine107_pointer_request(bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(8,64),bvconst(1,8)))) }
+
+example "MACHINE107-23 widened pointer transaction" { assert(¬(machine107_pointer_request(bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(24,64),bvconst(1,8)))) }
+
+example "MACHINE107-24 ordinary bytes pretend typed request" { assert(¬(machine107_pointer_request(bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(0,8)))) }
+
+example "MACHINE107-25 trusted protected context return" { assert(machine107_context_admit(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "MACHINE107-26 restore wrong thread" { assert(¬(machine107_context_admit(bvconst(1,64),bvconst(2,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107-27 restore wrong domain" { assert(¬(machine107_context_admit(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107-28 user image restores kind" { assert(¬(machine107_context_admit(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(0,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107-29 partial saved image" { assert(¬(machine107_context_admit(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(0,8),bvconst(1,8)))) }
+
+example "MACHINE107-30 stale event frame" { assert(¬(machine107_context_admit(bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(0,8)))) }
+
+example "MACHINE107-31 bootstrap raw address still Fabric checked" { assert(machine107_raw_address_allowed(bvconst(0,8),bvconst(1,8))) }
+
+example "MACHINE107-32 v2 raw address bypass denied" { assert(¬(machine107_raw_address_allowed(bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107-33 bootstrap cannot bypass Fabric" { assert(¬(machine107_raw_address_allowed(bvconst(0,8),bvconst(0,8)))) }
+
+example "MACHINE107 pair commits handle" { assert(machine107_pair_word(bvconst(3,8),bvconst(4,64),bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(99,64))=bvconst(4294967303,64)) }
+
+example "MACHINE107 pair commits position" { assert(machine107_pair_word(bvconst(3,8),bvconst(4,64),bvconst(5,64),bvconst(4294967303,64),bvconst(8,64),bvconst(99,64))=bvconst(8,64)) }
+
+example "MACHINE107 pair preserves other register" { assert(machine107_pair_word(bvconst(3,8),bvconst(4,64),bvconst(6,64),bvconst(4294967303,64),bvconst(8,64),bvconst(99,64))=bvconst(99,64)) }
+
+example "MACHINE107 fault preserves handle" { assert(machine107_pair_word(bvconst(4,8),bvconst(4,64),bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(99,64))=bvconst(99,64)) }
+
+example "MACHINE107 prepared pair has no effects" { assert(machine107_pair_word(bvconst(2,8),bvconst(4,64),bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(99,64))=bvconst(99,64)) }
+
+example "MACHINE107 PMOV commits kind" { assert(machine107_pair_tag(bvconst(3,8),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(0,8))=bvconst(1,8)) }
+
+example "MACHINE107 fault preserves pair kind" { assert(machine107_pair_tag(bvconst(4,8),bvconst(4,64),bvconst(4,64),bvconst(0,8),bvconst(1,8))=bvconst(1,8)) }
+
+example "MACHINE107 ordinary reg write clears kind" { assert(machine107_raw_reg_tag(bvconst(3,8),bvconst(5,64),bvconst(4,64),bvconst(1,8))=bvconst(0,8)) }
+
+example "MACHINE107 faulting load preserves kind" { assert(machine107_raw_reg_tag(bvconst(4,8),bvconst(5,64),bvconst(4,64),bvconst(1,8))=bvconst(1,8)) }
+
+example "MACHINE107 raw store invalidates tag" { assert(machine107_raw_mem_tag(bvconst(3,8),bvconst(31,64),bvconst(1,64),bvconst(16,64),bvconst(1,8))=bvconst(0,8)) }
+
+example "MACHINE107 fault store preserves tag" { assert(machine107_raw_mem_tag(bvconst(4,8),bvconst(31,64),bvconst(1,64),bvconst(16,64),bvconst(1,8))=bvconst(1,8)) }
+
+example "MACHINE107 typed store commits kind" { assert(machine107_typed_tag(bvconst(3,8),bvconst(16,64),bvconst(16,64),bvconst(1,8),bvconst(0,8))=bvconst(1,8)) }
+
+example "MACHINE107 typed null clears kind" { assert(machine107_typed_tag(bvconst(3,8),bvconst(16,64),bvconst(16,64),bvconst(0,8),bvconst(1,8))=bvconst(0,8)) }
+
+example "MACHINE107 failed typed store keeps kind" { assert(machine107_typed_tag(bvconst(4,8),bvconst(16,64),bvconst(16,64),bvconst(0,8),bvconst(1,8))=bvconst(1,8)) }
+
+example "MACHINE107 PSTORE handle low byte first" { assert(machine107_typed_byte(bvconst(3,8),bvconst(16,64),bvconst(16,64),bvconst(258,64),bvconst(772,64),bvconst(99,64))=bvconst(2,64)) }
+
+example "MACHINE107 PSTORE handle second byte" { assert(machine107_typed_byte(bvconst(3,8),bvconst(16,64),bvconst(17,64),bvconst(258,64),bvconst(772,64),bvconst(99,64))=bvconst(1,64)) }
+
+example "MACHINE107 PSTORE position low byte at eight" { assert(machine107_typed_byte(bvconst(3,8),bvconst(16,64),bvconst(24,64),bvconst(258,64),bvconst(772,64),bvconst(99,64))=bvconst(4,64)) }
+
+example "MACHINE107 PSTORE position second byte" { assert(machine107_typed_byte(bvconst(3,8),bvconst(16,64),bvconst(25,64),bvconst(258,64),bvconst(772,64),bvconst(99,64))=bvconst(3,64)) }
+
+example "MACHINE107 PSTORE fault preserves byte" { assert(machine107_typed_byte(bvconst(4,8),bvconst(16,64),bvconst(24,64),bvconst(258,64),bvconst(772,64),bvconst(99,64))=bvconst(99,64)) }
+
+example "MACHINE107 PSTORE neighbor unchanged" { assert(machine107_typed_byte(bvconst(3,8),bvconst(16,64),bvconst(32,64),bvconst(258,64),bvconst(772,64),bvconst(99,64))=bvconst(99,64)) }
+
+example "MACHINE107 trap clears handler kind" { assert(machine107_handler_tag(bvconst(3,8),bvconst(1,8))=bvconst(0,8)) }
+
+example "MACHINE107 resume restores protected kind" { assert(machine107_restore_tag(bvconst(3,8),bvconst(1,8),bvconst(0,8))=bvconst(1,8)) }
+
+example "MACHINE107 failed resume preserves kind" { assert(machine107_restore_tag(bvconst(4,8),bvconst(0,8),bvconst(1,8))=bvconst(1,8)) }
+
+example "MACHINE107 precommit rejection selects fault" { assert(machine107_terminal(bvconst(0,8))=bvconst(4,8)) }
+
+example "MACHINE107 universal failed pair transition is data no op" {
+    assert(∀(dst : BitVec64). ∀(q : BitVec64). ∀(h : BitVec64). ∀(p : BitVec64). ∀(old : BitVec64).
+        machine107_pair_word(bvconst(4,8),dst,q,h,p,old)=old)
+}
+example "MACHINE107 universal failed typed store preserves tags" {
+    assert(∀(cell : BitVec64). ∀(q : BitVec64). ∀(t : BitVec8). ∀(old : BitVec8).
+        machine107_typed_tag(bvconst(4,8),cell,q,t,old)=old)
+}
+example "MACHINE107 universal failed raw store preserves tags" {
+    assert(∀(offset : BitVec64). ∀(len : BitVec64). ∀(q : BitVec64). ∀(old : BitVec8).
+        machine107_raw_mem_tag(bvconst(4,8),offset,len,q,old)=old)
+}
+example "MACHINE107 universal failed typed store preserves all bytes" {
+    assert(∀(offset : BitVec64). ∀(q : BitVec64). ∀(h : BitVec64). ∀(p : BitVec64). ∀(old : BitVec64).
+        machine107_typed_byte(bvconst(4,8),offset,q,h,p,old)=old)
+}
+example "MACHINE107 universal self copy snapshots both source words" {
+    assert(∀(dst : BitVec64). ∀(h : BitVec64). ∀(pos : BitVec64).
+        kind107_pair(dst) →
+        ((machine107_pair_word(bvconst(3,8),dst,dst,h,pos,h)=h) ∧
+         (machine107_pair_word(bvconst(3,8),dst,bvadd(dst,bvconst(1,64)),h,pos,pos)=pos)))
+}
+example "MACHINE107 universal scalar commit cannot mint kind" {
+    assert(∀(dst : BitVec64). ∀(pair : BitVec64).
+        machine107_raw_reg_tag(bvconst(3,8),dst,pair,bvconst(0,8))=bvconst(0,8))
+}
+example "MACHINE107 universal pair admission refines ABI transport" {
+    assert(∀(dst : BitVec64). ∀(src : BitVec64). ∀(h : BitVec64). ∀(p : BitVec64).
+        ∀(oh : BitVec64). ∀(op : BitVec64). ∀(ot : BitVec8).
+        machine107_pair_transition(dst,src,h,p,bvconst(1,8),oh,op,ot,bvconst(1,8),bvconst(1,8)) →
+        repr107_transport(h,p,bvconst(1,8),oh,op,ot,bvconst(1,8)))
+}
+
+// Guarded transition computes status from checks; callers cannot choose COMMITTED.
+// stage-only effect functions above are private next-state helpers in the model.
+define machine107_checked_stage(stage : BitVec8, ticket : BitVec8,
+    fabric : BitVec8, span : BitVec8, exact : BitVec8, key : BitVec8, serial : BitVec8) =
+    if machine107_precommit(stage,ticket,fabric,span,exact,key,serial)
+    then bvconst(3,8) else bvconst(4,8)
+define machine107_guarded_raw_tag(stage : BitVec8, ticket : BitVec8,
+    fabric : BitVec8, span : BitVec8, exact : BitVec8, key : BitVec8, serial : BitVec8,
+    offset : BitVec64, length : BitVec64, cell : BitVec64, oldtag : BitVec8) =
+    machine107_raw_mem_tag(machine107_checked_stage(stage,ticket,fabric,span,exact,key,serial),
+        offset,length,cell,oldtag)
+define machine107_guarded_typed_byte(stage : BitVec8, ticket : BitVec8,
+    fabric : BitVec8, span : BitVec8, exact : BitVec8, key : BitVec8, serial : BitVec8,
+    offset : BitVec64, query : BitVec64, h : BitVec64, pos : BitVec64, old : BitVec64) =
+    machine107_typed_byte(machine107_checked_stage(stage,ticket,fabric,span,exact,key,serial),
+        offset,query,h,pos,old)
+
+// PADD validates real descriptor provenance and bounds; captures original handle
+// and checked position before applying atomic pair effects. Does not use PMOV's
+// equal-position admission predicate.
+define machine107_padd(dst : BitVec64, src : BitVec64,
+    h : BitVec64, pos : BitVec64, tag : BitVec8,
+    slot : BitVec64, epoch : BitVec64, live : BitVec8,
+    caller : BitVec64, domain : BitVec64,
+    lo : BitVec64, hi : BitVec64, extent : BitVec64,
+    count : BitVec64, size : BitVec64,
+    outh : BitVec64, outpos : BitVec64, outtag : BitVec8) =
+    kind107_pair(dst) ∧ kind107_pair(src) ∧
+    repr107_advance(h,pos,tag,slot,epoch,live,caller,domain,
+        lo,hi,extent,count,size,outh,outpos,outtag)
+
+// Issuance is a privileged operation, never an ordinary set-tag instruction.
+// Registry publication must already have succeeded, and the issued position
+// must lie in the descriptor view. Null is separately constructed untagged.
+define machine107_issue(dst : BitVec64, h : BitVec64,
+    slot : BitVec64, epoch : BitVec64, descriptor_live : BitVec8,
+    caller : BitVec64, domain : BitVec64, pos : BitVec64,
+    lo : BitVec64, hi : BitVec64, extent : BitVec64,
+    trusted_issuer : BitVec8, entry_published : BitVec8) =
+    kind107_pair(dst) ∧ (trusted_issuer=bvconst(1,8)) ∧
+    (entry_published=bvconst(1,8)) ∧
+    repr107_lookup(h,bvconst(1,8),slot,epoch,descriptor_live,caller,domain) ∧
+    ptr107_view(lo,hi,pos,extent)
+
+// Protected snapshot + trusted return frame decide restoration atomically.
+define machine107_checked_restore(saved_thread : BitVec64, thread : BitVec64,
+    saved_domain : BitVec64, domain : BitVec64,
+    image_protected : BitVec8, coherent : BitVec8, frame_current : BitVec8,
+    image_tag : BitVec8, oldtag : BitVec8) =
+    if machine107_context_admit(saved_thread,thread,saved_domain,domain,
+        image_protected,coherent,frame_current) then image_tag else oldtag
+
+example "MACHINE107 in place PADD checked one past" { assert(machine107_padd(bvconst(4,64),bvconst(4,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(4294967303,64),bvconst(16,64),bvconst(1,8))) }
+
+example "MACHINE107 PADD rebind handle" { assert(¬(machine107_padd(bvconst(4,64),bvconst(4,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(4294967304,64),bvconst(16,64),bvconst(1,8)))) }
+
+example "MACHINE107 PADD wrong scaling" { assert(¬(machine107_padd(bvconst(4,64),bvconst(4,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(4294967303,64),bvconst(2,64),bvconst(1,8)))) }
+
+example "MACHINE107 PADD out of view" { assert(¬(machine107_padd(bvconst(4,64),bvconst(4,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(3,64),bvconst(8,64),bvconst(4294967303,64),bvconst(16,64),bvconst(1,8)))) }
+
+example "MACHINE107 PADD descriptor stale" { assert(¬(machine107_padd(bvconst(4,64),bvconst(4,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(2,64),bvconst(8,64),bvconst(4294967303,64),bvconst(16,64),bvconst(1,8)))) }
+
+example "MACHINE107 trusted issue from published registry" { assert(machine107_issue(bvconst(4,64),bvconst(4294967303,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8))) }
+
+example "MACHINE107 unprivileged issue" { assert(¬(machine107_issue(bvconst(4,64),bvconst(4294967303,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(0,8),bvconst(1,8)))) }
+
+example "MACHINE107 issue unpublished entry" { assert(¬(machine107_issue(bvconst(4,64),bvconst(4294967303,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(0,8)))) }
+
+example "MACHINE107 issue wrong domain" { assert(¬(machine107_issue(bvconst(4,64),bvconst(4294967303,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107 issue position outside view" { assert(¬(machine107_issue(bvconst(4,64),bvconst(4294967303,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(17,64),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107 universal stale Fabric guarded tag no op" {
+    assert(∀(o : BitVec64). ∀(len : BitVec64). ∀(cell : BitVec64). ∀(old : BitVec8).
+        machine107_guarded_raw_tag(bvconst(2,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),o,len,cell,old)=old)
+}
+example "MACHINE107 universal stale Fabric guarded typed byte no op" {
+    assert(∀(o : BitVec64). ∀(q : BitVec64). ∀(h : BitVec64). ∀(pos : BitVec64). ∀(old : BitVec64).
+        machine107_guarded_typed_byte(bvconst(2,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),o,q,h,pos,old)=old)
+}
+example "MACHINE107 universal wrong thread restore cannot change kind" {
+    assert(∀(saved : BitVec64). ∀(thread : BitVec64). ∀(image : BitVec8). ∀(old : BitVec8).
+        ¬(saved=thread) →
+        (machine107_checked_restore(saved,thread,bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),image,old)=old))
+}
+
+// PLOAD captures payload and protected kind from one committed Fabric snapshot.
+// Nonzero untagged bytes are never reconstructed into an authenticated pointer.
+define machine107_pload(dst : BitVec64, h : BitVec64, pos : BitVec64, tag : BitVec8,
+    object : BitVec64, gen : BitVec64, offset : BitVec64, extent : BitVec64,
+    tag_object : BitVec64, tag_gen : BitVec64, tag_offset : BitVec64,
+    read_permission : BitVec8, snapshot : BitVec8, descriptor_valid : BitVec8) =
+    kind107_pair(dst) ∧ kind107_cell(offset,extent) ∧
+    kind107_storage_key(object,gen,offset,tag_object,tag_gen,tag_offset) ∧
+    kind107_transport(h,pos,tag,h,pos,tag,snapshot) ∧
+    (read_permission=bvconst(1,8)) ∧ (descriptor_valid=bvconst(1,8))
+
+example "MACHINE107 PLOAD committed object snapshot" { assert(machine107_pload(bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(64,64),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))) }
+
+example "MACHINE107 PLOAD raw bytes cannot create kind" { assert(¬(machine107_pload(bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(0,8),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(64,64),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107 PLOAD reused object tag rejected" { assert(¬(machine107_pload(bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(64,64),bvconst(7,64),bvconst(3,64),bvconst(16,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107 PLOAD wrong cell key" { assert(¬(machine107_pload(bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(64,64),bvconst(7,64),bvconst(2,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107 PLOAD read denied" { assert(¬(machine107_pload(bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(64,64),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(0,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "MACHINE107 PLOAD torn snapshot" { assert(¬(machine107_pload(bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(64,64),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(1,8),bvconst(0,8),bvconst(1,8)))) }
+
+example "MACHINE107 PLOAD stale descriptor rejected" { assert(¬(machine107_pload(bvconst(4,64),bvconst(4294967303,64),bvconst(8,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(64,64),bvconst(7,64),bvconst(2,64),bvconst(16,64),bvconst(1,8),bvconst(1,8),bvconst(0,8)))) }

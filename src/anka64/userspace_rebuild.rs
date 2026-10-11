@@ -17,6 +17,7 @@ pub enum RebuildError {
     Compile(DevelopmentCompileError),
     Link(AnkaldError),
     UnsupportedEntry,
+    InvalidProtectedManifest,
     Publish(AnkaldPublishError),
     Register(DevelopmentShellError),
 }
@@ -42,12 +43,29 @@ pub fn rebuild_application(
     bundle: &SourceBundle,
     compiler_authority: Option<&DeveloperExecutionAuthority>,
 ) -> Result<RebuiltApplication, RebuildError> {
+    rebuild_application_profile(producer,bundle,compiler_authority,false)
+}
+
+pub fn rebuild_protected_application(producer:&Cc2FixedPointWitness,bundle:&SourceBundle,
+    compiler_authority:Option<&DeveloperExecutionAuthority>) -> Result<RebuiltApplication,RebuildError> {
+    rebuild_application_profile(producer,bundle,compiler_authority,true)
+}
+fn rebuild_application_profile(producer:&Cc2FixedPointWitness,bundle:&SourceBundle,
+    compiler_authority:Option<&DeveloperExecutionAuthority>,protected:bool) -> Result<RebuiltApplication,RebuildError> {
     let authority = compiler_authority.ok_or(RebuildError::CompilerExecutionAuthorityRequired)?;
     let (compiler, preprocessor, linker) = producer.application_tools().map_err(RebuildError::Producer)?;
     let effective = run_ankapp(&preprocessor.bytes, bundle).map_err(RebuildError::Preprocess)?;
-    let aom = compile_application_aom_with_linked_compiler(compiler, &effective.bytes, authority)
-        .map_err(RebuildError::Compile)?;
+    let aom = if protected {
+        super::dev_compiler::compile_protected_application_aom_with_linked_compiler(compiler,&effective.bytes,authority)
+    } else {compile_application_aom_with_linked_compiler(compiler,&effective.bytes,authority)}.map_err(RebuildError::Compile)?;
     let image = run_ankald(&linker.bytes, &[&aom.bytes], "main").map_err(RebuildError::Link)?;
+    if protected {
+        let code=image.bytes.get(..image.code_size as usize).ok_or(RebuildError::InvalidProtectedManifest)?;
+        let metadata=image.bytes.get(image.lit_start as usize..).ok_or(RebuildError::InvalidProtectedManifest)?;
+        if image.lit_start==0 || !matches!(super::pointer_frames::ValidatedPointerProgram::from_image(code,metadata),Ok(Some(_))) {
+            return Err(RebuildError::InvalidProtectedManifest);
+        }
+    }
     // Ordinary spawn currently enters at zero. Do not silently patch a linked image.
     if image.entry != 0 { return Err(RebuildError::UnsupportedEntry); }
     let mut fabric = Fabric::new(0x1000000);
@@ -131,6 +149,38 @@ mod tests {
         assert_eq!(byte_report.child_result, ProcessResult::Exited(365));
         assert!(matches!(rebuild_application(&producer, &bundle(b"int main(){char x=1;int *p=&x;return 0;}"), Some(&authority)), Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
         assert!(matches!(rebuild_application(&producer, &bundle(b"typedef void *VP;int main(){VP p;return *p;}"), Some(&authority)), Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
+        // Same exact CC2_1 lineage now emits protected ABI v2 code and manifests.
+        let protected_source=include_bytes!("../../userspace/bin/protected_pointer_probe.c");
+        let mut protected=rebuild_protected_application(&producer,&bundle(protected_source),Some(&authority)).unwrap();
+        assert_eq!(protected.effective_source(),protected_source);
+        let artifact=protected.registry.get("rebuilt-application").unwrap();
+        let extent=protected.placement.allocated_extent(artifact.key.object).unwrap();
+        let code=protected.fabric.read_physical(extent.base,artifact.code_size);
+        let instructions:Vec<_>=code.chunks_exact(4).map(|c|super::super::isa::decode(u32::from_le_bytes(c.try_into().unwrap()))).collect();
+        for semantic in [Sem::PointerFrame,Sem::PointerLocal,Sem::PointerAdd,Sem::PointerLoad,Sem::PointerStore,Sem::PointerRead,Sem::PointerWrite,Sem::PointerMove,Sem::PointerUnframe] {
+            assert!(instructions.iter().any(|i|i.desc.semantics==semantic),"missing {semantic:?}");
+        }
+        assert!(!instructions.iter().any(|i|matches!(i.desc.semantics,Sem::Load|Sem::Store|Sem::LoadByte|Sem::StoreByte|Sem::Xchg)));
+        assert_eq!(protected.run(Some(&authority)).unwrap().child_result,ProcessResult::Exited(10));
+        for source in [
+            b"int main(){char b[4];char *p=b+4;return syscall(0,*p,0,0);}".as_slice(),
+            b"char *escape();int main(){char *p=escape();return syscall(0,*p,0,0);}char *escape(){char b;return &b;}".as_slice(),
+            b"int main(){char b[4];char *p=b-1;return syscall(0,0,0,0);}".as_slice(),
+            b"int main(){return syscall(1,65536,1,0);}".as_slice(),
+            b"int main(){int b[2];int *p=b;*(p+2305843009213693952)=42;return syscall(0,*p,0,0);}".as_slice(),
+            b"int main(){int b[2];int *p=b;return syscall(0,*(p-9223372036854775808),0,0);}".as_slice(),
+        ] {
+            let mut app=rebuild_protected_application(&producer,&bundle(source),Some(&authority)).unwrap();
+            assert_eq!(app.run(Some(&authority)).unwrap().child_result,ProcessResult::ProtectionFault);
+        }
+        let source=b"int main(){int b[2];int *p=b;*(p+1)=42;return syscall(0,*(p+1),0,0);}";
+        let mut app=rebuild_protected_application(&producer,&bundle(source),Some(&authority)).unwrap();
+        assert_eq!(app.run(Some(&authority)).unwrap().child_result,ProcessResult::Exited(42));
+        assert!(matches!(rebuild_protected_application(&producer,&bundle(b"int main(){char b[4];char *p=b;return p+p;}"),Some(&authority)),Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
+        let source=b"int main(){char b[1];char *p=b;*p=42;return syscall(0,*p,0,0);}";
+        let mut app=rebuild_protected_application(&producer,&bundle(source),Some(&authority)).unwrap();
+        assert_eq!(app.run(Some(&authority)).unwrap().child_result,ProcessResult::Exited(42));
+        assert!(matches!(rebuild_protected_application(&producer,&bundle(b"int main(){if(1){char b;}return syscall(0,0,0,0);}"),Some(&authority)),Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
         let original_key = producer.cc2_1_key;
         producer.cc2_1_key = producer.cc2_2_key;
         assert!(matches!(producer.application_tools(), Err(Cc2FixedPointError::PublicationIdentityChanged)));

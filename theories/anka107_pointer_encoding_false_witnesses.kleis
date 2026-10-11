@@ -1,0 +1,100 @@
+// Deliberately false claims; every assertion must be explicitly disproved.
+import "anka107_pointer_encoding.kleis"
+
+example "FALSE PMOV canonical encoding" { assert(¬(encoding107_valid(encoding107_r(bvconst(38,32),bvconst(4,32),bvconst(2,32),bvconst(0,32),bvconst(0,32))))) }
+
+example "FALSE PADD canonical encoding" { assert(¬(encoding107_valid(encoding107_r(bvconst(39,32),bvconst(4,32),bvconst(2,32),bvconst(12,32),bvconst(0,32))))) }
+
+example "FALSE PLOAD canonical encoding" { assert(¬(encoding107_valid(encoding107_r(bvconst(40,32),bvconst(4,32),bvconst(2,32),bvconst(0,32),bvconst(0,32))))) }
+
+example "FALSE PSTORE canonical encoding" { assert(¬(encoding107_valid(encoding107_r(bvconst(41,32),bvconst(4,32),bvconst(2,32),bvconst(0,32),bvconst(0,32))))) }
+
+example "FALSE PREAD canonical encoding" { assert(¬(encoding107_valid(encoding107_r(bvconst(42,32),bvconst(4,32),bvconst(2,32),bvconst(0,32),bvconst(0,32))))) }
+
+example "FALSE PWRITE canonical encoding" { assert(¬(encoding107_valid(encoding107_r(bvconst(43,32),bvconst(4,32),bvconst(2,32),bvconst(0,32),bvconst(0,32))))) }
+
+example "FALSE PFRAME canonical encoding" { assert(¬(encoding107_valid(encoding107_r(bvconst(44,32),bvconst(0,32),bvconst(0,32),bvconst(0,32),bvconst(0,32))))) }
+
+example "FALSE PLOCAL canonical encoding" { assert(¬(encoding107_valid(encoding107_r(bvconst(45,32),bvconst(4,32),bvconst(0,32),bvconst(0,32),bvconst(0,32))))) }
+
+example "FALSE PUNFRAME canonical encoding" { assert(¬(encoding107_valid(encoding107_r(bvconst(46,32),bvconst(0,32),bvconst(0,32),bvconst(0,32),bvconst(0,32))))) }
+
+example "FALSE pair 0" { assert(¬(encoding107_pair(bvconst(0,32)))) }
+
+example "FALSE pair 2" { assert(¬(encoding107_pair(bvconst(2,32)))) }
+
+example "FALSE pair 4" { assert(¬(encoding107_pair(bvconst(4,32)))) }
+
+example "FALSE pair 6" { assert(¬(encoding107_pair(bvconst(6,32)))) }
+
+example "FALSE pair 8" { assert(¬(encoding107_pair(bvconst(8,32)))) }
+
+example "FALSE pair 10" { assert(¬(encoding107_pair(bvconst(10,32)))) }
+
+example "FALSE invalid pair 1" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(38,32),bvconst(1,32),bvconst(2,32),bvconst(0,32),bvconst(0,32)))))) }
+
+example "FALSE invalid pair 11" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(38,32),bvconst(11,32),bvconst(2,32),bvconst(0,32),bvconst(0,32)))))) }
+
+example "FALSE invalid pair 12" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(38,32),bvconst(12,32),bvconst(2,32),bvconst(0,32),bvconst(0,32)))))) }
+
+example "FALSE invalid pair 13" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(38,32),bvconst(13,32),bvconst(2,32),bvconst(0,32),bvconst(0,32)))))) }
+
+example "FALSE invalid pair 14" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(38,32),bvconst(14,32),bvconst(2,32),bvconst(0,32),bvconst(0,32)))))) }
+
+example "FALSE invalid pair 15" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(38,32),bvconst(15,32),bvconst(2,32),bvconst(0,32),bvconst(0,32)))))) }
+
+example "FALSE PMOV unused rs2" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(38,32),bvconst(4,32),bvconst(2,32),bvconst(1,32),bvconst(0,32)))))) }
+
+example "FALSE PMOV reserved func" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(38,32),bvconst(4,32),bvconst(2,32),bvconst(0,32),bvconst(1,32)))))) }
+
+example "FALSE PADD reserved scalar" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(39,32),bvconst(4,32),bvconst(2,32),bvconst(13,32),bvconst(0,32)))))) }
+
+example "FALSE PREAD reserved destination" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(42,32),bvconst(13,32),bvconst(2,32),bvconst(0,32),bvconst(0,32)))))) }
+
+example "FALSE PWRITE odd address pair" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(43,32),bvconst(4,32),bvconst(3,32),bvconst(0,32),bvconst(0,32)))))) }
+
+example "FALSE PREAD reserved rs2" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(42,32),bvconst(4,32),bvconst(2,32),bvconst(1,32),bvconst(0,32)))))) }
+
+example "FALSE PREAD invalid width" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(42,32),bvconst(4,32),bvconst(2,32),bvconst(0,32),bvconst(4,32)))))) }
+
+example "FALSE PLOCAL raw base rejected" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(45,32),bvconst(4,32),bvconst(2,32),bvconst(0,32),bvconst(0,32)))))) }
+
+example "FALSE PLOCAL negative index" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(45,32),bvconst(4,32),bvconst(0,32),bvconst(0,32),bvconst(131072,32)))))) }
+
+example "FALSE PUNFRAME reserved payload" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(46,32),bvconst(0,32),bvconst(0,32),bvconst(0,32),bvconst(1,32)))))) }
+
+example "FALSE unassigned opcode" { assert(¬(¬(encoding107_valid(encoding107_r(bvconst(47,32),bvconst(0,32),bvconst(0,32),bvconst(0,32),bvconst(0,32)))))) }
+
+example "FALSE PREAD width 1" { assert(¬(encoding107_valid(encoding107_r(bvconst(42,32),bvconst(12,32),bvconst(2,32),bvconst(0,32),bvconst(0,32))))) }
+
+example "FALSE PREAD width 2" { assert(¬(encoding107_valid(encoding107_r(bvconst(42,32),bvconst(12,32),bvconst(2,32),bvconst(0,32),bvconst(1,32))))) }
+
+example "FALSE PREAD width 4" { assert(¬(encoding107_valid(encoding107_r(bvconst(42,32),bvconst(12,32),bvconst(2,32),bvconst(0,32),bvconst(2,32))))) }
+
+example "FALSE PREAD width 8" { assert(¬(encoding107_valid(encoding107_r(bvconst(42,32),bvconst(12,32),bvconst(2,32),bvconst(0,32),bvconst(3,32))))) }
+
+example "FALSE imm18 boundary -131072" { assert(¬(encoding107_imm_fits(bvsub(bvconst(0,64),bvconst(131072,64))))) }
+
+example "FALSE imm18 boundary 131071" { assert(¬(encoding107_imm_fits(bvconst(131071,64)))) }
+
+example "FALSE imm18 overflow 131072" { assert(¬(¬(encoding107_imm_fits(bvconst(131072,64))))) }
+
+example "FALSE imm18 overflow -131073" { assert(¬(¬(encoding107_imm_fits(bvsub(bvconst(0,64),bvconst(131073,64)))))) }
+
+example "FALSE negative immediate sign extends" { assert(¬(encoding107_signed(bvconst(262143,64))=bvsub(bvconst(0,64),bvconst(1,64)))) }
+
+example "FALSE typed negative displacement 40" { assert(¬(encoding107_valid(encoding107_i(bvconst(40,32),bvconst(4,32),bvconst(2,32),bvconst(262143,32))))) }
+
+example "FALSE typed negative displacement 41" { assert(¬(encoding107_valid(encoding107_i(bvconst(41,32),bvconst(4,32),bvconst(2,32),bvconst(262143,32))))) }
+
+example "FALSE invalid profile no dispatch" { assert(¬(¬(encoding107_execute(encoding107_r(bvconst(38,32),bvconst(4,32),bvconst(2,32),bvconst(0,32),bvconst(0,32)),bvconst(0,8),bvconst(1,8))))) }
+
+example "FALSE valid encoding cannot manufacture kind" { assert(¬(¬(encoding107_execute(encoding107_r(bvconst(38,32),bvconst(4,32),bvconst(2,32),bvconst(0,32),bvconst(0,32)),bvconst(1,8),bvconst(0,8))))) }
+
+example "FALSE all R fields round trip" { assert(¬(∀(op : BitVec32). ∀(d : BitVec32). ∀(s : BitVec32). ∀(t : BitVec32). ∀(f : BitVec32). (bvule(op,bvconst(63,32)) ∧ bvule(d,bvconst(15,32)) ∧ bvule(s,bvconst(15,32)) ∧ bvule(t,bvconst(15,32)) ∧ bvule(f,bvconst(16383,32))) → (encoding107_op(encoding107_r(op,d,s,t,f))=op ∧ encoding107_d(encoding107_r(op,d,s,t,f))=d ∧ encoding107_s(encoding107_r(op,d,s,t,f))=s ∧ encoding107_t(encoding107_r(op,d,s,t,f))=t ∧ encoding107_f(encoding107_r(op,d,s,t,f))=f))) }
+
+example "FALSE all I immediates round trip" { assert(¬(∀(bits : BitVec32). bvule(bits,bvconst(262143,32)) → (encoding107_imm(encoding107_i(bvconst(40,32),bvconst(4,32),bvconst(2,32),bits))=bits))) }
+
+example "FALSE assembler rejects oversized register before encoding" { assert(¬(¬(encoding107_r_inputs(bvconst(38,32),bvconst(16,32),bvconst(2,32),bvconst(0,32),bvconst(0,32))))) }
+
+example "FALSE assembler rejects oversized function before encoding" { assert(¬(¬(encoding107_r_inputs(bvconst(38,32),bvconst(4,32),bvconst(2,32),bvconst(0,32),bvconst(16384,32))))) }

@@ -1,0 +1,114 @@
+// Deliberately false claims; every assertion must be explicitly disproved.
+import "anka107_pointer_frames.kleis"
+
+example "FALSE owned aligned frame reserves atomically" { assert(¬(frame107_enter(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(4096,64),bvconst(1024,64),bvconst(8192,64),bvconst(128,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE wrong context cannot enter" { assert(¬(¬(frame107_enter(bvconst(7,64),bvconst(8,64),bvconst(3,64),bvconst(3,64),bvconst(4096,64),bvconst(1024,64),bvconst(8192,64),bvconst(128,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE wrong domain cannot enter" { assert(¬(¬(frame107_enter(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(4,64),bvconst(4096,64),bvconst(1024,64),bvconst(8192,64),bvconst(128,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE unaligned cursor cannot enter" { assert(¬(¬(frame107_enter(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(4097,64),bvconst(1024,64),bvconst(8192,64),bvconst(128,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE cursor outside stack cannot enter" { assert(¬(¬(frame107_enter(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(9000,64),bvconst(1024,64),bvconst(8192,64),bvconst(128,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE zero frame cannot enter" { assert(¬(¬(frame107_enter(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(4096,64),bvconst(1024,64),bvconst(8192,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE unaligned size cannot enter" { assert(¬(¬(frame107_enter(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(4096,64),bvconst(1024,64),bvconst(8192,64),bvconst(129,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE stack underflow cannot enter" { assert(¬(¬(frame107_enter(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(4096,64),bvconst(1024,64),bvconst(8192,64),bvconst(4096,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE unauthenticated manifest cannot enter" { assert(¬(¬(frame107_enter(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(4096,64),bvconst(1024,64),bvconst(8192,64),bvconst(128,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE wrong entry PC cannot enter" { assert(¬(¬(frame107_enter(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(4096,64),bvconst(1024,64),bvconst(8192,64),bvconst(128,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE duplicate activation cannot enter" { assert(¬(¬(frame107_enter(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(4096,64),bvconst(1024,64),bvconst(8192,64),bvconst(128,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE partial descriptor capacity cannot enter" { assert(¬(¬(frame107_enter(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(4096,64),bvconst(1024,64),bvconst(8192,64),bvconst(128,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))))) }
+
+example "FALSE Fabric rejection cannot enter" { assert(¬(¬(frame107_enter(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(4096,64),bvconst(1024,64),bvconst(8192,64),bvconst(128,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))) }
+
+example "FALSE base derived from private cursor" { assert(¬(frame107_base(bvconst(4096,64),bvconst(128,64))=bvconst(3968,64))) }
+
+example "FALSE typed spill interval" { assert(¬(frame107_local(bvconst(0,64),bvconst(16,64),bvconst(128,64),bvconst(16,64)))) }
+
+example "FALSE byte array interval" { assert(¬(frame107_local(bvconst(16,64),bvconst(64,64),bvconst(128,64),bvconst(1,64)))) }
+
+example "FALSE exact end interval" { assert(¬(frame107_local(bvconst(112,64),bvconst(16,64),bvconst(128,64),bvconst(16,64)))) }
+
+example "FALSE cross frame interval" { assert(¬(¬(frame107_local(bvconst(112,64),bvconst(17,64),bvconst(128,64),bvconst(1,64))))) }
+
+example "FALSE past frame interval" { assert(¬(¬(frame107_local(bvconst(129,64),bvconst(1,64),bvconst(128,64),bvconst(1,64))))) }
+
+example "FALSE empty local interval" { assert(¬(¬(frame107_local(bvconst(0,64),bvconst(0,64),bvconst(128,64),bvconst(1,64))))) }
+
+example "FALSE unaligned spill interval" { assert(¬(¬(frame107_local(bvconst(1,64),bvconst(16,64),bvconst(128,64),bvconst(16,64))))) }
+
+example "FALSE invalid alignment interval" { assert(¬(¬(frame107_local(bvconst(0,64),bvconst(16,64),bvconst(128,64),bvconst(3,64))))) }
+
+example "FALSE adjacent slots" { assert(¬(frame107_disjoint(bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(64,64)))) }
+
+example "FALSE reverse slots" { assert(¬(frame107_disjoint(bvconst(16,64),bvconst(64,64),bvconst(0,64),bvconst(16,64)))) }
+
+example "FALSE overlap" { assert(¬(¬(frame107_disjoint(bvconst(0,64),bvconst(16,64),bvconst(8,64),bvconst(16,64))))) }
+
+example "FALSE duplicate" { assert(¬(¬(frame107_disjoint(bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(16,64))))) }
+
+example "FALSE PLOCAL selects live preissued descriptor" { assert(¬(frame107_lookup(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(9,64),bvconst(9,64),bvconst(1,64),bvconst(2,64),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE other thread local rejected" { assert(¬(¬(frame107_lookup(bvconst(7,64),bvconst(8,64),bvconst(3,64),bvconst(3,64),bvconst(9,64),bvconst(9,64),bvconst(1,64),bvconst(2,64),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE other domain local rejected" { assert(¬(¬(frame107_lookup(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,64),bvconst(2,64),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE other activation local rejected" { assert(¬(¬(frame107_lookup(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(9,64),bvconst(10,64),bvconst(1,64),bvconst(2,64),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE index out of range rejected" { assert(¬(¬(frame107_lookup(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(9,64),bvconst(9,64),bvconst(2,64),bvconst(2,64),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE retired local rejected" { assert(¬(¬(frame107_lookup(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(9,64),bvconst(9,64),bvconst(1,64),bvconst(2,64),bvconst(0,8),bvconst(1,8))))) }
+
+example "FALSE stale generation rejected" { assert(¬(¬(frame107_lookup(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(9,64),bvconst(9,64),bvconst(1,64),bvconst(2,64),bvconst(1,8),bvconst(0,8))))) }
+
+example "FALSE owned drained top scope retires" { assert(¬(frame107_exit(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(9,64),bvconst(9,64),bvconst(1,8),bvconst(0,8),bvconst(1,8)))) }
+
+example "FALSE wrong context exit" { assert(¬(¬(frame107_exit(bvconst(7,64),bvconst(8,64),bvconst(3,64),bvconst(3,64),bvconst(9,64),bvconst(9,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))))) }
+
+example "FALSE wrong domain exit" { assert(¬(¬(frame107_exit(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))))) }
+
+example "FALSE out of order exit" { assert(¬(¬(frame107_exit(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(9,64),bvconst(10,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))))) }
+
+example "FALSE fabricated control exit" { assert(¬(¬(frame107_exit(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(9,64),bvconst(9,64),bvconst(0,8),bvconst(0,8),bvconst(1,8))))) }
+
+example "FALSE event return is not frame exit" { assert(¬(¬(frame107_exit(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(9,64),bvconst(9,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE outstanding DMA or CPU lease" { assert(¬(¬(frame107_exit(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(9,64),bvconst(9,64),bvconst(1,8),bvconst(0,8),bvconst(0,8))))) }
+
+example "FALSE retirement invalidates escaped local" { assert(¬(frame107_alive(bvconst(1,8),bvconst(9,64),bvconst(9,64),bvconst(1,8))=bvconst(0,8))) }
+
+example "FALSE child exit preserves parent local" { assert(¬(frame107_alive(bvconst(1,8),bvconst(8,64),bvconst(9,64),bvconst(1,8))=bvconst(1,8))) }
+
+example "FALSE failed exit preserves local" { assert(¬(frame107_alive(bvconst(0,8),bvconst(9,64),bvconst(9,64),bvconst(1,8))=bvconst(1,8))) }
+
+example "FALSE cursor restored after retirement" { assert(¬(frame107_cursor(bvconst(1,8),bvconst(4096,64),bvconst(3968,64))=bvconst(4096,64))) }
+
+example "FALSE failed exit preserves cursor" { assert(¬(frame107_cursor(bvconst(0,8),bvconst(4096,64),bvconst(3968,64))=bvconst(3968,64))) }
+
+example "FALSE fresh generation reuse" { assert(¬(frame107_reuse(bvconst(1,8),bvconst(1,8),bvconst(1,8)))) }
+
+example "FALSE reuse before retirement" { assert(¬(¬(frame107_reuse(bvconst(0,8),bvconst(1,8),bvconst(1,8))))) }
+
+example "FALSE reuse before drain" { assert(¬(¬(frame107_reuse(bvconst(1,8),bvconst(0,8),bvconst(1,8))))) }
+
+example "FALSE reuse old generation" { assert(¬(¬(frame107_reuse(bvconst(1,8),bvconst(1,8),bvconst(0,8))))) }
+
+example "FALSE RET after scope retirement" { assert(¬(frame107_return(bvconst(0,64),bvconst(1,8)))) }
+
+example "FALSE RET cannot skip retirement" { assert(¬(¬(frame107_return(bvconst(1,64),bvconst(1,8))))) }
+
+example "FALSE integer LR cannot authorize return" { assert(¬(¬(frame107_return(bvconst(0,64),bvconst(0,8))))) }
+
+example "FALSE all failed exits preserve allocation state" { assert(¬(∀(owner : BitVec64). ∀(retiring : BitVec64). ∀(old : BitVec8). frame107_alive(bvconst(0,8),owner,retiring,old)=old)) }
+
+example "FALSE all parent allocations survive child exit" { assert(¬(∀(owner : BitVec64). ∀(retiring : BitVec64). ∀(old : BitVec8). ¬(owner=retiring) → (frame107_alive(bvconst(1,8),owner,retiring,old)=old))) }
+
+example "FALSE all accepted frame bases stay in stack" { assert(¬(∀(cursor : BitVec64). ∀(low : BitVec64). ∀(high : BitVec64). ∀(size : BitVec64). frame107_enter(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),cursor,low,high,size,bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)) → (bvuge(frame107_base(cursor,size),low) ∧ bvule(frame107_base(cursor,size),cursor)))) }
+
+example "FALSE all local intervals avoid arithmetic wrap" { assert(¬(∀(offset : BitVec64). ∀(length : BitVec64). ∀(size : BitVec64). frame107_local(offset,length,size,bvconst(1,64)) → (bvuge(bvadd(offset,length),offset) ∧ bvule(bvadd(offset,length),size)))) }

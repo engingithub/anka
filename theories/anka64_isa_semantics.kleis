@@ -31,6 +31,15 @@ define op_lea = bvconst(34, 8)
 define op_xchg = bvconst(35, 8)
 define op_ldb = bvconst(36, 8)
 define op_stb = bvconst(37, 8)
+define op_pmov = bvconst(38, 8)
+define op_padd = bvconst(39, 8)
+define op_pload = bvconst(40, 8)
+define op_pstore = bvconst(41, 8)
+define op_pread = bvconst(42, 8)
+define op_pwrite = bvconst(43, 8)
+define op_pframe = bvconst(44, 8)
+define op_plocal = bvconst(45, 8)
+define op_punframe = bvconst(46, 8)
 define op_b = bvconst(48, 8)
 define op_call = bvconst(50, 8)
 define op_ret = bvconst(56, 8)
@@ -41,20 +50,24 @@ define op_halt = bvconst(62, 8)
 
 // ─── Format classification ──────────────────────────
 
-// Format R: add, sub, and, or, xor, shl, shr, asr, mul, cmp, mov
-// Format I: addi, subi, andi, ori, xori, cmpi, movi, ld, st, lea, xchg, ldb, stb
+// Format R: add, sub, and, or, xor, shl, shr, asr, mul, cmp, mov, pmov, padd, pread, pwrite
+// Format I: addi, subi, andi, ori, xori, cmpi, movi, ld, st, lea, xchg, ldb, stb, pload, pstore, plocal
 // Format B: b, call
-// Format S: ret, trap, eret, nop, halt
+// Format S: pframe, punframe, ret, trap, eret, nop, halt
 
 // ─── Memory effects ─────────────────────────────────
 
 define has_load_effect(op : BitVec8) =
     op = op_ld
     ∨     op = op_ldb
+    ∨     op = op_pload
+    ∨     op = op_pread
 
 define has_store_effect(op : BitVec8) =
     op = op_st
     ∨     op = op_stb
+    ∨     op = op_pstore
+    ∨     op = op_pwrite
 
 define has_atomic_effect(op : BitVec8) =
     op = op_xchg
@@ -79,6 +92,11 @@ define has_no_memory_effect(op : BitVec8) =
     ∨     op = op_cmpi
     ∨     op = op_movi
     ∨     op = op_lea
+    ∨     op = op_pmov
+    ∨     op = op_padd
+    ∨     op = op_pframe
+    ∨     op = op_plocal
+    ∨     op = op_punframe
     ∨     op = op_b
     ∨     op = op_call
     ∨     op = op_ret
@@ -179,4 +197,4 @@ example "ALU and self is identity" {
     )
 }
 
-// Total instructions in table: 31
+// Total instructions in table: 40

@@ -3900,3 +3900,17 @@ claim, not a host microarchitecture confidentiality proof. CC2 now selects these
 `char` accesses, preserving word instructions for `int*`. The expanded concrete
 CC2_1 byte application witness is implemented but awaits local bootstrap/full-suite
 validation; the last validated runtime baseline is 1004 tests.
+
+### Protected local application profile (Phase 10.7)
+
+CC2's protected profile emits canonical PMOV/PADD/PLOAD/PSTORE/PREAD/PWRITE and
+PFRAME/PLOCAL/PUNFRAME instructions plus an exact v2 local-frame manifest. Trusted
+loader admission binds that manifest to current sealed code. Even register pairs
+carry opaque pointer payloads with protected kind state; aligned 16-byte slots
+preserve kind across spills and calls. Local allocation bounds, ownership and
+retirement live in Fabric/context state. Fixed local arrays need no malloc.
+
+The initial profile permits scalar exit and rejects numeric-address syscalls,
+raw memory instructions, DMA export of local stacks and unsupported nested block
+allocations. Legacy compiler and application profiles retain their existing ABI.
+See root DESIGN_NOTES.md, DN-59, for representation, storage and lifetime details.

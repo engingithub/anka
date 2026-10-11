@@ -5165,3 +5165,801 @@ can reach q47's unsupported-pointee rejection and require error 9 precisely.
 No compiler change or broadened error matching is introduced. Existing lowering
 gates cover this supported typedef/declaration form. The corrected end-to-end
 witness still needs a local rerun; full-suite validation remains pending.
+
+## DN-51 — Allocation-associated pointers: formal checkpoint
+
+Phase 10.7 on `feat/anka107-pointer-arithmetic` now treats an application pointer
+as allocation identity, allocation generation, a narrowed byte-offset interval,
+a current position, and access rights. This supersedes the earlier assumption
+that ordinary numeric addresses plus caller-supplied bounds are sufficient.
+The machine representation and compiler ABI remain undecided and unimplemented.
+
+`anka107_pointer_metadata.kleis` defines a dynamic allocation lifecycle:
+creation requires a free record, checked placement, existing Fabric authority,
+and a strictly advanced generation; release requires the live allocation's
+identity/generation and owner authority. Reuse cannot overwrite a live record,
+retain the old generation, or wrap an exhausted generation. Identity zero and
+generation zero are reserved. Initial allocation advances generation 0 to 1.
+An implementation must preserve generation history across record-slot reuse;
+exhausted slots must be retired or replaced with genuinely fresh identities.
+
+Pointers retain original provenance across copy/store/load/pass/return and
+forward arithmetic. Checked byte/word scaling permits one-past formation but
+not dereference. Narrowing can reduce bounds and rights, never expand them.
+An application buffer's bounds can be smaller than its containing Fabric
+object. Resolving an old address to a newly allocated object cannot restore
+pointer validity. Release authorization is distinct from ordinary write rights.
+
+The access predicate composes metadata authenticity, live original allocation,
+matching identity/generation, representable allocation end, narrowed bounds,
+complete exact-width access, rights, alignment, and Fabric admission. Fabric
+admission is an obligation to the existing mapping/object/capability gates;
+this theory neither replaces nor proves their implementation. Authenticity is
+also an explicit obligation: merely supplying metadata-shaped integers cannot
+establish it. Allocation creation's placement obligation must be discharged
+against all live allocations; pairwise non-overlap is provided as a helper.
+
+The contract applies to heap allocations and scoped stack/local allocations.
+The implementation must invalidate each protected scope at its lifetime end,
+serialize invalidation against access, and preserve unrelated records. It must
+implement a metadata-preserving ABI and storage path. No runtime allocator,
+metadata table, hardware tag, compiler lowering, or borrow checker is added by
+this patch. Zero-size allocation policy, backward arithmetic, subtraction,
+integer reconstruction, and concurrency/borrowing semantics remain open.
+The record requires a representable exclusive end, conservatively excluding
+an allocation reaching past the largest representable address.
+
+Validation: 65 new positive witnesses pass; all 61 hostile assertions are
+explicitly disproved by Z3. The complete Phase 10.7 runner passes 266 positive
+and 244 hostile witnesses, with no Unknown accepted. Four new positive checks
+include quantified frame preservation and lifetime rejection properties.
+These are contract checks, not an end-to-end proof of runtime memory safety.
+
+Run from the repository root:
+
+```sh
+python3 scripts/check-anka107-gates.py --kleis /path/to/kleis
+```
+
+Next implementation decision: choose protected pointer metadata storage and
+propagation across the CC2 ABI, together with allocation-record lifecycle and
+stack/local scope registration. Representation selection needs refinement gates
+before compiler/runtime changes. The compiler-only bootstrap raw-word profile
+remains a separate exception; ordinary application pointers receive no such
+exemption.
+
+## DN-52 — Protected descriptor-pointer representation refinement
+
+The initial candidate has a 16-byte DATA payload: word 0 is a 64-bit descriptor
+handle (upper 32 bits epoch, lower 32 bits slot); word 1 is a 64-bit byte position
+relative to the allocation base. A protected pointer-kind tag must bind the pair.
+The tag is additional protected state, not an ordinary writable integer and not
+included in the 16-byte payload size. This is a proposed application ABI, not a
+change to existing AC2 sizes, machine registers, instructions or bootstrap ABI.
+
+Slots and descriptor epochs are nonzero 32-bit values. Lookup must match both
+encoded components, descriptor liveness and caller-domain binding. Free slots
+can be published only by a trusted issuer after validation and initialization,
+with a strictly advanced epoch. Epoch exhaustion retires the slot: wrapping or
+forgetting slot history is prohibited. The finite slot namespace may exhaust;
+allocation must then fail safely. This does not prescribe preallocating a large
+table, and records may be grown dynamically within the representable namespace.
+
+An issued descriptor stores allocation identity, allocation generation, narrowed
+lower/upper bounds, and rights. Its contents are immutable while issued. The
+allocation generation is independent of the descriptor epoch; dereference checks
+both lifecycles. A descriptor still live after allocation release is unusable.
+Changing a descriptor's allocation in place is prohibited. Narrowing uses a
+separately validated and published descriptor with the same allocation identity
+and generation and reduced bounds/rights. Domain transfer is outside this gate;
+merely copying payload words into another domain grants no authority.
+
+Copy, pointer storage, typed load, argument passage and return must preserve the
+ordered pair and protected tag coherently. Ordinary writes clear pointer-kind
+state; partial or torn values cannot remain usable pointers. Arithmetic retains
+the handle and tag and changes only a checked, element-scaled position. Null is
+an untagged zero handle/zero position and fails lookup. Materializing a numeric
+address uses checked allocation base plus position only after admission; it does
+not reconstruct provenance from the address.
+
+`anka107_pointer_representation.kleis` checks packing roundtrips, publication,
+lookup, immutable metadata, narrowing, pair transport, arithmetic, null,
+descriptor/heap ABA rejection, and domain/Fabric checks. Quantified checks prove
+that concrete admission implies the imported abstract admission contract and
+that a valid allocation plus bounded position cannot wrap address materialization.
+The implication is a compositional predicate refinement, not a proof that a
+compiler, allocator or hardware implements these predicates.
+
+This proposal exposes a necessary enforcement decision before implementation:
+where the protected tag resides and which trusted operations can create, copy,
+clear or consume it. The theory models tag validity as an explicit obligation;
+it does not derive unforgeability from the two payload integers. Register-side
+pointer-kind state, protected pointer storage and atomic/coherent transport need
+implementation-specific gates. An alternative representation could use protected
+side metadata, provided it satisfies the same abstraction relation.
+
+Validation: 57 new positive witnesses pass; all 50 hostile witnesses are explicitly
+disproved. Full Phase 10.7 totals: 323 positive and 294 hostile checks. No Rust,
+compiler, ISA or runtime code changes accompany this checkpoint.
+
+Next gate: pointer-kind enforcement and concrete CC2 call/storage ABI, including
+multiword argument/return placement, spills/reloads, ordinary byte writes to
+pointer storage, descriptor reclamation, scoped allocation registration and
+access/invalidation serialization. The descriptor candidate remains provisional
+until these costs and enforcement mechanisms are reviewed against the codebase.
+
+## DN-53 — Threads, SMP and DMA allocation lifetime gates
+
+`anka107_pointer_concurrency.kleis` proposes a serialized lifecycle refinement:
+Live -> Closing -> Retired -> Live with a new allocation generation. Admission
+checks validity and increments an operation lease count in one serialized step.
+Closing bars new CPU and DMA leases and preserves existing counts and backing.
+Retirement requires both CPU and DMA counts to be zero. Reuse additionally
+requires a newer non-wrapped generation and checked placement. Saturated counts
+reject admission; failures to drain retain the backing instead of reusing it.
+
+Existing `anka_concurrent_protection.kleis` requires Fabric generation/rights
+revalidation at commit. Allocation closure is distinct from Fabric revocation:
+an already admitted allocation lease may finish during Closing only if Fabric
+still permits commit. A lease pins backing memory; it is not irrevocable access
+authority. The new pointwise effect gate preserves bytes when commit is denied.
+No existing Fabric revocation semantics are weakened.
+
+CPU cache entries are hints. Their control epoch and current Live state must be
+checked against authoritative shared state atomically with admission. Control
+state must not cycle an epoch back to a stale cache's value. Implementation must
+select epoch widths and retirement rules and specify cache invalidation/ordering.
+The simple model requires shared serialization even if a cached epoch matches.
+
+Ticket consumption decrements one nonzero count and invalidates the active
+operation ticket in the same serialized step. The ticket must match operation,
+allocation identity/generation and issuing CPU/device. This binding and exact
+one-time consumption are explicit trusted-state obligations, not properties
+proved for a runtime ticket registry. Aggregate counters are separate for CPU
+and DMA; their sum need not fit in a machine word. An unrelated allocation or
+operation must not be mutated by the concrete implementation.
+
+Pointer publication uses a proposed versioned storage protocol: even means
+stable, odd means a write is in progress. Before payload mutation, the writer
+publishes an odd version and clears protected pointer-kind state. A trusted typed
+writer initializes both ordered payload words and publishes protected kind before
+releasing a fresh even version. Readers accept only equal even version samples,
+a valid tag, current storage identity and ordered payload/tag reads between the
+samples. Versions never wrap; exhausted storage identities require safe retirement.
+Raw writes cannot mint a tag. This is a protocol obligation, not a claim that
+ordinary concurrent Rust/C reads of non-atomic fields are valid: concrete storage
+must use locking or an explicitly supported atomic mechanism for every such read.
+Reader-versus-overwrite safety after snapshot also needs descriptor lookup/lifetime
+serialization before access. Coherent snapshots do not guarantee data-race freedom.
+
+DMA grants retain the original allocation identity/generation, narrowed span and
+rights, plus exact authorized device/Fabric binding. TX requires device READ;
+RX requires device WRITE. Nonzero spans must fit entirely within the pointer view.
+DMA grant validation composes with the same atomic lease-admission transition.
+Device payload addresses do not grant provenance or permit device-side descriptor
+lookup. Existing finite NIC DMA admission and commit checks remain applicable.
+
+DMA terminal evidence must establish stopped device activity, drained downstream
+bus operations, completed mapping/cache synchronization, disabled future grant
+use, and an acknowledgment bound to the correct operation. These conditions are
+composed directly with ticket consumption. A cancellation request, timeout, or
+unbound acknowledgment cannot release the lease. Host hardware enforcement must
+prevent device access outside the grant; an arbitrary physical bus master cannot
+be made safe merely by software counters or generation changes.
+
+DMA writes overlapping pointer storage must clear protected pointer-kind state
+before device mutation; unrelated cells retain their tags. The concrete version/
+lock protocol must cover DMA invalidation and CPU readers, and DMA must have no
+access to descriptor, allocation, ticket or protected-tag metadata. Cache visibility
+and payload synchronization are modeled as obligations, not a proven cache model.
+
+Validation: 88 positive witnesses, including quantified drainage, no-admission-
+after-close, non-wrapped decrement and denied-commit effect checks. All 81 hostile
+witnesses are explicitly disproved. Complete Phase 10.7 totals: 411 positive and
+375 hostile checks. The concrete CPU/DMA close-drain-retire sequence is included.
+These are compositional predicates and selected interleavings, not an exhaustive
+SMP weak-memory, liveness, fairness or hardware DMA verification.
+
+Next implementation gates must discharge protected tags, descriptor/ticket tables,
+shared serialization and memory ordering against actual runtime operations. The
+placement manager remains responsible for backing placement; this lifecycle gate
+specifies when release/reuse may occur, not a replacement physical allocator.
+
+## DN-54 — Protected pointer-kind state and CC2 application ABI v2
+
+This checkpoint specifies a candidate ABI and proves predicate refinements; it
+adds no compiler, ISA, Fabric or runtime implementation. Inspection confirms
+q24/q25 in ankacc2_stage3.c currently use size/alignment 8 for pointers; q45/q46
+perform word loads/stores. Existing AC2 passes up to four arguments in R0..R3
+and returns in R0. The bootstrap/legacy ABI remains separate from application v2.
+
+| Property | Proposed v2 rule |
+| --- | --- |
+| Pointer payload | 16 bytes: handle first, allocation-relative byte position second |
+| Pointer alignment | 16 bytes |
+| Protected kind | Trusted side state, outside application-visible payload |
+| Register pairs | R0/R1, R2/R3, R4/R5, R6/R7, R8/R9, R10/R11 |
+| Other registers | R12 scalar-only; R13 FP, R14 LR, R15 SP reserved |
+| Arguments | R0..R3 lanes; scalar one lane; pointer starts even and consumes two |
+| Return | Pointer R0/R1; scalar R0 with R0/R1 kind cleared |
+| Expression temporary | Pointer R4/R5 |
+| Call preservation | R0..R12 caller-clobbered; typed spills preserve live pointers |
+| Frame and spill | Base/extent aligned 16; complete aligned 16-byte pointer cells |
+| Null | Untagged zero/zero; transportable but not dereferenceable |
+
+The initial subset has no stack arguments. Two pointers fit R0/R1 and R2/R3.
+An int then pointer occupies R0 and R2/R3, leaving R1 untyped; a following int
+is rejected. Frame offsets in the theory are positive offsets from frame base;
+compiler translation to its FP-relative negative slots must be checked. Scalar
+char/int sizes remain 1/8. Expanded argument windows, aggregates and pointer-to-
+pointer type layout require additional profile work.
+
+CPU pointer-kind side state belongs to register pairs. Generic integer MOV,
+arithmetic and ordinary loads cannot copy or mint kind. Writing either half
+clears its tag; unrelated pairs retain theirs. The semantic allowlist for creation
+is trusted descriptor issuance, validated typed copy/load, and checked derivation.
+These are operation classes, not assigned instruction opcodes. Applications have
+no set-tag operation. The gate explicitly separates canonical untagged null from
+valid tagged pointers.
+
+Memory side state is keyed by Fabric object identity, object generation and
+aligned object-relative cell offset, never by virtual address. All aliases share
+the same protected tag entry. Application and DMA access must exclude metadata.
+An admitted raw CPU/DMA write clears kind on EVERY overlapping pointer cell before
+payload mutation; unrelated cells survive. Rejected writes preserve tags and data.
+Invalidation and admitted writes must use the serialized publication/commit
+protocol; DMA invalidation precedes device access. A versioned snapshot does not
+permit data races in host Rust/C: concrete storage must use locks or supported
+atomic accesses.
+
+Typed storage checks validated source or null, complete aligned cell, exact tag
+key, Fabric permission, trusted typed operation and coherent ordered transport.
+Pointer argument lowering combines register-lane assignment with actual ordered
+payload/tag transport. Quantified implications prove these typed spill/argument
+predicates imply repr107_transport for tagged nonnull pointers. Authentication,
+metadata isolation and source validation remain implementation obligations, not
+properties inferred from application-supplied flags.
+
+Calls and linking require explicit v2 artifact ABI metadata, size/alignment 16,
+verified canonical ordered signatures and current code authority. Mixed v1/v2,
+unverified metadata, mismatched signatures and implicit domain transitions are
+rejected. Signature identity is a verified canonical record, not an unchecked hash.
+Call entry preserves kind only on verified pointer-argument pairs, clearing all
+scratch/unused tags. Scalar results clear pair kind; pointer/null results validate
+the pair. Syscalls/raw bootstrap interfaces need explicit verified bridges; copying
+two integers cannot bridge authority or provenance.
+
+Context switching preserves payload and kind in trusted kernel images bound to
+the same thread/domain. User frames cannot restore protected kind. Subsequent
+access still rechecks descriptor/allocation lifetime. Concrete trap/context code
+must preserve architectural FP/SP/LR and restore tags coherently without leaking
+them to another thread.
+
+Validation: 91 new positive witnesses pass; all 79 hostile assertions are explicitly
+disproved. Full Phase 10.7 totals: 502 positive and 454 hostile. Quantified gates
+cover argument/spill representation refinement, lane bounds, ordinary-operation
+noncreation and overlapping-write invalidation. These are compositional contract
+proofs, not an end-to-end compiler or hardware memory-safety theorem.
+
+Before implementation, refine trusted operation classes into exact emulator/ISA
+transitions and artifact ABI fields, including tag isolation and admission/commit
+ordering. Preserve the self-hosting fixed-point bootstrap through the explicitly
+separate legacy compiler profile. The two-word representation and this restricted
+ABI remain a candidate whose costs must be validated during implementation.
+
+## DN-55 — Core/Fabric pointer machine-transition refinement
+
+The new `anka107_pointer_machine.kleis` specifies deterministic pointwise payload
+and tag next-state functions and guarded admission/commit predicates. No Rust,
+ISA descriptor, assembler or opcode changes are made. Semantic operation names
+below are specification names; opcode assignments remain an implementation choice.
+
+| Operation | Proposed transition |
+| --- | --- |
+| Trusted issue | Published current domain-bound descriptor, valid view/position and valid destination pair; protected kind supplied only by trusted issuer |
+| PMOV | Capture both source words and kind from pre-state; validate pairs and exact transport; update destination pair and kind together |
+| PADD | Retain handle/kind; validate descriptor, domain and exact checked element scaling; capture result before in-place destination mutation |
+| PLOAD | One coherent committed 16-byte object-cell snapshot of payload and protected kind; validate cell identity/generation, source and destination before pair update |
+| PSTORE | One exact contiguous 16-byte typed request; little-endian handle bytes 0..7 followed by position bytes 8..15; commit bytes and kind together |
+| PREAD/PWRITE | Descriptor-based application data access through existing exact-width allocation/Fabric gates; never a raw numeric-address bypass |
+| Ordinary register write | Commit scalar value and clear kind of any pair containing the destination register |
+| Raw Store/StoreByte/Atomic/DMA write | After successful precommit, invalidate every overlapping pointer cell and mutate payload under the same serialization |
+| Trap entry | Capture protected user image first; handler-visible pair kind cleared |
+| Protected resume | Validate saved thread/domain, coherent protected image and current return frame, then restore payload/kind together |
+
+Inspection of Core::step confirms ALU, MOV, MOVI and scalar load paths currently
+write core.r directly. They require a common successful-register-write barrier.
+CMP is flags-only and must not invalidate pair kind. OS syscall/event completion
+paths also write core.r directly and require that same barrier; merely modifying
+instruction dispatch would leave a bypass. Scalar/atomic results must clear kind.
+
+Fabric::phase_commit currently invokes validate_precommit before changing bytes.
+The existing checks include current generation, checked physical range and exact
+payload length. Pointer-state changes must join this commit boundary, after all
+checks pass. Neither Prepared nor authorization is enough to expose operand
+effects. Guarded functions compute Committed/Faulted from precommit evidence;
+stage-only pointwise functions are private effect helpers, not an application API.
+On failure, payload bytes, register operands and protected tags remain unchanged.
+Fault/control records may change. Leases retain backing but never override Fabric
+revocation. Terminal faults still consume their operation ticket exactly once.
+
+Typed pointer READ/WRITE requires a new trusted request classification, coherent
+payload/kind capture and an exact single-object 16-byte span. Two independent
+word transactions are prohibited as a substitute. The current Width/AccessKind
+and CPU decoder need corresponding implementation refinement; this theory does
+not assert current execute_read/write already provides typed pointer operations.
+A write-only pointer cell store must not add an enclosing payload read requirement.
+Protected metadata access is internal validation, not guest operand READ authority.
+
+The payload helpers explicitly model handle-first little-endian storage. Successful
+stores update only the target 16 bytes and its tag; neighboring bytes/cells survive.
+Raw writes use the existing overlap contract to clear all affected cells. Pointer
+cell keys remain Fabric object/generation/offset, independent of virtual aliases.
+All raw physical mutation helpers must be audited: bootstrap-only write_physical
+cannot be exposed as an application/DMA bypass of tag invalidation.
+
+ABI v2 application operand accesses cannot use legacy numeric-address Load/Store
+paths, even if a numeric address happens to map to authorized memory. PREAD/PWRITE
+must apply descriptor/allocation/access checks before materializing the exact
+Fabric request. Compiler-generated frame accesses need validated scoped-cell
+operations, not a blanket SP/FP bypass. Kernel/bootstrap accesses remain distinct
+and still pass Fabric checks. Arithmetic itself preserves original provenance;
+it never establishes dereferenceability or revives a released allocation.
+
+Context effects are admitted only from a coherent kernel-protected image bound
+to the returning thread/domain and a current event frame. This supplements the
+existing event_return path, which restores privilege/interrupt state and return PC.
+User-writable frames cannot restore tags. Saving/restoring payload, tags, control
+state and frame ownership must be atomic against scheduling and trap nesting;
+this gate models those bindings as explicit obligations rather than proving the
+current scheduler implements them. Restored stale descriptors remain unusable at
+subsequent access. Architectural FP/SP/LR and existing interrupt semantics remain
+obligations of the complete concrete context transition.
+
+Validation: 84 new positive witnesses pass; all 76 hostile witnesses are explicitly
+disproved. Full Phase 10.7 totals: 586 positive and 530 hostile checks. Quantified
+properties include rejected pair/store no-ops, revoked precommit preserving tags
+and bytes, self-copy source capture, scalar-operation noncreation, wrong-thread
+restore rejection and pair transport refinement to repr107_transport.
+
+These are machine-effect predicate refinements under trusted admission evidence,
+not a full inductive whole-machine, weak-memory or verified Rust/compiler proof.
+Registry authentication, exact physical mapping, lease accounting, source snapshot
+serialization and metadata isolation must be implemented and tested. The next
+implementation slice should establish protected pair/cell side state and common
+raw-write barriers, then typed pair operations and context integration. CC2 ABI v2
+lowering follows only once those machine operations enforce the specified effects.
+
+## Phase 10.7 scoped fixed-buffer runtime foundation
+
+`src/anka64/scoped_pointers.rs` implements a bounded trusted registration table
+for already allocated fixed buffers. Registration is restricted to the current
+LIFO scope. An opaque Rust pointer carries slot, allocation generation, and byte
+position; the table supplies immutable bounds, owner domain, and write permission.
+Checked displacement permits one-past transport, while every nonempty access must
+fit the exact registered span. Scope exit invalidates its allocations. Reuse
+increments the generation; a slot at the maximum generation is permanently
+retired. Scope identities also fail closed rather than wrap. Capacity exhaustion
+is explicit and does not require guest malloc.
+
+This realizes a sequential subset of the validated pointer metadata and machine
+contracts. Three focused tests cover traversal, boundary rejection, stale pointers
+at reused addresses, nested lifetimes, domain and permission checks, arithmetic
+overflow, bounded capacity, and exhausted generations. The library test target
+compiled successfully and those tests passed single threaded (1004 existing tests
+filtered out). The full regression suite was not run for this slice.
+
+Integration boundary: this table does not allocate buffers, prove their ownership,
+perform a Fabric transaction, implement protected machine kind tags, or encode the
+CC2 two-word pointer ABI. Only trusted runtime code may register buffers after
+checking their backing allocation and authority. Returned addresses must still go
+through Fabric authorization. Concurrent CPU/DMA accesses require the previously
+specified admission/closing/lease protocol before scope exit can retire storage;
+this sequential table must not be used as a concurrent lifetime manager.
+
+The concrete end-to-end milestone remains a CC2-rebuilt fixed-local-byte-array
+program with traversal, pointer argument/return transport, typed spill/reload,
+out-of-bounds rejection, and escaped-local-pointer rejection. Next implement the
+protected register and memory kind state and coherent pointer machine operations,
+then bind scope registration/exit and CC2 lowering to those operations. Guest
+malloc remains deferred.
+
+
+## DN-56 — Protected Core/Fabric pointer transport foundation
+
+This slice implements the protected pair/cell state described by DN-54/DN-55 as
+crate-private trusted runtime operations. The existing pointer representation,
+kind ABI and machine-transition gates cover its payload order, pair restrictions,
+raw-write effects, bounds and identity checks; all existing gates were rerun before
+integration and passed (586 positive, 530 explicitly disproved hostile witnesses).
+No opcodes, new C syntax, executable artifact format, or guest ABI are introduced.
+
+Core has six protected pair entries for R0/R1 through R10/R11. Typed move captures
+the source before replacing both destination words. Checked byte displacement
+preserves the handle. Ordinary writes to either half clear the pair kind, even if
+the integer value is unchanged. Core instructions and all production OS register
+assignments now use a common write barrier; CMP performs no destination write.
+Host register-array access remains available for existing trusted bootstrap/tests;
+it is not a guest interface and must not be used to mutate live protected pairs.
+
+The scoped descriptor payload is `(epoch32 << 32 | slot32, position64)`, with a
+one-based nonzero slot. The scoped table conservatively retires a descriptor slot
+at epoch32 exhaustion, rather than wrapping. Registration checks current Fabric
+read authority (and write authority for writable buffers), physical backing, and a
+single unambiguous mapping. Issued pointers also bind the Fabric object identity,
+its generation, and object-relative base. Revocation followed by regrant cannot
+revive an old pointer; virtual mapping changes cannot redirect its accesses.
+Registration still requires the trusted caller to establish allocation ownership
+and scope: permission to access a larger object is not evidence of a local lifetime.
+
+Fabric pointer cells use `(ObjectId, Generation, aligned object offset)` keys.
+Typed spill/reload commits or observes one exact 16-byte span, little-endian handle
+first and position second. A serialized exclusive Fabric borrow covers payload and
+protected kind together. Unchanged raw writes still clear kind; canonical all-zero
+null remains untagged and transportable, but cannot be dereferenced. Untagged
+nonzero integer payloads cannot acquire pointer kind through a typed reload.
+
+CPU, DMA span, atomic exchange, loader initialization, zero-fill and trusted
+physical-write paths clear every overlapping pointer cell at successful mutation.
+Validation failure preserves bytes and kind. Virtual aliases share the cell key;
+ambiguous mappings and arithmetic overflow reject before destination mutation.
+Object placement changes discard the object's stored cell kinds rather than
+reattaching old kinds to unrelated backing bytes. Bounds/rights/lifetime and
+Fabric authorization are independent checks at actual dereference.
+
+Validation: 50 Core tests, 48 Fabric tests, 3 scoped-pointer tests and 3 selected
+OS syscall regression tests passed. Eight new Core tests exercise typed transport,
+byte traversal, spills/reloads, escaped scope rejection, null, denied issuance,
+encoded CMP/MOV, raw register forgery attempts, aliases, failed raw writes,
+cross-cell DMA spans, atomic/bootstrap/loader invalidation, ambiguous mappings,
+and stale backing generations. Test discovery now contains 1015 library tests.
+The compiler-backed `p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address`
+run was terminated by SIGKILL in this environment; it did not report an assertion
+failure before termination. The complete regression suite is not verified here.
+The 74 existing library-test warnings remain unchanged.
+
+The protected-pointer application milestone remains incomplete. These operations
+are not yet architectural instructions and CC2 still emits its existing pointer
+ABI. In particular, do not enable protected application execution until complete
+protected event-context save/restore is integrated: current event handling restores
+control metadata, not a protected payload/tag image. Instruction encoding and
+trusted local-frame registration/retirement need their concrete Kleis refinements,
+then Core dispatch/assembler/decoder integration and CC2 argument/return/spill
+lowering. The final witness must be produced by the exact self-hosted CC2 lineage,
+not by a host emitter or a manually supplied protected token.
+
+The scoped table and registration stack are a sequential foundation, not a
+multithreaded allocation manager. Per-context scope ownership and the formal
+closing/admission/lease protocol are required before admitting concurrent CPU/DMA
+operations against scoped storage. No guest malloc or placement arithmetic is
+added by this slice.
+
+Focused local verification:
+
+```sh
+python3 scripts/check-anka107-gates.py --kleis /path/to/kleis
+cargo test --lib anka64::core::tests -- --test-threads=1
+cargo test --lib anka64::fabric::tests -- --test-threads=1
+cargo test --lib scoped_pointers -- --test-threads=1
+cargo test --lib anka64::os::tests::p92a_syscall -- --test-threads=1
+```
+
+## DN-57 — Protected event-context save/restore
+
+Baseline supplied by the local full regression run: 1015 tests passed after the
+protected transport foundation. This slice implements complete event register
+images for the protected profile while preserving the existing legacy profile's
+control-only/register-passthrough behavior. Guest pointer opcodes and CC2 ABI v2
+are still not enabled.
+
+Formal work preceded implementation: `anka107_pointer_events.kleis` refines the
+DN-55 context gate with owner/domain, depth/header, profile consistency, explicit
+scalar result lanes, and pointwise rejected-transition no-ops. All 30 positive
+witnesses passed and all 30 hostile witnesses were explicitly disproved. The
+Phase 10.7 runner now includes these files; total checks are 616 positive and
+560 hostile. Quantified properties cover rejected payload/tag preservation and
+complete asynchronous tag restoration. As with the earlier machine gates, these
+are conditional transition refinements, not an inductive proof of Rust execution.
+The implementation must supply the trusted image and admission facts.
+
+A private saved-event stack accompanies the observable control-header stack.
+Each entry binds the exact header to a trusted execution-context identity and
+protection domain. Fresh context identities use an atomic checked counter with
+no wrap; identity is independent of the CPU bus-master agent, so moving a complete
+context to another physical CPU does not invalidate its saved frames. Cloning a
+whole Core preserves context identity and represents a trusted copy/checkpoint of
+that same context; it is not an independent-thread/fork constructor. New contexts
+must be constructed through `Anka64Core::new`.
+
+Protected entry captures all sixteen register words, six protected pair kinds,
+flags, halted state and the protected return-authority stack. Handler entry clears
+pair kinds and isolates the handler's return-authority stack. Words remain as
+untagged inputs so the existing syscall argument ABI still works. Nested events
+capture the interrupted supervisor context separately, restoring that handler
+before the outer event restores the user. Pending IRQ bits and arbitration state
+are external event state and are intentionally not rolled back.
+
+Event return peeks and validates context identity, domain, matching public/private
+depths, exact control header and saved profile before consuming either entry.
+Success restores PC, privilege and interrupt enable state in the common primitive;
+protected mode also restores the complete private image. Wrong-context, wrong-domain,
+tampered, missing-image and replayed public-header returns are rejected without
+consuming frames or changing the current operand image. Integer memory or a public
+control header alone cannot manufacture a saved protected image. Existing trusted
+synthetic I/O fixtures now use the common entry primitive rather than pushing bare
+headers.
+
+Syscall results are an explicit exception to complete register restoration. Kernel
+result writers call `write_syscall_result`, which records scalar outputs in R0..R12
+for the matching protected syscall frame. Handler instruction scratch writes are
+not exported. Return overlays those recorded values onto the saved words; either
+half being written clears the corresponding pointer kind, even when the scalar
+bits are unchanged. Reserved FP/LR/SP lanes cannot be exported through the result
+mask. Asynchronous event frames ignore result recording. Typed pointer returns from
+syscalls are not introduced by this contract.
+
+Mode selection is trusted and monotonic. Successful typed pointer installation
+selects protected context handling, or the future loader can select it explicitly.
+An outstanding legacy frame cannot be upgraded into a protected image: registration
+rejects such an upgrade before issuing a descriptor. Existing guest compilers and
+applications remain in the legacy profile and retain their established behavior.
+
+Encoded ERET, ordinary host syscall return and blocked I/O completion use the same
+checked return primitive. Failed ERET produces ControlFlowViolation without popping;
+failed host-mediated return marks the process as ProtectionFault rather than
+panicking or resuming an invalid context. Restoring a stale pointer's kind does not
+revive its allocation: descriptor, domain, backing generation, bounds and Fabric
+permission checks still occur at subsequent use.
+
+Validation: all 58 Core tests and 280 OS tests passed single threaded, including
+10 new event/context tests. Tests cover complete payload/kind/flags/return-stack
+restoration, handler authority isolation, nested events, explicit scalar output
+patches, unchanged-bit invalidation, scratch/reserved-lane exclusion, stale
+allocations, wrong context/domain, CPU migration, tampering/replay, profile upgrade
+rejection before descriptor issuance, actual TRAP/ERET execution, blocked block-I/O
+completion, and process fault on a fabricated header. Both library and binary test
+targets compile with `cargo test --no-run`. The library test warning count remains
+74. The library now has 1025 tests; its complete regression suite has not been run
+for this slice.
+
+Focused verification:
+
+```sh
+python3 scripts/check-anka107-gates.py --kleis /path/to/kleis
+cargo test --lib anka64::core::tests -- --test-threads=1
+cargo test --lib anka64::os::tests -- --test-threads=1
+```
+
+Next: concrete instruction encoding and trusted local-frame registration/retirement
+contracts, then decoder/assembler/Core dispatch and CC2 protected ABI lowering.
+The final milestone still requires a program rebuilt by the exact self-hosted CC2
+lineage, demonstrating local-array traversal, calls, typed spills, bounds rejection
+and escaped-local rejection. Context save/restore does not itself close that witness,
+add malloc, or implement concurrent scoped allocation/lease retirement.
+
+## DN-58 — Concrete protected pointer encodings and local-frame refinement
+
+This checkpoint reserves the following ABI v2 instruction words. It does not yet
+add them to `desc::INSNS`, change execution, or lower CC2 source. Rust's machine
+description remains the executable ISA source of truth; the next implementation
+must make decoder, assembler, disassembler, Core and generated ISA theory agree.
+The user's preceding complete regression run passed all 1025 tests single threaded.
+
+The existing 32-bit layouts are retained: opcode in bits 31..26, rd in 25..22,
+rs1 in 21..18, rs2 in 17..14 and function in 13..0 for R format; I format instead
+has a signed immediate in 17..0; S format has a payload in 25..0. Pair operands
+name their first register, one of R0/R2/R4/R6/R8/R10. Scalar operands are R0..R12.
+All these instructions preserve arithmetic flags. Instruction fetch remains the
+normal code-authorized fetch, distinct from the data transactions below.
+
+| Opcode | Instruction and operands | Format and canonical encoding | Effect |
+| --- | --- | --- | --- |
+| 0x26 | `pmov pair_dst, pair_src` | R; rs2=0, function=0 | Copy both captured words and protected kind |
+| 0x27 | `padd pair_dst, pair_src, scalar_delta` | R; function=0 | Checked signed 64-bit **byte** displacement; preserve allocation identity/view/rights |
+| 0x28 | `pload pair_dst, [pair_address + disp]` | I; signed imm18 | One typed 16-byte read and kind transport |
+| 0x29 | `pstore pair_src, [pair_address + disp]` | I; source in rd, address in rs1 | One typed 16-byte write and kind transport |
+| 0x2a | `pread scalar_dst, [pair_address], width` | R; rs2=0; function=0/1/2/3 for 1/2/4/8 bytes | Exact-width read, zero extend, ordinary destination write clears any overlapping pair kind |
+| 0x2b | `pwrite scalar_src, [pair_address], width` | R; source in rd; rs2=0; same width function | Exact-width write of low bits; invalidate all overlapping memory kinds |
+| 0x2c | `pframe manifest_index` | S; unsigned index26 | Trusted reservation and atomic issuance of a manifest's local descriptors |
+| 0x2d | `plocal pair_dst, local_index` | I; rs1=0; unsigned index17, bit17=0 | Lookup a preissued descriptor at position zero in the current active scope |
+| 0x2e | `punframe` | S; payload=0 | Retire the exact current scope before releasing its storage |
+
+0x2f is unassigned. No instruction accepts a raw integer base for issuance or typed
+storage. Assembly validates field ranges **before** encoding, including signed
+imm18 [-131072,131071]; masking an overflowing register/immediate is not admission.
+Unused fields and invalid width/pair encodings fault without operand effects.
+Reservations become executable only in the authenticated protected application
+profile; a valid word by itself is neither a pointer kind nor allocation authority.
+
+PMOV captures before replacing the destination, including self/overlapping scalar
+sources of PADD. PADD treats its scalar delta as two's-complement signed bytes and
+checks overflow and view bounds; one-past is representable but cannot authorize a
+nonempty access. Null can be transported through PMOV/PLOAD/PSTORE, but is not a
+memory address or arithmetic source. PLOAD/PSTORE first derive the address with
+checked signed displacement and validate the **whole** 16-byte span against its
+allocation/view/rights, current domain, backing generation and Fabric permission.
+The storage cell must also be 16-byte aligned in the backing object. Payload order
+is little-endian handle then position. They use the existing serialized typed
+transport rules, not two independent eight-byte transactions. A loaded non-null
+payload without a matching protected kind is rejected. All failed admissions
+preserve register operands, memory bytes and kinds; instruction fault reporting
+and PC handling remain separate control effects.
+
+### Trusted manifest and frame state
+
+An ABI v2 application artifact supplies an immutable frame-manifest table, validated
+at admission and bound to its published artifact identity/generation and code.
+Each record has: index (<2^26), authorized entry code offset, scope identity/parent,
+function/call association, positive frame byte size (multiple of 16), authorized
+exit sites/control transitions, and ordered local storage records. Local records
+have index (<2^17), relative byte offset, positive length, alignment (1/2/4/8/16),
+read/write rights, and storage class (application object, scalar compiler slot or
+typed pointer slot). Typed slots have size/alignment 16. Records are disjoint,
+fit the frame without overflow, and cannot name control metadata, caller storage,
+padding or another allocation. Union/interior views must be explicit same-allocation
+views in a later extension; overlapping independent manifest allocations are
+rejected here. Dynamic-sized locals, arbitrary jumps across scope boundaries,
+setjmp/longjmp and unvalidated indirect/tail transitions are outside this first
+compiler subset and must be rejected, not assigned guessed lifetimes.
+
+The loader must validate artifact provenance, manifest structure, entry/exit PCs,
+call ancestry and allowed control-flow transitions. A seal alone does not prove a
+manifest is safe. An application cannot choose a larger ambient stack range,
+replace a manifest with writable bytes, or mint a descriptor by presenting FP/SP.
+The stack region/backing comes from the existing process virtual-layout and physical
+placement managers. This design adds no independent hard-coded placement scheme.
+
+Each execution context owns a **private** stack cursor, stack region, active scope
+stack and activation identities. A frame record binds context identity, domain,
+artifact generation, protected call activation/scope ancestry, manifest, backing
+object/generation, reserved interval, parent cursor/FP and preissued descriptors.
+Activation identities do not wrap. Separate threads have separate stacks; the
+current single global `ScopedPointers` LIFO stack is not sufficient for this design.
+Sharing a Fabric must not force unrelated threads to retire in global LIFO order.
+
+PFRAME uses the private cursor, never integer FP/SP, to reserve [cursor-size,cursor).
+Admission checks stack limits, 16-byte alignment, exact authenticated entry,
+correct ancestry, no duplicate activation, manifest validity, current Fabric
+backing/rights, and capacity for **all** records. Issue all descriptors and publish
+the frame atomically, or publish none and preserve cursor, scopes and operands.
+Their bounds are individual local intervals, not the ambient stack or whole frame.
+PFRAME publishes SP/FP=frame base while saving previous values privately. Scalar
+writes to FP/SP cannot change allocation ownership or the private cursor.
+
+PLOCAL is a lookup into that frame, including scalar and compiler spill slots; it
+cannot request a new base, length or rights. Repeated lookup preserves allocation
+identity and generation. ABI v2 scalar slot accesses also use protected addressing
+and PREAD/PWRITE; legacy raw LD/ST/LDB/STB/XCHG addressing cannot bypass the contract.
+Pointer arguments may retain caller allocations while the callee owns its own frame.
+CALL suspends caller scope ownership rather than retiring it. Nested lexical scopes
+use separate manifested activations and retire in context-local order. The initial
+compiler may restrict itself to function-scoped fixed storage until nested scope
+transitions are implemented and validated.
+
+### Retirement, return and events
+
+PUNFRAME requires the current context/domain, exact top activation and protected
+exit authority. Close new admissions first; wait for previously admitted CPU/DMA
+work to reach terminal drain; invalidate every descriptor owned by that activation
+and associated protected storage kinds; then pop the frame and restore the private
+parent cursor and FP/SP. These effects form one serialized retirement transition.
+Failure changes none of them. Parent allocations survive a child's retirement.
+Copied pointer words/kinds in registers or caller cells cannot revive a retired
+allocation. Storage reuse requires retirement, drain and a fresh generation;
+epoch exhaustion retires the descriptor slot permanently rather than wrapping.
+
+RET and tail exits require no outstanding scope for the returning call activation
+and genuine protected return authority. Every early return closes its scopes first;
+branching around PUNFRAME does not authorize RET. Process teardown/trusted unwind
+must retire scopes in order and drain before releasing backing. Normal guest
+retirement cannot retire another context's or an ancestor's scope. Until leases
+are implemented, this first sequential slice must reject DMA exports of local
+storage rather than pretending there is nothing to drain.
+
+TRAP/IRQ entry **suspends**, rather than retires, the interrupted frame stack and
+private cursor. The protected event image must save those fields with its existing
+words/kinds/control image; handlers use an isolated trusted scope stack. ERET
+restores the matching interrupted stack only after handler-owned scopes have closed.
+An event header or scalar register cannot authorize retirement or frame restoration.
+This extends DN-57's implementation obligations; it is not already supplied by the
+current event image. Physical CPU migration retains context identity and its stack.
+
+### Gates and scope of proof
+
+`anka107_pointer_encoding.kleis` specifies canonical fields, signed displacement
+representability, profile/semantic admission, and quantified R/I field round trips.
+`anka107_pointer_frames.kleis` specifies context-bound admission, stack subtraction,
+local interval/alignment and disjointness, preissued lookup, ordered/drained exit,
+allocation invalidation and storage reuse. Hostile files assert their negations and
+must all be explicitly disproved. Quantified witnesses cover stack containment,
+nonwrapping local ends, rejected retirement preservation and parent survival.
+
+The manifest, control, capacity, backing, generation and drain flags are explicit
+trusted implementation obligations. These are conditional predicate/transition
+refinements, not an inductive whole-machine proof, a verified loader/CC2 proof, or
+an implementation of concurrent allocation retirement. The next slice must provide
+those obligations in runtime state and validated artifact metadata before exposing
+PFRAME/PLOCAL. The final compiler-backed local-array/call/spill/escape witness and
+malloc remain open.
+
+Run all formal gates with:
+
+```sh
+python3 scripts/check-anka107-gates.py --kleis /path/to/kleis
+```
+
+Validation: the full Phase 10.7 runner passed **721 positive witnesses and 665
+hostile witnesses explicitly disproved**. This adds 49 encoding and 56 frame
+witnesses, with 105 corresponding hostile checks. No Rust/compiler code changed;
+the previously reported 1025-test runtime result remains the baseline, not a new
+runtime run for this formal-only checkpoint.
+
+## DN-59 — Concrete protected local application ABI (Phase 10.7)
+
+The implementation binds DN-58's nine canonical pointer instructions to a validated,
+sealed linked image. CC2 has an explicit protected-application profile; its own
+bootstrap remains the established compiler profile. This distinction is trusted
+invocation policy, not a source filename or integer-cast escape hatch.
+
+ABI v2 uses even register pairs for opaque pointer words, with protected register
+kinds; scalar arguments consume one of R0–R3 and pointer arguments consume an
+aligned pair. Pointer results use R0/R1. Typed spills occupy aligned 16-byte local
+slots and use PLOAD/PSTORE. Scalar and byte accesses use PREAD/PWRITE with exact
+width. C element offsets lower to one checked PADD per element byte, avoiding a wrapping
+scalar multiplication before bounds checking. Subtraction rejects signed-minimum
+negation. Each checked step retains allocation identity and bounds.
+Adding two pointers, constructing pointers from arbitrary integers, and unsupported mixed interfaces
+are rejected. Fixed byte/word arrays, address-taking, pointer parameters and returns,
+and indirect scalar reads/writes are the initial supported application subset.
+Nested block declarations are rejected until lexical activation lowering exists.
+
+The linked literal section contains an exactly consumed little-endian v2 manifest:
+magic `0x50313037`, version, exact code length, function count, then each function's
+entry/end/frame size/local count and each local's offset/length/alignment/flags.
+Flags 1 and 3 identify writable scalar/buffer and typed pointer storage. Exit sites
+are derived from canonical PUNFRAME instructions. Admission validates complete code,
+function coverage, canonical fields, branch/call destinations, distinct local bounds,
+and exit structure before binding the bytes to a current sealed Fabric object.
+
+PFRAME allocates from a private context cursor and atomically registers every local;
+PLOCAL only retrieves those registrations. Allocation bounds retain declared array
+length even when storage is padded. PUNFRAME invalidates owned descriptors and kinds
+before restoring parent cursor/FP/SP and the protected saved LR. Caller allocations
+survive child retirement. Event images suspend and restore frame ownership. Process
+teardown also retires suspended frames. Scope LIFO order is per context, allowing
+independent contexts to interleave without sharing a global stack.
+
+This first slice is sequential: protected stacks reject DMA export and other-domain
+sharing. Protected applications can use scalar SYS_EXIT only; numeric-address
+syscalls are rejected until a typed syscall ABI is implemented. Malloc, DMA leases,
+shared allocation retirement, aggregates and nested lexical lifetimes remain future
+work. A pointer is still an opaque allocation identity and position with protected
+kind, bounds, rights, generation and backing state; it is never an ordinary integer.
+
+The larger compiler source uses the existing virtual layout builder and placement
+manager to reserve a disjoint source span. Frozen bootstrap entry points retain
+legacy geometry. CPU-only compiler/preprocessor/linker harnesses discard terminal
+transaction diagnostics between bounded execution quanta; transaction IDs remain
+monotonic and live transactions are retained. This is not device retirement or a
+change to application/kernel transaction semantics.
+
+The artifact gate adds 23 positive and 23 hostile witnesses, including the scaling
+no-wrap invariant and signed-minimum negation boundary. All Phase 10.7 formal
+gates pass: **744 positive, 688 hostile explicitly disproved**. These remain
+conditional refinements, not an inductive whole-machine or verified-compiler proof.
+
+Validation checkpoint: all formal gates passed (744 positive / 688 explicitly
+ disproved hostile witnesses). Focused runtime checks passed: 64 core, 50 Fabric,
+280 OS, 11 ISA, 6 instruction-description, 3 scoped-pointer tests, artifact parser,
+source-layout and protected output transport checks. All Cargo test targets build.
+The full suite contains 1037 tests. Full debug/release runs were interrupted by
+resource limits; no full-suite success is claimed. The old bootstrap closure test
+hit this container's 8 GB limit. The exact self-host chain passed before the last
+checked-scaling change, and the emitted protected probe admitted and exited 10 in
+a diagnostic run. 
+
+```sh
+cargo test --lib p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address -- --test-threads=1 --nocapture
+cargo test -- --test-threads=1
+```
+test result: ok. 1037 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 977.42s

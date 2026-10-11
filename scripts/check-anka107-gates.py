@@ -13,7 +13,7 @@ args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
 executable = str(Path(args.kleis).resolve()) if '/' in args.kleis else args.kleis
 all_ok = True
-for stem in ('anka107_application_pointers', 'anka107_userspace_rebuild', 'anka107_byte_transactions', 'anka107_cc2_byte_lowering'):
+for stem in ('anka107_application_pointers', 'anka107_userspace_rebuild', 'anka107_byte_transactions', 'anka107_cc2_byte_lowering', 'anka107_pointer_metadata', 'anka107_pointer_representation', 'anka107_pointer_concurrency', 'anka107_pointer_kind_abi', 'anka107_pointer_machine', 'anka107_pointer_events', 'anka107_pointer_encoding', 'anka107_pointer_frames', 'anka107_pointer_artifact'):
     for hostile in (False, True):
         path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')
         expected = len(re.findall(r'^example\s+"', path.read_text(), re.MULTILINE))
