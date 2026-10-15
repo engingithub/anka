@@ -3362,14 +3362,26 @@ client and an adversarial gate before the next one depends on it:
       - 20/20 positive source-bundle witnesses, 0/16 hostile witnesses accepted
       - 21/21 positive include-preprocessing witnesses, 0/17 hostile witnesses accepted
       - implementation pending
-10.6  AnkaCC2 self-host bootstrap and fixed-point closure
-10.7  modularize the compiler/toolchain itself under AC2
-10.8  rebuild/refactor Anka userspace with headers, modules, and libraries
+10.6  AnkaCC2 self-host bootstrap and fixed-point closure — COMPLETE
+10.7  verified CC2 application rebuild and protected local pointer ABI — COMPLETE
+      - byte/word access, checked pointer arithmetic, typed calls and spills
+      - local-frame registration/retirement and protected event save/restore
+      - exact self-hosted CC2 lineage and compiler-backed application witnesses
+      - 1037/1037 Rust tests; 744 positive / 688 hostile Kleis checks
+10.8  typed syscall I/O and broader modular toolchain/userspace rebuild
+      - bounded protected byte-buffer I/O is the next implementation milestone
+      - compiler/toolchain modularization, headers, modules, and libraries
+      - persistent tool/source receipts and rebuilt socket/HTTP services
 10.9  supply-chain closure, hostile audit, and CPU-to-HTTP rebuild gate
 ```
 
-Subphase boundaries may move when a demanding client exposes a better dependency
-order, but the end conditions do not.
+The completed 10.7 scope is fixed by DESIGN_NOTES.md DN-59. The former roadmap
+entry assigning compiler/toolchain modularization to 10.7 is superseded; that work
+is scheduled in 10.8. Typed syscall I/O and service rebuilds are future milestones,
+not outstanding requirements for the completed protected local application
+checkpoint. The final Phase 10 acceptance conditions remain unchanged: rebuilding
+the exact socket/HTTP artifacts and producing the alive response are still
+required before Phase 10 as a whole closes.
 
 #### Phase 10.0 closure: AC2, bootstrap, and AOM/link contracts
 

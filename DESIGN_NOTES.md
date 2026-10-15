@@ -4851,6 +4851,13 @@ not itself authorize ordinary application execution.
 
 ## DN-48: Rebuild Applications With Verified CC2 and Separate Execution Authority (Phase 10.7)
 
+**Current phase status:** Phase 10.7 is complete and merged to `main`; DN-59 records
+its final scope and the 1037-test validation. The checkpoints below retain their
+historical status at the time of each implementation step. Earlier statements that
+10.7 remains open do not override DN-59. Typed syscall I/O, compiler/toolchain
+modularization, persistent tool/source receipts, and broader service rebuilds are
+scheduled in 10.8; the final CPU-to-HTTP closure remains 10.9.
+
 **Checkpoint, 2026-10-10.** On `feat/anka107-userspace-rebuild`, the user reported
 **997 passing tests, zero failures**, run single threaded (864.83 seconds). The
 concrete CC2-backed application witness passes. Phase 10.7 remains open; this is
@@ -5896,6 +5903,19 @@ runtime run for this formal-only checkpoint.
 
 ## DN-59 — Concrete protected local application ABI (Phase 10.7)
 
+**Status: COMPLETE, merged to `main`, 2026-10-10.** Phase 10.7 closes the verified
+CC2 application rebuild and protected local-pointer milestone: byte/word accesses,
+checked scaled arithmetic, typed pointer arguments/results and spills, local-frame
+registration/retirement, and protected event-context save/restore. The exact
+CC2_0 → CC2_1 → CC2_2 fixed point and compiler-backed application/hostile witnesses
+pass in the final full suite.
+
+This scope supersedes the earlier roadmap assignment of compiler/toolchain
+modularization to 10.7. Phase 10.8 starts with typed syscall I/O, then broader
+modular toolchain/userspace rebuilds. Those tasks, malloc and the other deferred
+features below do not reopen 10.7. Phase 10.9 retains the final supply-chain audit
+and exact rebuilt CPU-to-HTTP alive-response acceptance gate.
+
 The implementation binds DN-58's nine canonical pointer instructions to a validated,
 sealed linked image. CC2 has an explicit protected-application profile; its own
 bootstrap remains the established compiler profile. This distinction is trusted
@@ -5948,15 +5968,14 @@ no-wrap invariant and signed-minimum negation boundary. All Phase 10.7 formal
 gates pass: **744 positive, 688 hostile explicitly disproved**. These remain
 conditional refinements, not an inductive whole-machine or verified-compiler proof.
 
-Validation checkpoint: all formal gates passed (744 positive / 688 explicitly
- disproved hostile witnesses). Focused runtime checks passed: 64 core, 50 Fabric,
-280 OS, 11 ISA, 6 instruction-description, 3 scoped-pointer tests, artifact parser,
-source-layout and protected output transport checks. All Cargo test targets build.
-The full suite contains 1037 tests. Full debug/release runs were interrupted by
-resource limits; no full-suite success is claimed. The old bootstrap closure test
-hit this container's 8 GB limit. The exact self-host chain passed before the last
-checked-scaling change, and the emitted protected probe admitted and exited 10 in
-a diagnostic run. 
+**Final validation checkpoint, 2026-10-10:** all **1037 Rust/runtime tests passed**,
+single threaded, in 977.42 seconds. This supersedes the earlier container-limited
+validation checkpoint and validates the final checked-scaling compiler changes,
+fixed-point lineage and protected application witnesses. The full Phase 10.7
+Kleis runner passes **744 positive witnesses and 688 hostile assertions explicitly
+disproved**; Unknown results are never accepted.
+
+Commands for reproducing the checkpoint:
 
 ```sh
 cargo test --lib p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address -- --test-threads=1 --nocapture
