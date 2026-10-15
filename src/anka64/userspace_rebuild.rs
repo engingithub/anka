@@ -181,6 +181,19 @@ mod tests {
         let mut app=rebuild_protected_application(&producer,&bundle(source),Some(&authority)).unwrap();
         assert_eq!(app.run(Some(&authority)).unwrap().child_result,ProcessResult::Exited(42));
         assert!(matches!(rebuild_protected_application(&producer,&bundle(b"int main(){if(1){char b;}return syscall(0,0,0,0);}"),Some(&authority)),Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
+        // Phase 10.8 shares this exact fixed-point lineage, avoiding a second
+        // expensive bootstrap solely for the typed-output integration witness.
+        let output_source=include_bytes!("../../userspace/bin/typed_output_probe.c");
+        let mut output=rebuild_protected_application(&producer,&bundle(output_source),Some(&authority)).unwrap();
+        let report=output.run(Some(&authority)).unwrap();
+        assert_eq!(report.child_result,ProcessResult::Exited(0));
+        assert_eq!(report.byte_output,vec![65,0,255,66]);
+        for source in [b"int main(){return write_bytes(65536,4);}".as_slice(),
+            b"int main(){int b[2];return write_bytes(b,8);}".as_slice(),
+            b"int main(){char b[2];return write_bytes(b,b);}".as_slice()] {
+            assert!(matches!(rebuild_protected_application(&producer,&bundle(source),Some(&authority)),
+                Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
+        }
         let original_key = producer.cc2_1_key;
         producer.cc2_1_key = producer.cc2_2_key;
         assert!(matches!(producer.application_tools(), Err(Cc2FixedPointError::PublicationIdentityChanged)));

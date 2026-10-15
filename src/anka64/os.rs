@@ -2583,8 +2583,18 @@ impl Kernel {
     }
 
     fn handle_syscall(&mut self, idx: usize) {
-        if self.processes[idx].core.protected_application() && self.processes[idx].core.r[R0 as usize]!=SYS_EXIT {
-            self.finish_process(idx,ProcessResult::ProtectionFault);return;
+        if self.processes[idx].core.protected_application() {
+            let Some((words, kinds)) = self.processes[idx].core.protected_syscall_image() else {
+                self.finish_process(idx, ProcessResult::ProtectionFault); return;
+            };
+            match words[R0 as usize] {
+                SYS_EXIT if kinds[0].is_none() => {
+                    self.finish_process(idx, ProcessResult::Exited(words[R1 as usize]));
+                }
+                SYS_WRITE => self.handle_protected_buffer_write(idx, words, kinds),
+                _ => self.finish_process(idx, ProcessResult::ProtectionFault),
+            }
+            return;
         }
 
         let syscall = self.processes[idx].core.r[R0 as usize];
@@ -2707,6 +2717,47 @@ impl Kernel {
     /// R1 = virtual address of the object to seal.
     /// Returns: R0 = 0 on success, R0 = MAX on error.
     ///
+    /// DN-60: protected R2/R3 source, R4 count; saved scalar R1/R5 zero.
+    /// This entire call holds exclusive Kernel/Fabric access: no scheduler,
+    /// scope retirement, DMA callback or revocation can interleave or outlive it.
+    /// Thus the stack-local borrow is the serialized lease refinement; it is
+    /// not an SMP/async lease implementation. Staging never exposes a prefix.
+    fn handle_protected_buffer_write(&mut self, idx: usize, words: [u64; 16],
+        kinds: [Option<super::scoped_pointers::ScopedPointer>; 6]) {
+        let length = words[4];
+        let staged = (|| -> Option<Vec<u8>> {
+            if words[1] != 0 || words[5] != 0 || kinds[0].is_some()
+                || kinds[2].is_some() || length > MAX_WRITE { return None; }
+            let pointer = kinds[1]?;
+            if pointer.words() != [words[2], words[3]] { return None; }
+            let core = &self.processes[idx].core;
+            let (object, offset) = core.syscall_read_span(&self.fabric, pointer, length).ok()?;
+            // Reserve the sink before reading, but do not change its visible size.
+            self.byte_output.len().checked_add(length as usize)?;
+            self.byte_output.try_reserve(length as usize).ok()?;
+            let mut bytes = Vec::new();
+            bytes.try_reserve_exact(length as usize).ok()?;
+            for i in 0..length {
+                // Identity, full-range authority and exact byte transaction are
+                // independently rechecked; a pin never overrides revocation.
+                core.syscall_read_span(&self.fabric, pointer, length).ok()?;
+                let request = MemoryRequest { context: AccessContext {
+                    agent: core.agent, domain: core.domain, privilege: Privilege::Supervisor },
+                    object, offset: offset.checked_add(i)?, width: Width::Byte,
+                    length: 1, kind: AccessKind::Read };
+                bytes.push(*self.fabric.execute_read(request).ok()?.first()?);
+            }
+            core.syscall_read_span(&self.fabric, pointer, length).ok()?;
+            Some(bytes)
+        })();
+        let result = match staged {
+            Some(bytes) => { self.byte_output.extend_from_slice(&bytes); length }
+            None => u64::MAX,
+        };
+        self.processes[idx].core.write_syscall_result(R0 as usize, result);
+        self.resume_from_trap(idx);
+    }
+
     /// Authority check: the calling domain must possess a valid SEAL
     /// capability covering the entire object.  WRITE authority alone
     /// is not sufficient — writing a buffer and authorizing it to
@@ -5378,6 +5429,109 @@ mod tests {
         core.trap_vector = 0x3FF0;
 
         (core, dom, text, data, stack)
+    }
+
+    fn typed_output_fixture(length: u64, position: i64) -> (Kernel, ObjectId) {
+        use super::super::pointer_frames::{ValidatedPointerProgram, FrameManifest, LocalStorage};
+        let mut fabric = Fabric::new(0x400000);
+        let (mut core, domain, text, _, stack) = create_process(
+            &mut fabric, CPU0, "typed_output", 0, 0x10000, 0x20000);
+        let mut asm = Asm64::new();
+        asm.pframe(0); asm.plocal(R2, 0);
+        asm.movi(R12, 65); asm.pwrite(R12, R2, 1);
+        asm.movi(R12, position as i32); asm.padd(R2, R2, R12);
+        asm.movi(R0, SYS_WRITE as i32); asm.movi(R1, 0);
+        asm.movi(R4, length as i32); asm.movi(R5, 0); asm.trap(0);
+        let exit = asm.here() as u64 * 4;
+        asm.punframe(); asm.ret();
+        let code = asm.to_bytes();
+        fabric.write_physical(0, &code);
+        seal_code_object(&mut fabric, text, domain);
+        fabric.register_agent(CPU0, AgentKind::Cpu(CoreId(0)), domain);
+        let program = ValidatedPointerProgram::validate(&code, vec![FrameManifest {
+            entry: 0, end: code.len() as u64, size: 16, exits: vec![exit],
+            locals: vec![LocalStorage { offset: 0, length: 4, alignment: 1,
+                writable: true, pointer_slot: false }],
+        }]).unwrap();
+        core.admit_pointer_program(&mut fabric, program, 0, 0x20000, 0x24000).unwrap();
+        for _ in 0..16 {
+            if matches!(core.step(&mut fabric), StepResult::Halted) { break; }
+        }
+        assert!(core.protected_syscall_image().is_some());
+        let mut kernel = Kernel::new(fabric); kernel.spawn(core);
+        kernel.byte_output.push(90);
+        (kernel, stack)
+    }
+
+    #[test]
+    fn p108_typed_output_uses_saved_pointer_and_preserves_it() {
+        let (mut kernel, _) = typed_output_fixture(4, 0);
+        // Handler scratch cannot replace captured words or clear saved kind.
+        kernel.processes[0].core.write_register(R2 as usize, 123);
+        kernel.processes[0].core.write_register(R4 as usize, u64::MAX);
+        kernel.processes[0].core.write_register(R0 as usize, SYS_EXIT);
+        kernel.handle_syscall(0);
+        assert_eq!(kernel.byte_output, [90, 65, 0, 0, 0]);
+        assert_eq!(kernel.processes[0].core.r[0], 4);
+        assert_eq!(kernel.processes[0].core.pointer_read(&mut kernel.fabric, R2, Width::Byte).unwrap(), [65]);
+        assert!(kernel.processes[0].core.pointer_read(&mut kernel.fabric, R0, Width::Byte).is_err());
+    }
+
+    #[test]
+    fn p108_typed_output_empty_one_past_and_exact_boundary() {
+        for (n, pos, expected) in [(0, 4, 0), (1, 4, u64::MAX), (2, 3, u64::MAX),
+            (65537, 0, u64::MAX), (1, 3, 1)] {
+            let (mut kernel, _) = typed_output_fixture(n, pos);
+            kernel.handle_syscall(0);
+            assert_eq!(kernel.processes[0].core.r[0], expected);
+            assert_eq!(kernel.byte_output.len(), 1 + if expected == u64::MAX { 0 } else { expected as usize });
+        }
+    }
+
+    #[test]
+    fn p108_typed_output_rejects_revoked_split_and_write_only_authority() {
+        for case in 0..3 {
+            let (mut kernel, stack) = typed_output_fixture(4, 0);
+            let domain = kernel.processes[0].core.domain;
+            if case == 0 { kernel.fabric.revoke(stack); }
+            else {
+                kernel.fabric.domains.get_mut(&domain).unwrap().capabilities.retain(|e| e.cap.object() != stack);
+                if case == 1 {
+                    kernel.fabric.grant(domain, stack, 0x3ff0, 2, Permissions::READ);
+                    kernel.fabric.grant(domain, stack, 0x3ff2, 2, Permissions::READ);
+                } else { kernel.fabric.grant(domain, stack, 0, 0x4000, Permissions::WRITE); }
+            }
+            kernel.handle_syscall(0);
+            assert_eq!(kernel.processes[0].core.r[0], u64::MAX);
+            assert_eq!(kernel.byte_output, [90]);
+        }
+    }
+
+    #[test]
+    fn p108_typed_output_rejects_forgery_and_noncanonical_lanes() {
+        for case in 0..6 {
+            let (mut kernel, _) = typed_output_fixture(if case == 1 { 0 } else { 4 }, 0);
+            let (mut words, mut kinds) = kernel.processes[0].core.protected_syscall_image().unwrap();
+            match case {
+                0 | 1 => kinds[1] = None,
+                2 => words[3] += 1, // payload/tag mismatch
+                3 => words[1] = 1,
+                4 => words[5] = 1,
+                _ => kinds[2] = kinds[1], // pointer-kind length lane
+            }
+            kernel.handle_protected_buffer_write(0, words, kinds);
+            assert_eq!(kernel.processes[0].core.r[0], u64::MAX);
+            assert_eq!(kernel.byte_output, [90]);
+        }
+    }
+
+    #[test]
+    fn p108_typed_output_rejects_tampered_event_before_publication() {
+        let (mut kernel, _) = typed_output_fixture(4, 0);
+        kernel.processes[0].core.event_frames.last_mut().unwrap().return_pc += 4;
+        kernel.handle_syscall(0);
+        assert_eq!(kernel.processes[0].result, Some(ProcessResult::ProtectionFault));
+        assert_eq!(kernel.byte_output, [90]);
     }
 
     #[test]

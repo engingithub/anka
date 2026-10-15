@@ -1417,6 +1417,32 @@ impl Fabric {
         Ok((object, offset.checked_add(pointer.words()[1]).ok_or(E::Unmapped)?))
     }
 
+    /// One generation-current READ grant covers the complete output range.
+    /// Empty ranges validate the point inclusively without weakening covers(),
+    /// which intentionally rejects zero-width memory transactions elsewhere.
+    pub(crate) fn authorize_pointer_output(&self, agent: AgentId, domain: DomainId,
+        object: ObjectId, offset: u64, length: u64) -> bool {
+        if !self.agents.get(&agent).is_some_and(|a|
+            a.domain == domain && matches!(a.kind, AgentKind::Cpu(_))) { return false; }
+        if self.pointer_stack_objects.get(&object).is_some_and(|(_, owner)| *owner != domain) {
+            return false;
+        }
+        if length != 0 {
+            let req = MemoryRequest { context: AccessContext { agent, domain,
+                privilege: Privilege::Supervisor }, object, offset,
+                width: Width::Byte, length, kind: AccessKind::Read };
+            return matches!(self.authorize(&req), AuthResult::Authorized(_));
+        }
+        let Some(obj) = self.objects.get(&object) else { return false; };
+        if offset > obj.size { return false; }
+        self.domains.get(&domain).is_some_and(|d| d.capabilities.iter().any(|entry| {
+            let cap = &entry.cap;
+            cap.object() == object && self.validate(cap)
+                && cap.permissions().contains(Permissions::READ)
+                && offset >= cap.offset() && offset - cap.offset() <= cap.length()
+        }))
+    }
+
     /// All successful byte writers, including DMA/atomic/bootstrap, share this barrier.
     fn clear_pointer_cells_physical(&mut self, base: u64, length: u64) {
         if length == 0 { return; }

@@ -86,6 +86,18 @@ impl ScopedPointers {
         a.base.checked_add(pointer.position).ok_or(PointerError::Bounds)
     }
 
+    /// Synchronous syscall borrow: authentic live allocation, exact owner and
+    /// range, including a validated one-past empty range. No token escapes.
+    pub(crate) fn read_span(&self, pointer: ScopedPointer, domain: u64,
+        owner: u64, length: u64) -> Result<u64, PointerError> {
+        let a = self.allocation(pointer, domain)?;
+        if self.owners.get(&a.scope) != Some(&owner) { return Err(PointerError::InvalidScope); }
+        if pointer.position > a.length || length > a.length - pointer.position {
+            return Err(PointerError::Bounds);
+        }
+        a.base.checked_add(pointer.position).ok_or(PointerError::Bounds)
+    }
+
     pub(crate) fn storage_span(&self, pointer:ScopedPointer) -> Option<(u64,u64)> {
         let a=self.slots.get(pointer.slot)?;
         if a.generation!=pointer.generation { return None; }

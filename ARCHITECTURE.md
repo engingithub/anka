@@ -3369,7 +3369,11 @@ client and an adversarial gate before the next one depends on it:
       - exact self-hosted CC2 lineage and compiler-backed application witnesses
       - 1037/1037 Rust tests; 744 positive / 688 hostile Kleis checks
 10.8  typed syscall I/O and broader modular toolchain/userspace rebuild
-      - bounded protected byte-buffer I/O is the next implementation milestone
+      - synchronous protected console output COMPLETE: ABI, runtime/lowering, DN-60
+      - exact CC2 fixed point and rebuilt output probe pass; 1043/1043 Rust tests
+      - 113 positive / 86 hostile Kleis checks; 10.7 prerequisites remain green
+      - typed trap ABI, exact buffer READ authority, lease drain, atomic output
+      - broader typed I/O requires its next contract; input/async I/O remain open
       - compiler/toolchain modularization, headers, modules, and libraries
       - persistent tool/source receipts and rebuilt socket/HTTP services
 10.9  supply-chain closure, hostile audit, and CPU-to-HTTP rebuild gate
@@ -3377,9 +3381,10 @@ client and an adversarial gate before the next one depends on it:
 
 The completed 10.7 scope is fixed by DESIGN_NOTES.md DN-59. The former roadmap
 entry assigning compiler/toolchain modularization to 10.7 is superseded; that work
-is scheduled in 10.8. Typed syscall I/O and service rebuilds are future milestones,
-not outstanding requirements for the completed protected local application
-checkpoint. The final Phase 10 acceptance conditions remain unchanged: rebuilding
+is scheduled in 10.8. Typed console output is the first completed 10.8 slice,
+validated by the exact CC2 application witness and 1043 passing Rust/runtime tests
+on 2026-10-15. Broader I/O and service rebuilds remain future milestones, not
+outstanding requirements for the completed protected local application checkpoint. The final Phase 10 acceptance conditions remain unchanged: rebuilding
 the exact socket/HTTP artifacts and producing the alive response are still
 required before Phase 10 as a whole closes.
 

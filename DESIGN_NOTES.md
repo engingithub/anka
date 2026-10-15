@@ -5982,3 +5982,207 @@ cargo test --lib p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_ad
 cargo test -- --test-threads=1
 ```
 test result: ok. 1037 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 977.42s
+
+## DN-60 — Typed syscall console-output contract (Phase 10.8)
+
+**Status, 2026-10-15: synchronous protected console output COMPLETE and validated.**
+Formal gates, exact CC2 fixed-point/application integration, and all **1043
+Rust/runtime tests** pass. Phase 10.7 remains complete. This is the first bounded slice of 10.8,
+not a claim that input, asynchronous I/O, or the userspace service rebuild is done.
+
+### Contract and concrete trap ABI
+
+`theories/anka108_typed_syscall_io.kleis` imports the 10.7 protected pointer and
+event contracts without adding axioms. The first operation is synchronous console
+byte output, reusing syscall number `SYS_WRITE = 1` under a **protected-mode trap
+ABI**. The legacy address-based ABI remains a separate dispatch path; protected
+validation failure must never fall back to it.
+
+| Lane | Protected SYS_WRITE meaning |
+| --- | --- |
+| R0 | syscall number 1; scalar |
+| R1 | reserved, exactly zero |
+| R2/R3 | protected descriptor handle and allocation-relative byte position |
+| R4 | byte count, 0 through 65536 inclusive; scalar |
+| R5 | flags, exactly zero |
+| Result R0 | complete byte count on success; `u64::MAX` on failure |
+
+The R0/R1 and R4/R5 pairs must have scalar kind; R2/R3 must have protected pointer
+kind. Syscall arguments and pointer tags are captured from the authenticated
+**saved application event image**, not the handler's registers, whose pointer tags
+are cleared on entry. `io108_request` composes the actual ABI, descriptor/allocation
+range, event ownership/mode/depth, and serialized lease admission checks.
+
+This trap ABI is not an extension of the four-lane CC2 C function-call ABI. A future
+compiler intrinsic/wrapper taking `(char *buffer, int length)` can receive its
+pointer in R0/R1 and length in R2, save length into scalar R4, PMOV the pointer to
+R2/R3, then install scalar syscall number/reserved/flags. Implementation must preserve
+live values using the existing typed spill discipline. The exact source-level
+intrinsic name and lowering still require an implementation/refinement review;
+ordinary raw `syscall(1, address, length, 0)` is not silently reinterpreted.
+
+### Buffer authority and zero length
+
+One current descriptor, one live allocation generation, and one current Fabric
+READ grant must cover the entire requested interval. The local allocation owner
+context and descriptor domain must match the caller. Descriptor rights and Fabric
+rights must each include READ; WRITE alone never authorizes output. Permission
+fragments and mappings cannot be stitched to fabricate a wider grant. Bounds are
+checked by subtraction before any addition, so request and effective-address
+arithmetic cannot wrap. Reads are exact bytes; byte alignment is sufficient.
+
+Zero length deliberately differs from legacy SYS_WRITE: it still validates live
+pointer provenance, owner, domain, view and READ rights. An authentic one-past
+pointer with length zero is valid; null, forged, stale and revoked pointers are
+not exceptions. A zero-length request performs no operand read.
+
+The flat `cap_object` field identifies the allocation covered by one selected grant;
+the runtime adapter must prove its correspondence to the actual Fabric object and
+generation. `fabric_current`, `serialized`, ticket freshness/binding, and event
+header integrity denote trusted implementation obligations, never guest flags.
+A bound operation ticket includes invocation identity, allocation identity and
+generation, descriptor/view, starting position, requested length and caller context.
+A successful check cannot be reused for a different request.
+
+### Lifecycle, output atomicity and return
+
+Admission and CPU-lease acquisition linearize together. The lease prevents backing
+retirement/reuse; it does not override permission revocation. Every byte read checks
+the active bound ticket and current Fabric authority. Closing may drain an existing
+operation, but bars new operations. Scope retirement waits for the lease to drain.
+
+All bytes are staged privately. Only complete copying, current authority and a
+serialized, capacity-checked sink append permit publication. Failure discards the
+staging buffer and changes no output bytes or length. Success returns the entire
+count: this first console contract has no short/partial successful writes. It is
+output-atomic, **not a snapshot guarantee** for concurrently modified source bytes.
+The final authorization and append must share the same serialization boundary.
+`io108_publish` composes the copy/sink guard with current active/bound lease
+admission; `io108_publish_flag` is the publication decision used by sink/result
+effects. An old admission certificate alone cannot publish after lease release.
+
+Both success and post-admission failure consume the lease ticket exactly once after
+all reads cease. Pre-admission rejection acquires none. Return permits no retained
+borrow, callback, DMA operation or active ticket. R0 is the sole scalar result lane;
+10.7 event restoration preserves the source pointer pair and unrelated saved state,
+while clearing pointer kind in the R0/R1 result pair. No pointer authority is
+exported to the output sink. The application buffer is read, not modified.
+
+Blocking/input syscalls, partial transfers, retained buffers, DMA and cross-domain
+sharing are **not authorized by this checkpoint**. They need their own subsequent
+contracts and hostile witnesses before implementation. The error-return policy
+applies to well-formed owned traps; malformed/foreign protected event frames retain
+the existing process-fault behavior rather than attempting an unsafe return.
+
+### Proof scope, validation and next implementation gate
+
+Positive examples include universal refinement of an admitted buffer to each
+existing protected byte-access predicate, nonwrapping effective addresses and sink
+sizes, failed-output noninterference, and prefix/zero-length preservation. Hostile
+assertions cover raw/stale pointers, ownership/domain confusion, bounds and rights,
+zero-length forgery, revocation, event tampering, lease misuse, partial publication
+and retained authority. These are definition-level proofs and witnesses. They do
+not yet verify a kernel copy loop, compiler lowering, actual table lookup or SMP
+implementation. Boolean certificates in stage predicates must be derived from the
+complete admission/current-authority checks; they are not proof substitutes.
+
+Run the combined prerequisites and new gate using the existing Kleis installation:
+
+```sh
+python3 scripts/check-anka108-gates.py --kleis /Users/enginatik/.cargo/bin/kleis
+```
+
+Use `--only-108` for a focused rerun after the 10.7 prerequisites have passed. The
+runner requires explicit Z3 disproof of every hostile assertion; Unknown, timeout,
+missing examples and evaluation errors do not count as rejection.
+
+**Validation:** the supplied Kleis executable and standard library pass all
+**113 positive witnesses**, with **86/86 hostile assertions explicitly disproved
+by Z3**. The unchanged 10.7 prerequisites also pass (744 positive, 688 hostile),
+for a combined **857 positive / 774 explicitly disproved hostile** checkpoint.
+
+The next implementation milestone is one rebuilt protected CC2 application emitting
+an exact local byte buffer through this ABI, plus runtime rejection tests. Preserve
+existing legacy output behavior and the 10.7 fixed-point/application regressions.
+Full Rust tests remain a local MacBook checkpoint; no Rust or C code changed here.
+
+
+### DN-60 implementation checkpoint — synchronous typed console output
+
+The protected SYS_WRITE path now captures words and pointer kind from the intact,
+context-owned private syscall image. Handler scratch cannot select a different
+operation or substitute pointer payloads. Only EXIT and typed WRITE are admitted
+for protected applications; a malformed saved frame faults before output.
+Legacy SYS_WRITE retains its address-based ABI and historical return convention.
+Protected WRITE returns the byte count or `u64::MAX` and restores the source pair.
+
+`write_bytes(char *buffer, int length)` is a compiler intrinsic reserved in the
+stage-3 lexer. It is admitted only in protected profile 2, requires `char *` and a
+scalar length, uses typed spills while evaluating both expressions, and lowers to
+the DN-60 R2/R3 + R4 trap ABI. It does not reinterpret ordinary `syscall` arguments.
+The intrinsic has no implicit declaration, link dependency or host execution path.
+
+`ScopedPointers::read_span` checks owner context, domain, live generation and the
+whole interval, including zero length. Fabric checks one current READ grant and a
+matching CPU/domain. Existing nonzero-width capability semantics are unchanged;
+the new empty-range check applies only to protected console output. Every source
+byte uses an exact Fabric byte-read transaction. The runtime stages the entire
+range, rechecks authority before append, and reserves output storage without
+publishing bytes on failure. It allocates no application memory.
+
+**Serialized lease refinement:** a stack-local captured pointer is used only while
+`&mut Kernel` exclusively owns Fabric through admission, copy and append. This
+path never schedules another process, ticks a device, invokes a callback, returns
+a borrowed buffer, or runs scope retirement. Thus no backing retirement/reuse or
+revocation can interleave. These exclusive serialized operations implement the
+first synchronous contract without adding an unused lease counter. Runtime
+checks still revalidate identity/range/READ authority on each byte and before
+publication. Introducing concurrent mutation, DMA, asynchronous output, callbacks
+or a yield inside this path would invalidate this refinement and requires an
+explicit lease implementation first. The more general concurrency theories are
+not a claim that SMP has been implemented.
+
+`userspace/bin/typed_output_probe.c` emits `[65, 0, 255, 66]`, checks the returned
+count, verifies authenticated zero-length one-past output and rejection of an
+out-of-bounds span, and confirms its source remains readable. The existing
+`p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address` test now runs
+this probe with its already-built exact CC2 lineage and checks the actual byte
+output. It also rejects integer pointers, word pointers and pointer-valued lengths
+at compilation. Sharing that lineage avoids a second full bootstrap in the suite.
+
+**Checks run here:** Rust test build succeeded; six new `p108` runtime tests pass;
+three legacy `p73h` output tests, ten `p107_event` tests and two `p107_encoded`
+frame/transport tests pass. No formal files or imports changed since the already
+passing 113-positive/86-hostile 10.8 gate.
+
+**Final developer validation, 2026-10-15:** the exact CC2 integration test passed
+locally in **209.51 seconds**. CC2_0 contained 146224 code bytes; CC2_1 and CC2_2
+both contained **165256 code/backing bytes**, with entry **162568**. The fixed-point
+comparison passed, and the rebuilt typed-output probe emitted the exact expected
+bytes and passed its count, bounds, zero-length and source-preservation checks.
+The compiler rejection and ControlFlowViolation diagnostics in this passing test
+come from its deliberate hostile cases.
+
+The full single-threaded Rust/runtime suite then passed locally:
+
+```text
+test result: ok. 1043 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 999.68s
+```
+
+This closes the synchronous typed console-output slice, not Phase 10.8 as a whole.
+The previously validated formal checkpoint remains **113 positive / 86 hostile**
+for 10.8, or **857 positive / 774 hostile** including 10.7 prerequisites; every
+hostile assertion was explicitly disproved. Unchanged formal files were not rerun
+for the implementation-only changes.
+
+Developer commands (from repository root):
+
+```sh
+cargo test --lib p108 -- --test-threads=1
+cargo test --lib p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address -- --test-threads=1 --nocapture
+cargo test -- --test-threads=1
+```
+
+No unchanged Kleis rerun is needed for this implementation-only patch. If the
+10.8 contracts change, use `check-anka108-gates.py --only-108`; if a dependency,
+Kleis executable or stdlib changes, expand to the affected/full formal gates.

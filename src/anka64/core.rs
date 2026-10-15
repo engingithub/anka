@@ -314,6 +314,40 @@ impl Anka64Core {
             .and_then(|s|s.image.as_ref()).is_some_and(|i|i.frames.is_some())
     }
 
+    /// Capture only an owned, intact protected syscall image. Handler scratch
+    /// words/kinds are deliberately not a source of application authority.
+    pub(crate) fn protected_syscall_image(&self) -> Option<([u64; 16],
+        [Option<super::scoped_pointers::ScopedPointer>; 6])> {
+        let saved = self.saved_event_contexts.last()?;
+        let header = self.event_frames.last()?;
+        if self.privilege != Privilege::Supervisor || !self.protected_context_enabled
+            || self.event_frames.len() != self.saved_event_contexts.len()
+            || saved.context_id != self.context_id || saved.domain != self.domain
+            || saved.header != *header || header.cause != EventCause::Syscall
+            || self.pointer_frames.as_ref().is_some_and(|s| !s.active.is_empty()) {
+            return None;
+        }
+        let image = saved.image.as_ref()?;
+        Some((image.words, image.kinds))
+    }
+
+    /// Validate the complete protected range without performing an operand read.
+    /// &mut Kernel/Fabric serializes this borrow through final publication.
+    pub(crate) fn syscall_read_span(&self, fabric: &Fabric,
+        pointer: super::scoped_pointers::ScopedPointer, length: u64)
+        -> Result<(ObjectId, u64), PointerMachineError> {
+        let address = fabric.scoped_pointers.read_span(pointer, self.domain.0,
+            self.context_id, length).map_err(PointerMachineError::Pointer)?;
+        let backing = fabric.scoped_pointer_backing(pointer, self.domain)?;
+        if length != 0 && self.checked_pointer_mapping(address, length)? != backing {
+            return Err(PointerMachineError::Unmapped);
+        }
+        if !fabric.authorize_pointer_output(self.agent, self.domain, backing.0, backing.1, length) {
+            return Err(PointerMachineError::MissingKind);
+        }
+        Ok(backing)
+    }
+
     /// Explicit scalar syscall result, distinct from handler scratch registers.
     /// Interrupt frames never export result lanes. No call can mint pointer kind.
     pub(crate) fn write_syscall_result(&mut self, register: usize, value: u64) {
@@ -1316,6 +1350,25 @@ mod tests {
         fabric.register_agent(core.agent,AgentKind::Cpu(CoreId(0)),domain);
         core.admit_pointer_program(&mut fabric,program,0,0x8000,0x9000).unwrap();
         (fabric,core,exit0 as usize/4)
+    }
+
+    #[test]
+    fn p108_syscall_range_rejects_foreign_owner_and_stale_zero_length() {
+        let (mut fabric, _, _, _, mut core) = setup();
+        fabric.register_agent(core.agent, AgentKind::Cpu(CoreId(0)), core.domain);
+        let foreign = fabric.scoped_pointers.enter_scope_for(core.context_id + 1).unwrap();
+        core.register_local_pointer(&mut fabric, foreign, R2, 0x8000, 4, true).unwrap();
+        let p = core.captured_pointer(R2).unwrap().unwrap();
+        assert!(core.syscall_read_span(&fabric, p, 0).is_err());
+        fabric.scoped_pointers.leave_scope(foreign).unwrap();
+        let own = fabric.scoped_pointers.enter_scope_for(core.context_id).unwrap();
+        core.register_local_pointer(&mut fabric, own, R2, 0x8000, 4, true).unwrap();
+        let p = core.captured_pointer(R2).unwrap().unwrap();
+        let end = fabric.scoped_pointers.add(p, core.domain.0, 4).unwrap();
+        assert!(core.syscall_read_span(&fabric, end, 0).is_ok());
+        assert!(core.syscall_read_span(&fabric, end, 1).is_err());
+        fabric.scoped_pointers.leave_scope(own).unwrap();
+        assert!(core.syscall_read_span(&fabric, end, 0).is_err());
     }
 
     #[test]
