@@ -1,0 +1,1166 @@
+// Phase 10.8 protected separate compilation and guest-link composition.
+// SPECIFICATION ONLY. No new axioms and no runtime implementation claim.
+// AOM v1, target profile 2 and pointer manifest v2 remain the wire formats.
+// Admission role 1 means relocatable module; role 2 means closed linked image.
+// Roles are trusted validation results, never guest-granted execution authority.
+//
+// Every *_checked flag below is a conditional implementation obligation over
+// the SAME immutable bytes/request: actual parser scans, exact comparisons and
+// imported guards must establish it. The flags are not an executable parser,
+// an assumption of compiler correctness, or application-supplied certificates.
+// Per-item predicates must hold for EVERY item, not a sampled item/count alone.
+// Linker guards below use bit-vector/logical normal forms of Phase 10.4's
+// conditional Bool definitions, so they compose in quantified SMT assertions.
+// Imported pointer/receipt predicates already use that representation directly.
+import "anka104_ankald_process_abi.kleis"
+import "anka107_pointer_artifact.kleis"
+import "anka108_compiler_adapter.kleis"
+
+define pm108_yes(x : BitVec8) = x=bvconst(1,8)
+define pm108_aligned8(x : BitVec64) = bvand(x,bvconst(7,64))=bvconst(0,64)
+define pm108_nop() = bvshl(bvconst(63,64),bvconst(26,64))
+define pm108_call_opcode() = bvshl(bvconst(50,64),bvconst(26,64))
+define pm108_frame_word(index : BitVec64) =
+    bvor(bvshl(bvconst(44,64),bvconst(26,64)),index)
+
+// The first profile contains only nonempty code and exact manifest-only rodata.
+// AOM parser validates symbols/relocations; the module validator checks complete
+// frame coverage, legal instructions, local branches/returns/locals and calls.
+// An external CALL is allowed ONLY at one canonical import relocation site.
+// Definitions own a dense frame table; imported/unused prototypes own no frame.
+// module_structure includes a bijection between definitions and frame entries,
+// exact symbol-to-entry agreement and ABI argument-lane validity; equal counts
+// alone do not establish these conditions.
+define pm108_module(role : BitVec8, aom_version : BitVec64, abi : BitVec64,
+    code : BitVec64, metadata_code : BitVec64, definitions : BitVec64,
+    frames : BitVec64, total : BitVec64, parsed : BitVec8,
+    module_structure : BitVec8, exact_calls : BitVec8, producer_receipt : BitVec8) =
+    (role=bvconst(1,8)) ∧ (aom_version=bvconst(1,64)) ∧
+    (abi=bvconst(2,64)) ∧ pm108_aligned8(code) ∧ bvule(code,total) ∧
+    bvuge(total,bvconst(112,64)) ∧ bvule(total,ad108_arena()) ∧
+    (definitions=frames) ∧ pm108_yes(parsed) ∧ pm108_yes(exact_calls) ∧
+    pm108_yes(producer_receipt) ∧
+    artifact107_admit(abi,code,metadata_code,frames,bvconst(1,8),bvconst(1,8),
+        bvconst(1,8),module_structure,bvconst(1,8))
+
+// Called for every symbol after AOM classification; not every function-table
+// entry is a definition. Dense ordinal is assigned in definition-table order.
+define pm108_owns_frame(definition : BitVec8, owns_frame : BitVec8) =
+    ((definition=bvconst(1,8)) ∧ (owns_frame=bvconst(1,8))) ∨
+    ((definition=bvconst(0,8)) ∧ (owns_frame=bvconst(0,8)))
+
+// Fold ordered input modules from code_cursor=0, frame_cursor=0. No reordering,
+// hidden trampoline, inter-function gap or extra frame is introduced. These
+// are image-relative offsets; physical placement still uses placement managers.
+define pm108_layout(code_cursor : BitVec64, frame_cursor : BitVec64,
+    code : BitVec64, frames : BitVec64, next_code : BitVec64, next_frame : BitVec64) =
+    pm108_aligned8(code_cursor) ∧ pm108_aligned8(code) ∧
+    bvugt(code,bvconst(0,64)) ∧
+    bvule(code_cursor,rb108_limit()) ∧ bvule(code,bvsub(rb108_limit(),code_cursor)) ∧
+    bvugt(frames,bvconst(0,64)) ∧ bvule(frame_cursor,bvconst(4096,64)) ∧
+    bvule(frames,bvsub(bvconst(4096,64),frame_cursor)) ∧
+    (next_code=bvadd(code_cursor,code)) ∧ (next_frame=bvadd(frame_cursor,frames))
+
+define pm108_frame_index(prefix : BitVec64, local : BitVec64, count : BitVec64,
+    total : BitVec64, mapped : BitVec64) =
+    bvugt(count,bvconst(0,64)) ∧ bvule(total,bvconst(4096,64)) ∧
+    bvule(prefix,total) ∧ bvule(count,bvsub(total,prefix)) ∧ bvult(local,count) ∧
+    (mapped=bvadd(prefix,local))
+
+// PFRAME's global index is recomputed only at each authenticated frame entry.
+// Its paired NOP stays canonical. PLOCAL indices are frame-local and unchanged.
+define pm108_pframe(prefix : BitVec64, local : BitVec64, count : BitVec64,
+    total : BitVec64, mapped : BitVec64, before : BitVec64, after : BitVec64,
+    pad_before : BitVec64, pad_after : BitVec64, at_entry : BitVec8) =
+    pm108_frame_index(prefix,local,count,total,mapped) ∧ pm108_yes(at_entry) ∧
+    (before=pm108_frame_word(local)) ∧ (after=pm108_frame_word(mapped)) ∧
+    (pad_before=pm108_nop()) ∧ (pad_after=pad_before)
+
+define pm108_frame_range(base : BitVec64, code : BitVec64,
+    entry : BitVec64, end : BitVec64, linked_entry : BitVec64, linked_end : BitVec64) =
+    pm108_aligned8(base) ∧ pm108_aligned8(code) ∧
+    pm108_aligned8(entry) ∧ pm108_aligned8(end) ∧
+    bvult(entry,end) ∧ bvule(end,code) ∧ bvule(code,bvsub(ptr107_max(),base)) ∧
+    (linked_entry=bvadd(base,entry)) ∧ (linked_end=bvadd(base,end))
+
+// Exits are derived again from the exact linked code, not trusted from a list.
+// This law relates an original PUNFRAME slot to the same relocated instruction.
+define pm108_exit(base : BitVec64, entry : BitVec64, end : BitVec64,
+    exit : BitVec64, linked_exit : BitVec64) =
+    pm108_aligned8(base) ∧ pm108_aligned8(exit) ∧
+    bvult(entry,exit) ∧ bvule(exit,end) ∧ bvule(bvconst(16,64),bvsub(end,exit)) ∧
+    bvule(end,bvsub(ptr107_max(),base)) ∧ (linked_exit=bvadd(base,exit))
+
+// Linking must never enlarge a local's bounds, add a pointer slot, change its
+// flags or shift frame-relative storage. The protected frame size also survives.
+define pm108_local(size : BitVec64, offset : BitVec64, length : BitVec64,
+    align : BitVec64, flags : BitVec64, out_size : BitVec64, out_offset : BitVec64,
+    out_length : BitVec64, out_align : BitVec64, out_flags : BitVec64) =
+    bvugt(size,bvconst(0,64)) ∧ (bvand(size,bvconst(15,64))=bvconst(0,64)) ∧
+    frame107_local(offset,length,size,align) ∧
+    ((flags=bvconst(1,64)) ∨ ((flags=bvconst(3,64)) ∧
+        (align=bvconst(16,64)) ∧ (length=bvconst(16,64)))) ∧
+    (out_size=size) ∧ (out_offset=offset) ∧ (out_length=length) ∧
+    (out_align=align) ∧ (out_flags=flags)
+
+// Emit ONE v2 header, then the ordered rebased frame records and unchanged local
+// records. Concatenating independent complete manifests is invalid. Each frame
+// has four u64 fields; each local has four. No literal payload/trailing bytes in
+// this first profile. Per-frame local limits/disjointness still require scans.
+define pm108_manifest(code : BitVec64, frames : BitVec64, locals : BitVec64,
+    magic : BitVec64, version : BitVec64, header_code : BitVec64,
+    header_frames : BitVec64, bytes : BitVec64) =
+    bvugt(code,bvconst(0,64)) ∧ pm108_aligned8(code) ∧ bvule(code,rb108_limit()) ∧
+    bvugt(frames,bvconst(0,64)) ∧ bvule(frames,bvconst(4096,64)) ∧
+    bvule(locals,bvconst(32768,64)) ∧
+    (magic=bvconst(1345400887,64)) ∧ (version=bvconst(2,64)) ∧
+    (header_code=code) ∧ (header_frames=frames) ∧
+    (bytes=bvmul(bvconst(32,64),bvadd(bvconst(1,64),bvadd(frames,locals)))) ∧
+    bvule(bytes,rb108_limit())
+
+// Exact serialized image: code then one merged manifest, no additional bytes.
+// Bound their SUM, not merely each component. RX/READ below are loader mapping
+// permissions; the serialized artifact itself remains non-executable READ data.
+define pm108_image(code : BitVec64, metadata : BitVec64,
+    lit_start : BitVec64, total : BitVec64) =
+    bvugt(code,bvconst(0,64)) ∧ pm108_aligned8(code) ∧ pm108_aligned8(metadata) ∧
+    bvuge(metadata,bvconst(64,64)) ∧ bvule(code,rb108_limit()) ∧
+    bvule(metadata,bvsub(rb108_limit(),code)) ∧
+    (lit_start=code) ∧ (total=bvadd(code,metadata))
+define pm108_permissions(code : BitVec64, metadata : BitVec64, serialized : BitVec64) =
+    (code=bvconst(5,64)) ∧ (metadata=bvconst(1,64)) ∧ (serialized=bvconst(1,64))
+
+// Every export must denote exactly one matching frame entry (not a middle PC).
+// Exact name/type tuples come from immutable parsed tables, never a hash alone.
+define pm108_resolve(definitions : BitVec8, name : Bool, function : Bool,
+    returns : Bool, arity : Bool, parameters : Bool, exported : Bool,
+    source_abi : BitVec64, target_abi : BitVec64, frame_matches : BitVec64,
+    signature_layout_checked : BitVec8) =
+    (definitions=bvconst(1,8)) ∧ name ∧ function ∧ returns ∧ arity ∧ parameters ∧ exported ∧
+    kind107_link(source_abi,target_abi,bvconst(16,64),bvconst(16,64),signature_layout_checked) ∧
+    (frame_matches=bvconst(1,64))
+
+// The original 8-byte CALL slot belongs inside a function after its PFRAME.
+// No relocation: already resolves to a local frame entry. One relocation:
+// exactly a zero-displacement CALL/NOP import placeholder. More than one fails.
+define pm108_call_site(entry : BitVec64, end : BitVec64, pc : BitVec64,
+    word : BitVec64, pad : BitVec64, relocations : BitVec64, local_entry : BitVec8) =
+    pm108_aligned8(pc) ∧ bvult(entry,pc) ∧ bvule(pc,end) ∧
+    bvule(bvconst(8,64),bvsub(end,pc)) ∧ (pad=pm108_nop()) ∧
+    (bvand(word,bvsub(ptr107_max(),bvconst(4194303,64)))=pm108_call_opcode()) ∧
+    (((relocations=bvconst(0,64)) ∧ pm108_yes(local_entry)) ∨
+     ((relocations=bvconst(1,64)) ∧ (word=pm108_call_opcode())))
+
+define pm108_call_word(pc : BitVec64, target : BitVec64) =
+    bvor(pm108_call_opcode(),bvand(bvlshr(bvsub(target,pc),bvconst(2,64)),bvconst(4194303,64)))
+define pm108_call_delta(word : BitVec64) =
+    if bvuge(bvand(word,bvconst(4194303,64)),bvconst(2097152,64))
+    then bvsub(bvand(word,bvconst(4194303,64)),bvconst(4194304,64))
+    else bvand(word,bvconst(4194303,64))
+define pm108_call_target(pc : BitVec64, word : BitVec64) =
+    bvadd(pc,bvmul(pm108_call_delta(word),bvconst(4,64)))
+
+// Logical normal form of aom104_call_displacement_representable. Keep both
+// asymmetric signed bounds; a CALL_PC20 name must not imply a 20-bit ISA field.
+define pm108_displacement(pc : BitVec64, target : BitVec64) =
+    (bvand(pc,bvconst(3,64))=bvconst(0,64)) ∧
+    (bvand(target,bvconst(3,64))=bvconst(0,64)) ∧
+    (((bvuge(target,pc)) ∧ bvule(bvsub(target,pc),bvconst(8388604,64))) ∨
+     ((bvult(target,pc)) ∧ bvule(bvsub(pc,target),bvconst(8388608,64))))
+
+// Existing CALL_PC20 wire kind uses the ISA's SIGNED 22-bit word displacement.
+// This predicate consumes addresses from the SAME ordered module layout, with
+// resolution/site certificates derived from pm108_resolve/pm108_call_site.
+define pm108_relocation(source_base : BitVec64, source_size : BitVec64,
+    offset : BitVec64, target_base : BitVec64, target_size : BitVec64,
+    export : BitVec64, patch : BitVec64, target : BitVec64,
+    width : BitVec64, addend : BitVec64, word : BitVec64,
+    site_checked : BitVec8, resolution_checked : BitVec8) =
+    pm108_aligned8(source_base) ∧ pm108_aligned8(target_base) ∧ pm108_aligned8(offset) ∧
+    (width=bvconst(8,64)) ∧ (addend=bvconst(0,64)) ∧
+    bvule(offset,source_size) ∧ bvule(width,bvsub(source_size,offset)) ∧
+    bvule(source_size,bvsub(ptr107_max(),source_base)) ∧ (patch=bvadd(source_base,offset)) ∧
+    bvult(export,target_size) ∧ pm108_aligned8(export) ∧
+    bvule(target_size,bvsub(ptr107_max(),target_base)) ∧ (target=bvadd(target_base,export)) ∧
+    pm108_displacement(patch,target) ∧
+    (word=pm108_call_word(patch,target)) ∧ pm108_yes(site_checked) ∧ pm108_yes(resolution_checked)
+
+// Check EVERY code slot. Only registered import CALLs and entry PFRAME indices
+// may change. The per-class certificate is the respective full predicate above,
+// over this same slot. Opcode match alone is insufficient. All paired NOPs stay.
+define pm108_patch(class : BitVec8, before : BitVec64, after : BitVec64,
+    pad_before : BitVec64, pad_after : BitVec64, pframe_checked : BitVec8,
+    import_call_checked : BitVec8) =
+    (pad_before=pm108_nop()) ∧ (pad_after=pad_before) ∧
+    (((class=bvconst(0,8)) ∧ (before=after)) ∨
+     ((class=bvconst(1,8)) ∧ pm108_yes(pframe_checked)) ∨
+     ((class=bvconst(2,8)) ∧ pm108_yes(import_call_checked)))
+
+// Frozen dependency vector in linker input order; each entry retains its full
+// DN-64 receipt, exact bundle/root/include bytes, effective source and tools.
+// Numeric object IDs need their Fabric context namespace. Exact bytes do not
+// rescue a wrong context/generation/role or a different dependency position.
+define pm108_dependency(index : BitVec64, consumed_index : BitVec64,
+    context : BitVec64, object : BitVec64, generation : BitVec64,
+    actual_context : BitVec64, actual_object : BitVec64, actual_generation : BitVec64,
+    role : BitVec8, frozen : BitVec8, bytes_exact : BitVec8,
+    source_lineage : BitVec8, producer_and_tools : BitVec8, current : BitVec8) =
+    (index=consumed_index) ∧ bvugt(context,bvconst(0,64)) ∧ bvugt(generation,bvconst(0,64)) ∧
+    (context=actual_context) ∧ (object=actual_object) ∧ (generation=actual_generation) ∧
+    (role=bvconst(1,8)) ∧ pm108_yes(frozen) ∧ pm108_yes(bytes_exact) ∧
+    pm108_yes(source_lineage) ∧ pm108_yes(producer_and_tools) ∧ pm108_yes(current)
+
+// Sequential fold over that frozen vector, beginning at zero. dependency_checked
+// is pm108_dependency for vector[done] and the actually consumed module/receipt.
+define pm108_consume(total : BitVec64, done : BitVec64, index : BitVec64,
+    dependency_checked : BitVec8, next : BitVec64) =
+    bvugt(total,bvconst(0,64)) ∧ bvule(total,bvconst(4096,64)) ∧ bvult(done,total) ∧
+    (index=done) ∧ pm108_yes(dependency_checked) ∧ (next=bvadd(done,bvconst(1,64)))
+
+// Keep the current ordinary application entry convention: int main(void) at
+// image offset zero, a validated frame entry. Caller supplies main's module
+// first and main as its first definition. Nonzero entry fails; no host repair.
+define pm108_entry(main_selected : Bool, definitions : BitVec8,
+    entry : BitVec64, code : BitVec64, return_type : BitVec64,
+    argc : BitVec64, frame_matches : BitVec64) =
+    main_selected ∧ (definitions=bvconst(1,8)) ∧ bvult(entry,code) ∧
+    (entry=bvconst(0,64)) ∧ (return_type=bvconst(1,64)) ∧
+    (argc=bvconst(0,64)) ∧ (frame_matches=bvconst(1,64))
+
+// Completeness certificates are universal scans/recomputed predicates on the
+// exact final output, not separate success bits. All original local CALLs and
+// branches must retain their relative semantics; raw access/opcodes remain
+// forbidden by the existing protected validator. Rebuild exactly ONE manifest.
+define pm108_ready(modules : BitVec64, consumed : BitVec64,
+    unresolved : BitVec64, unapplied : BitVec64, role : BitVec8,
+    all_modules : BitVec8, no_duplicate_exports : BitVec8, all_patches : BitVec8,
+    merged_manifest : BitVec8, full_final_validation : BitVec8, entry : BitVec8,
+    geometry : BitVec8, permissions : BitVec8, sealed_current : BitVec8,
+    lineage : BitVec8, guest_linker : BitVec8, host_semantics : BitVec8) =
+    bvugt(modules,bvconst(0,64)) ∧ bvule(modules,bvconst(4096,64)) ∧ (consumed=modules) ∧
+    (unresolved=bvconst(0,64)) ∧ (unapplied=bvconst(0,64)) ∧ (role=bvconst(2,8)) ∧
+    pm108_yes(merged_manifest) ∧ pm108_yes(full_final_validation) ∧ pm108_yes(lineage) ∧
+    pm108_yes(guest_linker) ∧ (host_semantics=bvconst(0,8)) ∧
+    pm108_yes(all_modules) ∧ pm108_yes(no_duplicate_exports) ∧ pm108_yes(all_patches) ∧
+    pm108_yes(entry) ∧ pm108_yes(geometry) ∧ pm108_yes(permissions) ∧ pm108_yes(sealed_current)
+
+// Receipt binds linked bytes, final geometry/entry/manifest, ordered complete
+// dependency receipts and exact guest linker identity. Publication is in-memory
+// only. Serialized artifact is READ data; loading RX code/READ metadata and
+// executing it still require the existing distinct authorities and validators.
+// fresh means distinct from EVERY input/source/tool/staging object (qualified
+// identity), checked while the reservation is current. Receipt creates no rights.
+define pm108_publish(ready : Bool, phase : BitVec8, expected : BitVec64,
+    epoch : BitVec64, output : BitVec64, generation : BitVec64,
+    source : BitVec64, compiler : BitVec64, rights : BitVec64,
+    publication : BitVec8, fresh : BitVec8, receipt : BitVec8,
+    serialized : BitVec8, drained : BitVec8, owner : BitVec8,
+    binding_current : BitVec8, reservation : BitVec8, immutable : BitVec8,
+    atomic_pair : BitVec8) =
+    ready ∧ pm108_yes(fresh) ∧
+    rb108_publish(phase,expected,epoch,output,generation,source,compiler,rights,
+        owner,binding_current,publication,reservation,immutable,receipt,
+        atomic_pair,serialized,drained)
+
+// Use the SAME actual publication predicate for epoch, artifact AND receipt.
+// These next-state functions may not be called with an unverified success flag.
+define pm108_after(committed : Bool, before : BitVec64, staged : BitVec64) =
+    if committed then staged else before
+define pm108_epoch(committed : Bool, before : BitVec64) =
+    if committed then bvadd(before,bvconst(1,64)) else before
+
+define pm108_execute(role : BitVec8, unresolved : BitVec64, unapplied : BitVec64,
+    final_checked : Bool, artifact_key : Bool, explicit_execution : Bool,
+    ordinary_admission : Bool, placement : Bool, virtual_layout : Bool) =
+    (role=bvconst(2,8)) ∧ (unresolved=bvconst(0,64)) ∧ (unapplied=bvconst(0,64)) ∧
+    final_checked ∧ artifact_key ∧ explicit_execution ∧ ordinary_admission ∧ placement ∧ virtual_layout
+
+// Cross-module pointer transport uses the same ABI/authority rules as an
+// intra-module call; module names are never domain transitions or new grants.
+define pm108_call_abi(caller_abi : BitVec64, callee_abi : BitVec64,
+    caller_signature : BitVec64, callee_signature : BitVec64,
+    domain : BitVec64, callee_domain : BitVec64, slots : BitVec8,
+    kinds : BitVec8, admitted_code : BitVec8) =
+    kind107_call(caller_abi,callee_abi,caller_signature,callee_signature,
+        domain,callee_domain,slots,kinds,admitted_code)
+
+// Witnesses generated below. Concrete acceptance, rejection and universal laws.
+
+example "PM108 module admission is distinct from execution" {
+    assert(pm108_module(bvconst(1,8),bvconst(1,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(2,64),bvconst(2,64),bvconst(512,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "PM108 rejects linked-role masquerading as module" {
+    assert(¬(pm108_module(bvconst(2,8),bvconst(1,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(2,64),bvconst(2,64),bvconst(512,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects unsupported AOM version" {
+    assert(¬(pm108_module(bvconst(1,8),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(2,64),bvconst(2,64),bvconst(512,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects legacy pointer ABI" {
+    assert(¬(pm108_module(bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(64,64),bvconst(64,64),bvconst(2,64),bvconst(2,64),bvconst(512,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects unaligned module code" {
+    assert(¬(pm108_module(bvconst(1,8),bvconst(1,64),bvconst(2,64),bvconst(63,64),bvconst(63,64),bvconst(2,64),bvconst(2,64),bvconst(512,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects wrong module code extent" {
+    assert(¬(pm108_module(bvconst(1,8),bvconst(1,64),bvconst(2,64),bvconst(64,64),bvconst(72,64),bvconst(2,64),bvconst(2,64),bvconst(512,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects import counted as a frame" {
+    assert(¬(pm108_module(bvconst(1,8),bvconst(1,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(1,64),bvconst(2,64),bvconst(512,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects empty module frame table" {
+    assert(¬(pm108_module(bvconst(1,8),bvconst(1,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(0,64),bvconst(0,64),bvconst(512,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects exhausted module frame table" {
+    assert(¬(pm108_module(bvconst(1,8),bvconst(1,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(4097,64),bvconst(4097,64),bvconst(512,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects oversized compiler AOM" {
+    assert(¬(pm108_module(bvconst(1,8),bvconst(1,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(2,64),bvconst(2,64),bvconst(262152,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects unparsed AOM" {
+    assert(¬(pm108_module(bvconst(1,8),bvconst(1,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(2,64),bvconst(2,64),bvconst(512,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects malformed local frame structure" {
+    assert(¬(pm108_module(bvconst(1,8),bvconst(1,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(2,64),bvconst(2,64),bvconst(512,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects uncovered external CALL" {
+    assert(¬(pm108_module(bvconst(1,8),bvconst(1,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(2,64),bvconst(2,64),bvconst(512,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "PM108 rejects unbound compiler receipt" {
+    assert(¬(pm108_module(bvconst(1,8),bvconst(1,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(2,64),bvconst(2,64),bvconst(512,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 definition owns one frame" {
+    assert(pm108_owns_frame(bvconst(1,8),bvconst(1,8)))
+}
+
+example "PM108 import owns no frame" {
+    assert(pm108_owns_frame(bvconst(0,8),bvconst(0,8)))
+}
+
+example "PM108 rejects import owns a frame" {
+    assert(¬(pm108_owns_frame(bvconst(0,8),bvconst(1,8))))
+}
+
+example "PM108 rejects definition missing frame" {
+    assert(¬(pm108_owns_frame(bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 ordered second module layout" {
+    assert(pm108_layout(bvconst(64,64),bvconst(2,64),bvconst(48,64),bvconst(1,64),bvconst(112,64),bvconst(3,64)))
+}
+
+example "PM108 rejects reordered code cursor" {
+    assert(¬(pm108_layout(bvconst(64,64),bvconst(2,64),bvconst(48,64),bvconst(1,64),bvconst(48,64),bvconst(3,64))))
+}
+
+example "PM108 rejects extra layout gap" {
+    assert(¬(pm108_layout(bvconst(64,64),bvconst(2,64),bvconst(48,64),bvconst(1,64),bvconst(120,64),bvconst(3,64))))
+}
+
+example "PM108 rejects unaligned module extent" {
+    assert(¬(pm108_layout(bvconst(64,64),bvconst(2,64),bvconst(47,64),bvconst(1,64),bvconst(111,64),bvconst(3,64))))
+}
+
+example "PM108 rejects empty module code" {
+    assert(¬(pm108_layout(bvconst(64,64),bvconst(2,64),bvconst(0,64),bvconst(1,64),bvconst(64,64),bvconst(3,64))))
+}
+
+example "PM108 rejects empty definition set" {
+    assert(¬(pm108_layout(bvconst(64,64),bvconst(2,64),bvconst(48,64),bvconst(0,64),bvconst(112,64),bvconst(2,64))))
+}
+
+example "PM108 rejects wrong frame prefix sum" {
+    assert(¬(pm108_layout(bvconst(64,64),bvconst(2,64),bvconst(48,64),bvconst(1,64),bvconst(112,64),bvconst(4,64))))
+}
+
+example "PM108 rejects frame count exhaustion" {
+    assert(¬(pm108_layout(bvconst(64,64),bvconst(4096,64),bvconst(48,64),bvconst(1,64),bvconst(112,64),bvconst(4097,64))))
+}
+
+example "PM108 rejects linked code capacity exhaustion" {
+    assert(¬(pm108_layout(bvconst(1048576,64),bvconst(2,64),bvconst(48,64),bvconst(1,64),bvconst(1048624,64),bvconst(3,64))))
+}
+
+example "PM108 first module layout starts at zero" {
+    assert(pm108_layout(bvconst(0,64),bvconst(0,64),bvconst(64,64),bvconst(2,64),bvconst(64,64),bvconst(2,64)))
+}
+
+example "PM108 second module frame zero becomes global frame two" {
+    assert(pm108_frame_index(bvconst(2,64),bvconst(0,64),bvconst(1,64),bvconst(3,64),bvconst(2,64)))
+}
+
+example "PM108 rejects unrebased global frame index" {
+    assert(¬(pm108_frame_index(bvconst(2,64),bvconst(0,64),bvconst(1,64),bvconst(3,64),bvconst(0,64))))
+}
+
+example "PM108 rejects out of range local frame" {
+    assert(¬(pm108_frame_index(bvconst(2,64),bvconst(1,64),bvconst(1,64),bvconst(3,64),bvconst(3,64))))
+}
+
+example "PM108 rejects prefix beyond final frame table" {
+    assert(¬(pm108_frame_index(bvconst(4,64),bvconst(0,64),bvconst(1,64),bvconst(3,64),bvconst(4,64))))
+}
+
+example "PM108 rejects overlapping end of frame table" {
+    assert(¬(pm108_frame_index(bvconst(2,64),bvconst(0,64),bvconst(2,64),bvconst(3,64),bvconst(2,64))))
+}
+
+example "PM108 rejects global frame capacity exhaustion" {
+    assert(¬(pm108_frame_index(bvconst(2,64),bvconst(0,64),bvconst(1,64),bvconst(4097,64),bvconst(2,64))))
+}
+
+example "PM108 PFRAME patch changes only the admitted index" {
+    assert(pm108_pframe(bvconst(2,64),bvconst(0,64),bvconst(1,64),bvconst(3,64),bvconst(2,64),bvconst(2952790016,64),bvconst(2952790018,64),bvconst(4227858432,64),bvconst(4227858432,64),bvconst(1,8)))
+}
+
+example "PM108 rejects PFRAME patch at non-entry" {
+    assert(¬(pm108_pframe(bvconst(2,64),bvconst(0,64),bvconst(1,64),bvconst(3,64),bvconst(2,64),bvconst(2952790016,64),bvconst(2952790018,64),bvconst(4227858432,64),bvconst(4227858432,64),bvconst(0,8))))
+}
+
+example "PM108 rejects wrong original PFRAME index" {
+    assert(¬(pm108_pframe(bvconst(2,64),bvconst(0,64),bvconst(1,64),bvconst(3,64),bvconst(2,64),bvconst(2952790017,64),bvconst(2952790018,64),bvconst(4227858432,64),bvconst(4227858432,64),bvconst(1,8))))
+}
+
+example "PM108 rejects wrong rewritten PFRAME index" {
+    assert(¬(pm108_pframe(bvconst(2,64),bvconst(0,64),bvconst(1,64),bvconst(3,64),bvconst(2,64),bvconst(2952790016,64),bvconst(2952790017,64),bvconst(4227858432,64),bvconst(4227858432,64),bvconst(1,8))))
+}
+
+example "PM108 rejects PFRAME changes paired instruction" {
+    assert(¬(pm108_pframe(bvconst(2,64),bvconst(0,64),bvconst(1,64),bvconst(3,64),bvconst(2,64),bvconst(2952790016,64),bvconst(2952790018,64),bvconst(4227858432,64),bvconst(3355443200,64),bvconst(1,8))))
+}
+
+example "PM108 frame bounds rebase with owning code" {
+    assert(pm108_frame_range(bvconst(64,64),bvconst(48,64),bvconst(0,64),bvconst(48,64),bvconst(64,64),bvconst(112,64)))
+}
+
+example "PM108 rejects unrebased frame entry" {
+    assert(¬(pm108_frame_range(bvconst(64,64),bvconst(48,64),bvconst(0,64),bvconst(48,64),bvconst(0,64),bvconst(112,64))))
+}
+
+example "PM108 rejects wrong rebased frame end" {
+    assert(¬(pm108_frame_range(bvconst(64,64),bvconst(48,64),bvconst(0,64),bvconst(48,64),bvconst(64,64),bvconst(120,64))))
+}
+
+example "PM108 rejects frame beyond owning module" {
+    assert(¬(pm108_frame_range(bvconst(64,64),bvconst(48,64),bvconst(0,64),bvconst(56,64),bvconst(64,64),bvconst(120,64))))
+}
+
+example "PM108 rejects wrapped frame address" {
+    assert(¬(pm108_frame_range(bvsub(bvconst(0,64),bvconst(8,64)),bvconst(48,64),bvconst(0,64),bvconst(48,64),bvsub(bvconst(0,64),bvconst(8,64)),bvconst(40,64))))
+}
+
+example "PM108 exit remains the same rebased instruction" {
+    assert(pm108_exit(bvconst(64,64),bvconst(0,64),bvconst(48,64),bvconst(32,64),bvconst(96,64)))
+}
+
+example "PM108 rejects exit not rebased" {
+    assert(¬(pm108_exit(bvconst(64,64),bvconst(0,64),bvconst(48,64),bvconst(32,64),bvconst(32,64))))
+}
+
+example "PM108 rejects exit leaves no RET slot" {
+    assert(¬(pm108_exit(bvconst(64,64),bvconst(0,64),bvconst(48,64),bvconst(40,64),bvconst(104,64))))
+}
+
+example "PM108 rejects exit at frame entry" {
+    assert(¬(pm108_exit(bvconst(64,64),bvconst(0,64),bvconst(48,64),bvconst(0,64),bvconst(64,64))))
+}
+
+example "PM108 local pointer slot is preserved exactly" {
+    assert(pm108_local(bvconst(64,64),bvconst(16,64),bvconst(16,64),bvconst(16,64),bvconst(3,64),bvconst(64,64),bvconst(16,64),bvconst(16,64),bvconst(16,64),bvconst(3,64)))
+}
+
+example "PM108 rejects enlarged local bounds" {
+    assert(¬(pm108_local(bvconst(64,64),bvconst(16,64),bvconst(16,64),bvconst(16,64),bvconst(3,64),bvconst(64,64),bvconst(16,64),bvconst(32,64),bvconst(16,64),bvconst(3,64))))
+}
+
+example "PM108 rejects rebased local storage offset" {
+    assert(¬(pm108_local(bvconst(64,64),bvconst(16,64),bvconst(16,64),bvconst(16,64),bvconst(3,64),bvconst(64,64),bvconst(80,64),bvconst(16,64),bvconst(16,64),bvconst(3,64))))
+}
+
+example "PM108 rejects changed frame size" {
+    assert(¬(pm108_local(bvconst(64,64),bvconst(16,64),bvconst(16,64),bvconst(16,64),bvconst(3,64),bvconst(80,64),bvconst(16,64),bvconst(16,64),bvconst(16,64),bvconst(3,64))))
+}
+
+example "PM108 rejects removed pointer-slot kind" {
+    assert(¬(pm108_local(bvconst(64,64),bvconst(16,64),bvconst(16,64),bvconst(16,64),bvconst(3,64),bvconst(64,64),bvconst(16,64),bvconst(16,64),bvconst(16,64),bvconst(1,64))))
+}
+
+example "PM108 rejects misaligned pointer slot" {
+    assert(¬(pm108_local(bvconst(64,64),bvconst(8,64),bvconst(16,64),bvconst(16,64),bvconst(3,64),bvconst(64,64),bvconst(8,64),bvconst(16,64),bvconst(16,64),bvconst(3,64))))
+}
+
+example "PM108 rejects oversized pointer slot" {
+    assert(¬(pm108_local(bvconst(64,64),bvconst(16,64),bvconst(32,64),bvconst(16,64),bvconst(3,64),bvconst(64,64),bvconst(16,64),bvconst(32,64),bvconst(16,64),bvconst(3,64))))
+}
+
+example "PM108 rejects unknown local flags" {
+    assert(¬(pm108_local(bvconst(64,64),bvconst(16,64),bvconst(16,64),bvconst(16,64),bvconst(7,64),bvconst(64,64),bvconst(16,64),bvconst(16,64),bvconst(16,64),bvconst(7,64))))
+}
+
+example "PM108 byte buffer preserves its byte alignment" {
+    assert(pm108_local(bvconst(64,64),bvconst(3,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(64,64),bvconst(3,64),bvconst(4,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "PM108 one merged manifest header" {
+    assert(pm108_manifest(bvconst(112,64),bvconst(3,64),bvconst(4,64),bvconst(1345400887,64),bvconst(2,64),bvconst(112,64),bvconst(3,64),bvconst(256,64)))
+}
+
+example "PM108 rejects concatenated manifest headers" {
+    assert(¬(pm108_manifest(bvconst(112,64),bvconst(3,64),bvconst(4,64),bvconst(1345400887,64),bvconst(2,64),bvconst(112,64),bvconst(3,64),bvconst(288,64))))
+}
+
+example "PM108 rejects wrong merged code extent" {
+    assert(¬(pm108_manifest(bvconst(112,64),bvconst(3,64),bvconst(4,64),bvconst(1345400887,64),bvconst(2,64),bvconst(64,64),bvconst(3,64),bvconst(256,64))))
+}
+
+example "PM108 rejects wrong merged frame count" {
+    assert(¬(pm108_manifest(bvconst(112,64),bvconst(3,64),bvconst(4,64),bvconst(1345400887,64),bvconst(2,64),bvconst(112,64),bvconst(2,64),bvconst(256,64))))
+}
+
+example "PM108 rejects manifest version downgrade" {
+    assert(¬(pm108_manifest(bvconst(112,64),bvconst(3,64),bvconst(4,64),bvconst(1345400887,64),bvconst(1,64),bvconst(112,64),bvconst(3,64),bvconst(256,64))))
+}
+
+example "PM108 rejects truncated manifest" {
+    assert(¬(pm108_manifest(bvconst(112,64),bvconst(3,64),bvconst(4,64),bvconst(1345400887,64),bvconst(2,64),bvconst(112,64),bvconst(3,64),bvconst(248,64))))
+}
+
+example "PM108 rejects manifest arithmetic capacity exhaustion" {
+    assert(¬(pm108_manifest(bvconst(112,64),bvconst(3,64),bvconst(32768,64),bvconst(1345400887,64),bvconst(2,64),bvconst(112,64),bvconst(3,64),bvconst(1048704,64))))
+}
+
+example "PM108 typed cross-module import resolution" {
+    assert(pm108_resolve(bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(1,8)))
+}
+
+example "PM108 rejects missing definition" {
+    assert(¬(pm108_resolve(bvconst(0,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "PM108 rejects duplicate definitions" {
+    assert(¬(pm108_resolve(bvconst(2,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "PM108 rejects different import name" {
+    assert(¬(pm108_resolve(bvconst(1,8),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "PM108 rejects nonfunction target" {
+    assert(¬(pm108_resolve(bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "PM108 rejects return type mismatch" {
+    assert(¬(pm108_resolve(bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "PM108 rejects argument count mismatch" {
+    assert(¬(pm108_resolve(bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "PM108 rejects pointer parameter mismatch" {
+    assert(¬(pm108_resolve(bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "PM108 rejects nonexported target" {
+    assert(¬(pm108_resolve(bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "PM108 rejects mixed pointer profiles" {
+    assert(¬(pm108_resolve(bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(2,64),bvconst(1,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "PM108 rejects export points inside a frame" {
+    assert(¬(pm108_resolve(bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(1,8))))
+}
+
+example "PM108 rejects matching signatures with invalid argument lanes" {
+    assert(¬(pm108_resolve(bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(0,8))))
+}
+
+example "PM108 exact linked code and manifest extent" {
+    assert(pm108_image(bvconst(112,64),bvconst(256,64),bvconst(112,64),bvconst(368,64)))
+}
+
+example "PM108 rejects manifest overlaps executable code" {
+    assert(¬(pm108_image(bvconst(112,64),bvconst(256,64),bvconst(104,64),bvconst(368,64))))
+}
+
+example "PM108 rejects hidden gap before manifest" {
+    assert(¬(pm108_image(bvconst(112,64),bvconst(256,64),bvconst(120,64),bvconst(368,64))))
+}
+
+example "PM108 rejects extra bytes after manifest" {
+    assert(¬(pm108_image(bvconst(112,64),bvconst(256,64),bvconst(112,64),bvconst(376,64))))
+}
+
+example "PM108 rejects missing merged manifest header and frame" {
+    assert(¬(pm108_image(bvconst(112,64),bvconst(32,64),bvconst(112,64),bvconst(144,64))))
+}
+
+example "PM108 rejects sum of individually bounded sections exceeds capacity" {
+    assert(¬(pm108_image(bvconst(1048576,64),bvconst(64,64),bvconst(1048576,64),bvconst(1048640,64))))
+}
+
+example "PM108 exact total image capacity is admitted" {
+    assert(pm108_image(bvconst(1048512,64),bvconst(64,64),bvconst(1048512,64),bvconst(1048576,64)))
+}
+
+example "PM108 separate code metadata and serialized permissions" {
+    assert(pm108_permissions(bvconst(5,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "PM108 rejects writable executable code" {
+    assert(¬(pm108_permissions(bvconst(7,64),bvconst(1,64),bvconst(1,64))))
+}
+
+example "PM108 rejects executable manifest" {
+    assert(¬(pm108_permissions(bvconst(5,64),bvconst(5,64),bvconst(1,64))))
+}
+
+example "PM108 rejects writable manifest" {
+    assert(¬(pm108_permissions(bvconst(5,64),bvconst(3,64),bvconst(1,64))))
+}
+
+example "PM108 rejects executable serialized artifact" {
+    assert(¬(pm108_permissions(bvconst(5,64),bvconst(1,64),bvconst(5,64))))
+}
+
+example "PM108 canonical external call placeholder" {
+    assert(pm108_call_site(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(3355443200,64),bvconst(4227858432,64),bvconst(1,64),bvconst(0,8)))
+}
+
+example "PM108 rejects duplicate relocation at call site" {
+    assert(¬(pm108_call_site(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(3355443200,64),bvconst(4227858432,64),bvconst(2,64),bvconst(0,8))))
+}
+
+example "PM108 rejects external call without relocation" {
+    assert(¬(pm108_call_site(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(3355443200,64),bvconst(4227858432,64),bvconst(0,64),bvconst(0,8))))
+}
+
+example "PM108 rejects relocation overwrites a PFRAME" {
+    assert(¬(pm108_call_site(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(2952790016,64),bvconst(4227858432,64),bvconst(1,64),bvconst(0,8))))
+}
+
+example "PM108 rejects relocation has nonzero placeholder" {
+    assert(¬(pm108_call_site(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(3355443201,64),bvconst(4227858432,64),bvconst(1,64),bvconst(0,8))))
+}
+
+example "PM108 rejects CALL paired with executable payload" {
+    assert(¬(pm108_call_site(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(3355443200,64),bvconst(3355443200,64),bvconst(1,64),bvconst(0,8))))
+}
+
+example "PM108 rejects CALL outside function" {
+    assert(¬(pm108_call_site(bvconst(0,64),bvconst(64,64),bvconst(64,64),bvconst(3355443200,64),bvconst(4227858432,64),bvconst(1,64),bvconst(0,8))))
+}
+
+example "PM108 rejects CALL at frame entry" {
+    assert(¬(pm108_call_site(bvconst(0,64),bvconst(64,64),bvconst(0,64),bvconst(3355443200,64),bvconst(4227858432,64),bvconst(1,64),bvconst(0,8))))
+}
+
+example "PM108 resolved local call needs no relocation" {
+    assert(pm108_call_site(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(3355443204,64),bvconst(4227858432,64),bvconst(0,64),bvconst(1,8)))
+}
+
+example "PM108 cross-module CALL relocation" {
+    assert(pm108_relocation(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(64,64),bvconst(48,64),bvconst(0,64),bvconst(16,64),bvconst(64,64),bvconst(8,64),bvconst(0,64),bvconst(3355443212,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "PM108 rejects wrong source patch address" {
+    assert(¬(pm108_relocation(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(64,64),bvconst(48,64),bvconst(0,64),bvconst(24,64),bvconst(64,64),bvconst(8,64),bvconst(0,64),bvconst(3355443212,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects wrong target base addition" {
+    assert(¬(pm108_relocation(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(64,64),bvconst(48,64),bvconst(0,64),bvconst(16,64),bvconst(72,64),bvconst(8,64),bvconst(0,64),bvconst(3355443212,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects relocation crosses code extent" {
+    assert(¬(pm108_relocation(bvconst(0,64),bvconst(64,64),bvconst(64,64),bvconst(64,64),bvconst(48,64),bvconst(0,64),bvconst(64,64),bvconst(64,64),bvconst(8,64),bvconst(0,64),bvconst(3355443200,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects unaligned relocation" {
+    assert(¬(pm108_relocation(bvconst(0,64),bvconst(64,64),bvconst(18,64),bvconst(64,64),bvconst(48,64),bvconst(0,64),bvconst(18,64),bvconst(64,64),bvconst(8,64),bvconst(0,64),bvconst(3355443212,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects target one past code" {
+    assert(¬(pm108_relocation(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(64,64),bvconst(48,64),bvconst(48,64),bvconst(16,64),bvconst(112,64),bvconst(8,64),bvconst(0,64),bvconst(3355443224,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects wrong CALL width" {
+    assert(¬(pm108_relocation(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(64,64),bvconst(48,64),bvconst(0,64),bvconst(16,64),bvconst(64,64),bvconst(4,64),bvconst(0,64),bvconst(3355443212,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects nonzero relocation addend" {
+    assert(¬(pm108_relocation(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(64,64),bvconst(48,64),bvconst(0,64),bvconst(16,64),bvconst(64,64),bvconst(8,64),bvconst(1,64),bvconst(3355443212,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects incorrect encoded CALL displacement" {
+    assert(¬(pm108_relocation(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(64,64),bvconst(48,64),bvconst(0,64),bvconst(16,64),bvconst(64,64),bvconst(8,64),bvconst(0,64),bvconst(3355443211,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects unvalidated relocation site" {
+    assert(¬(pm108_relocation(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(64,64),bvconst(48,64),bvconst(0,64),bvconst(16,64),bvconst(64,64),bvconst(8,64),bvconst(0,64),bvconst(3355443212,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "PM108 rejects unresolved relocation target" {
+    assert(¬(pm108_relocation(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(64,64),bvconst(48,64),bvconst(0,64),bvconst(16,64),bvconst(64,64),bvconst(8,64),bvconst(0,64),bvconst(3355443212,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 rejects out of range forward displacement" {
+    assert(¬(pm108_relocation(bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(8388624,64),bvconst(48,64),bvconst(0,64),bvconst(16,64),bvconst(8388624,64),bvconst(8,64),bvconst(0,64),bvconst(3357540352,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 backward CALL is signed" {
+    assert(pm108_relocation(bvconst(64,64),bvconst(48,64),bvconst(16,64),bvconst(0,64),bvconst(64,64),bvconst(0,64),bvconst(80,64),bvconst(0,64),bvconst(8,64),bvconst(0,64),bvconst(3359637484,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "PM108 maximum forward CALL displacement" {
+    assert(pm108_displacement(bvconst(0,64),bvconst(8388604,64)))
+}
+
+example "PM108 maximum backward CALL displacement" {
+    assert(pm108_displacement(bvconst(8388608,64),bvconst(0,64)))
+}
+
+example "PM108 rejects forward displacement overflow" {
+    assert(¬(pm108_displacement(bvconst(0,64),bvconst(8388608,64))))
+}
+
+example "PM108 rejects backward displacement overflow" {
+    assert(¬(pm108_displacement(bvconst(8388612,64),bvconst(0,64))))
+}
+
+example "PM108 unrelocated pointer instruction remains exact" {
+    assert(pm108_patch(bvconst(0,8),bvconst(2635792384,64),bvconst(2635792384,64),bvconst(4227858432,64),bvconst(4227858432,64),bvconst(0,8),bvconst(0,8)))
+}
+
+example "PM108 rejects changed unrelocated instruction" {
+    assert(¬(pm108_patch(bvconst(0,8),bvconst(2635792384,64),bvconst(0,64),bvconst(4227858432,64),bvconst(4227858432,64),bvconst(0,8),bvconst(0,8))))
+}
+
+example "PM108 rejects unclassified patch kind" {
+    assert(¬(pm108_patch(bvconst(3,8),bvconst(2635792384,64),bvconst(2635792384,64),bvconst(4227858432,64),bvconst(4227858432,64),bvconst(0,8),bvconst(0,8))))
+}
+
+example "PM108 rejects uncertified PFRAME rewrite" {
+    assert(¬(pm108_patch(bvconst(1,8),bvconst(2635792384,64),bvconst(2635792384,64),bvconst(4227858432,64),bvconst(4227858432,64),bvconst(0,8),bvconst(0,8))))
+}
+
+example "PM108 rejects uncertified import CALL rewrite" {
+    assert(¬(pm108_patch(bvconst(2,8),bvconst(2635792384,64),bvconst(2635792384,64),bvconst(4227858432,64),bvconst(4227858432,64),bvconst(0,8),bvconst(0,8))))
+}
+
+example "PM108 rejects modified padding word" {
+    assert(¬(pm108_patch(bvconst(0,8),bvconst(2635792384,64),bvconst(2635792384,64),bvconst(4227858432,64),bvconst(0,64),bvconst(0,8),bvconst(0,8))))
+}
+
+example "PM108 exact dependency receipt in request order" {
+    assert(pm108_dependency(bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "PM108 rejects dependency reordering" {
+    assert(¬(pm108_dependency(bvconst(0,64),bvconst(1,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects same object number in another Fabric" {
+    assert(¬(pm108_dependency(bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(8,64),bvconst(11,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects substituted artifact object" {
+    assert(¬(pm108_dependency(bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(7,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects stale dependency generation" {
+    assert(¬(pm108_dependency(bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(7,64),bvconst(11,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects wrong dependency admission role" {
+    assert(¬(pm108_dependency(bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects mutable dependency vector" {
+    assert(¬(pm108_dependency(bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects substituted module bytes" {
+    assert(¬(pm108_dependency(bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects substituted header or root source" {
+    assert(¬(pm108_dependency(bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects unverified producer or linker tool" {
+    assert(¬(pm108_dependency(bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "PM108 rejects retired dependency object" {
+    assert(¬(pm108_dependency(bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(7,64),bvconst(11,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 ordered dependency fold advances once" {
+    assert(pm108_consume(bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,64)))
+}
+
+example "PM108 rejects skipped dependency" {
+    assert(¬(pm108_consume(bvconst(2,64),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,64))))
+}
+
+example "PM108 rejects repeated dependency position" {
+    assert(¬(pm108_consume(bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(2,64))))
+}
+
+example "PM108 rejects consumption past end" {
+    assert(¬(pm108_consume(bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(1,8),bvconst(3,64))))
+}
+
+example "PM108 rejects unchecked dependency" {
+    assert(¬(pm108_consume(bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,64))))
+}
+
+example "PM108 rejects false completed dependency count" {
+    assert(¬(pm108_consume(bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(2,64))))
+}
+
+example "PM108 ordinary main entry at zero" {
+    assert(pm108_entry((bvconst(1,8)=bvconst(1,8)),bvconst(1,8),bvconst(0,64),bvconst(112,64),bvconst(1,64),bvconst(0,64),bvconst(1,64)))
+}
+
+example "PM108 rejects nonzero application entry" {
+    assert(¬(pm108_entry((bvconst(1,8)=bvconst(1,8)),bvconst(1,8),bvconst(64,64),bvconst(112,64),bvconst(1,64),bvconst(0,64),bvconst(1,64))))
+}
+
+example "PM108 rejects wrong selected entry name" {
+    assert(¬(pm108_entry((bvconst(0,8)=bvconst(1,8)),bvconst(1,8),bvconst(0,64),bvconst(112,64),bvconst(1,64),bvconst(0,64),bvconst(1,64))))
+}
+
+example "PM108 rejects ambiguous main" {
+    assert(¬(pm108_entry((bvconst(1,8)=bvconst(1,8)),bvconst(2,8),bvconst(0,64),bvconst(112,64),bvconst(1,64),bvconst(0,64),bvconst(1,64))))
+}
+
+example "PM108 rejects pointer-valued main" {
+    assert(¬(pm108_entry((bvconst(1,8)=bvconst(1,8)),bvconst(1,8),bvconst(0,64),bvconst(112,64),bvconst(1001,64),bvconst(0,64),bvconst(1,64))))
+}
+
+example "PM108 rejects main requiring arguments" {
+    assert(¬(pm108_entry((bvconst(1,8)=bvconst(1,8)),bvconst(1,8),bvconst(0,64),bvconst(112,64),bvconst(1,64),bvconst(1,64),bvconst(1,64))))
+}
+
+example "PM108 rejects main without frame entry" {
+    assert(¬(pm108_entry((bvconst(1,8)=bvconst(1,8)),bvconst(1,8),bvconst(0,64),bvconst(112,64),bvconst(1,64),bvconst(0,64),bvconst(0,64))))
+}
+
+example "PM108 complete guest-linked protected image" {
+    assert(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "PM108 rejects unconsumed module" {
+    assert(¬(pm108_ready(bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 rejects remaining import" {
+    assert(¬(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 rejects remaining relocation" {
+    assert(¬(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(1,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 rejects module certificate used as executable certificate" {
+    assert(¬(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 rejects invalid input module" {
+    assert(¬(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 rejects duplicate exported name" {
+    assert(¬(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 rejects unverified patch set" {
+    assert(¬(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 rejects missing merged manifest" {
+    assert(¬(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 rejects missing full final validation" {
+    assert(¬(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 rejects invalid entry" {
+    assert(¬(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 rejects invalid linked geometry" {
+    assert(¬(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 rejects amplified linked permissions" {
+    assert(¬(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 rejects unsealed or stale linked bytes" {
+    assert(¬(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 rejects incomplete dependency lineage" {
+    assert(¬(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 rejects no guest linker execution" {
+    assert(¬(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,8))))
+}
+
+example "PM108 rejects host repairs linked bytes" {
+    assert(¬(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 atomic linked artifact and receipt publication" {
+    assert(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "PM108 rejects publication before complete link" {
+    assert(¬(pm108_publish((bvconst(0,8)=bvconst(1,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects publication from collecting phase" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(0,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects stale publication epoch" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(2,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects publication epoch exhaustion" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvsub(bvconst(0,64),bvconst(1,64)),bvsub(bvconst(0,64),bvconst(1,64)),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects publication aliases source" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(11,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects publication aliases compiler" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(12,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects publication of generation zero" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(0,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects exported execution right on serialized bytes" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects missing publication authority" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects publication aliases another dependency or staging" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects publication lacks exact linked receipt" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects publication not serialized" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects undrained link operation" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects wrong publication owner" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects stale publication binding" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects lost output reservation" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects mutable final bytes" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "PM108 rejects split artifact and receipt visibility" {
+    assert(¬(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 ordinary execution remains separately authorized" {
+    assert(pm108_execute(bvconst(2,8),bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))))
+}
+
+example "PM108 rejects executing a relocatable module" {
+    assert(¬(pm108_execute(bvconst(1,8),bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))))
+}
+
+example "PM108 rejects executing unresolved code" {
+    assert(¬(pm108_execute(bvconst(2,8),bvconst(1,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))))
+}
+
+example "PM108 rejects executing unpatched code" {
+    assert(¬(pm108_execute(bvconst(2,8),bvconst(0,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))))
+}
+
+example "PM108 rejects execution without final validation" {
+    assert(¬(pm108_execute(bvconst(2,8),bvconst(0,64),bvconst(0,64),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))))
+}
+
+example "PM108 rejects execution of substituted artifact" {
+    assert(¬(pm108_execute(bvconst(2,8),bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))))
+}
+
+example "PM108 rejects execution without explicit authority" {
+    assert(¬(pm108_execute(bvconst(2,8),bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))))
+}
+
+example "PM108 rejects bypassing ordinary registration" {
+    assert(¬(pm108_execute(bvconst(2,8),bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))))
+}
+
+example "PM108 rejects bypassing placement manager" {
+    assert(¬(pm108_execute(bvconst(2,8),bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))))
+}
+
+example "PM108 rejects bypassing virtual layout" {
+    assert(¬(pm108_execute(bvconst(2,8),bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)))))
+}
+
+example "PM108 cross-module pointer call preserves existing ABI" {
+    assert(pm108_call_abi(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "PM108 rejects cross-module signature mismatch" {
+    assert(¬(pm108_call_abi(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects implicit cross-domain call" {
+    assert(¬(pm108_call_abi(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects cross-module argument lane overflow" {
+    assert(¬(pm108_call_abi(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(0,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "PM108 rejects lost pointer kind across module call" {
+    assert(¬(pm108_call_abi(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "PM108 rejects call into unadmitted code" {
+    assert(¬(pm108_call_abi(bvconst(2,64),bvconst(2,64),bvconst(11,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "PM108 callee exit preserves caller-owned buffer" {
+    assert(frame107_alive(bvconst(1,8),bvconst(8,64),bvconst(9,64),bvconst(1,8))=bvconst(1,8))
+}
+
+example "PM108 callee local pointer expires on return" {
+    assert(frame107_alive(bvconst(1,8),bvconst(9,64),bvconst(9,64),bvconst(1,8))=bvconst(0,8))
+}
+
+example "PM108 rejects callee-local pointer survives its retirement" {
+    assert(¬(frame107_alive(bvconst(1,8),bvconst(9,64),bvconst(9,64),bvconst(1,8))=bvconst(1,8)))
+}
+
+example "PM108 pointer argument transports both payload words and kind" {
+    assert(kind107_pointer_argument(bvconst(1,64),bvconst(2,64),bvconst(4,64),bvconst(4294967297,64),bvconst(3,64),bvconst(1,8),bvconst(4294967297,64),bvconst(3,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "PM108 two-module layout and frame composition" {
+    assert(pm108_layout(bvconst(0,64),bvconst(0,64),bvconst(64,64),bvconst(2,64),bvconst(64,64),bvconst(2,64)) ∧ pm108_layout(bvconst(64,64),bvconst(2,64),bvconst(48,64),bvconst(1,64),bvconst(112,64),bvconst(3,64)) ∧ pm108_pframe(bvconst(2,64),bvconst(0,64),bvconst(1,64),bvconst(3,64),bvconst(2,64),bvconst(2952790016,64),bvconst(2952790018,64),bvconst(4227858432,64),bvconst(4227858432,64),bvconst(1,8)) ∧ pm108_frame_range(bvconst(64,64),bvconst(48,64),bvconst(0,64),bvconst(48,64),bvconst(64,64),bvconst(112,64)) ∧ pm108_manifest(bvconst(112,64),bvconst(3,64),bvconst(4,64),bvconst(1345400887,64),bvconst(2,64),bvconst(112,64),bvconst(3,64),bvconst(256,64)))
+}
+
+example "PM108 publication advances one epoch" {
+    assert(pm108_epoch(pm108_publish(pm108_ready(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(3,64))=bvconst(4,64))
+}
+
+example "PM108 failed link preserves previous artifact" {
+    assert(pm108_after(pm108_publish((bvconst(0,8)=bvconst(1,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(77,64),bvconst(99,64))=bvconst(77,64))
+}
+
+example "PM108 failed link preserves previous receipt" {
+    assert(pm108_after(pm108_publish((bvconst(0,8)=bvconst(1,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(177,64),bvconst(199,64))=bvconst(177,64))
+}
+
+example "PM108 rejects failed link advances epoch" {
+    assert(¬(pm108_epoch(pm108_publish((bvconst(0,8)=bvconst(1,8)),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(3,64))=bvconst(4,64)))
+}
+
+example "PM108 universal frame remapping stays inside final table" {
+    assert(∀(p : BitVec64). ∀(i : BitVec64). ∀(n : BitVec64). ∀(t : BitVec64). ∀(g : BitVec64).
+        pm108_frame_index(p,i,n,t,g) → bvult(g,t))
+}
+
+example "PM108 universal frame remapping is injective within each module" {
+    assert(∀(p : BitVec64). ∀(i : BitVec64). ∀(j : BitVec64). ∀(n : BitVec64). ∀(t : BitVec64). ∀(g : BitVec64).
+        (pm108_frame_index(p,i,n,t,g) ∧ pm108_frame_index(p,j,n,t,g)) → (i=j))
+}
+
+example "PM108 universal successive module frame ranges cannot alias" {
+    assert(∀(p : BitVec64). ∀(n : BitVec64). ∀(i : BitVec64). ∀(j : BitVec64). ∀(m : BitVec64). ∀(t : BitVec64). ∀(a : BitVec64). ∀(b : BitVec64).
+        (pm108_frame_index(p,i,n,t,a) ∧ pm108_frame_index(bvadd(p,n),j,m,t,b)) → bvult(a,b))
+}
+
+example "PM108 universal checked frame index fits PFRAME immediate" {
+    assert(∀(p : BitVec64). ∀(i : BitVec64). ∀(n : BitVec64). ∀(t : BitVec64). ∀(g : BitVec64).
+        pm108_frame_index(p,i,n,t,g) → bvult(g,bvconst(67108864,64)))
+}
+
+example "PM108 universal frame range rebasing preserves its extent" {
+    assert(∀(b : BitVec64). ∀(c : BitVec64). ∀(s : BitVec64). ∀(e : BitVec64). ∀(os : BitVec64). ∀(oe : BitVec64).
+        pm108_frame_range(b,c,s,e,os,oe) → (bvsub(oe,os)=bvsub(e,s)))
+}
+
+example "PM108 universal representable CALL encode decode roundtrip" {
+    assert(∀(pc : BitVec64). ∀(target : BitVec64).
+        pm108_displacement(pc,target) → (pm108_call_target(pc,pm108_call_word(pc,target))=target))
+}
+
+example "PM108 universal uniform code rebasing preserves local CALL encoding" {
+    assert(∀(b : BitVec64). ∀(pc : BitVec64). ∀(target : BitVec64).
+        (pm108_aligned8(b) ∧ pm108_displacement(pc,target) ∧ bvule(pc,bvsub(ptr107_max(),b)) ∧ bvule(target,bvsub(ptr107_max(),b))) →
+        (pm108_call_word(bvadd(b,pc),bvadd(b,target))=pm108_call_word(pc,target)))
+}
+
+example "PM108 universal dependency fold cannot skip completion positions" {
+    assert(∀(n : BitVec64). ∀(d : BitVec64). ∀(i : BitVec64). ∀(next : BitVec64).
+        pm108_consume(n,d,i,bvconst(1,8),next) → ((i=d) ∧ bvule(next,n) ∧ bvugt(next,d)))
+}
+
+example "PM108 universal failure preserves every existing visible field" {
+    assert(∀(old : BitVec64). ∀(staged : BitVec64). pm108_after((bvconst(0,8)=bvconst(1,8)),old,staged)=old)
+}
+
+example "PM108 universal same decision exposes artifact and receipt together" {
+    assert(∀(commit : Bool). ∀(a : BitVec64). ∀(r : BitVec64). ∀(na : BitVec64). ∀(nr : BitVec64).
+        ((pm108_after(commit,a,na)=na) ∧ (pm108_after(commit,r,nr)=nr)) ∨
+        ((pm108_after(commit,a,na)=a) ∧ (pm108_after(commit,r,nr)=r)))
+}
+
+example "PM108 universal relocatable modules never satisfy execution admission" {
+    assert(∀(u : BitVec64). ∀(r : BitVec64). ¬(pm108_execute(bvconst(1,8),u,r,(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))))
+}
+
+example "PM108 universal successful publication cannot wrap the epoch" {
+    assert(∀(e : BitVec64). pm108_publish((bvconst(1,8)=bvconst(1,8)),bvconst(1,8),e,e,bvconst(99,64),bvconst(1,64),bvconst(11,64),bvconst(12,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)) → bvugt(pm108_epoch((bvconst(1,8)=bvconst(1,8)),e),e))
+}

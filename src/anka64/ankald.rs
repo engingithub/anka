@@ -2,7 +2,7 @@
 //!
 //! The linker itself lives in `userspace/system/compiler/ankald.c` and performs
 //! all symbol resolution, layout, relocation, and entry selection inside Anka.
-//! This Rust module is transport/publication plumbing only:
+//! The generic runner provides transport/publication plumbing:
 //!
 //! 1. map exact sealed AOM bytes read-only,
 //! 2. map a distinct scratch object read/write (never SEAL or EXECUTE),
@@ -10,16 +10,18 @@
 //! 4. read its non-authoritative result metadata,
 //! 5. copy exactly `image_size` bytes into a fresh exact-size object and seal it.
 //!
-//! It deliberately does not parse symbols, resolve imports, apply relocations,
-//! or select entry addresses on the host.
+//! The protected wrapper additionally checks the guest result against validated
+//! inputs. Host checks never select call targets or entry addresses, apply
+//! relocations, merge manifests, or repair output bytes.
 
 use super::fabric::Fabric;
+use super::pointer_frames::{ValidatedPointerModule, ValidatedPointerProgram};
 use super::os::{BootError, BootGrant, BootImage, BootInfo, BootMap, Kernel};
 use super::placement::{
     PhysicalPlacementManager, PlacementError, VirtualLayoutBuilder,
     PLACEMENT_PAGE_SIZE,
 };
-use super::state::{Generation, ObjectId, ObjectKind, ObjectState, Permissions};
+use super::state::{DomainId, Generation, ObjectId, ObjectKind, ObjectState, Permissions};
 
 pub const ANKALD_CONTROL_VADDR: u64 = 0x20000;
 const ANKALD_VIRTUAL_LIMIT: u64 = 0x80_0000;
@@ -61,6 +63,23 @@ pub struct LinkedArtifactKey {
     pub generation: Generation,
 }
 
+/// Terminal linker execution retained for receipt-bound publication. Moving
+/// out its Fabric drops all runnable process state; no caller supplies a
+/// completion/drain certificate or manufactures this from arbitrary bytes.
+pub(crate) struct AnkaldOutput {
+    pub image: AnkaldLinkedImage,
+    pub fabric: Fabric,
+    pub placement: PhysicalPlacementManager,
+    pub context: u64,
+    pub process_slot: u64,
+    pub process_generation: u64,
+    pub domain: DomainId,
+    pub linker_key: LinkedArtifactKey,
+    pub input_keys: Vec<LinkedArtifactKey>,
+    pub scratch_key: LinkedArtifactKey,
+    pub control_key: LinkedArtifactKey,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkedArtifact {
     pub key: LinkedArtifactKey,
@@ -90,6 +109,9 @@ pub enum AnkaldError {
     InvalidResultGeometry,
     ScratchUnexpectedlySealed,
     LinkedOutputMutatedInput,
+    InvalidProtectedLayout,
+    InvalidProtectedResult,
+    LinkerStateChanged,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -161,6 +183,11 @@ pub fn run_ankald(
     inputs: &[&[u8]],
     entry_name: &str,
 ) -> Result<AnkaldLinkedImage, AnkaldError> {
+    run_ankald_process(linker_image, inputs, entry_name).map(|output| output.image)
+}
+
+fn run_ankald_process(linker_image: &[u8], inputs: &[&[u8]], entry_name: &str)
+    -> Result<AnkaldOutput, AnkaldError> {
     if linker_image.is_empty() {
         return Err(AnkaldError::EmptyLinkerImage);
     }
@@ -276,6 +303,11 @@ pub fn run_ankald(
     }
     control[entry_offset..entry_offset + entry_name.len()].copy_from_slice(entry_name.as_bytes());
     initialize_exact(&mut fabric, control_obj, &control)?;
+    let key = |object| LinkedArtifactKey { object, generation: fabric.objects[&object].generation };
+    let linker_key = key(linker_obj);
+    let scratch_key = key(scratch_obj);
+    let control_key = key(control_obj);
+    let input_keys: Vec<_> = input_objects.iter().copied().map(key).collect();
 
     let control_phys = placement.allocated_extent(control_obj)
         .expect("placed ankald control remains PM-owned").base;
@@ -357,8 +389,13 @@ pub fn run_ankald(
     let mut kernel = Kernel::new(fabric);
     kernel.next_phys = kernel_base;
     kernel.boot(&info).map_err(AnkaldError::Boot)?;
+    let init = &kernel.processes[0];
+    let owner = (init.pid, init.generation, init.core.context_identity(), init.core.domain);
     for _ in 0..ANKALD_MAX_ROUNDS {
         kernel.run(ANKALD_QUANTUM,1);
+        if !kernel.fabric.compiler_trace_safe(scratch_obj) {
+            return Err(AnkaldError::LinkerStateChanged);
+        }
         if kernel.processes.first().is_some_and(|p| p.exited()) {break;}
         assert!(kernel.fabric.discard_completed_compiler_trace());
     }
@@ -367,6 +404,18 @@ pub fn run_ankald(
     if !init.exited() {
         return Err(AnkaldError::LinkerDidNotExit);
     }
+    if kernel.processes.len() != 1 || owner.2 == 0
+        || owner != (init.pid, init.generation, init.core.context_identity(), init.core.domain)
+        || !init.async_requests.is_empty() || init.io_wait.is_some()
+        || !kernel.fabric.compiler_trace_safe(scratch_obj)
+        || kernel.fabric.objects.get(&linker_obj).is_none_or(|o|
+            o.state != ObjectState::Sealed || o.generation != linker_key.generation)
+        || kernel.fabric.objects.get(&control_obj).is_none_or(|o|
+            o.state != ObjectState::Active || o.generation != control_key.generation)
+        || kernel.fabric.read_physical(control_phys, 48) != &control[..48]
+        || kernel.fabric.read_physical(control_phys + 88, control_size - 88) != &control[88..] {
+        return Err(AnkaldError::LinkerStateChanged);
+    }
     let status = read_u64_physical(&kernel.fabric, control_phys, CTRL_STATUS);
     if init.exit_code != 0 || status != 0 {
         return Err(AnkaldError::LinkerRejected(if status != 0 { status } else { init.exit_code }));
@@ -374,17 +423,18 @@ pub fn run_ankald(
 
     let scratch_state = kernel.fabric.objects.get(&scratch_obj)
         .ok_or(AnkaldError::InvalidResultGeometry)?;
-    if scratch_state.state != ObjectState::Active {
+    if scratch_state.state != ObjectState::Active || scratch_state.generation != scratch_key.generation {
         return Err(AnkaldError::ScratchUnexpectedlySealed);
     }
 
     // Read-only AOM grants must have kept every exact input byte unchanged.
-    for ((phys, original), object) in input_phys.iter().zip(inputs.iter()).zip(input_objects.iter()) {
+    for ((phys, original), key) in input_phys.iter().zip(inputs.iter()).zip(&input_keys) {
         let now = kernel.fabric.read_physical(*phys, original.len() as u64);
         if now != *original {
             return Err(AnkaldError::LinkedOutputMutatedInput);
         }
-        if kernel.fabric.objects.get(object).map(|o| o.state) != Some(ObjectState::Sealed) {
+        if kernel.fabric.objects.get(&key.object).is_none_or(|o|
+            o.state != ObjectState::Sealed || o.generation != key.generation) {
             return Err(AnkaldError::LinkedOutputMutatedInput);
         }
     }
@@ -403,13 +453,136 @@ pub fn run_ankald(
 
     let image_len = usize::try_from(image_size).map_err(|_| AnkaldError::SizeOverflow)?;
     let bytes = kernel.fabric.read_physical(scratch_phys, image_len as u64).to_vec();
-    Ok(AnkaldLinkedImage {
+    let image = AnkaldLinkedImage {
         bytes,
         code_size,
         lit_start,
         entry,
         process_slots_observed: kernel.processes.len(),
-    })
+    };
+    Ok(AnkaldOutput { image, fabric: kernel.fabric, placement, context: owner.2,
+        process_slot: 0, process_generation: u64::from(owner.1) + 1, domain: owner.3,
+        linker_key, input_keys, scratch_key, control_key })
+}
+
+const PROTECTED_IMAGE_LIMIT: u64 = 1024 * 1024;
+
+fn protected_geometry(inputs: &[ValidatedPointerModule]) -> Result<(u64, u64, usize), AnkaldError> {
+    if inputs.is_empty() { return Err(AnkaldError::EmptyInput); }
+    let mut code = 0u64;
+    let mut metadata = 32u64;
+    let mut frames = 0usize;
+    for input in inputs {
+        let module = input.module();
+        if code % module.header.code_align != 0 {
+            return Err(AnkaldError::InvalidProtectedLayout);
+        }
+        code = code.checked_add(module.code.len() as u64).ok_or(AnkaldError::InvalidProtectedLayout)?;
+        metadata = metadata.checked_add(module.rodata.len() as u64 - 32)
+            .ok_or(AnkaldError::InvalidProtectedLayout)?;
+        frames = frames.checked_add(input.frames().len()).ok_or(AnkaldError::InvalidProtectedLayout)?;
+        if frames > 4096 || code.checked_add(metadata).is_none_or(|n| n > PROTECTED_IMAGE_LIMIT) {
+            return Err(AnkaldError::InvalidProtectedLayout);
+        }
+    }
+    Ok((code, metadata, frames))
+}
+
+/// Guest-produced bytes are checked, never repaired. For an imported CALL the
+/// checker decodes the guest's chosen address and checks the export AT that
+/// address. It does not search by import name, select a target, or emit a CALL.
+pub(crate) fn validate_protected_link_result(inputs: &[ValidatedPointerModule],
+    image: &AnkaldLinkedImage) -> Result<(), AnkaldError> {
+    use std::collections::{BTreeMap, BTreeSet};
+    use super::desc::Sem;
+    use super::isa::decode;
+
+    let (code_size, metadata_size, frame_count) = protected_geometry(inputs)?;
+    let reject = || AnkaldError::InvalidProtectedResult;
+    if image.code_size != code_size || image.lit_start != code_size || image.entry != 0
+        || image.bytes.len() as u64 != code_size + metadata_size || image.process_slots_observed != 1 {
+        return Err(reject());
+    }
+    let (code, metadata) = image.bytes.split_at(code_size as usize);
+    let program = ValidatedPointerProgram::from_image(code, metadata)
+        .map_err(|_| reject())?.ok_or_else(reject)?;
+    if program.frames.len() != frame_count { return Err(reject()); }
+
+    let mut exports_at = BTreeMap::new();
+    let mut names = BTreeSet::new();
+    let mut base = 0;
+    for input in inputs {
+        for symbol in input.module().symbols.iter().filter(|s| s.is_export()) {
+            if !names.insert(symbol.name.as_str()) || exports_at.insert(base + symbol.value, symbol).is_some() {
+                return Err(reject());
+            }
+        }
+        base += input.module().code.len() as u64;
+    }
+    let entry = exports_at.get(&0).ok_or_else(reject)?;
+    if entry.name != "main" || entry.return_type != 1 || !entry.parameter_types.is_empty() {
+        return Err(reject());
+    }
+
+    let mut base = 0u64;
+    let mut prefix = 0usize;
+    for input in inputs {
+        let module = input.module();
+        for (index, before) in input.frames().iter().enumerate() {
+            let after = &program.frames[prefix + index];
+            if after.entry != base + before.entry || after.end != base + before.end
+                || after.size != before.size || after.locals != before.locals
+                || after.exits.len() != before.exits.len()
+                || after.exits.iter().zip(&before.exits).any(|(a, b)| *a != base + *b) {
+                return Err(reject());
+            }
+        }
+        let relocations: BTreeMap<_, _> = module.relocations.iter().map(|r| (r.offset, r)).collect();
+        for (index, original) in module.code.chunks_exact(8).enumerate() {
+            let offset = index as u64 * 8;
+            let pc = base + offset;
+            let before = u64::from_le_bytes(original.try_into().unwrap());
+            let after = u64::from_le_bytes(code[pc as usize..pc as usize+8].try_into().unwrap());
+            if decode(before as u32).desc.semantics == Sem::PointerFrame {
+                let mapped = (before & 0x3ffffff) + prefix as u64;
+                if after != ((before & !0x3ffffff) | mapped) { return Err(reject()); }
+            } else if let Some(relocation) = relocations.get(&offset) {
+                if after >> 32 != before >> 32 || after as u32 & !0x3fffff != 50 << 26 {
+                    return Err(reject());
+                }
+                let decoded = decode(after as u32);
+                let target = u64::try_from(pc as i128 + decoded.imm as i128 * 4).map_err(|_| reject())?;
+                let target_export = exports_at.get(&target).ok_or_else(reject)?;
+                let import = &module.symbols[relocation.symbol_index as usize];
+                if target_export.name != import.name || target_export.kind != import.kind
+                    || target_export.return_type != import.return_type
+                    || target_export.parameter_types != import.parameter_types {
+                    return Err(reject());
+                }
+            } else if before != after {
+                return Err(reject());
+            }
+        }
+        base += module.code.len() as u64;
+        prefix += input.frames().len();
+    }
+    Ok(())
+}
+
+/// Structural protected composition only. Producer/dependency receipts and
+/// publication are a separate boundary; this function grants no authority.
+pub(crate) fn run_protected_ankald(linker_image: &[u8], inputs: &[ValidatedPointerModule])
+    -> Result<AnkaldLinkedImage, AnkaldError> {
+    run_protected_ankald_for_publication(linker_image, inputs).map(|output| output.image)
+}
+
+pub(crate) fn run_protected_ankald_for_publication(linker_image: &[u8], inputs: &[ValidatedPointerModule])
+    -> Result<AnkaldOutput, AnkaldError> {
+    protected_geometry(inputs)?;
+    let bytes: Vec<_> = inputs.iter().map(ValidatedPointerModule::bytes).collect();
+    let output = run_ankald_process(linker_image, &bytes, "main")?;
+    validate_protected_link_result(inputs, &output.image)?;
+    Ok(output)
 }
 
 /// Publish exact bytes produced by `run_ankald` into a caller-owned Fabric.

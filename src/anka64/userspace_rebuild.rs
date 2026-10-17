@@ -153,6 +153,130 @@ mod tests {
     fn bundle(source: &[u8]) -> SourceBundle {
         SourceBundle::new("/bin/pointer_probe.c", [SourceBundleMember::new("/bin/pointer_probe.c", source.to_vec()).unwrap()]).unwrap()
     }
+
+    // All four module pieces share one fixed-point producer. Execute the exact
+    // receipt-bound publication through ordinary registration and SYS_SPAWN.
+    fn check_protected_module_emission(producer: &Cc2FixedPointWitness,
+        execution: &DeveloperExecutionAuthority, publication: &RebuildPublicationAuthority) {
+        use super::super::compiler_adapter::RebuildAdmissionRole;
+        use super::super::pointer_frames::{ValidatedPointerModule, ValidatedPointerProgram};
+        let (_, _, linker) = producer.application_tools().unwrap();
+        let header = include_bytes!("../../userspace/bin/protected_modules/api.h");
+        // Include operands are exact bundle keys, not relative filesystem paths.
+        let caller = include_bytes!("../../userspace/bin/protected_modules/main.c");
+        let callee = include_bytes!("../../userspace/bin/protected_modules/buffer.c");
+        let mut modules = Vec::new();
+        let mut store = RebuildArtifactStore::new();
+        let mut epochs = Vec::new();
+        for (root, source, frame_count) in [("/probe/main.c", caller.as_slice(), 2),
+            ("/probe/buffer.c", callee.as_slice(), 2)] {
+            let bundle = SourceBundle::new(root, [
+                SourceBundleMember::new(root, source.to_vec()).unwrap(),
+                SourceBundleMember::new("/probe/api.h", header.to_vec()).unwrap(),
+            ]).unwrap();
+            let epoch = store.compile_module(store.epoch(), producer, &bundle,
+                Some(execution), Some(publication))
+                .unwrap_or_else(|error| panic!("protected-module publication {root}: {error:?}"));
+            let bytes = store.artifact_bytes(epoch).unwrap();
+            let receipt = store.receipt(epoch).unwrap();
+            assert_eq!(receipt.source_bundle, bundle);
+            assert_eq!(receipt.role, RebuildAdmissionRole::RelocatableModule);
+            assert_eq!(receipt.compiler_image, producer.cc2_1);
+            let checked = ValidatedPointerModule::from_aom(bytes)
+                .expect("fixed-point CC2 must emit a structurally valid protected module");
+            assert_eq!(checked.bytes(), bytes);
+            assert_eq!(checked.frames().len(), frame_count);
+            let module = checked.module();
+            assert!(module.symbol("unused").is_none());
+            if root == "/probe/main.c" {
+                assert_eq!(module.relocations.len(), 1);
+                let relocation = &module.relocations[0];
+                assert_eq!(module.symbols[relocation.symbol_index as usize].name, "touch");
+                assert!(module.symbol("touch").unwrap().is_import());
+                assert_eq!(checked.frames()[0].entry, module.symbol("tail").unwrap().value);
+                assert_eq!(checked.frames()[1].entry, 0);
+                assert_eq!(super::super::isa::decode(u32::from_le_bytes(module.code[..4].try_into().unwrap())).imm, 1);
+                assert!(ValidatedPointerProgram::from_image(&module.code, &module.rodata).is_err());
+            } else {
+                assert!(module.symbol("tail").unwrap().is_import());
+                assert_eq!(module.symbols.len(), 3);
+                assert_eq!(module.relocations.len(), 1);
+                assert!(ValidatedPointerProgram::from_image(&module.code, &module.rodata).is_err());
+            }
+            modules.push(checked);
+            epochs.push(epoch);
+        }
+        let request = store.freeze_modules(&epochs).unwrap();
+        assert!(matches!(store.link_modules(&request, None, Some(publication)),
+            Err(CompilerAdapterError::ExecutionAuthorityRequired)));
+        assert!(matches!(store.link_modules(&request, Some(execution), None),
+            Err(CompilerAdapterError::PublicationAuthorityRequired)));
+        let linked_epoch = store.link_modules(&request, Some(execution), Some(publication))
+            .expect("guest ankald must publish the exact protected link and ordered receipt");
+        assert_eq!(linked_epoch, 3);
+        let linked = store.linked_image(linked_epoch).unwrap();
+        let receipt = store.linked_receipt(linked_epoch).unwrap();
+        assert_eq!(receipt.role, RebuildAdmissionRole::LinkedImage);
+        assert_eq!(receipt.linker_image, *linker);
+        assert_eq!(receipt.artifact_permissions, super::super::state::Permissions::READ);
+        assert_eq!(receipt.dependencies.len(), 2);
+        for (position, dependency) in receipt.dependencies.iter().enumerate() {
+            assert_eq!(dependency.position, position);
+            assert_eq!(&dependency.compiler_receipt, store.receipt(epochs[position]).unwrap());
+            assert_eq!(dependency.aom_bytes, modules[position].bytes());
+            assert_ne!(dependency.compiler_receipt.context, receipt.context);
+            assert_ne!(dependency.transport_key.object, receipt.artifact_key.object);
+        }
+        let program = ValidatedPointerProgram::from_image(&linked.bytes[..linked.code_size as usize],
+            &linked.bytes[linked.lit_start as usize..]).unwrap().unwrap();
+        assert_eq!(program.frames.len(), 4);
+        assert_eq!(linked.entry, 0);
+        eprintln!("protected-module link: modules=2 frames=4 code={} metadata={} entry=0",
+            linked.code_size, linked.bytes.len() as u64 - linked.code_size);
+        eprintln!("protected-module publication: epoch={linked_epoch} dependencies=2 rights=READ");
+        let receipt = receipt.clone();
+        assert!(matches!(store.run_linked_application(&receipt, None),
+            Err(CompilerAdapterError::ExecutionAuthorityRequired)));
+        let report = store.run_linked_application(&receipt, Some(execution))
+            .expect("receipt-bound protected modules must execute through ordinary spawn");
+        assert_eq!(report.child_result, ProcessResult::Exited(0));
+        assert_eq!(report.byte_output, [65, 0, 255, 66]);
+        assert_eq!(report.artifact.object, receipt.artifact_key.object);
+        assert_eq!(report.artifact.generation, receipt.artifact_key.generation);
+        assert_eq!(report.presented_code_permissions, super::super::state::Permissions::RX);
+        assert_eq!(report.presented_literal_permissions, Some(super::super::state::Permissions::READ));
+        assert!(report.process_slots_observed >= 2);
+        assert_eq!(store.linked_receipt(linked_epoch), Some(&receipt));
+        assert_eq!(store.linked_image(linked_epoch), Some(&receipt.image));
+        assert_eq!(store.epoch(), linked_epoch);
+        eprintln!("protected-module execution: exit=0 output=[65,0,255,66] receipt=matched");
+
+        // The already-published helper module is reused by both hostile callers.
+        // Each remains a valid program structurally; runtime lifetime/bounds
+        // checks must reject the attempted access before emitting any byte.
+        // If an access unexpectedly succeeds, explicit SYS_EXIT must expose
+        // that success instead of a root RET producing a misleading fault.
+        for (name, source) in [
+            ("escaped-local", b"#include \"/probe/api.h\"\nint main(){char *p=escape();return syscall(0,*p,0,0);}int tail(int x){return x;}".as_slice()),
+            ("one-past", b"#include \"/probe/api.h\"\nint main(){char b[1];int status=touch(b+1,1);return syscall(0,status,0,0);}int tail(int x){return x;}".as_slice()),
+        ] {
+            let bundle = SourceBundle::new("/probe/main.c", [
+                SourceBundleMember::new("/probe/main.c", source.to_vec()).unwrap(),
+                SourceBundleMember::new("/probe/api.h", header.to_vec()).unwrap(),
+            ]).unwrap();
+            let caller_epoch = store.compile_module(store.epoch(), producer, &bundle,
+                Some(execution), Some(publication)).unwrap();
+            let request = store.freeze_modules(&[caller_epoch, epochs[1]]).unwrap();
+            let epoch = store.link_modules(&request, Some(execution), Some(publication)).unwrap();
+            let hostile = store.linked_receipt(epoch).unwrap().clone();
+            let report = store.run_linked_application(&hostile, Some(execution)).unwrap();
+            assert_eq!(report.child_result, ProcessResult::ProtectionFault, "{name}");
+            assert!(report.byte_output.is_empty(), "{name}");
+            assert_eq!(store.linked_image(linked_epoch), Some(&receipt.image));
+            eprintln!("protected-module rejection: {name}=ProtectionFault output=[]");
+        }
+    }
+
     #[test]
     fn p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address() {
         let authority = DeveloperExecutionAuthority::provision();
@@ -161,6 +285,7 @@ mod tests {
             include_bytes!("../../userspace/system/compiler/ankacc2_stage3.c"),
             include_bytes!("../../userspace/system/compiler/ankapp.c"),
             include_bytes!("../../userspace/system/compiler/ankald.c")).unwrap();
+        check_protected_module_emission(&producer, &authority, &publication);
         let source = include_bytes!("../../userspace/bin/pointer_probe.c");
         let mut application = rebuild_application(&producer, &bundle(source), Some(&authority)).unwrap();
         assert_eq!(application.effective_source(), source);

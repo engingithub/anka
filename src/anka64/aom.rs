@@ -99,11 +99,9 @@ fn aligned(value: u64, alignment: u64) -> bool {
     alignment != 0 && alignment.is_power_of_two() && value % alignment == 0
 }
 
-fn portable_public_type(mut type_tag: u64) -> bool {
-    while type_tag >= 1000 {
-        type_tag -= 1000;
-    }
-    matches!(type_tag, 1 | 2 | 3)
+fn portable_public_type(type_tag: u64) -> bool {
+    // Untrusted AOM tags must not control an unbounded subtraction loop.
+    matches!(type_tag % 1000, 1 | 2 | 3)
 }
 
 fn checked_range(offset: u64, size: u64, total: u64) -> Result<std::ops::Range<usize>, AomError> {

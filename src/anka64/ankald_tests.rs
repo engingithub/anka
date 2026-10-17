@@ -52,7 +52,7 @@ fn stage3_image() -> &'static CompiledCImage {
     })
 }
 
-fn ankald_image() -> &'static CompiledCImage {
+pub(crate) fn ankald_image() -> &'static CompiledCImage {
     static IMAGE: OnceLock<CompiledCImage> = OnceLock::new();
     IMAGE.get_or_init(|| {
         compile_c_with_ccb(canonical_ccb(), ankald_source())
@@ -96,6 +96,200 @@ fn add_rodata(module: &[u8], data: &[u8]) -> Vec<u8> {
     out[96..104].copy_from_slice(&reloc.to_le_bytes());
     AomModule::parse(&out).expect("test mutation must remain valid AOM");
     out
+}
+
+// Small hand-assembled inputs exercise the real guest linker without a CC2
+// bootstrap. The separate p107 acceptance covers exact self-hosted production.
+pub(crate) fn protected_test_aom(code: &[u8], metadata: &[u8],
+    symbols: &[(&str, u64, u64, &[u64])], relocations: &[(u64, u64)]) -> Vec<u8> {
+    let rodata = 112 + code.len() as u64;
+    let syms = rodata + metadata.len() as u64;
+    let relocs = syms + symbols.len() as u64 * 160;
+    let total = relocs + relocations.len() as u64 * 48;
+    let mut bytes = b"ANKAOM1\0".to_vec();
+    for word in [1, 112, total, 112, code.len() as u64, 8, rodata,
+        metadata.len() as u64, 8, syms, symbols.len() as u64, relocs, relocations.len() as u64] {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    bytes.extend_from_slice(code);
+    bytes.extend_from_slice(metadata);
+    for &(name, binding, value, params) in symbols {
+        bytes.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        let mut storage = [0; 64]; storage[..name.len()].copy_from_slice(name.as_bytes());
+        bytes.extend_from_slice(&storage);
+        for word in [binding, 1, if binding == 1 { 1 } else { 0 }, value, 0, 1, params.len() as u64] {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        for i in 0..4 { bytes.extend_from_slice(&params.get(i).copied().unwrap_or(0).to_le_bytes()); }
+    }
+    for &(offset, symbol) in relocations {
+        for word in [1, offset, 8, 1, symbol, 0] { bytes.extend_from_slice(&word.to_le_bytes()); }
+    }
+    bytes
+}
+
+pub(crate) fn protected_test_modules() -> Vec<super::pointer_frames::ValidatedPointerModule> {
+    use super::isa::Asm64;
+    use super::pointer_frames::ValidatedPointerModule;
+    let mut caller = Asm64::new();
+    caller.pframe(1); caller.nop(); caller.call(0); caller.nop();
+    caller.call(6); caller.nop(); caller.punframe(); caller.nop(); caller.ret(); caller.nop();
+    caller.pframe(0); caller.nop(); caller.plocal(8, 0); caller.nop();
+    caller.punframe(); caller.nop(); caller.ret(); caller.nop();
+    let metadata: Vec<u8> = [1345400887u64, 2, 72, 2,
+        40, 72, 16, 1, 0, 16, 16, 3, 0, 40, 16, 1, 0, 4, 1, 1]
+        .iter().flat_map(|w| w.to_le_bytes()).collect();
+    let caller = protected_test_aom(&caller.to_bytes(), &metadata,
+        &[("tail", 1, 40, &[1]), ("touch", 2, 0, &[1002, 1]), ("main", 1, 0, &[])], &[(8, 1)]);
+    let mut callee = Asm64::new();
+    callee.pframe(0); callee.nop(); callee.call(0); callee.nop(); callee.plocal(8, 0); callee.nop();
+    callee.punframe(); callee.nop(); callee.ret(); callee.nop();
+    let metadata: Vec<u8> = [1345400887u64, 2, 40, 1, 0, 40, 16, 1, 0, 16, 16, 3]
+        .iter().flat_map(|w| w.to_le_bytes()).collect();
+    let callee = protected_test_aom(&callee.to_bytes(), &metadata,
+        &[("touch", 1, 0, &[1002, 1]), ("tail", 2, 0, &[1])], &[(8, 1)]);
+    vec![ValidatedPointerModule::from_aom(&caller).unwrap(), ValidatedPointerModule::from_aom(&callee).unwrap()]
+}
+
+fn set_word(bytes: &mut [u8], offset: usize, value: u64) {
+    bytes[offset..offset+8].copy_from_slice(&value.to_le_bytes());
+}
+
+#[test]
+fn p108_protected_link_merges_frames_and_resolves_both_call_directions() {
+    use super::ankald::run_protected_ankald;
+    use super::pointer_frames::ValidatedPointerProgram;
+    let inputs = protected_test_modules();
+    let image = run_protected_ankald(&ankald_image().bytes, &inputs).unwrap();
+    assert_eq!((image.code_size, image.lit_start, image.entry, image.bytes.len()), (112, 112, 0, 336));
+    let program = ValidatedPointerProgram::from_image(&image.bytes[..112], &image.bytes[112..]).unwrap().unwrap();
+    assert_eq!(program.frames.iter().map(|f| f.entry).collect::<Vec<_>>(), [40, 0, 72]);
+    assert_eq!(program.frames[2].locals, inputs[1].frames()[0].locals);
+    let word = |pc| u32::from_le_bytes(image.bytes[pc..pc+4].try_into().unwrap());
+    assert_eq!(word(72), (44 << 26) | 2);
+    assert_eq!(8 + sign_extend_22(word(8)) * 4, 72);
+    assert_eq!(80 + sign_extend_22(word(80)) * 4, 40);
+    assert_eq!(&image.bytes[16..24], &inputs[0].module().code[16..24]);
+    assert_eq!(&image.bytes[88..96], &inputs[1].module().code[16..24]);
+    assert_eq!(image, run_protected_ankald(&ankald_image().bytes, &inputs).unwrap());
+}
+
+#[test]
+fn p108_protected_link_rejects_unresolved_duplicate_and_wrong_signature() {
+    use super::ankald::run_protected_ankald;
+    use super::pointer_frames::ValidatedPointerModule;
+    let inputs = protected_test_modules();
+    assert_eq!(run_protected_ankald(&ankald_image().bytes, &inputs[..1]), Err(AnkaldError::LinkerRejected(4)));
+    let mut duplicate = inputs.clone(); duplicate.push(inputs[1].clone());
+    assert_eq!(run_protected_ankald(&ankald_image().bytes, &duplicate), Err(AnkaldError::LinkerRejected(3)));
+    let mut changed = inputs[1].bytes().to_vec();
+    set_word(&mut changed, inputs[1].module().header.symbol_offset as usize + 112, 2);
+    let wrong = vec![inputs[0].clone(), ValidatedPointerModule::from_aom(&changed).unwrap()];
+    assert_eq!(run_protected_ankald(&ankald_image().bytes, &wrong), Err(AnkaldError::LinkerRejected(5)));
+}
+
+#[test]
+fn p108_protected_link_rejects_mixed_profiles_and_changed_entry_contract() {
+    use super::ankald::run_protected_ankald;
+    use super::pointer_frames::ValidatedPointerModule;
+    let inputs = protected_test_modules();
+    let mut legacy = inputs[1].bytes().to_vec();
+    set_word(&mut legacy, 112, (63u64 << 26) | (63u64 << 58));
+    assert_eq!(run_ankald(&ankald_image().bytes, &[inputs[0].bytes(), &legacy], "main"), Err(AnkaldError::LinkerRejected(9)));
+    assert_eq!(run_protected_ankald(&ankald_image().bytes, &[inputs[1].clone(), inputs[0].clone()]), Err(AnkaldError::LinkerRejected(8)));
+    assert_eq!(run_ankald(&ankald_image().bytes, &[inputs[0].bytes(), inputs[1].bytes()], "tail"), Err(AnkaldError::LinkerRejected(8)));
+    for (offset, value) in [(112, 2), (120, 1)] {
+        let mut changed = inputs[0].bytes().to_vec();
+        let symbol = inputs[0].module().header.symbol_offset as usize + 2 * 160;
+        set_word(&mut changed, symbol + offset, value);
+        if offset == 120 { set_word(&mut changed, symbol + 128, 1); }
+        let wrong = vec![ValidatedPointerModule::from_aom(&changed).unwrap(), inputs[1].clone()];
+        assert_eq!(run_protected_ankald(&ankald_image().bytes, &wrong), Err(AnkaldError::LinkerRejected(8)));
+    }
+}
+
+#[test]
+fn p108_protected_link_guest_rejects_bad_frame_and_relocation_slots() {
+    let inputs = protected_test_modules();
+    let caller = inputs[0].module();
+    let reloc = caller.header.relocation_offset as usize;
+    let rodata = caller.header.rodata_offset as usize;
+    for (offset, value) in [(112, (44u64 << 26) | (63u64 << 58)),
+        (rodata + 24, 1), (rodata + 32, 8), (reloc + 8, 0), (reloc + 40, 1),
+        (112 + 8, (50u64 << 26) | 1 | (63u64 << 58)),
+        (112 + 16, (50u64 << 26) | 1 | (63u64 << 58)), (112 + 8, 50u64 << 26)] {
+        let mut bad = inputs[0].bytes().to_vec(); set_word(&mut bad, offset, value);
+        assert_eq!(run_ankald(&ankald_image().bytes, &[&bad, inputs[1].bytes()], "main"),
+            Err(AnkaldError::LinkerRejected(9)), "offset={offset} value={value}");
+    }
+    let mut duplicate = inputs[0].bytes().to_vec();
+    duplicate.extend_from_slice(&inputs[0].bytes()[reloc..reloc+48]);
+    let total = duplicate.len() as u64;
+    set_word(&mut duplicate, 24, total); set_word(&mut duplicate, 104, 2);
+    assert_eq!(run_ankald(&ankald_image().bytes, &[&duplicate, inputs[1].bytes()], "main"), Err(AnkaldError::LinkerRejected(9)));
+    let mut missing = inputs[0].bytes()[..reloc].to_vec();
+    set_word(&mut missing, 24, reloc as u64); set_word(&mut missing, 104, 0);
+    assert_eq!(run_ankald(&ankald_image().bytes, &[&missing, inputs[1].bytes()], "main"), Err(AnkaldError::LinkerRejected(9)));
+    let mut large_tag = inputs[0].bytes().to_vec();
+    set_word(&mut large_tag, caller.header.symbol_offset as usize + 112, 1 << 62);
+    assert_eq!(run_ankald(&ankald_image().bytes, &[&large_tag, inputs[1].bytes()], "main"), Err(AnkaldError::LinkerRejected(2)));
+}
+
+#[test]
+fn p108_protected_link_checks_every_guest_patch_and_metadata_field() {
+    use super::ankald::{run_protected_ankald, validate_protected_link_result};
+    let inputs = protected_test_modules();
+    let image = run_protected_ankald(&ankald_image().bytes, &inputs).unwrap();
+    for (pc, word) in [(8, (50u32 << 26) | 8), // valid frame, wrong imported function
+        (16, (50u32 << 26) | 0x3ffffc), // changed internal CALL, still valid code
+        (88, (45u32 << 26) | (6 << 22)), // legal PLOCAL with changed destination
+        (76, (63u32 << 26) | 1)] { // noncanonical padding
+        let mut changed = image.clone();
+        changed.bytes[pc..pc+4].copy_from_slice(&word.to_le_bytes());
+        assert_eq!(validate_protected_link_result(&inputs, &changed), Err(AnkaldError::InvalidProtectedResult));
+    }
+    for (offset, value) in [(112 + 32 + 16, 32), (112 + 32 + 32 + 24, 1)] {
+        let mut changed = image.clone(); set_word(&mut changed.bytes, offset, value);
+        assert_eq!(validate_protected_link_result(&inputs, &changed), Err(AnkaldError::InvalidProtectedResult));
+    }
+    let mut changed = image.clone(); changed.bytes.push(0);
+    assert_eq!(validate_protected_link_result(&inputs, &changed), Err(AnkaldError::InvalidProtectedResult));
+    let mut changed = image.clone(); changed.entry = 40;
+    assert_eq!(validate_protected_link_result(&inputs, &changed), Err(AnkaldError::InvalidProtectedResult));
+}
+
+#[test]
+fn p108_protected_link_limits_frames_and_combined_image_before_execution() {
+    use super::ankald::run_protected_ankald;
+    use super::pointer_frames::ValidatedPointerModule;
+    let inputs = protected_test_modules();
+    assert_eq!(run_protected_ankald(&[], &vec![inputs[0].clone(); 2049]), Err(AnkaldError::InvalidProtectedLayout));
+    let size = (1024 * 1024 / 5) & !7usize;
+    let mut code: Vec<u8> = std::iter::repeat_n((63u32 << 26).to_le_bytes(), size / 4).flatten().collect();
+    code[..4].copy_from_slice(&(44u32 << 26).to_le_bytes());
+    code[size-16..size-12].copy_from_slice(&(46u32 << 26).to_le_bytes());
+    let mut ending = super::isa::Asm64::new(); ending.ret();
+    code[size-8..size-4].copy_from_slice(&ending.to_bytes());
+    let metadata: Vec<u8> = [1345400887u64, 2, size as u64, 1, 0, size as u64, 16, 0]
+        .iter().flat_map(|w| w.to_le_bytes()).collect();
+    let bytes = protected_test_aom(&code, &metadata, &[("main", 1, 0, &[])], &[]);
+    let module = ValidatedPointerModule::from_aom(&bytes).unwrap();
+    assert!(5 * size <= 1024 * 1024);
+    assert_eq!(run_protected_ankald(&[], &vec![module; 5]), Err(AnkaldError::InvalidProtectedLayout));
+}
+
+#[test]
+fn p108_protected_link_preserves_legacy_rodata_and_entry_behavior() {
+    use super::isa::Asm64;
+    let mut asm = Asm64::new(); asm.movi(0, 42); asm.nop(); asm.ret(); asm.nop();
+    let code = asm.to_bytes();
+    let rodata = 123u64.to_le_bytes();
+    let aom = protected_test_aom(&code, &rodata, &[("entry", 1, 0, &[])], &[]);
+    let image = run_ankald(&ankald_image().bytes, &[&aom], "entry").unwrap();
+    assert_eq!(image.code_size, code.len() as u64);
+    assert_eq!(image.entry, 0);
+    assert_eq!(&image.bytes[..code.len()], code);
+    assert_eq!(&image.bytes[code.len()..], rodata);
 }
 
 #[test]

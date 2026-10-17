@@ -3,6 +3,9 @@
 ## 1. Project Purpose
 
 **Anka** is a vertically integrated computer architecture project built from the bottom up.
+See [README.md](README.md) for the project rationale, current acceptance evidence
+and development entry points. [DESIGN_NOTES.md](DESIGN_NOTES.md) records decisions
+and deferred work.
 
 The project began as an MC68000 emulator written in Rust and quickly grew into a complete experimental computing stack:
 
@@ -29,7 +32,9 @@ The long-term goal is not to reproduce the MC68000 indefinitely.
 
 The 68000 is the experimental scaffold used to discover which architectural ideas survive contact with a real compiler, real operating-system code, asynchronous events, hostile software, and formal verification.
 
-The eventual architecture is **Anka64**: a clean 64-bit machine designed from those lessons rather than inherited historical conventions.
+The active architecture is **Anka64**: a custom 64-bit machine designed from
+those lessons. Its reference runtime and self-hosting toolchain are implemented;
+native hardware remains a future direction.
 
 ---
 
@@ -47,23 +52,13 @@ The project repeatedly demonstrated this distinction.
 
 A one-bit MOVEM decoder error survived dozens of tests, a working assembler, a working compiler, and ordinary guest programs. It was exposed only when the operating system became the first real client requiring MOVEM-to-registers for context switching.
 
-The working methodology is therefore:
-
-```text
-design
-  ↓
-implement
-  ↓
-build a real client
-  ↓
-let the client break the abstraction
-  ↓
-fix the architecture
-  ↓
-turn the failure into a regression test
-  ↓
-formalize the invariant
-```
+The current methodology is formal-first. State the architectural contract and
+its hostile witnesses, pass the required Kleis gates, implement a bounded piece,
+then exercise it with a real client and adversarial tests. When a client exposes
+a missing invariant, refine and recheck the contract before extending the
+implementation. Retain the failure as a regression witness. Historical failures
+explain how this discipline developed; formalization is no longer postponed
+until the end of a feature.
 
 A design is not considered strong merely because it looks elegant in isolation.
 
@@ -78,48 +73,34 @@ It must survive:
 
 ## 3. Current Vertical Stack
 
-The current stack is the Anka64 self-hosted toolchain:
+The current toolchain is the second-generation AnkaCC2 C-subset compiler,
+guest ankapp preprocessor and guest ankald linker. These execute on the Anka64
+reference machine; the development host stores sources and orchestrates the
+acceptance runs.
 
-```text
-Canonical Anka source (~17 KB, 46 functions)
-          │
-          ▼
-  Self-hosted AnkaCC64 (63,808-byte fixed-point compiler)
-          │
-          ▼
-  31-instruction Anka64 ISA
-          │
-          ▼
-  Protected capability fabric
-          │
-    ┌─────┴─────┐
-    ▼           ▼
- CPU cores    DMA / agents
-    │           │
-    └─────┬─────┘
-          ▼
-  Secure OS (SYS_EXIT, SYS_WRITE, SYS_SEAL, SYS_EXEC,
-             SYS_SPAWN, SYS_WAIT, SYS_SEND, SYS_RECV,
-             SYS_BLOCK_READ, SYS_CAP_DROP, SYS_SEND_CAP,
-             SYS_SEND_KEY, SYS_DEV_SUBMIT)
-          │
-          ▼
-  ankad (native Anka64 supervisor — boot, spawn, wait, restart)
+```mermaid
+flowchart TB
+    SRC["Immutable source bundles"] --> BUILD["Guest ankapp, AnkaCC2 and ankald"]
+    BUILD --> ART["Protected modules and linked artifacts"]
+    ART --> PUB["Explicit publication and execution authority"]
+    PUB --> OS["Ordinary Anka process admission and supervision"]
+    OS --> CPU["Anka64 core and protected pointer ABI"]
+    CPU --> FAB["Authority-enforcing object fabric"]
+    DMA["DMA and device agents"] --> FAB
+    FAB --> MEM["Object backing through placement management"]
 ```
 
-The compiler is self-hosting.  The bootstrap relation is:
+The established CC_A -> CC_B -> CC_C lineage remains the bootstrap foundation.
+CC_A is frozen; new compiler semantics belong in guest source. The current
+second-generation witness builds CC2_0 through extended CC_B, then compiles the
+same CC2 source with CC2_0 and CC2_1 and checks `CC2_1 == CC2_2` byte for byte.
+On 2026-10-17, the passing protected-module acceptance measured CC2_0 at
+148984 bytes and CC2_1/CC2_2 at 168888 bytes, entry 166200.
 
-```text
-CC_A (bootstrap seed, 45 functions) ──compile──→ CC_B (63,808 bytes, 46 functions)
-CC_B (authoritative compiler)       ──compile──→ CC_C (63,808 bytes, 46 functions)
-                                                 CC_B == CC_C  (fixed point)
-```
-
-CC_A is a frozen bootstrap seed.  It compiles canonical source but does
-not itself implement every compiler semantic.  CC_B is the authoritative
-compiler artifact.  CC_C proves CC_B is correct.  New compiler features
-go into canonical source and are tested through CC_B, not by modifying
-CC_A.
+A compiler fixed point establishes deterministic bootstrap closure. It is not
+a proof of every compiler transformation; semantic tests, hostile programs and
+formal contracts remain separate obligations. DN-69 records the latest
+receipt-bound protected-module execution evidence.
 
 The MC68000 stack (AnkaCC, AnkaASM, S-record loader, ROM monitor)
 remains in the codebase as the experimental scaffold from which the
@@ -1189,6 +1170,16 @@ Anka protects agents through explicit authority
 
 The strongest realization is native hardware in which every CPU, DMA, or accelerator transaction must pass through the capability fabric before memory commit. At that point a compromised kernel cannot simply skip the authorization function because authorization is below software.
 
+### Envisioned trust anchor
+
+Anka64 is envisioned to have a single trust anchor, with OIDC currently being
+considered as its basis.
+
+**Hardware direction deferred (2026-10-17).** Native FPGA/hardware realization
+is a future research direction, not current implementation work or a prerequisite
+for the software “Anka64 is alive” milestone. Its architecture and required
+timing/cache proof work are recorded in the following section.
+
 This yields three distinct implementation stages:
 
 | Stage | Security meaning |
@@ -1209,6 +1200,147 @@ capability fabric
 The architectural lesson is:
 
 > **A security invariant is only as strong as the lowest layer capable of bypassing its enforcement point.**
+
+<a id="future-fpga"></a>
+
+## Future Native FPGA Realization — Deferred
+
+**Scope decision, 2026-10-17:** preserve native FPGA implementation as a future
+direction. No RTL, board bring-up or hardware implementation is being started.
+Substantial Kleis specification and refinement work on execution timing,
+caches and shared microarchitectural state must precede any implementation.
+This direction adds no completion requirement to the current software phases.
+
+### Native machine and memory organization
+
+The proposed machine contains native Anka64 execution cores, an authority-
+enforcing fabric, protected metadata and memory controllers, and eventually
+DMA and peripheral agents. An auxiliary host or ARM processor may help load
+an image; native execution means the FPGA's Anka64 core executes that image.
+
+The architectural distinction is the separation of **identity, authority and
+placement**. Physical RAM and instruction fetch remain, but a raw address does
+not confer access to an object. Every participating agent must use the common
+fabric enforcement path. Boot, debug and maintenance paths require explicit
+trusted controls and cannot provide an unmediated route to object payloads.
+
+This changes the organization of a von Neumann-style machine's addressing and
+protection. Conventional machines already have mechanisms such as MMUs and
+IOMMUs; Anka64's proposed distinction is object-based access through a common
+authority boundary, with physical placement independent of that authority.
+
+| Concern | Conventional address-centered organization | Proposed native Anka64 organization |
+|---|---|---|
+| Memory reference | Virtual/physical address checked by platform protection | Object identity, generation-qualified authority, bounded offset and operation |
+| CPU and device access | CPU and device translation/protection paths | Common fabric obligations for every participating agent |
+| Executable publication | Executable mappings and platform W^X controls | Object sealing with separate SEAL authority |
+| Movement | Address translation and mapping changes | Placement changes without minting authority |
+
+| Logical memory region | Intended role and boundary |
+| --- | --- |
+| Object store | Object payloads addressed through object identity and bounded offsets. The fabric checks authority and current generation, then resolves physical placement. Guest code, stacks and application/compiler scratch remain protected objects. |
+| Conventional machine RAM | Trusted bootstrap, controller-private scratch and possibly protected metadata backing. Permitted masters and address windows must be defined; this region cannot alias object-store payloads through an unchecked path. |
+
+These are logical trust regions. Separate chips are not required by the
+proposal; a shared memory device would need enforced access separation.
+Descriptors, capability/domain records, placement mappings and revocation
+state belong to protected metadata. On-chip metadata caches with protected
+external backing are a possible implementation, not a selected design or a
+measured capacity claim.
+
+The object store may use external DDR; it need not fit in FPGA on-chip memory.
+Metadata may be cached in BRAM/URAM/registers with protected external backing.
+One million objects remains a sizing scenario, not a validated capacity:
+descriptor size, capability cardinality, fragmentation, cache misses, bandwidth
+and concurrency must be accounted for separately. The Rust Fabric currently
+uses software maps and byte-vector backing; two physical RAM controllers are
+not an implemented feature of that reference model.
+
+```mermaid
+flowchart TB
+    CPU["Native Anka64 cores"] --> IN["Trusted requester identity"]
+    DMA["DMA and peripheral agents"] --> IN
+    IN --> FAB["Fabric: authorize, translate, order and commit"]
+    FAB <--> META["Protected authority and placement metadata"]
+    FAB --> OBJ["Object-store payloads"]
+    META <--> RAM["Restricted conventional RAM"]
+    BOOT["Trusted boot and maintenance"] --> FAB
+    BOOT --> RAM
+```
+
+This diagram identifies trust boundaries, not a final bus or controller design.
+Requester identity must come from trusted ingress/execution context, rather
+than an untrusted request's claimed domain. The native core must also preserve
+protected pointer-kind, return and event-context state; the fabric must preserve
+pointer descriptors and pointer-bearing memory-cell state. Reproducing visible
+integer bits must not reproduce authority.
+
+Each request must establish trusted requester identity; validate object
+lifecycle, generation, capability provenance, permissions, bounds and overflow;
+resolve placement; and only then commit an authorized operation. Denial must
+produce no prohibited memory effect. Sealing, grants, revocation and movement
+must compose with concurrent requests. `Object` deliberately carries no physical
+address, while `Capability64` records object, generation, offset, length and
+permissions. Current placement uses 4 KiB page-granular contiguous extents;
+scatter/gather backing needs its own design and proofs.
+
+### Required Kleis work on timing and caches
+
+Hardware introduces observable behavior beyond architectural return values and
+memory contents. A denied access with no architectural memory effect can still
+affect a timing observation. Existing software tests and architectural Kleis
+gates do not establish hardware timing-channel confidentiality.
+
+The future formal work must cover:
+
+1. **Observer and information-flow model.** Define what each domain can observe:
+   latency, completion order, cache effects, faults, counters and contention.
+   State permitted public influences and intentional disclosures. Formulate
+   timing noninterference by comparing observable traces from executions with
+   equivalent public inputs and different protected state.
+2. **Cache authority and confidentiality.** Cover data, instruction, descriptor
+   and placement caches, including hits, fills, replacement and writeback.
+   Bind relevant state to identity, generation and authority context. A cached
+   entry cannot bypass a current authority check.
+3. **Logical spans and physical transfers.** Specify how cache-line fills and
+   wider memory transfers preserve exact logical byte bounds. Co-fetched bytes
+   must not become accessible through returned data or forbidden observations.
+4. **Cycle-level transaction refinement.** Define acceptance, backpressure,
+   authorization, commit, cancellation and response delivery. Include prefetch
+   and speculative side effects if those mechanisms are introduced.
+5. **Revocation, sealing, retirement and movement.** Define ordering against
+   in-flight operations, cached grants, dirty lines and late responses. Specify
+   drain/invalidation/revalidation obligations before storage or identity reuse.
+6. **Shared resources and additional agents.** Model queues, arbitration,
+   coherence, memory-controller contention, multiple cores and DMA. Fairness and
+   eventual completion are separate properties from timing confidentiality.
+7. **Protected context and lifecycle.** Preserve authority across stalls and
+   context switches; define safe reset, boot and debug behavior, including stale
+   transactions and residual cache state.
+8. **Implementation correspondence.** Relate future RTL traces to the Kleis
+   model under stated assumptions. Combine refinement checks with adversarial
+   measurements and identify physical effects outside the proved model.
+
+Partitioning, flushing, deterministic scheduling and an initially cache-free
+design are alternatives for future evaluation. None is selected or proved by
+this roadmap. A cache-free design would still require analysis of arbitration,
+queues and memory timing. RTL clock timing closure and security against timing
+observations are distinct obligations; no hard real-time guarantee is made.
+
+### Conditional future implementation sequence
+
+If this direction is explicitly resumed, first specify and prove the relevant
+Kleis contracts and hostile witnesses. A bounded fabric prototype with small
+memory and synthetic agents could then test request/response refinement before
+a native core, external memory, DMA or multicore integration is attempted.
+Each extension would require its corresponding formal gates, conformance tests
+against the Rust reference and physical validation. No hardware schedule,
+board selection, clock target or resource utilization is committed here.
+
+The consolidated [DN-70](DESIGN_NOTES.md#dn-70) retains the board discussion,
+conditional bring-up stages, demonstration criteria and source-code anchors.
+The active objective remains the software self-hosting and end-to-end
+“Anka64 is alive” chain.
 
 ---
 
@@ -1418,9 +1550,9 @@ assert(CC_B == CC_C)        (binary fixed point)
 
 ### Key facts (as of Phase 6B; see Section 18 for current numbers)
 
-- **42** canonical functions at Phase 6B (now 46 after Phase 7)
-- **15,030** bytes of canonical source text at Phase 6B (now ~17 KB)
-- **57,176** bytes — fixed-point compiler binary at Phase 6B (now 63,808)
+- **42** canonical functions at Phase 6B (46 at the Phase 7 checkpoint)
+- **15,030** bytes of canonical source text at Phase 6B (~17 KB at Phase 7)
+- **57,176** bytes — fixed-point compiler binary at Phase 6B (63,808 at Phase 7)
 - **29** ISA instructions — no expansion was needed for self-hosting
 - **Stage-2/stage-3 binary identity** — hard assertion, not advisory
 - **22-program permanent semantic corpus** — literals, arithmetic, variables, if/else, while, function calls, recursion, pointer dereference, bitwise, comparisons
@@ -1446,14 +1578,23 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 
 # 18. Current Implementation Facts
 
+Current toolchain and acceptance checkpoint: **2026-10-17**. Older sizes and
+test totals in historical milestone sections describe those earlier checkpoints.
+
 | Property | Status |
 |----------|--------|
-| ISA instructions | 29 |
-| Self-hosted compiler | Fixed point (CC_B == CC_C) |
+| ISA | Single-source instruction descriptions, including byte and protected-pointer operations; see `src/anka64/desc.rs` |
+| Self-hosted compiler | Exact CC2_1 == CC2_2 fixed point; CC_B == CC_C remains the bootstrap foundation |
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
-| CC_B = CC_C | 46 functions; binary size verified by fixed-point regression |
-| Canonical source | ~17 KB |
-| Tests | 967/967 Rust tests through closed Phase 10.4 ankald static linking |
+| Current CC2 witness | CC2_0 = 148984 bytes; CC2_1 = CC2_2 = 168888 bytes; entry 166200 |
+| CC2 source | `userspace/system/compiler/ankacc2_stage3.c` |
+| Regression evidence | 1093 passed in the full run; the one failed probe was corrected and its acceptance rerun passed in 249.49s; no fresh all-green full run claimed |
+| Protected modules | Two C units, four frames, 3336 code + 2048 metadata bytes; receipt-bound execution and hostile lifetime/bounds checks accepted (DN-69) |
+| Module formal gate | 217 positive / 168 explicitly disproved hostile witnesses |
+| Protected application ABI | Metadata-bearing pointers, checked arithmetic, local-frame lifetimes, protected calls/spills and event-context save/restore |
+| Typed I/O | Exact protected-buffer output and process-owned immutable input |
+| Toolchain artifacts | Guest preprocessing, AOM emission, static linking, separate admission/publication/execution authority and ordered dependency receipts |
+| Networking | Ethernet through HTTP implemented; Phase 10's rebuild of the real socket/HTTP chain remains open |
 | Multicore | Implemented (SC + XCHG) |
 | DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -1487,7 +1628,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 | System image | Declarative boot manifest: encode → decode → load_into(Fabric, phys_base) → kernel.boot() |
 | Steady-state conservation | 100-cycle resource fixed point verified |
 | Formal lifecycle model | Kleis Petri net: 3 P-invariants, cycle closure, 26 properties |
-| Linux x86_64 binary | Built and tested via Podman (440/440, stripped ELF, ~649 KiB) |
+| Linux x86_64 host binary | Historical Podman checkpoint: 440/440, stripped ELF, ~649 KiB; not a current-suite total or native Anka64 hardware result |
 
 ---
 
@@ -3353,7 +3494,7 @@ client and an adversarial gate before the next one depends on it:
       - 967/967 Rust tests
       - 37/37 positive linker Kleis witnesses, 0/28 hostile witnesses accepted
       - 14/14 positive linker-process ABI witnesses, 0/13 hostile witnesses accepted
-10.5  source bundles + headers/includes + minimum earned preprocessing — FORMAL GATE ESTABLISHED
+10.5  source bundles + headers/includes + minimum earned preprocessing — COMPLETE
       - explicit immutable source bundles with unique canonical logical names
       - exact root selection; names remain metadata and create no authority
       - include-only first slice; no ambient host/filesystem lookup
@@ -3361,7 +3502,8 @@ client and an adversarial gate before the next one depends on it:
       - preprocessing failure emits/publishes nothing
       - 20/20 positive source-bundle witnesses, 0/16 hostile witnesses accepted
       - 21/21 positive include-preprocessing witnesses, 0/17 hostile witnesses accepted
-      - implementation pending
+      - guest ankapp include expansion and bundle-to-AOM-to-link path implemented
+      - merged in PR #9; 980/980 Rust tests at that checkpoint
 10.6  AnkaCC2 self-host bootstrap and fixed-point closure — COMPLETE
 10.7  verified CC2 application rebuild and protected local pointer ABI — COMPLETE
       - byte/word access, checked pointer arithmetic, typed calls and spills
@@ -3382,7 +3524,23 @@ client and an adversarial gate before the next one depends on it:
       - exact lineage, separate publication authority, fresh READ-only AOM publication
       - concrete CC2 adapter ABI COMPLETE: DN-63/DN-64; 170 positive / 137 hostile checks
       - 7 new focused Rust tests pass; protected rebuild now retains the AOM receipt
-      - latest full suite: 1064/1064 passed in 1027.13s; CC2 witness passed in 216.85s
+      - last all-green full suite predates module work: 1064/1064 in 1027.13s
+      - protected separate-module composition: Kleis specification in DN-65
+      - module admission, dense frame indices, guest manifest merge and ordered receipts
+      - formal gate: 217 positive / 168 explicitly disproved hostile witnesses
+      - piece 1: CC2 definition-only frame indices + relocatable module validator (DN-66)
+      - piece 1 CC2 acceptance passed on the developer machine: 1 test, 239.48s
+      - piece 2: guest manifest merge, PFRAME rebasing and exact output checks (DN-67)
+      - piece 2 passed locally: 7 linker tests (19.99s), CC2 acceptance (246.54s)
+      - piece 2/3 witness: 3 frames, 688 code + 512 metadata bytes, entry 0
+      - piece 3: module admission + ordered dependency/linked receipts (DN-68)
+      - piece 3 passed locally: 22 tests (23.16s), CC2 receipt acceptance (248.79s)
+      - piece 4 COMPLETE: receipt-bound spawn, cross-unit calls and typed output (DN-69)
+      - 5 focused execution tests pass (32.80s); full run: 1093 passed, 1 failed (1134.87s)
+      - root-RET probe error corrected; fixed-point acceptance rerun PASSED (249.49s)
+      - all 1094 library tests have passing evidence across those runs; no fresh full run
+      - 2 modules / 4 frames / 3336 code + 2048 metadata bytes; exact output and exit 0
+      - escaped-local and one-past cases both reject with ProtectionFault and no output
       - compiler/toolchain modularization, headers, modules, and libraries
       - persistent tool/source receipts and rebuilt socket/HTTP services
 10.9  supply-chain closure, hostile audit, and CPU-to-HTTP rebuild gate
@@ -3853,8 +4011,9 @@ host development paths/bytes
   -> linked artifact
 ```
 
-Phase 10.5 implementation is still pending; the formal gate freezes the
-semantics that implementation must realize.
+Phase 10.5 implemented this pipeline and closed at the 980-test checkpoint.
+The formal gate specifies its semantics; DN-64 records the later consolidated
+status and the current roadmap supersedes the earlier formal-only plan.
 
 #### Formal scope
 
@@ -3924,8 +4083,9 @@ The CPU never fetches an enclosing operand word. Fabric validates before reading
 or writing the exact operand span. This is an architectural/simulator transaction
 claim, not a host microarchitecture confidentiality proof. CC2 now selects these byte instructions for `char*` dereferences and local
 `char` accesses, preserving word instructions for `int*`. The expanded concrete
-CC2_1 byte application witness is implemented but awaits local bootstrap/full-suite
-validation; the last validated runtime baseline is 1004 tests.
+CC2_1 byte application witness passed; Phase 10.7 subsequently closed with the
+protected local application ABI at 1037 passing tests (DN-59). Current Phase
+10.8 acceptance evidence is recorded in DN-69 and Section 18 above.
 
 ### Protected local application profile (Phase 10.7)
 

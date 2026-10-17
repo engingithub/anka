@@ -29,7 +29,10 @@ return x&((0-1)-(a-1));
 }
 
 int pubtype(int t){
-while(1000<=t){t=t-1000;}
+if(t<0){return 0;}
+int scale=1000;
+while(scale<=(t>>1)){scale=scale<<1;}
+while(1000<=scale){if(scale<=t){t=t-scale;}scale=scale>>1;}
 if(t==1){return 1;}
 if(t==2){return 1;}
 if(t==3){return 1;}
@@ -272,6 +275,148 @@ m=m+1;
 return 0;
 }
 
+int pmode(int m){
+int b=modbase(m);
+return ((*(b+112)<<32)>>58)==44;
+}
+
+int pmeta(int m){int b=modbase(m);return b+*(b+56);}
+
+int pframe(int m,int index){
+int q=pmeta(m)+32;
+int i=0;
+while(i<index){q=q+32+*(q+24)*32;i=i+1;}
+return q;
+}
+
+int preloc(int m,int off){
+int b=modbase(m);
+int r=0;
+int found=0;
+while(r<*(b+104)){
+int q=b+*(b+96)+r*48;
+if(*(q+8)==off){if(found!=0){return 0-1;}found=q;}
+r=r+1;
+}
+return found;
+}
+
+int pvalid(int m){
+int b=modbase(m);
+int cs=*(b+40);
+int rs=*(b+64);
+if(((1<<18)<*(b+24))|(rs<64)){return 0;}
+if(*(b+56)!=112+cs){return 0;}
+if(*(b+80)!=*(b+56)+rs){return 0;}
+int h=pmeta(m);
+if((*h!=(12343|(20529<<16)))|(*(h+8)!=2)|(*(h+16)!=cs)){return 0;}
+int count=*(h+24);
+if((count<=0)|(4096<count)){return 0;}
+int end=h+rs;
+int q=h+32;
+int i=0;
+int covered=0;
+while(i<count){
+if(end-q<32){return 0;}
+int start=*q;
+int stop=*(q+8);
+int n=*(q+24);
+if((n<0)|(4096<n)){return 0;}
+if(((end-q-32)>>5)<n){return 0;}
+if((start<0)|(stop<=start)|(cs<stop)|((start&7)!=0)|((stop&7)!=0)){return 0;}
+if(*(b+112+start)!=((44<<26)|i|((63<<26)<<32))){return 0;}
+int j=0;
+while(j<i){
+int other=pframe(m,j);
+if((start<*(other+8))&(*other<stop)){return 0;}
+j=j+1;
+}
+covered=covered+stop-start;
+if(cs<covered){return 0;}
+q=q+32+n*32;
+i=i+1;
+}
+if((q!=end)|(covered!=cs)){return 0;}
+int s=0;
+int f=0;
+while(s<*(b+88)){
+int sym=symbase(m,s);
+int lane=0;
+int p=0;
+while(p<*(sym+120)){
+if(1000<=*(sym+128+p*8)){lane=alignup(lane,2)+2;}else{lane=lane+1;}
+p=p+1;
+}
+if(4<lane){return 0;}
+if(*(sym+72)==1){
+if(count<=f){return 0;}
+if(*(sym+96)!=*pframe(m,f)){return 0;}
+f=f+1;
+}
+s=s+1;
+}
+if(f!=count){return 0;}
+int r=0;
+while(r<*(b+104)){
+int rel=b+*(b+96)+r*48;
+int off=*(rel+8);
+if((*(rel+40)!=0)|(preloc(m,off)!=rel)){return 0;}
+if(*(b+112+off)!=((50<<26)|((63<<26)<<32))){return 0;}
+r=r+1;
+}
+int pc=0;
+while(pc<cs){
+int slot=*(b+112+pc);
+if((slot>>32)!=(63<<26)){return 0;}
+int word=(slot<<32)>>32;
+int op=word>>26;
+if(op==44){
+int index=word&((1<<26)-1);
+if(count<=index){return 0;}
+if(*pframe(m,index)!=pc){return 0;}
+}
+if(op==50){
+if((word>>22)!=(50<<4)){return 0;}
+if(preloc(m,pc)==0){
+int disp=word&((1<<22)-1);
+if((1<<21)<=disp){disp=disp-(1<<22);}
+int target=pc+disp*4;
+int matches=0;
+i=0;
+while(i<count){if(*pframe(m,i)==target){matches=matches+1;}i=i+1;}
+if(matches!=1){return 0;}
+}
+}
+pc=pc+8;
+}
+return 1;
+}
+
+int pprofile(){
+int mode=pmode(0);
+int mc=*(131000+72);
+int m=0;
+int code=0;
+int metadata=32;
+int frames=0;
+while(m<mc){
+if(pmode(m)!=mode){return 0-1;}
+if(mode==1){
+if(pvalid(m)==0){return 0-1;}
+int b=modbase(m);
+int cs=*(b+40);
+int rs=*(b+64)-32;
+int fc=*(pmeta(m)+24);
+if((code&(*(b+48)-1))!=0){return 0-1;}
+if((((1<<20)-code)<cs)|(((1<<20)-metadata)<rs)|((4096-frames)<fc)){return 0-1;}
+code=code+cs;metadata=metadata+rs;frames=frames+fc;
+}
+m=m+1;
+}
+if((1<<20)-code<metadata){return 0-1;}
+return frames;
+}
+
 int codebase(int index){
 int cur=0;
 int m=0;
@@ -330,6 +475,13 @@ int imagegeom(int want){
 int mc=*(131000+72);
 int cur=codesize();
 if(cur<0){return 0-1;}
+if(pmode(0)==1){
+if(want==0){return cur;}
+cur=cur+32;
+int index=0;
+while(index<mc){int b0=modbase(index);cur=cur+*(b0+64)-32;index=index+1;}
+return cur;
+}
 int lit=0;
 int m=0;
 while(m<mc){
@@ -433,12 +585,40 @@ int co=*(b+32);
 int p=0;
 while(p<cs){*(out+cb+p)=*(b+co+p);p=p+8;}
 int rs=*(b+64);
-if(0<rs){
+if((0<rs)&(pmode(0)==0)){
 int rb0=robase(m);
 int ro=*(b+56);
 p=0;
 while(p<rs){wb(out+rb0+p,rb(b+ro+p));p=p+1;}
 }
+m=m+1;
+}
+return 0;
+}
+
+int pmerge(int frames){
+int out=*(131000+88);
+int cs=codesize();
+int dest=out+cs;
+*dest=12343|(20529<<16);*(dest+8)=2;*(dest+16)=cs;*(dest+24)=frames;
+dest=dest+32;
+int prefix=0;
+int m=0;
+while(m<*(131000+72)){
+int base=codebase(m);
+int count=*(pmeta(m)+24);
+int i=0;
+while(i<count){
+int src=pframe(m,i);
+int size=32+*(src+24)*32;
+*dest=*src+base;*(dest+8)=*(src+8)+base;
+int p=16;
+while(p<size){*(dest+p)=*(src+p);p=p+8;}
+*(out+base+*src)=(44<<26)|(prefix+i)|((63<<26)<<32);
+dest=dest+size;
+i=i+1;
+}
+prefix=prefix+count;
 m=m+1;
 }
 return 0;
@@ -492,6 +672,8 @@ int p=1;
 while(p<el){if(restc(rb(ep+p))==0){return fail(8);}p=p+1;}
 int m=0;
 while(m<mc){if(validmod(m)==0){return fail(2);}m=m+1;}
+int pf=pprofile();
+if(pf<0){return fail(9);}
 if(alldefs()==0){return fail(3);}
 int ir=importsok();
 if(ir!=0){return fail(ir);}
@@ -505,10 +687,17 @@ int em=findentry(1);
 int es=findentry(2);
 int ent=codebase(em)+*(symbase(em,es)+96);
 if((ent<0)|(cs<=ent)|((ent&7)!=0)){return fail(8);}
+if(0<pf){
+if((ent!=0)|(el!=4)){return fail(8);}
+if((rb(ep)!=109)|(rb(ep+1)!=97)|(rb(ep+2)!=105)|(rb(ep+3)!=110)){return fail(8);}
+int entrysym=symbase(em,es);
+if((*(entrysym+112)!=1)|(*(entrysym+120)!=0)){return fail(8);}
+}
 int rr=relocsok();
 if(rr!=0){return fail(rr);}
 zeroout(ims);
 copysecs();
+if(0<pf){pmerge(pf);}
 patchall();
 *(131000+128)=cs;
 *(131000+136)=lit;

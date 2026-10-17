@@ -1429,7 +1429,7 @@ s=q43(ns,nl,d,1);
 *(61900+c*8)=s;
 c=c+1;}
 c5=*49224;
-if(*68480==2){q35((44<<26)|fi);}else{q35(q34(63));}
+if(*68480==2){q35(44<<26);}else{q35(q34(63));}
 q35(q34(63));q35(q34(63));q35(q34(63));
 c=0;
 reg=0;
@@ -1657,6 +1657,8 @@ int f2=0;
 int t3=0;
 int cg=0;
 int mg=0;
+int frames=0;
+int ordinal=0;
 
 nc=*49248;
 p=0;
@@ -1678,12 +1680,18 @@ q3(15);
 return 0;}
 litlen=0;
 if(*68480==2){
-q55(12343|(20529<<16));q55(2);q55(ce-112);q55(*49240);
 fi=0;
 while(fi<*49240){
 fn=61936+fi*80;
-if(*(fn+24)!=1){q3(7);return 0;}
+if(*(fn+24)==1){frames=frames+1;}
+fi=fi+1;}
+q55(12343|(20529<<16));q55(2);q55(ce-112);q55(frames);
+fi=0;
+while(fi<*49240){
+fn=61936+fi*80;
+if(*(fn+24)==1){
 rec=68528+fi*64;
+*(73728+112+*rec)=((44<<26)|ordinal)|((63<<26)<<32);
 q55(*rec);q55(*(rec+8));q55(*(rec+16));q55(*(rec+24));
 index=0;
 while(index<*(rec+24)){
@@ -1691,6 +1699,7 @@ local=*(rec+32);
 while(*local!=index){local=*(local+8);}
 q55(*(rec+16)+*(local+16));q55(*(local+24));q55(*(local+32));q55(*(local+40));
 index=index+1;}
+ordinal=ordinal+1;}
 fi=fi+1;}
 litlen=*49224-ce;}
 so=*49224;

@@ -11,9 +11,16 @@ use super::dev_compiler::{compile_for_adapter, CompiledCImage, DevelopmentCompil
 use super::dev_runner::DeveloperExecutionAuthority;
 use super::fabric::Fabric;
 use super::placement::{PhysicalPlacementManager, PlacementError};
-use super::pointer_frames::ValidatedPointerProgram;
+use super::pointer_frames::{ValidatedPointerModule, ValidatedPointerProgram};
 use super::source_bundle::{run_ankapp_with_capacity, AnkaPreprocessError, SourceBundle};
 use super::state::*;
+
+mod protected_modules;
+pub use protected_modules::{FrozenModuleLink, LinkedModuleDependency, LinkedRebuildReceipt};
+
+/// Validation role is evidence, never execution or publication authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebuildAdmissionRole { ClosedTranslationUnit, RelocatableModule, LinkedImage }
 
 const COPY_LIMIT: u64 = 65536;
 // Adapter ABI version, target profile, output bound. This is coordinator-owned
@@ -44,6 +51,10 @@ pub enum CompilerAdapterError {
     BindingChanged,
     Placement(PlacementError),
     PublicationRejected,
+    InvalidModuleDependency,
+    DependencyChanged,
+    Link(super::ankald::AnkaldError),
+    Run(super::dev_runner::DevelopmentRunError),
 }
 
 /// Produced only by the isolated, terminal, compile-only execution bridge.
@@ -119,6 +130,7 @@ pub(crate) fn copy_sealed_prefix(fabric: &mut Fabric, reader: DomainId,
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebuildReceipt {
     pub epoch: u64,
+    pub role: RebuildAdmissionRole,
     pub context: u64,
     pub process_slot: u64,
     /// Injective encoding of concrete u32 process generation: u64(g) + 1.
@@ -152,6 +164,7 @@ struct PublishedRebuild {
     fabric: Fabric,
     placement: PhysicalPlacementManager,
     reader: DomainId,
+    context: u64,
     receipt: RebuildReceipt,
 }
 
@@ -162,6 +175,7 @@ struct PublishedRebuild {
 pub struct RebuildArtifactStore {
     epoch: u64,
     records: BTreeMap<u64, PublishedRebuild>,
+    linked_records: BTreeMap<u64, protected_modules::PublishedLinkedRebuild>,
 }
 impl RebuildArtifactStore {
     pub fn new() -> Self { Self::default() }
@@ -180,6 +194,23 @@ impl RebuildArtifactStore {
     pub fn compile(&mut self, expected_epoch: u64, producer: &Cc2FixedPointWitness,
         bundle: &SourceBundle, execution: Option<&DeveloperExecutionAuthority>,
         publication: Option<&RebuildPublicationAuthority>) -> Result<u64, CompilerAdapterError> {
+        self.compile_as(expected_epoch, producer, bundle, execution, publication,
+            RebuildAdmissionRole::ClosedTranslationUnit)
+    }
+
+    /// Publish an unresolved protected AOM as immutable READ data. It cannot
+    /// enter the closed application path by virtue of this admission role.
+    pub fn compile_module(&mut self, expected_epoch: u64, producer: &Cc2FixedPointWitness,
+        bundle: &SourceBundle, execution: Option<&DeveloperExecutionAuthority>,
+        publication: Option<&RebuildPublicationAuthority>) -> Result<u64, CompilerAdapterError> {
+        self.compile_as(expected_epoch, producer, bundle, execution, publication,
+            RebuildAdmissionRole::RelocatableModule)
+    }
+
+    fn compile_as(&mut self, expected_epoch: u64, producer: &Cc2FixedPointWitness,
+        bundle: &SourceBundle, execution: Option<&DeveloperExecutionAuthority>,
+        publication: Option<&RebuildPublicationAuthority>, role: RebuildAdmissionRole)
+        -> Result<u64, CompilerAdapterError> {
         execution.ok_or(CompilerAdapterError::ExecutionAuthorityRequired)?;
         publication.ok_or(CompilerAdapterError::PublicationAuthorityRequired)?;
         self.next_epoch(expected_epoch)?;
@@ -196,7 +227,11 @@ impl RebuildArtifactStore {
             preprocessor: preprocessor.clone(), linker: linker.clone(),
             bundle: bundle.clone(), source: effective.bytes,
         };
-        self.publish(expected_epoch, output, binding, publication)
+        if role == RebuildAdmissionRole::ClosedTranslationUnit {
+            self.publish(expected_epoch, output, binding, publication)
+        } else {
+            self.publish_as(expected_epoch, output, binding, publication, role)
+        }
     }
 
     fn next_epoch(&self, expected: u64) -> Result<u64, CompilerAdapterError> {
@@ -204,18 +239,34 @@ impl RebuildArtifactStore {
         self.epoch.checked_add(1).ok_or(CompilerAdapterError::EpochExhausted)
     }
 
-    fn publish(&mut self, expected_epoch: u64, mut output: CompilerOutput,
+    fn publish(&mut self, expected_epoch: u64, output: CompilerOutput,
         binding: Binding, publication: Option<&RebuildPublicationAuthority>)
         -> Result<u64, CompilerAdapterError> {
+        self.publish_as(expected_epoch, output, binding, publication,
+            RebuildAdmissionRole::ClosedTranslationUnit)
+    }
+
+    fn publish_as(&mut self, expected_epoch: u64, mut output: CompilerOutput,
+        binding: Binding, publication: Option<&RebuildPublicationAuthority>,
+        role: RebuildAdmissionRole) -> Result<u64, CompilerAdapterError> {
         publication.ok_or(CompilerAdapterError::PublicationAuthorityRequired)?;
         let epoch = self.next_epoch(expected_epoch)?;
         validate_binding(&output, &binding)?;
         let module = AomModule::parse(&output.bytes).map_err(CompilerAdapterError::InvalidAom)?;
-        // The first adapter publishes closed protected translation units. The
-        // existing guest linker still runs; no host resolves/patches a CALL.
-        if !module.relocations.is_empty() || module.symbols.iter().any(|s| s.is_import())
-            || !matches!(ValidatedPointerProgram::from_image(&module.code, &module.rodata), Ok(Some(_))) {
-            return Err(CompilerAdapterError::InvalidProtectedManifest);
+        match role {
+            RebuildAdmissionRole::ClosedTranslationUnit => {
+                // Retain the stronger existing admission; unresolved modules
+                // must opt into their distinct non-executable role.
+                if !module.relocations.is_empty() || module.symbols.iter().any(|s| s.is_import())
+                    || !matches!(ValidatedPointerProgram::from_image(&module.code, &module.rodata), Ok(Some(_))) {
+                    return Err(CompilerAdapterError::InvalidProtectedManifest);
+                }
+            }
+            RebuildAdmissionRole::RelocatableModule => {
+                ValidatedPointerModule::from_aom(&output.bytes)
+                    .map_err(|_| CompilerAdapterError::InvalidProtectedManifest)?;
+            }
+            RebuildAdmissionRole::LinkedImage => return Err(CompilerAdapterError::InvalidProtectedManifest),
         }
         let profile_key = output.profile_key;
         let bytes = std::mem::take(&mut output.bytes);
@@ -225,7 +276,7 @@ impl RebuildArtifactStore {
             return Err(CompilerAdapterError::PublicationRejected);
         }
         let receipt = RebuildReceipt {
-            epoch, context: output.context, process_slot: output.process_slot,
+            epoch, role, context: output.context, process_slot: output.process_slot,
             process_generation: output.process_generation, producer_domain: output.domain,
             origin_compiler_key: binding.origin_compiler_key, compiler_key: output.compiler_key,
             source_key: output.source_key, profile_key, artifact_key,
@@ -236,7 +287,7 @@ impl RebuildArtifactStore {
         };
         // No fallible operation or guest execution after this visibility point.
         self.records.insert(epoch, PublishedRebuild { fabric: output.fabric,
-            placement: output.placement, reader: output.reader, receipt });
+            placement: output.placement, reader: output.reader, context: output.context, receipt });
         self.epoch = epoch;
         Ok(epoch)
     }
@@ -272,16 +323,26 @@ fn validate_binding(output: &CompilerOutput, binding: &Binding) -> Result<(), Co
 
 fn publish_bytes(output: &mut CompilerOutput, label: &str, bytes: &[u8])
     -> Result<LinkedArtifactKey, CompilerAdapterError> {
-    let object = output.fabric.alloc_object(label, bytes.len() as u64, ObjectKind::Memory);
-    output.placement.allocate_and_place_object(&mut output.fabric, object)
+    publish_read_only(&mut output.fabric, &mut output.placement, output.reader, label, bytes)
+}
+
+// Called only on an attempt-owned, terminal machine. Any failure drops that
+// private Fabric/PM, leaving every previously visible store record unchanged.
+fn publish_read_only(fabric: &mut Fabric, placement: &mut PhysicalPlacementManager,
+    reader: DomainId, label: &str, bytes: &[u8]) -> Result<LinkedArtifactKey, CompilerAdapterError> {
+    if bytes.is_empty() || bytes.len() > 1024 * 1024 {
+        return Err(CompilerAdapterError::PublicationRejected);
+    }
+    let object = fabric.alloc_object(label, bytes.len() as u64, ObjectKind::Memory);
+    placement.allocate_and_place_object(fabric, object)
         .map_err(CompilerAdapterError::Placement)?;
-    let before = output.fabric.objects[&object].generation;
+    let before = fabric.objects[&object].generation;
     let after = before.0.checked_add(1).ok_or(CompilerAdapterError::PublicationRejected)?;
-    if !output.fabric.zero_object_extent(object)
-        || !output.fabric.initialize_object(object, 0, bytes)
-        || !output.fabric.seal_object(object)
-        || output.fabric.objects[&object].generation.0 != after
-        || output.fabric.grant(output.reader, object, 0, bytes.len() as u64, Permissions::READ).is_none() {
+    if !fabric.zero_object_extent(object)
+        || !fabric.initialize_object(object, 0, bytes)
+        || !fabric.seal_object(object)
+        || fabric.objects[&object].generation.0 != after
+        || fabric.grant(reader, object, 0, bytes.len() as u64, Permissions::READ).is_none() {
         return Err(CompilerAdapterError::PublicationRejected);
     }
     Ok(LinkedArtifactKey { object, generation: Generation(after) })
@@ -293,7 +354,7 @@ mod tests {
     use super::super::isa::{Asm64, R0, R1, R2, R3, R4};
     use super::super::source_bundle::SourceBundleMember;
 
-    fn tiny_aom() -> Vec<u8> {
+    pub(super) fn tiny_aom() -> Vec<u8> {
         let mut asm = Asm64::new();
         asm.pframe(0); asm.movi(R0, 0); asm.punframe(); asm.ret();
         let code = asm.to_bytes();
@@ -334,7 +395,7 @@ mod tests {
             entry: 0, process_slots_observed: 1 }
     }
 
-    fn prepared(bytes: &[u8]) -> (CompilerOutput, Binding) {
+    pub(super) fn prepared(bytes: &[u8]) -> (CompilerOutput, Binding) {
         let compiler = producer(bytes, None, 0);
         let source = b"exact source\n".to_vec();
         let output = compile_for_adapter(&compiler, &source).unwrap();

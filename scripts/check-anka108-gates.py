@@ -28,6 +28,8 @@ def main():
                            help='run only the rebuild-artifact gate pair')
     selection.add_argument('--only-adapter', action='store_true',
                            help='run only the concrete compiler-adapter gate pair')
+    selection.add_argument('--only-modules', action='store_true',
+                           help='run only the protected-module composition gate pair')
     parser.add_argument('--timeout', type=int, default=120,
                         help='wall-clock seconds per command (default: 120)')
     args = parser.parse_args()
@@ -46,7 +48,7 @@ def main():
     # Some supplied Kleis CLI builds resolve stdlib imports from cwd even when
     # KLEIS_ROOT is set. Keep theory paths absolute and run from the selected
     # root so external stdlib installations work without copying into Anka.
-    if not (args.only_108 or args.only_input or args.only_rebuild or args.only_adapter):
+    if not (args.only_108 or args.only_input or args.only_rebuild or args.only_adapter or args.only_modules):
         try:
             previous = subprocess.run(
                 [sys.executable, str(root / 'scripts/check-anka107-gates.py'),
@@ -58,7 +60,9 @@ def main():
         if previous.returncode:
             return 1
     all_ok = True
-    if args.only_adapter:
+    if args.only_modules:
+        stems = ('anka108_protected_modules',)
+    elif args.only_adapter:
         stems = ('anka108_compiler_adapter',)
     elif args.only_rebuild:
         stems = ('anka108_rebuild_artifact',)
@@ -66,7 +70,8 @@ def main():
         stems = ('anka108_typed_input',)
     else:
         stems = ('anka108_typed_syscall_io', 'anka108_typed_input',
-                 'anka108_rebuild_artifact', 'anka108_compiler_adapter')
+                 'anka108_rebuild_artifact', 'anka108_compiler_adapter',
+                 'anka108_protected_modules')
     for stem in stems:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')

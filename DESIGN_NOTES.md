@@ -3,8 +3,10 @@
 Architectural decisions, alternatives considered, rejected assumptions,
 deferred changes, and reasoning about why we chose not to act.
 
-See `ARCHITECTURE.md` for the authoritative current architecture, rules,
-milestones, and implementation facts.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the authoritative current architecture,
+rules, milestones, and implementation facts. [README.md](README.md) introduces
+the project's purpose and development entry points. Architectural decisions
+and future directions belong in these documents rather than separate root notes.
 
 ---
 
@@ -2212,7 +2214,7 @@ The Fabric `derive_device_from_authority_id()` independently verifies that the
 backing entry matches the presented object, generation, and rights exactly,
 then checks `child_rights ⊆ backing_rights`.  This prevents a backing
 authority from ever "rescuing" an insufficient presented capability — the
-same rule that governed the 9.2c/OIDC exact-presented-authority design.
+same rule that governed the 9.2c exact-presented-authority design.
 
 ### Attenuation lattice
 
@@ -6876,3 +6878,770 @@ cargo test -- --test-threads=1
 The passing long witness establishes the concrete compiler-to-AOM-to-link-to-run
 path with a retained in-memory receipt. Phase 10.8 remains open for
 compiler/toolchain modularization, broader I/O and rebuilt services.
+
+## DN-65 — Protected module composition contract (Phase 10.8)
+
+**Status: FORMAL GATE PASSED; implementation proceeds in pieces (DN-66–DN-68).** On 2026-10-17,
+the focused Kleis gate passed **217 positive witnesses** and explicitly
+disproved **168/168 hostile assertions**. The original formal patch changed
+theories, the gate runner and documentation only. Its runtime checkpoint was
+DN-64's **1064 passing tests**; no Rust suite or CC2 bootstrap was rerun for that
+formal patch. The user independently confirmed the same focused formal result.
+
+### Existing foundations and the concrete gap
+
+Phase 10.3 already supplies AOM emission and separate translation units. Phase
+10.4 already supplies the guest static linker, typed symbol resolution and CALL
+relocations. Phase 10.5 already supplies immutable source bundles and guest
+include-only preprocessing: PR #9 merged that implementation with 980 passing
+tests. The roadmap's old 10.5 "implementation pending" text was stale and is
+corrected in this patch. General macros and conditional preprocessing remain
+outside that completed include-only scope.
+
+The next work composes these facilities with the Phase 10.7 protected ABI and
+DN-64's producer/publication boundary. At the formal checkpoint there were
+three restrictions:
+
+- CC2's protected `q59` manifest writer requires every function-table entry to
+  be defined locally; an imported function currently causes rejection.
+- The adapter admits only closed protected objects, rejecting imports and
+  relocations and applying the closed-program frame validator.
+- Guest `ankald` copies each input rodata section. Multiple complete protected
+  manifests need composition into one manifest, together with PFRAME index
+  rebasing. Concatenating those independent headers is insufficient.
+
+### Selected bounded profile
+
+Keep **AOM v1**, **target profile 2**, the **v2 pointer representation/calling
+convention**, and the **v2 manifest encoding**. Introduce separate trusted
+admission roles for a relocatable protected module and a closed linked image.
+A role records what was validated; it grants no rights. An unresolved module
+can be retained as immutable READ data with a compiler receipt, but cannot pass
+application execution admission. The existing closed-image path must retain
+its stronger checks.
+
+Each input contains nonempty code and exact manifest-only rodata. The initial
+slice adds no arbitrary literal pools, data relocations, globals, dynamic
+linking, archive extraction, heap allocation or IR/register allocator. Each
+compiler AOM remains bounded by the adapter's 262144-byte arena; the serialized
+linked code plus merged manifest is bounded by the existing 1 MiB artifact
+limit. Total frames are bounded by 4096; every module must own a nonempty frame
+set. Capacity checks fail before arithmetic wraps or an output is published.
+
+### Compiler/module admission obligations
+
+Definitions have a dense module-local frame ordinal; imports and unused
+prototypes have no frame. The actual function-table-to-frame mapping must be a
+bijection for definitions, with exact export-entry agreement. Equal counts
+alone do not prove that mapping. PFRAME operands use these dense ordinals,
+rather than raw table indices that include imported declarations.
+
+The new module validator must retain the existing exact AOM/manifest parsing,
+complete function coverage, instruction restrictions, local storage bounds and
+nonoverlap, argument-lane validity, within-function branches, and PUNFRAME/RET
+discipline. Only an external CALL may remain unresolved, and only when exactly
+one admitted import relocation covers its canonical zero-displacement CALL/NOP
+slot. Internal CALLs already target local frame entries. A relocation cannot
+cover a PFRAME, an arbitrary instruction, an out-of-function slot or noncanonical
+padding. Unsupported widths/kinds/addends remain rejected.
+
+### Guest linking and manifest composition
+
+Consume modules in the immutable request's explicit order. Starting from zero,
+fold code sizes and frame counts to obtain each module's code base and frame
+prefix. Do not reorder modules or introduce a trampoline. For a module with
+frame prefix `p`, local frame `i` becomes `p + i`; checked bounds make this
+mapping injective and disjoint from the next module's frame range.
+
+Rebase frame entry/end PCs and their derived exit PCs by the module's code
+base. Keep frame size and every local offset, length, alignment, flag and local
+index unchanged. PLOCAL indexes within its own frame, so it is never rebased.
+Rewrite PFRAME indices only at validated frame entries. Preserve internal CALL
+and branch displacements because their source and target shift together.
+
+Resolve imports against exactly one compatible exported function, with the
+same pointer ABI, valid argument layout, exact return/parameter types, and one
+matching target frame entry. Duplicate exports remain invalid. Apply only the
+existing zero-addend, code-section, 8-byte CALL_PC20 relocation. Despite its
+wire name, the instruction uses a signed **22-bit displacement in 4-byte words**;
+the positive and negative limits differ and are checked before encoding.
+
+The guest linker writes one manifest header followed by the ordered rebased
+frame records and unchanged local records. With `F` frames and `L` total local
+records, its exact byte length is `32 * (1 + F + L)`. The header's code length
+and frame count describe the complete output. Metadata follows the code with
+no extra payload or trailing bytes in this profile. Every code slot must be
+unchanged or justified by its complete PFRAME/import-CALL patch predicate;
+paired NOPs remain unchanged. Host-side symbol resolution, relocation and
+manifest repair remain forbidden.
+
+After guest linking, rerun full closed-image validation on the exact returned
+code and merged manifest. There must be no unresolved imports or unapplied
+relocations. The first application entry remains **`int main(void)` at offset
+zero**, at a validated frame entry. Put the entry module first and define main
+first in that module; a nonzero entry fails explicitly. Supporting another
+entry convention requires its own refinement.
+
+### Lineage, publication and calls
+
+Retain a frozen dependency vector in linker input order. Every consumed entry
+must match its position, Fabric context/object/generation, exact AOM bytes,
+module admission role and current full compiler receipt. Those receipts retain
+the exact source bundle/root/includes/effective source, fixed-point producer,
+profile and tools. A logical filename or a digest alone cannot replace this
+identity. Matching bare object IDs across separate Fabrics is insufficient.
+
+The linked receipt binds the complete ordered dependencies, exact guest linker,
+linked bytes, entry, geometry and merged manifest. Preserve DN-64's publication
+authority, current reservation/owner/binding checks, drain, nonwrapping epoch
+and one shared artifact/receipt visibility decision. Failure preserves prior
+records and publishes no linked result; already published input modules may
+remain. The new output must be distinct from all inputs, tools and staging.
+The serialized artifact carries READ only. Loader mappings retain RX code and
+READ/non-executable metadata; ordinary registration, placement and explicit
+execution authority remain separate gates. This is in-memory atomicity, not
+persistent crash recovery.
+
+Calls across modules use the existing same-domain pointer ABI, protected pair
+transport and typed spills. A module boundary creates no authority. Returning
+from the helper retires its own frame while preserving the caller's buffer;
+an escaped helper-local pointer becomes stale under the existing frame rules.
+
+### Formal scope and validation
+
+`anka108_protected_modules.kleis` imports the existing linker-process,
+protected-artifact and compiler-adapter theories. It adds no axioms. The older
+linker's conditional Bool guards are expressed in bit-vector/logical normal
+form here for composition in quantified assertions. Pointer ABI and receipt
+predicates are reused directly.
+
+The gate proves arithmetic/encoding properties and conditional admission and
+publication laws. Universal witnesses cover frame-index bounds/injectivity,
+disjoint successive frame ranges, PFRAME representability, extent preservation,
+CALL encode/decode round trips and invariance under uniform rebasing, dependency
+progress, failure preservation, shared visibility and nonwrapping publication.
+Concrete cases include a two-module layout, forward/backward calls, preserved
+pointer cells, dependency substitutions and authority failures.
+
+Parser/scan certificates in the model are explicit implementation obligations:
+they must be computed over the same frozen bytes and all relevant items. A
+count or caller-supplied success flag cannot establish them. These proofs do
+not establish full compiler/parser/linker C semantics or implementation
+correspondence; the concrete refinement and runtime witnesses remain next.
+
+The supplied Linux Kleis executable with Z3 4.12.2 ran the new pair successfully:
+
+```text
+PASS: anka108_protected_modules.kleis: 217 positive witnesses
+PASS: anka108_protected_modules_false_witnesses.kleis: 168/168 explicitly disproved
+```
+
+Run only this new gate pair locally:
+
+```sh
+python3 scripts/check-anka108-gates.py \
+  --kleis /Users/enginatik/.cargo/bin/kleis \
+  --kleis-root ~/git/cee/kleis \
+  --only-modules
+```
+
+`--only-108` now includes this pair; the default still includes 10.7 prerequisites.
+The focused command loads imported definitions but does not rerun the unchanged
+prerequisite example suites. Unknown results, parser/evaluation errors and
+non-disproof failures remain gate failures.
+
+### Next concrete witness
+
+Implement a shared prototype header plus two protected C units: `main.c` owns a
+fixed byte buffer, and `buffer.c` defines a helper accepting its protected pointer
+and length. Compile both through the exact fixed-point CC2 and guest preprocessor,
+publish each admitted AOM/receipt, link with guest ankald, retain the linked
+dependency receipt, validate/register normally, and emit the helper's result
+through typed console output. Exercise wrong signatures, malformed frame maps,
+unresolved calls, stale/substituted dependencies and absent execution authority.
+Reuse one CC2 bootstrap for these integration checks. The user runs the long
+single-threaded acceptance/full suite after implementation. Broader service
+rebuilds, persistent receipts and Phase 10.9's exact CPU-to-HTTP closure remain
+open.
+
+## DN-66 — Protected modules, implementation piece 1 (Phase 10.8)
+
+**Status: emission and structural validation implemented; concrete CC2
+acceptance passed on the developer machine (1 passed, 239.48s).** Work stays on
+`feat/anka108-protected-modules`. The DN-65 Kleis contract passed on the user's
+machine before this implementation: **217 positive / 168 hostile disproofs**.
+No theory changed in this piece, so the unchanged gates were not rerun.
+
+### Bounded handoffs
+
+Keep the implementation in separate reviewable/testable handoffs:
+
+1. **This piece:** CC2 protected-module emission, structural module validation,
+   fast hostile cases, and compiler checks sharing the existing CC2 bootstrap.
+2. Guest `ankald` manifest merge and PFRAME rebasing, with exact import CALL
+   resolution and closed-image validation on the returned bytes.
+3. Adapter module admission and linked-artifact publication with the complete
+   ordered dependency receipts and existing distinct authorities.
+4. Two-unit protected-buffer execution, typed output and hostile integration
+   witnesses, then the full single-threaded regression suite.
+
+Each handoff updates this root document and supplies only changed files in its
+ZIP. Finish the relevant acceptance checks before starting the next piece.
+DN-67 and DN-68 record the subsequent piece-2 and piece-3 handoffs. Cross-unit
+execution and the composition milestone's full suite remain piece 4.
+
+### Concrete changes
+
+CC2 now counts only defined functions in the protected manifest. `q52` emits
+a provisional PFRAME index; `q59` assigns dense ordinals in definition-table
+order and patches each corresponding entry slot itself. Imports and unused
+prototypes consume no frame. Internal forward calls still receive the existing
+guest fixup, while external calls retain the existing typed AOM relocation.
+No host patches the compiler output. The AOM/profile/manifest versions stay
+1/2/2. Raw bootstrap and ordinary application profiles retain their paths.
+
+`ValidatedPointerModule::from_aom` parses the exact bounded AOM and v2 manifest,
+retaining immutable original bytes plus parsed tables. It checks definition/
+frame bijection, matching export entries, aligned complete frames, canonical
+instruction/NOP slots, public argument-lane fit, and unique zero-addend import
+relocations at canonical zero-displacement CALLs. Common frame validation
+preserves instruction restrictions, local bounds/nonoverlap, within-function
+branches, resolved internal calls and PUNFRAME/RET discipline.
+
+A module validation result is separate from an executable program and does
+not establish producer lineage or publication authority. The closed-image
+constructor always uses an empty unresolved-call set. The current compiler
+adapter remains restricted to closed objects until piece 3; no imported module
+can use this new constructor to bypass application admission.
+
+The AOM public-type check now uses remainder instead of repeated subtraction,
+with equivalent type classification. This keeps a hostile 64-bit type tag
+from controlling an enormous validation loop. Tests cover large valid and
+invalid tags as well as malformed relocations, padding, export/frame aliasing,
+ABI overflow, raw memory instructions, out-of-frame branches and bad metadata.
+
+The existing concrete CC2 acceptance test now guest-preprocesses and compiles
+two small translation units sharing a prototype header. They deliberately
+include an unused prototype, an external pointer-taking call and a forward
+definition whose frame order differs from code order. The check validates the
+resulting AOMs and confirms that the unresolved caller fails closed-image
+validation. Piece 1 stops before cross-module linking/execution. Both compilations
+reuse the one fixed-point producer already built by that test.
+
+### Piece-1 validation checkpoint
+
+Agent-run focused checks passed:
+
+```text
+anka64::pointer_frames::tests: 10 passed, 0 failed (9 new tests)
+anka64::compiler_adapter::tests: 6 passed, 0 failed
+```
+
+The Rust test target builds, including the added integration check. The user's
+first piece-1 run reached the CC2 fixed point: CC2_0 was 148984 bytes; CC2_1 and
+CC2_2 were identical at 168888 bytes with entry 166200. The new module fixture
+then failed preprocessing with `PreprocessorRejected(2)` before either module
+was compiled. Its include operand was `api.h`, but the bundle member's exact
+name was `/probe/api.h`. Phase 10.5 deliberately performs no relative-path
+resolution. Both fixture directives now use `/probe/api.h`, and preprocessing
+failures identify the failing fixture. Preprocessor semantics are unchanged.
+The user then reran the full concrete application acceptance successfully:
+**1 passed, 0 failed, 1072 filtered out, 239.48s**. The same CC2_0/CC2_1/CC2_2
+sizes and fixed-point entry were observed. The compiler refusals and
+ControlFlowViolation lines in that passing run are expected hostile cases.
+The latest full-suite evidence remains the prior
+**1064 passed in 1027.13s** checkpoint; it is not a result for this patch.
+
+The piece-1 commands were:
+
+```sh
+cargo test --lib anka64::pointer_frames::tests -- --test-threads=1
+cargo test --lib anka64::compiler_adapter::tests -- --test-threads=1
+cargo test --lib \
+  anka64::userspace_rebuild::tests::p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address \
+  -- --exact --nocapture --test-threads=1
+```
+
+The passing acceptance permits the piece-2 work below. Reserve the full-suite
+run for the completed composition milestone unless a specific regression
+requires it earlier.
+
+## DN-67 — Protected modules, guest-linker composition (Phase 10.8, piece 2)
+
+**Status: implemented and concrete CC2 acceptance passed on the developer's
+machine.** Continue on `feat/anka108-protected-modules`.
+This implements the guest linking and structural result checks from DN-65.
+The existing 217-positive/168-hostile Kleis gate covers this slice; its theories
+and contracts are unchanged, so they were not rerun. This is runtime evidence
+for the implementation, not a proof of the full C linker or compiler semantics.
+
+### Guest construction and independent result checks
+
+Guest `ankald` distinguishes protected modules by the initial PFRAME and rejects
+mixed protected/legacy input sets. The protected path checks exact manifest
+geometry, dense definition/frame correspondence, canonical PFRAME and CALL/NOP
+slots, unique zero-addend relocations, local CALL targets and argument-lane fit.
+It uses the existing exact symbol/signature resolver for external calls.
+
+The explicit input order determines packed code bases and frame prefixes. The
+guest writes one v2 manifest, rebases each frame entry/end and its PFRAME index,
+and copies frame sizes and local records unchanged. Internal CALLs, branches,
+PLOCAL operands and all other instructions retain their bytes. Imported CALLs
+use the existing signed 22-bit displacement encoding and range checks. No
+trampoline or inter-module padding is introduced. The entry must remain
+`int main(void)` at offset zero. AOM/profile/manifest versions remain 1/2/2.
+
+`run_protected_ankald` accepts immutable `ValidatedPointerModule` values. It
+checks the aggregate limits before executing the guest, then independently
+checks the guest's exact returned bytes. The result must pass full closed-image
+validation, exact geometry/entry checks, frame/local correspondence and an
+exhaustive comparison of every original code slot. For an imported CALL, the
+checker decodes the guest-selected target address and verifies the export at
+that address against the import's exact name and signature. It does not search
+by import name to choose an address, emit code, apply a relocation, merge a
+manifest or repair bytes. Duplicate exported names are rejected.
+
+Each protected input remains bounded by 262144 bytes. Total frames are capped
+at 4096, and **code plus merged metadata** must fit the 1 MiB artifact limit.
+Invalid protected composition uses guest error 9; the existing entry, symbol
+and signature errors remain distinct. Public-type validation in guest ankald
+now reduces large type tags in a bounded number of binary steps, avoiding the
+old repeated-subtraction loop. Legacy code-only and arbitrary-rodata linking
+retain their existing path and entry convention.
+
+The guest's composition checks supplement the complete Rust module validator;
+they do not replace its instruction/local-storage/return checks. Structural
+success creates no producer receipt, publication authority or execution right.
+DN-68 implements the subsequent module/linked receipt boundary (piece 3).
+Actual cross-module protected-pointer execution remains piece 4.
+
+### Validation and local handoff
+
+Agent-run checks using the real guest linker compiled by canonical CC_B:
+
+```text
+p108_protected_link: 7 passed, 0 failed, 1073 filtered out; 35.23s
+```
+
+These cover forward and backward imported calls, definition order different
+from code order, exact manifest composition, preserved pointer-slot metadata,
+deterministic output, malformed frame/relocation inputs, wrong or unresolved
+signatures, duplicate exports, changed entry contracts, mixed profiles, changed
+guest output, aggregate frame/image limits and legacy rodata behavior. Small
+hand-assembled AOM inputs avoid another CC2 bootstrap for these focused checks.
+The Rust test target builds, including the extended integration test.
+
+The existing long CC2 acceptance now compiles the two exact protected C units
+and links them through guest ankald using its one fixed-point producer. The
+helper also calls back into the first unit, exercising both relocation
+directions. Successful validation prints `protected-module link: modules=2
+frames=3 code=... metadata=... entry=0`. This test checks linked bytes; it does
+not yet publish module receipts or execute the cross-module application.
+
+After applying the piece-2 ZIP at the repository root, run locally:
+
+```sh
+cargo test --lib p108_protected_link -- --nocapture --test-threads=1
+cargo test --lib \
+  anka64::userspace_rebuild::tests::p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address \
+  -- --exact --nocapture --test-threads=1
+```
+
+The user confirmed both checks on 2026-10-17: **7 focused tests passed in
+19.99s**, followed by **1 acceptance test passed, 1079 filtered out, in 246.54s**.
+CC2_0 remained 148984 bytes; CC2_1 and CC2_2 were both 168888 bytes with entry
+166200. The protected module result was exactly **2 modules, 3 frames, 688 code
+bytes, 512 metadata bytes, entry 0**. The expected compiler refusals and
+ControlFlowViolation cases also passed. This is not a full-suite result.
+
+## DN-68 — Protected module admission and linked receipts (Phase 10.8, piece 3)
+
+**Status: implemented and locally accepted; 22 focused checks passed in 23.16s,
+then the receipt-integrated CC2 acceptance passed in 248.79s.** Stay on
+`feat/anka108-protected-modules`. The existing DN-65 Kleis contract supplies the
+module role, ordered dependency, complete linked validation, authority and
+atomic publication obligations. No theory, guest ABI, compiler or linker C
+source changed, so unchanged Kleis gates were not rerun. These concrete checks
+exercise the implementation obligations; they do not establish full compiler
+or linker correctness from the conditional formal predicates alone.
+
+### Admission and frozen dependencies
+
+`RebuildArtifactStore::compile_module` uses the same guest preprocessing,
+fixed-point producer validation, strict compiler transport and fresh sealed
+publication as the existing closed-translation-unit API. It applies
+`ValidatedPointerModule` and records `RelocatableModule` admission. The original
+`compile` API still rejects imports and relocations and requires a closed
+protected program. A module admission role never grants execution rights.
+
+`freeze_modules` captures an explicit ordered sequence of published module
+epochs, their complete receipts, exact AOM bytes, dependency positions and the
+store's expected publication epoch. The request is immutable through the public
+API. Each dependency includes its context/object/generation, full original
+source bundle and effective source, target profile, compiler image and exact
+tool images. Every dependency must agree on the guest linker image used by the
+request. Bare object numbers and friendly source names cannot establish identity.
+
+Before linking and again before publication, the store checks the same complete
+snapshots against current records. It checks sealed source/compiler/profile
+objects, the artifact's exact READ grant and bytes, role, context, generation,
+position and full receipt equality. The test deliberately uses equal bare
+artifact keys in different compiler Fabrics: substituting the other context's
+receipt fails even when the AOM bytes are identical. Reordering a frozen vector,
+altering source/tool evidence or revoking a dependency also fails.
+
+### Terminal guest output and atomic publication
+
+The linker runner now retains its terminal Fabric, placement manager, exact
+linker/input/staging/control keys and actual process identity for publication.
+It verifies unchanged request controls and ordered sealed inputs, unchanged
+process owner, a single terminal process, no pending I/O, drained transactions
+and no attempted fetch from generated staging. Runnable process state is
+dropped before publication. The existing physical and virtual placement
+managers continue to own all placement decisions.
+
+`link_modules` requires both developer execution authority for the guest linker
+and separate rebuild publication authority. It reruns the piece-2 exact-byte and
+closed-image result checks against the same frozen inputs. It also checks that
+the actual sealed transport objects match each dependency in order, the actual
+linker matches its recorded image, and the staged bytes match the guest result.
+No host symbol resolution, code generation or manifest repair is introduced.
+
+Publication creates a fresh exact-size sealed object in that attempt's Fabric
+and grants **READ only**. A `LinkedRebuildReceipt` binds the exact image bytes,
+entry/segment geometry/merged manifest, complete ordered compiler receipts and
+AOM bytes, actual transported input keys, linker identity and process context.
+The linked result has a distinct `LinkedImage` role and cannot be fed back as a
+relocatable module. `linked_image` checks the current sealed publication before
+returning its bytes; receipt copies alone are historical evidence, not authority.
+
+Compiled and linked publications share one monotonically increasing store
+epoch. Exclusive `&mut` ownership serializes a link attempt, while exact expected
+epoch comparison and checked increment prevent stale reservations and wrap.
+The artifact and receipt become visible by inserting one complete record; no
+fallible work or guest execution follows that insertion. A failed attempt drops
+its private machine and reservations. Existing module/linked records remain
+unchanged, including when linking fails or the real placement pool is exhausted.
+This is in-memory atomicity, not persistence or crash recovery.
+
+### Verification and next handoff
+
+The agent ran the affected adapter and linker tests together, single-threaded:
+
+```text
+22 passed; 0 failed; 1067 filtered out; 40.23s
+```
+
+This includes nine new publication tests, six existing adapter tests and seven
+piece-2 linker tests. Tests cover separate admission roles, immutable ordered
+receipts, context collisions, changed generations/source/tools, missing
+authorities, stale/replayed requests, epoch exhaustion, guest failure, wrong
+actual output/input bindings, request-control tampering, READ-only publication
+and allocation failure preserving prior records. Small compiler ABI fixtures
+test the publication boundary; they make no claim to be fixed-point compilers.
+The linker checks execute real guest ankald built by canonical CC_B.
+
+The actual-binding test was then extended with a nonterminal transaction and a
+faulted fetch attempt from staging. That focused rerun also passed:
+**1 passed, 1088 filtered out, 34.02s**. Both cases must reject publication even
+when the guest's linked bytes and all dependency receipts are otherwise valid.
+
+The long acceptance fixture now compiles and publishes both C modules through
+the public module API, freezes their dependency order, guest-links them and
+publishes the exact linked image with its receipt. It reuses the existing single
+CC2 bootstrap and the same two module compilations. It checks absent authority,
+each retained source/tool receipt and the exact linked bytes. It prints the
+existing `protected-module link` line plus:
+
+```text
+protected-module publication: epoch=3 dependencies=2 rights=READ
+```
+
+Apply this handoff at the repository root and run locally:
+
+```sh
+cargo test --lib -- \
+  anka64::compiler_adapter:: anka64::ankald_tests::p108_protected_link \
+  --test-threads=1
+cargo test --lib \
+  anka64::userspace_rebuild::tests::p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address \
+  -- --exact --nocapture --test-threads=1
+```
+
+The user confirmed the final 22 focused tests in **23.16s** and the extended
+CC2 acceptance in **248.79s** on 2026-10-17 (1 passed, 1088 filtered out).
+The fixed point remained CC2_0=148984 bytes and CC2_1=CC2_2=168888 bytes, entry
+166200. Publication reported epoch 3, two dependencies and READ rights, with
+the same 688-byte code / 512-byte metadata image. These are targeted results;
+no full-suite result had been reported at this checkpoint. DN-69 records the
+subsequent piece-4 full-suite failure and its probe correction.
+DN-69 implements the subsequent execution handoff. Piece 3 itself publishes
+READ artifacts and does not execute the cross-module application.
+
+<a id="dn-69"></a>
+
+## DN-69 — Receipt-bound protected module execution (Phase 10.8, piece 4)
+
+**Status: the four-piece protected-module implementation checkpoint is accepted
+on 2026-10-17.** Five focused execution tests passed in 32.80s. The full
+single-threaded run reported 1093 passed and one C probe failure in 1134.87s;
+after correcting that fixture's process-exit path, the expanded fixed-point
+acceptance passed in **249.49s** (1 passed, 1093 filtered out). All 1094 library
+tests have passing evidence across those runs. A new full-suite run on the
+corrected tree has not been reported. Work was performed on
+`feat/anka108-protected-modules`; this records acceptance, not a branch merge.
+
+### Formal boundary and exact application identity
+
+DN-65's existing `pm108_execute` gate requires linked-image admission, full
+closure, current artifact identity, explicit execution authority, ordinary
+admission, physical placement and virtual layout. Its call predicate reuses
+the protected ABI, and the previously established frame rules retire a helper's
+locals without retiring its caller's storage. This handoff makes those existing
+obligations concrete. It changes no pointer representation, guest instruction,
+syscall ABI, compiler/linker C implementation or Kleis definition. The unchanged
+217 positive / 168 hostile module witnesses were not rerun. Their conditional
+certificates are implementation obligations, not a proof of all compiler or
+linker semantics.
+
+`RebuildArtifactStore::run_linked_application` takes a complete expected
+`LinkedRebuildReceipt` and an explicit application execution authority. The
+receipt is compared with the retained store record, including its context,
+object/generation, exact image, geometry, tools and ordered dependencies. A
+module epoch, altered receipt or another Fabric's identical bytes/bare object
+key cannot select the publication. Missing authority fails before loading.
+
+The store rechecks the current sealed publication and exact READ grant, actual
+linker and transported module bytes, and each original module's current full
+compiler receipt. It reruns module validation and the complete protected link
+result validator on those same bytes. Consequently closure, entry, every guest
+patch and merged frame metadata are recomputed rather than inferred from a
+cached success flag. Source/tool/module revocation or changed dependency order
+cannot pass the new execution entry point.
+
+Registration uses the **existing sealed artifact in its original Fabric**.
+There is no second publication, copied executable object or new epoch. The
+ordinary development runner supplies the existing PhysicalPlacementManager and
+VirtualLayoutBuilder path, boots its supervisor and executes SYS_SPAWN/SYS_WAIT.
+Explicit execution authorizes RX code and READ/non-executable metadata. The
+ordinary loader still independently admits the protected program. After
+teardown, the publication, READ grant and receipt remain intact and can be used
+for another explicitly authorized run. `CompilerAdapterError::Run` preserves
+ordinary registration, placement, spawn and runtime failures.
+
+### Concrete C witness and hostile callers
+
+The shared header and two C sources live under
+`userspace/bin/protected_modules/`. The header is installed in each immutable
+test bundle at `/probe/api.h`, exactly matching the include operand.
+
+The main unit owns a four-byte buffer. `touch` in the second unit uses its own
+local storage, changes the caller's first byte from 64 to 65, and calls `tail`
+back in the first unit. After both returns, the caller reads its live buffer
+and emits exactly **[65, 0, 255, 66]** through `write_bytes`. Empty one-past output
+is accepted; an overrun output span returns failure without adding bytes. The
+second unit also exports `escape`, so the expanded positive image has **four
+frames**, instead of the earlier three-frame linking-only witness. The failed
+fixed-point acceptance measured 2328 code / 1280 metadata bytes. After the
+explicit-exit correction, both the targeted CC2_0 diagnostic and the passing
+self-hosted acceptance measured **3336 code / 2048 metadata bytes**.
+
+Application entry is direct: there is no caller or C startup wrapper above
+`main`. Every successful or error path from this probe therefore invokes
+`syscall(0, status, 0, 0)` (SYS_EXIT). Ordinary helpers still use `return` to
+consume their actual CALL authority. This follows the existing standalone
+application ABI; it introduces no new return semantics or authority.
+
+Two additional callers reuse that already-published helper module. One reads a
+pointer returned to a helper-local array after the helper has retired. The other
+passes a one-past pointer to `touch`, which attempts a byte access. Both images
+must link and pass structural admission, then terminate with ProtectionFault
+and no output. These cases reuse the same fixed-point compiler producer and
+guest tools; there is no additional CC2 bootstrap. Earlier successful linked
+receipts remain available while the hostile images are compiled and run.
+
+The long acceptance checks exact executed object/generation, two or more
+observed process slots, RX/READ segment permissions and unchanged publication
+identity/epoch after the successful run. The developer's passing rerun confirmed:
+
+```text
+protected-module execution: exit=0 output=[65,0,255,66] receipt=matched
+protected-module rejection: escaped-local=ProtectionFault output=[]
+protected-module rejection: one-past=ProtectionFault output=[]
+```
+
+### Explicit process-exit correction
+
+The 2026-10-17 full run reached an identical CC2_1/CC2_2 fixed point, linked the
+four-frame image and published it with two dependencies and READ rights. It
+then faulted at PC `0x6e0`, with object 0 and offset 0. The positive C probe
+incorrectly used plain `return` from `main`: that instruction is RET, but direct
+process entry has no return authority. The runtime correctly rejected it.
+
+The correction changes the positive probe's six termination paths to explicit
+SYS_EXIT. It also corrects the one-past hostile caller: if its forbidden access
+were ever to succeed, it must exit normally so the test fails, rather than
+produce a misleading ProtectionFault at the entry function's RET. The escaped
+local caller already used SYS_EXIT. Compiler, linker, runtime and formal
+contracts are unchanged; the existing Kleis gates need no modification for
+this fixture correction.
+
+A temporary targeted diagnostic used CC2_0, the real guest ankapp and ankald,
+and the ordinary registered-artifact execution path. It reproduced the exact
+original image geometry and decoded `0x6e0` as RET. All five cases passed their
+expected outcomes in one diagnostic test (105.15s):
+
+| Case | Observed process result | Output bytes |
+|---|---|---|
+| Original positive probe | ProtectionFault at `0x6e0`, after correct output | `[65, 0, 255, 66]` |
+| Corrected positive probe | Exited(0) | `[65, 0, 255, 66]` |
+| Escaped helper-local pointer | ProtectionFault | `[]` |
+| One-past access with explicit exit fallback | ProtectionFault | `[]` |
+| In-bounds control with explicit exit | Exited(1), the helper's returned status | `[]` |
+
+The diagnostic was removed after use; it adds no permanent test or repeated
+bootstrap cost. It isolated the exit error. The developer then ran the complete
+CC2_0 -> CC2_1 -> CC2_2 receipt-bound acceptance successfully, as recorded below.
+The test count remains 1094.
+
+### Focused checks and local closure
+
+Agent-run evidence:
+
+```text
+p108_module_execution: 5 passed; 0 failed; 1089 filtered out; 32.80s
+```
+
+The focused tests use small hand-assembled modules and the real guest ankald
+built by canonical CC_B. They exercise ordinary protected execution and typed
+output, repeated runs, explicit authority, receipt/context substitution,
+changed current objects/READ access, stale original dependencies, exact-byte
+and closed-image revalidation, escaped locals, one-past access and real
+placement exhaustion followed by retry. They do not substitute for the
+self-hosted C compilation witness. The full Rust test target, including that
+expanded witness, built successfully. Existing warning cleanup remains deferred.
+
+Developer-run closure evidence, 2026-10-17:
+
+```text
+CC2_0 ready: code=148984 backing=148984
+CC2_1 == CC2_2: code=168888 backing=168888 entry=166200
+protected-module link: modules=2 frames=4 code=3336 metadata=2048 entry=0
+protected-module publication: epoch=3 dependencies=2 rights=READ
+protected-module execution: exit=0 output=[65,0,255,66] receipt=matched
+protected-module rejection: escaped-local=ProtectionFault output=[]
+protected-module rejection: one-past=ProtectionFault output=[]
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1093 filtered out; finished in 249.49s
+```
+
+The escaped-local fault at PC `0x28` and one-past fault at PC `0x298` are
+required negative outcomes. The later compiler rejections and protection
+faults in this acceptance run are also intentional hostile cases; the test's
+final status is success. The corrected root-RET failure at `0x6e0` is gone.
+
+The acceptance command, retained for future changes to this path, is:
+
+```sh
+cargo test --lib \
+  anka64::userspace_rebuild::tests::p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address \
+  -- --exact --nocapture --test-threads=1
+```
+
+No test rerun is required for the subsequent documentation consolidation. If
+a fresh full-suite checkpoint is desired before merge, use
+`cargo test -- --test-threads=1` and record it separately from the full run plus
+successful corrected acceptance. The four-piece module checkpoint is complete;
+broader service rebuilds, persistent source/tool receipts and Phase 10's
+CPU-to-HTTP rebuild closure remain separate work. This acceptance does not close
+all of Phase 10.8 or the final “Anka64 is alive” rebuild milestone.
+
+<a id="dn-70"></a>
+
+## DN-70 — Hardware direction deferred; timing/cache contracts required
+
+**Decision, 2026-10-17: record native FPGA/hardware realization as a future
+direction. Do not start hardware implementation now.** The active work remains
+the software reference architecture, self-hosted toolchain and software
+“Anka64 is alive” closure. Hardware work does not enlarge the completion scope
+of Phase 10.7 or the current Phase 10.8 protected-module checkpoint.
+
+Execution timing and caches introduce additional security obligations beyond
+architectural value correctness, bounds and authority checks. Future hardware
+work must begin with substantial Kleis specification/refinement of observers
+and permitted information flows, cache hits/fills/evictions and metadata caches,
+request pipelines, revocation and relocation ordering, shared-resource
+contention, coherence/DMA, and protected state across context switches/reset.
+Timing noninterference must be formulated over observable execution traces
+under explicit assumptions; existing functional tests are not evidence of that
+property. Optional speculation/prefetch must be covered if introduced.
+
+The consolidated [future FPGA architecture](ARCHITECTURE.md#future-fpga)
+records the two logical memory regions, fabric request path, architectural
+comparison, metadata scaling, Mermaid diagram and timing/cache proof
+obligations. Cache partitioning, flushing, deterministic scheduling and a
+cache-free prototype remain alternatives for later evaluation. No mitigation,
+board, clock target or hard real-time promise is selected by this decision.
+
+This update records scope and future work only. It adds no RTL, Kleis theory or
+test gate, and changes no executable code. The 1094-test software run was still
+in progress when this deferral was recorded; its subsequent result and probe
+correction are recorded in DN-69. Hardware theory work itself will begin only
+when that direction is explicitly resumed.
+
+### Hardware candidates and sizing questions retained for later work
+
+The earlier board discussion is retained as research context, not a purchase
+recommendation or a confirmed fit for Anka64 RTL:
+
+| Candidate discussed | Possible role | Questions before selecting it |
+|---|---|---|
+| Artix-7 XC7A200T, PA200T-StarLite class | A future native core without depending on a hard ARM processor | Actual chip, DDR reference design, schematics, pin constraints, tool support and licensing |
+| Zynq-7020 | Fabric experiments and bootstrap support | Every ARM/DDR/debug path must be accounted for; running the Rust runtime on ARM is not native Anka64 execution |
+| Kintex UltraScale+ XCKU5P | Larger core count or additional I/O | Memory-controller support, board documentation, clocking, licenses, power and cost |
+
+Before purchase or integration, obtain schematics, memory part numbers, XDC
+pinout, clock/reset plan, JTAG procedure, tool compatibility and a working DDR
+reference design. No native Anka64 utilization or maximum clock frequency has
+been measured. Object capacity must count metadata, capabilities, placement,
+fragmentation and bandwidth; one million objects is only a sizing scenario.
+
+### Conditional bring-up gates
+
+These are future stages, conditional on an explicit decision to resume hardware:
+
+| Gate | Required work and evidence |
+|---|---|
+| 0 — formal contracts | Specify and prove the selected observer/timing/cache model, non-bypass, authority, lifecycle, placement and transaction ordering contracts. Include hostile witnesses and an RTL refinement relation. |
+| 1 — board and memory | Bring up clocks, reset, JTAG/UART and memory diagnostics. Inventory every bus master and debug path; define object-store, conventional-RAM and fabric-private metadata windows and their permitted masters. A small on-chip prototype may precede external DDR. |
+| 2 — fabric RTL | Implement protected metadata, capability/domain checks, placement lookup, ordering and fault behavior. Use existing adversarial programs as conformance vectors against the Rust reference; denial must cause no prohibited memory effect. |
+| 3 — native core and boot | Execute an image on a native Anka64 core through authorized object accesses. Auxiliary loading by a PC or ARM does not substitute for native execution. |
+| 4 — additional agents | Integrate DMA, storage, network and additional cores through the same fabric; check races, coherence, revocation visibility, invalidation and isolation under contention. |
+| 5 — physical validation | Establish RTL-to-architecture correspondence, synthesis, place-and-route and clock timing closure; run on-board adversarial tests and analyze timing/cache/contention/power/debug channels, including effects outside the formal model. |
+
+### Future demonstration criteria
+
+- A native Anka64 core executes on FPGA fabric.
+- Two protection domains obtain distinct authorized/denied outcomes for the
+  same object; bounds, permissions, stale generations and revocation are enforced.
+- Object movement changes placement without changing identity or creating authority.
+- Sealing and revocation have the required effects on subsequent requests.
+- CPU, boot, debug and DMA paths are audited for bypass of the fabric.
+- Logs, synthesis resources, timing measurements, assumptions and outstanding
+  proof obligations are recorded with the result.
+
+Functional conformance, clock timing closure and timing confidentiality are
+separate evidence. No hard real-time behavior is promised; a deadline cannot
+justify bypassing an authority check.
+
+### Implementation anchors for future refinement
+
+- `src/anka64/state.rs`: object, agent and domain identities, capabilities,
+  lifecycle and permissions.
+- `src/anka64/fabric.rs`: authority, translation, revocation and transactions.
+- `src/anka64/placement.rs`: page-granular contiguous placement independent of authority.
+- `src/anka64/core.rs`: protected pointer-kind, call/return and event-context state.
+- `theories/`: architectural contracts to inspect and extend before hardware claims.
+
+The separate FPGA proposal has been absorbed into ARCHITECTURE.md and this note.
+The separate headless-web proposal is retired; the single-trust-anchor direction
+is stated briefly in ARCHITECTURE.md. Neither consolidation starts implementation.
