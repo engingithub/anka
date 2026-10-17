@@ -1422,6 +1422,16 @@ impl Fabric {
     /// which intentionally rejects zero-width memory transactions elsewhere.
     pub(crate) fn authorize_pointer_output(&self, agent: AgentId, domain: DomainId,
         object: ObjectId, offset: u64, length: u64) -> bool {
+        self.authorize_pointer_span(agent, domain, object, offset, length, AccessKind::Read)
+    }
+
+    pub(crate) fn authorize_pointer_input(&self, agent: AgentId, domain: DomainId,
+        object: ObjectId, offset: u64, length: u64) -> bool {
+        self.authorize_pointer_span(agent, domain, object, offset, length, AccessKind::Write)
+    }
+
+    fn authorize_pointer_span(&self, agent: AgentId, domain: DomainId,
+        object: ObjectId, offset: u64, length: u64, kind: AccessKind) -> bool {
         if !self.agents.get(&agent).is_some_and(|a|
             a.domain == domain && matches!(a.kind, AgentKind::Cpu(_))) { return false; }
         if self.pointer_stack_objects.get(&object).is_some_and(|(_, owner)| *owner != domain) {
@@ -1430,7 +1440,7 @@ impl Fabric {
         if length != 0 {
             let req = MemoryRequest { context: AccessContext { agent, domain,
                 privilege: Privilege::Supervisor }, object, offset,
-                width: Width::Byte, length, kind: AccessKind::Read };
+                width: Width::Byte, length, kind };
             return matches!(self.authorize(&req), AuthResult::Authorized(_));
         }
         let Some(obj) = self.objects.get(&object) else { return false; };
@@ -1438,7 +1448,7 @@ impl Fabric {
         self.domains.get(&domain).is_some_and(|d| d.capabilities.iter().any(|entry| {
             let cap = &entry.cap;
             cap.object() == object && self.validate(cap)
-                && cap.permissions().contains(Permissions::READ)
+                && cap.permissions().contains(kind.required_permission())
                 && offset >= cap.offset() && offset - cap.offset() <= cap.length()
         }))
     }

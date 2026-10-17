@@ -1,0 +1,674 @@
+// Phase 10.8 next slice: synchronous read of an immutable process-owned input.
+// SPECIFICATION ONLY. No new axioms, runtime, compiler or input device claim.
+// Proposed SYS_READ_BYTES=20 (current implemented syscall numbers stop at 19).
+// Trap: scalar R0=20,R1=0; tagged R2/R3 destination; scalar R4=capacity,R5=0.
+// Input is provisioned by trusted loader/boot policy, not a guest-selected address.
+// One immutable <=1 MiB image + cursor is bound to process slot/generation,
+// context and domain. No ambient global stdin, filesystem or authority transfer.
+// A read validates the ENTIRE capacity even at EOF/zero count, writes exactly
+// min(capacity,remaining), and atomically advances the source cursor with write.
+// Zero-capacity/EOF issues no memory transaction; it never skips authentication.
+// Source input cannot alias guest-writable memory. Supplied byte values below
+// denote the immutable image at the checked source index, never kernel padding.
+import "anka108_typed_syscall_io.kleis"
+
+define in108_abi(number : BitVec64, reserved : BitVec64, flags : BitVec64,
+    kind01 : BitVec8, kind45 : BitVec8) =
+    (number=bvconst(20,64)) ∧ (reserved=bvconst(0,64)) ∧
+    (flags=bvconst(0,64)) ∧ (kind01=bvconst(0,8)) ∧ (kind45=bvconst(0,8))
+
+// Uses the existing nonwrapping view/whole-range check, but requires WRITE,
+// not READ, from both descriptor and a single generation-current Fabric grant.
+define in108_destination(h : BitVec64, pos : BitVec64, tag : BitVec8,
+    slot : BitVec64, epoch : BitVec64, descriptor_live : BitVec8,
+    caller_domain : BitVec64, descriptor_domain : BitVec64,
+    caller_context : BitVec64, owner_context : BitVec64,
+    descriptor_id : BitVec64, descriptor_gen : BitVec64,
+    lo : BitVec64, hi : BitVec64, rights : BitVec64,
+    allocation_id : BitVec64, allocation_gen : BitVec64, allocation_live : BitVec8,
+    base : BitVec64, extent : BitVec64, length : BitVec64,
+    cap_object : BitVec64, cap_lo : BitVec64, cap_hi : BitVec64,
+    cap_rights : BitVec64, fabric_current : BitVec8) =
+    repr107_lookup(h,tag,slot,epoch,descriptor_live,caller_domain,descriptor_domain) ∧
+    (caller_context=owner_context) ∧
+    ptr107_current(descriptor_id,descriptor_gen,allocation_id,allocation_gen,
+        allocation_live,tag) ∧
+    ptr107_record_valid(allocation_id,allocation_gen,base,extent) ∧
+    io108_range(lo,hi,pos,extent,length) ∧
+    bvule(rights,bvconst(3,64)) ∧ (bvand(rights,bvconst(2,64))=bvconst(2,64)) ∧
+    (cap_object=allocation_id) ∧ bvule(cap_lo,pos) ∧ bvule(pos,cap_hi) ∧
+    bvule(cap_hi,extent) ∧ bvule(length,bvsub(cap_hi,pos)) ∧
+    bvule(cap_rights,bvconst(3,64)) ∧
+    (bvand(cap_rights,bvconst(2,64))=bvconst(2,64)) ∧
+    (fabric_current=bvconst(1,8))
+
+define in108_stream(stream_id : BitVec64, selected_id : BitVec64,
+    stream_gen : BitVec64, selected_gen : BitVec64,
+    stream_context : BitVec64, caller_context : BitVec64,
+    stream_domain : BitVec64, caller_domain : BitVec64,
+    stream_slot : BitVec64, caller_slot : BitVec64,
+    stream_process_gen : BitVec64, caller_process_gen : BitVec64,
+    source_live : BitVec8, source_immutable : BitVec8,
+    cursor : BitVec64, total : BitVec64) =
+    bvugt(stream_id,bvconst(0,64)) ∧ bvugt(stream_gen,bvconst(0,64)) ∧
+    (stream_id=selected_id) ∧ (stream_gen=selected_gen) ∧
+    (stream_context=caller_context) ∧ (stream_domain=caller_domain) ∧
+    (stream_slot=caller_slot) ∧ (stream_process_gen=caller_process_gen) ∧
+    (source_live=bvconst(1,8)) ∧ (source_immutable=bvconst(1,8)) ∧
+    bvule(cursor,total) ∧ bvule(total,bvconst(1048576,64))
+
+// Only meaningful under valid cursor/total and bounded capacity predicates.
+define in108_count(capacity : BitVec64, cursor : BitVec64, total : BitVec64) =
+    if bvule(capacity,bvsub(total,cursor)) then capacity else bvsub(total,cursor)
+define in108_begin(abi_ok : BitVec8, destination_ok : BitVec8,
+    stream_ok : BitVec8, event_ok : BitVec8, phase : BitVec8,
+    count : BitVec64, next : BitVec64, fresh : BitVec8, serialized : BitVec8) =
+    (stream_ok=bvconst(1,8)) ∧
+    io108_begin(abi_ok,destination_ok,event_ok,phase,count,next,fresh,serialized)
+
+// Current certificates derive from the full predicates, not user-writable flags.
+// Expected id/gen/cursor bind ONE operation; final check and all effects share
+// a serialized commit boundary. Capacity remains the ORIGINAL requested range.
+// Partial Fabric writes followed by an error are forbidden: preflight everything
+// and use one exact-range atomic write (or a verified equivalent transaction).
+define in108_commit(ready : BitVec8, destination_ok : BitVec8, stream_ok : BitVec8,
+    expected_id : BitVec64, current_id : BitVec64,
+    expected_gen : BitVec64, current_gen : BitVec64,
+    expected_cursor : BitVec64, cursor : BitVec64, total : BitVec64,
+    capacity : BitVec64, copied : BitVec64,
+    phase : BitVec8, active : BitVec8, bound : BitVec8,
+    fabric_current : BitVec8, serialized : BitVec8) =
+    (ready=bvconst(1,8)) ∧ (destination_ok=bvconst(1,8)) ∧ (stream_ok=bvconst(1,8)) ∧
+    bvugt(current_id,bvconst(0,64)) ∧ bvugt(current_gen,bvconst(0,64)) ∧
+    (expected_id=current_id) ∧ (expected_gen=current_gen) ∧
+    (expected_cursor=cursor) ∧ bvule(cursor,total) ∧ bvule(total,bvconst(1048576,64)) ∧
+    bvule(capacity,io108_limit()) ∧ (copied=in108_count(capacity,cursor,total)) ∧
+    conc107_commit(phase,active,bound,fabric_current,serialized)
+define in108_commit_flag(ready : BitVec8, destination_ok : BitVec8, stream_ok : BitVec8,
+    expected_id : BitVec64, current_id : BitVec64,
+    expected_gen : BitVec64, current_gen : BitVec64,
+    expected_cursor : BitVec64, cursor : BitVec64, total : BitVec64,
+    capacity : BitVec64, copied : BitVec64,
+    phase : BitVec8, active : BitVec8, bound : BitVec8,
+    fabric_current : BitVec8, serialized : BitVec8) =
+    if in108_commit(ready,destination_ok,stream_ok,expected_id,current_id,
+        expected_gen,current_gen,expected_cursor,cursor,total,capacity,copied,
+        phase,active,bound,fabric_current,serialized) then bvconst(1,8) else bvconst(0,8)
+define in108_cursor(committed : BitVec8, old : BitVec64, count : BitVec64) =
+    if committed=bvconst(1,8) then bvadd(old,count) else old
+// Exact memory effect reuses output's proven pointwise interval frame, but its
+// coordinates now name DESTINATION bytes, not the console sink.
+define in108_byte(committed : BitVec8, pos : BitVec64, count : BitVec64,
+    query : BitVec64, source : BitVec8, old : BitVec8) =
+    io108_sink_byte(committed,pos,count,query,source,old)
+// cell/pos use PHYSICAL coordinates: typed aliases must also lose kind.
+// This is a raw-byte input write, never typed pointer import or tag publication.
+define in108_tag(committed : BitVec8, pos : BitVec64, count : BitVec64,
+    cell : BitVec64, old : BitVec8) =
+    if committed=bvconst(1,8) ∧ bvugt(count,bvconst(0,64)) ∧
+        (if bvule(pos,cell) then bvult(bvsub(cell,pos),count)
+         else bvult(bvsub(pos,cell),bvconst(16,64)))
+    then bvconst(0,8) else old
+// Source cursor index for the byte mapped to destination query, checked below.
+define in108_source_index(cursor : BitVec64, pos : BitVec64, query : BitVec64) =
+    bvadd(cursor,bvsub(query,pos))
+
+// Complete admission binds destination, input image, event and lease together.
+define in108_request(number : BitVec64,
+    reserved : BitVec64,
+    flags : BitVec64,
+    kind01 : BitVec8,
+    kind45 : BitVec8,
+    h : BitVec64,
+    pos : BitVec64,
+    tag : BitVec8,
+    slot : BitVec64,
+    epoch : BitVec64,
+    descriptor_live : BitVec8,
+    caller_domain : BitVec64,
+    descriptor_domain : BitVec64,
+    caller_context : BitVec64,
+    owner_context : BitVec64,
+    descriptor_id : BitVec64,
+    descriptor_gen : BitVec64,
+    lo : BitVec64,
+    hi : BitVec64,
+    rights : BitVec64,
+    allocation_id : BitVec64,
+    allocation_gen : BitVec64,
+    allocation_live : BitVec8,
+    base : BitVec64,
+    extent : BitVec64,
+    length : BitVec64,
+    cap_object : BitVec64,
+    cap_lo : BitVec64,
+    cap_hi : BitVec64,
+    cap_rights : BitVec64,
+    fabric_current : BitVec8,
+    stream_id : BitVec64,
+    selected_id : BitVec64,
+    stream_gen : BitVec64,
+    selected_gen : BitVec64,
+    stream_context : BitVec64,
+    stream_domain : BitVec64,
+    stream_slot : BitVec64,
+    caller_slot : BitVec64,
+    stream_process_gen : BitVec64,
+    caller_process_gen : BitVec64,
+    source_live : BitVec8,
+    source_immutable : BitVec8,
+    cursor : BitVec64,
+    total : BitVec64,
+    saved_context : BitVec64,
+    saved_domain : BitVec64,
+    public_depth : BitVec64,
+    protected_depth : BitVec64,
+    header_exact : BitVec8,
+    saved_mode : BitVec8,
+    phase : BitVec8,
+    cpu_count : BitVec64,
+    next_cpu_count : BitVec64,
+    fresh : BitVec8,
+    serialized : BitVec8) =
+    in108_abi(number,reserved,flags,kind01,kind45) ∧
+    in108_destination(h,pos,tag,slot,epoch,descriptor_live,caller_domain,descriptor_domain,caller_context,owner_context,descriptor_id,descriptor_gen,lo,hi,rights,allocation_id,allocation_gen,allocation_live,base,extent,length,cap_object,cap_lo,cap_hi,cap_rights,fabric_current) ∧
+    in108_stream(stream_id,selected_id,stream_gen,selected_gen,stream_context,caller_context,stream_domain,caller_domain,stream_slot,caller_slot,stream_process_gen,caller_process_gen,source_live,source_immutable,cursor,total) ∧
+    event107_admit(saved_context,caller_context,saved_domain,caller_domain,public_depth,protected_depth,header_exact,bvconst(1,8),saved_mode) ∧
+    conc107_admit(phase,cpu_count,next_cpu_count,bvconst(1,8),fresh,serialized)
+
+example "input scalar trap ABI" {
+    assert(in108_abi(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)))
+}
+
+example "reject output number on input path" {
+    assert(¬(in108_abi(bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8))))
+}
+
+example "reject reserved lane" {
+    assert(¬(in108_abi(bvconst(20,64),bvconst(1,64),bvconst(0,64),bvconst(0,8),bvconst(0,8))))
+}
+
+example "reject unsupported flags" {
+    assert(¬(in108_abi(bvconst(20,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(0,8))))
+}
+
+example "reject tagged number" {
+    assert(¬(in108_abi(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "reject tagged capacity" {
+    assert(¬(in108_abi(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "write-only destination sufficient" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "reject integer destination" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(0,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject stale descriptor epoch" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject retired descriptor" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(0,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject wrong destination domain" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(5,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject wrong destination context" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(10,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject wrong allocation" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject stale allocation generation" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(3,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject retired allocation" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(0,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject position below view" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject capacity beyond narrowed view" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject READ-only descriptor" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(1,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject invalid descriptor rights" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(6,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject wrong grant object" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(12,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject grant begins too late" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(4,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject grant too short" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject READ-only Fabric grant" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "reject revoked write grant" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(0,8))))
+}
+
+example "reject oversized capacity" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(65537,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject wrapping capacity" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),ptr107_max(),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "reject wrapping allocation" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),ptr107_max(),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "empty authentic one-past destination" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(14,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(0,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "reject empty forged destination" {
+    assert(¬(in108_destination(bvconst(4294967303,64),bvconst(14,64),bvconst(0,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(0,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "RW destination allowed" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(3,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(3,64),bvconst(1,8)))
+}
+
+example "owned immutable input including process generation zero" {
+    assert(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64)))
+}
+
+example "reject zero stream identity" {
+    assert(¬(in108_stream(bvconst(0,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64))))
+}
+
+example "reject wrong selected input" {
+    assert(¬(in108_stream(bvconst(5,64),bvconst(6,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64))))
+}
+
+example "reject stale input generation" {
+    assert(¬(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(3,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64))))
+}
+
+example "reject other input context" {
+    assert(¬(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64))))
+}
+
+example "reject other input domain" {
+    assert(¬(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(5,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64))))
+}
+
+example "reject other process slot" {
+    assert(¬(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64))))
+}
+
+example "reject reused process slot" {
+    assert(¬(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64))))
+}
+
+example "reject detached input" {
+    assert(¬(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(3,64),bvconst(10,64))))
+}
+
+example "reject mutable guest alias input" {
+    assert(¬(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(3,64),bvconst(10,64))))
+}
+
+example "reject cursor beyond input" {
+    assert(¬(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(11,64),bvconst(10,64))))
+}
+
+example "reject unbounded input image" {
+    assert(¬(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(1048577,64))))
+}
+
+example "full read" {
+    assert(in108_count(bvconst(4,64),bvconst(3,64),bvconst(10,64))=bvconst(4,64))
+}
+
+example "short read at tail" {
+    assert(in108_count(bvconst(8,64),bvconst(7,64),bvconst(10,64))=bvconst(3,64))
+}
+
+example "EOF" {
+    assert(in108_count(bvconst(8,64),bvconst(10,64),bvconst(10,64))=bvconst(0,64))
+}
+
+example "zero capacity" {
+    assert(in108_count(bvconst(0,64),bvconst(3,64),bvconst(10,64))=bvconst(0,64))
+}
+
+example "maximum request" {
+    assert(in108_count(bvconst(65536,64),bvconst(0,64),bvconst(1048576,64))=bvconst(65536,64))
+}
+
+example "atomic destination and cursor commit" {
+    assert(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "reject failed admission publication" {
+    assert(¬(in108_commit(bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject revoked destination publication" {
+    assert(¬(in108_commit(bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject detached source publication" {
+    assert(¬(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject substituted source identity" {
+    assert(¬(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(6,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject changed source generation" {
+    assert(¬(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject concurrent source cursor update" {
+    assert(¬(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject partial destination write" {
+    assert(¬(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject excess destination write" {
+    assert(¬(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(6,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject retired backing publication" {
+    assert(¬(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject released lease publication" {
+    assert(¬(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject foreign operation ticket" {
+    assert(¬(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject Fabric revocation at commit" {
+    assert(¬(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "reject unserialized commit" {
+    assert(¬(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "short tail commits exact remaining count" {
+    assert(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(10,64),bvconst(8,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "reject tail overread publication" {
+    assert(¬(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(10,64),bvconst(8,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "EOF still validates destination" {
+    assert(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(10,64),bvconst(10,64),bvconst(10,64),bvconst(5,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "reject EOF skips write authority" {
+    assert(¬(in108_commit(bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(10,64),bvconst(10,64),bvconst(10,64),bvconst(5,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "zero capacity commit validates provenance" {
+    assert(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "reject zero capacity skips provenance" {
+    assert(¬(in108_commit(bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "whole owned input request" {
+    assert(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "reject foreign event owner" {
+    assert(¬(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(10,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject legacy event mode" {
+    assert(¬(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject tampered saved header" {
+    assert(¬(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject absent private event" {
+    assert(¬(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject wrong lease increment" {
+    assert(¬(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(2,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject lease count wrap" {
+    assert(¬(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),ptr107_max(),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject reused admission ticket" {
+    assert(¬(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "reject whole detached-source request" {
+    assert(¬(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject whole raw-destination request" {
+    assert(¬(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(0,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "interior byte clears tag" {
+    assert(in108_tag(bvconst(1,8),bvconst(17,64),bvconst(1,64),bvconst(16,64),bvconst(1,8))=bvconst(0,8))
+}
+
+example "last cell byte clears tag" {
+    assert(in108_tag(bvconst(1,8),bvconst(31,64),bvconst(1,64),bvconst(16,64),bvconst(1,8))=bvconst(0,8))
+}
+
+example "cross-cell prefix clears tag" {
+    assert(in108_tag(bvconst(1,8),bvconst(15,64),bvconst(2,64),bvconst(16,64),bvconst(1,8))=bvconst(0,8))
+}
+
+example "adjacent cell tag survives" {
+    assert(in108_tag(bvconst(1,8),bvconst(16,64),bvconst(16,64),bvconst(32,64),bvconst(1,8))=bvconst(1,8))
+}
+
+example "zero count preserves tag" {
+    assert(in108_tag(bvconst(1,8),bvconst(16,64),bvconst(0,64),bvconst(16,64),bvconst(1,8))=bvconst(1,8))
+}
+
+example "input cannot mint pointer kind" {
+    assert(in108_tag(bvconst(1,8),bvconst(16,64),bvconst(1,64),bvconst(16,64),bvconst(0,8))=bvconst(0,8))
+}
+
+example "count bounded by capacity and remaining" {
+    assert(∀(c : BitVec64). ∀(p : BitVec64). ∀(t : BitVec64).
+    (bvule(p,t) ∧ bvule(c,io108_limit())) →
+    (bvule(in108_count(c,p,t),c) ∧ bvule(in108_count(c,p,t),bvsub(t,p))))
+}
+
+example "successful cursor does not wrap or exceed input" {
+    assert(∀(c : BitVec64). ∀(p : BitVec64). ∀(t : BitVec64).
+    (bvule(p,t) ∧ bvule(c,io108_limit())) →
+    (bvuge(in108_cursor(bvconst(1,8),p,in108_count(c,p,t)),p) ∧
+     bvule(in108_cursor(bvconst(1,8),p,in108_count(c,p,t)),t)))
+}
+
+example "failure consumes no source bytes" {
+    assert(∀(p : BitVec64). ∀(n : BitVec64).
+    in108_cursor(bvconst(0,8),p,n)=p)
+}
+
+example "failure changes no destination byte" {
+    assert(∀(p : BitVec64). ∀(n : BitVec64). ∀(q : BitVec64). ∀(b : BitVec8). ∀(old : BitVec8).
+    in108_byte(bvconst(0,8),p,n,q,b,old)=old)
+}
+
+example "failure changes no destination kind" {
+    assert(∀(p : BitVec64). ∀(n : BitVec64). ∀(cell : BitVec64). ∀(old : BitVec8).
+    in108_tag(bvconst(0,8),p,n,cell,old)=old)
+}
+
+example "zero count changes no kind" {
+    assert(∀(p : BitVec64). ∀(cell : BitVec64). ∀(old : BitVec8).
+    in108_tag(bvconst(1,8),p,bvconst(0,64),cell,old)=old)
+}
+
+example "raw input never creates a protected tag" {
+    assert(∀(p : BitVec64). ∀(n : BitVec64). ∀(cell : BitVec64).
+    in108_tag(bvconst(1,8),p,n,cell,bvconst(0,8))=bvconst(0,8))
+}
+
+example "short read preserves destination tail" {
+    assert(∀(p : BitVec64). ∀(n : BitVec64). ∀(q : BitVec64). ∀(b : BitVec8). ∀(old : BitVec8).
+    (bvuge(q,p) ∧ bvuge(bvsub(q,p),n)) → in108_byte(bvconst(1,8),p,n,q,b,old)=old)
+}
+
+example "destination authority refines each exact WRITE byte" {
+    assert(∀(h : BitVec64). ∀(pos : BitVec64). ∀(tag : BitVec8). ∀(slot : BitVec64). ∀(epoch : BitVec64). ∀(descriptor_live : BitVec8). ∀(caller_domain : BitVec64). ∀(descriptor_domain : BitVec64). ∀(caller_context : BitVec64). ∀(owner_context : BitVec64). ∀(descriptor_id : BitVec64). ∀(descriptor_gen : BitVec64). ∀(lo : BitVec64). ∀(hi : BitVec64). ∀(rights : BitVec64). ∀(allocation_id : BitVec64). ∀(allocation_gen : BitVec64). ∀(allocation_live : BitVec8). ∀(base : BitVec64). ∀(extent : BitVec64). ∀(length : BitVec64). ∀(cap_object : BitVec64). ∀(cap_lo : BitVec64). ∀(cap_hi : BitVec64). ∀(cap_rights : BitVec64). ∀(fabric_current : BitVec8). ∀(i : BitVec64).
+    (in108_destination(h,pos,tag,slot,epoch,descriptor_live,caller_domain,descriptor_domain,caller_context,owner_context,descriptor_id,descriptor_gen,lo,hi,rights,allocation_id,allocation_gen,allocation_live,base,extent,length,cap_object,cap_lo,cap_hi,cap_rights,fabric_current) ∧ bvult(i,length)) → repr107_access(h,bvadd(pos,i),tag,slot,epoch,descriptor_live,caller_domain,descriptor_domain,descriptor_id,descriptor_gen,lo,hi,rights,allocation_id,allocation_gen,allocation_live,base,extent,bvconst(1,64),bvconst(2,64),fabric_current,bvconst(1,8)))
+}
+
+example "source byte index stays within immutable image" {
+    assert(∀(capacity : BitVec64). ∀(cursor : BitVec64). ∀(total : BitVec64). ∀(pos : BitVec64). ∀(query : BitVec64).
+    (bvule(cursor,total) ∧ bvule(capacity,io108_limit()) ∧ bvuge(query,pos) ∧
+     bvult(bvsub(query,pos),in108_count(capacity,cursor,total))) →
+    (bvuge(in108_source_index(cursor,pos,query),cursor) ∧
+     bvult(in108_source_index(cursor,pos,query),total)))
+}
+
+example "rejected commit cannot advance input cursor" {
+    assert(∀(ready : BitVec8). ∀(destination_ok : BitVec8). ∀(stream_ok : BitVec8). ∀(expected_id : BitVec64). ∀(current_id : BitVec64). ∀(expected_gen : BitVec64). ∀(current_gen : BitVec64). ∀(expected_cursor : BitVec64). ∀(cursor : BitVec64). ∀(total : BitVec64). ∀(capacity : BitVec64). ∀(copied : BitVec64). ∀(phase : BitVec8). ∀(active : BitVec8). ∀(bound : BitVec8). ∀(fabric_current : BitVec8). ∀(serialized : BitVec8).
+    ¬(in108_commit(ready,destination_ok,stream_ok,expected_id,current_id,expected_gen,current_gen,expected_cursor,cursor,total,capacity,copied,phase,active,bound,fabric_current,serialized)) → in108_cursor(in108_commit_flag(ready,destination_ok,stream_ok,expected_id,current_id,expected_gen,current_gen,expected_cursor,cursor,total,capacity,copied,phase,active,bound,fabric_current,serialized),cursor,copied)=cursor)
+}
+
+example "rejected commit cannot publish a destination byte" {
+    assert(∀(ready : BitVec8). ∀(destination_ok : BitVec8). ∀(stream_ok : BitVec8). ∀(expected_id : BitVec64). ∀(current_id : BitVec64). ∀(expected_gen : BitVec64). ∀(current_gen : BitVec64). ∀(expected_cursor : BitVec64). ∀(cursor : BitVec64). ∀(total : BitVec64). ∀(capacity : BitVec64). ∀(copied : BitVec64). ∀(phase : BitVec8). ∀(active : BitVec8). ∀(bound : BitVec8). ∀(fabric_current : BitVec8). ∀(serialized : BitVec8). ∀(pos : BitVec64). ∀(query : BitVec64). ∀(b : BitVec8). ∀(old : BitVec8).
+    ¬(in108_commit(ready,destination_ok,stream_ok,expected_id,current_id,expected_gen,current_gen,expected_cursor,cursor,total,capacity,copied,phase,active,bound,fabric_current,serialized)) → in108_byte(in108_commit_flag(ready,destination_ok,stream_ok,expected_id,current_id,expected_gen,current_gen,expected_cursor,cursor,total,capacity,copied,phase,active,bound,fabric_current,serialized),pos,copied,query,b,old)=old)
+}
+
+example "input result scalar clears result tag" {
+    assert(event107_tag(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))=bvconst(0,8))
+}
+
+example "destination pair survives return" {
+    assert(event107_tag(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(2,64),bvconst(1,8),bvconst(0,8))=bvconst(1,8))
+}
+
+example "input must drain borrow before return" {
+    assert(¬(io108_return(bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,64))))
+}
+
+example "input error returns sentinel" {
+    assert(io108_result(bvconst(0,8),bvconst(3,64))=ptr107_max())
+}
+
+
+// Loader authority is separate from permission to call read_bytes. An input
+// image cannot be replaced/reset while live or while any operation retains it.
+// IDs select records, nonwrapping generations distinguish each provisioning.
+define in108_provision(old_live : BitVec8, new_live : BitVec8,
+    old_gen : BitVec64, new_gen : BitVec64, trusted_loader : BitVec8,
+    drained : BitVec8, serialized : BitVec8) =
+    (old_live=bvconst(0,8)) ∧ (new_live=bvconst(1,8)) ∧
+    bvult(old_gen,ptr107_max()) ∧ (new_gen=bvadd(old_gen,bvconst(1,64))) ∧
+    (trusted_loader=bvconst(1,8)) ∧ (drained=bvconst(1,8)) ∧ (serialized=bvconst(1,8))
+define in108_detach(old_live : BitVec8, new_live : BitVec8,
+    outstanding : BitVec64, trusted_owner : BitVec8, serialized : BitVec8) =
+    (old_live=bvconst(1,8)) ∧ (new_live=bvconst(0,8)) ∧
+    (outstanding=bvconst(0,64)) ∧ (trusted_owner=bvconst(1,8)) ∧ (serialized=bvconst(1,8))
+
+example "trusted first input provision" {
+    assert(in108_provision(bvconst(0,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "reject overwrite live input" {
+    assert(¬(in108_provision(bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject zero provisioning generation" {
+    assert(¬(in108_provision(bvconst(0,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject guest provisions input" {
+    assert(¬(in108_provision(bvconst(0,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject rebind retained source" {
+    assert(¬(in108_provision(bvconst(0,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "reject unserialized provision" {
+    assert(¬(in108_provision(bvconst(0,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "reject input generation wrap" {
+    assert(¬(in108_provision(bvconst(0,8),bvconst(1,8),ptr107_max(),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "drained input detach" {
+    assert(in108_detach(bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "reject double detach" {
+    assert(¬(in108_detach(bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject detach source still in use" {
+    assert(¬(in108_detach(bvconst(1,8),bvconst(0,8),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject foreign source detach" {
+    assert(¬(in108_detach(bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "EOF whole request remains authenticated" {
+    assert(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(10,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "reject EOF capacity outside view despite zero copied" {
+    assert(¬(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(10,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject missing stream is not EOF" {
+    assert(¬(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(10,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "reject EOF READ-only destination" {
+    assert(¬(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(1,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(10,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "short read returns three" {
+    assert(io108_result(bvconst(1,8),bvconst(3,64))=bvconst(3,64))
+}
+
+example "EOF returns zero" {
+    assert(io108_result(bvconst(1,8),bvconst(0,64))=bvconst(0,64))
+}

@@ -1,0 +1,355 @@
+// Every claim below MUST be explicitly disproved, never Unknown.
+import "anka108_typed_input.kleis"
+
+example "FALSE admit output number on input path" {
+    assert(in108_abi(bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE admit reserved lane" {
+    assert(in108_abi(bvconst(20,64),bvconst(1,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE admit unsupported flags" {
+    assert(in108_abi(bvconst(20,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE admit tagged number" {
+    assert(in108_abi(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE admit tagged capacity" {
+    assert(in108_abi(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE admit integer destination" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(0,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit stale descriptor epoch" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit retired descriptor" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(0,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit wrong destination domain" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(5,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit wrong destination context" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(10,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit wrong allocation" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit stale allocation generation" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(3,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit retired allocation" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(0,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit position below view" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(4,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit capacity beyond narrowed view" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit READ-only descriptor" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(1,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit invalid descriptor rights" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(6,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit wrong grant object" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(12,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit grant begins too late" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(4,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit grant too short" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit READ-only Fabric grant" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(1,64),bvconst(1,8)))
+}
+
+example "FALSE admit revoked write grant" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(0,8)))
+}
+
+example "FALSE admit oversized capacity" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(65537,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit wrapping capacity" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),ptr107_max(),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit wrapping allocation" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),ptr107_max(),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit empty forged destination" {
+    assert(in108_destination(bvconst(4294967303,64),bvconst(14,64),bvconst(0,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(0,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE admit zero stream identity" {
+    assert(in108_stream(bvconst(0,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64)))
+}
+
+example "FALSE admit wrong selected input" {
+    assert(in108_stream(bvconst(5,64),bvconst(6,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64)))
+}
+
+example "FALSE admit stale input generation" {
+    assert(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(3,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64)))
+}
+
+example "FALSE admit other input context" {
+    assert(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64)))
+}
+
+example "FALSE admit other input domain" {
+    assert(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(5,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64)))
+}
+
+example "FALSE admit other process slot" {
+    assert(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64)))
+}
+
+example "FALSE admit reused process slot" {
+    assert(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64)))
+}
+
+example "FALSE admit detached input" {
+    assert(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(3,64),bvconst(10,64)))
+}
+
+example "FALSE admit mutable guest alias input" {
+    assert(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(3,64),bvconst(10,64)))
+}
+
+example "FALSE admit cursor beyond input" {
+    assert(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(11,64),bvconst(10,64)))
+}
+
+example "FALSE admit unbounded input image" {
+    assert(in108_stream(bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(1048577,64)))
+}
+
+example "FALSE admit failed admission publication" {
+    assert(in108_commit(bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit revoked destination publication" {
+    assert(in108_commit(bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit detached source publication" {
+    assert(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit substituted source identity" {
+    assert(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(6,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit changed source generation" {
+    assert(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit concurrent source cursor update" {
+    assert(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit partial destination write" {
+    assert(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(4,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit excess destination write" {
+    assert(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(6,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit retired backing publication" {
+    assert(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit released lease publication" {
+    assert(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit foreign operation ticket" {
+    assert(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit Fabric revocation at commit" {
+    assert(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE admit unserialized commit" {
+    assert(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE admit tail overread publication" {
+    assert(in108_commit(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(10,64),bvconst(8,64),bvconst(8,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit EOF skips write authority" {
+    assert(in108_commit(bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(10,64),bvconst(10,64),bvconst(10,64),bvconst(5,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit zero capacity skips provenance" {
+    assert(in108_commit(bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit foreign event owner" {
+    assert(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(10,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit legacy event mode" {
+    assert(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit tampered saved header" {
+    assert(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit absent private event" {
+    assert(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit wrong lease increment" {
+    assert(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(2,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit lease count wrap" {
+    assert(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),ptr107_max(),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit reused admission ticket" {
+    assert(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE admit whole detached-source request" {
+    assert(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE admit whole raw-destination request" {
+    assert(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(0,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE interior byte clears tag" {
+    assert(¬(in108_tag(bvconst(1,8),bvconst(17,64),bvconst(1,64),bvconst(16,64),bvconst(1,8))=bvconst(0,8)))
+}
+
+example "FALSE last cell byte clears tag" {
+    assert(¬(in108_tag(bvconst(1,8),bvconst(31,64),bvconst(1,64),bvconst(16,64),bvconst(1,8))=bvconst(0,8)))
+}
+
+example "FALSE cross-cell prefix clears tag" {
+    assert(¬(in108_tag(bvconst(1,8),bvconst(15,64),bvconst(2,64),bvconst(16,64),bvconst(1,8))=bvconst(0,8)))
+}
+
+example "FALSE adjacent cell tag survives" {
+    assert(¬(in108_tag(bvconst(1,8),bvconst(16,64),bvconst(16,64),bvconst(32,64),bvconst(1,8))=bvconst(1,8)))
+}
+
+example "FALSE zero count preserves tag" {
+    assert(¬(in108_tag(bvconst(1,8),bvconst(16,64),bvconst(0,64),bvconst(16,64),bvconst(1,8))=bvconst(1,8)))
+}
+
+example "FALSE input cannot mint pointer kind" {
+    assert(¬(in108_tag(bvconst(1,8),bvconst(16,64),bvconst(1,64),bvconst(16,64),bvconst(0,8))=bvconst(0,8)))
+}
+
+example "FALSE input result scalar clears result tag" {
+    assert(¬(event107_tag(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))=bvconst(0,8)))
+}
+
+example "FALSE destination pair survives return" {
+    assert(¬(event107_tag(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(2,64),bvconst(1,8),bvconst(0,8))=bvconst(1,8)))
+}
+
+example "FALSE input must drain borrow before return" {
+    assert(¬(¬(io108_return(bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)))))
+}
+
+example "FALSE input error returns sentinel" {
+    assert(¬(io108_result(bvconst(0,8),bvconst(3,64))=ptr107_max()))
+}
+
+example "FALSE failure consumes input" {
+    assert(in108_cursor(bvconst(0,8),bvconst(3,64),bvconst(5,64))=bvconst(8,64))
+}
+
+example "FALSE EOF returns full capacity" {
+    assert(in108_count(bvconst(8,64),bvconst(10,64),bvconst(10,64))=bvconst(8,64))
+}
+
+example "FALSE tail read overwrites padding" {
+    assert(in108_byte(bvconst(1,8),bvconst(16,64),bvconst(3,64),bvconst(19,64),bvconst(65,8),bvconst(0,8))=bvconst(65,8))
+}
+
+example "FALSE raw input imports pointer kind" {
+    assert(in108_tag(bvconst(1,8),bvconst(16,64),bvconst(16,64),bvconst(16,64),bvconst(0,8))=bvconst(1,8))
+}
+
+
+example "FALSE overwrite live input" {
+    assert(in108_provision(bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE zero provisioning generation" {
+    assert(in108_provision(bvconst(0,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE guest provisions input" {
+    assert(in108_provision(bvconst(0,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE rebind retained source" {
+    assert(in108_provision(bvconst(0,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE unserialized provision" {
+    assert(in108_provision(bvconst(0,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE input generation wrap" {
+    assert(in108_provision(bvconst(0,8),bvconst(1,8),ptr107_max(),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE double detach" {
+    assert(in108_detach(bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE detach source still in use" {
+    assert(in108_detach(bvconst(1,8),bvconst(0,8),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE foreign source detach" {
+    assert(in108_detach(bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE EOF capacity outside view despite zero copied" {
+    assert(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(7,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(10,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE missing stream is not EOF" {
+    assert(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(10,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE EOF READ-only destination" {
+    assert(in108_request(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(4294967303,64),bvconst(3,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(11,64),bvconst(4,64),bvconst(2,64),bvconst(14,64),bvconst(1,64),bvconst(11,64),bvconst(4,64),bvconst(1,8),bvconst(4096,64),bvconst(16,64),bvconst(5,64),bvconst(11,64),bvconst(2,64),bvconst(14,64),bvconst(2,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(10,64),bvconst(10,64),bvconst(9,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}

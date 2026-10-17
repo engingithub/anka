@@ -46,6 +46,14 @@ impl DeveloperExecutionAuthority {
     }
 }
 
+/// Explicit permission to provision a private immutable input image. Execution
+/// authority alone does not confer this loader/ingress permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeveloperInputAuthority { _private: () }
+impl DeveloperInputAuthority {
+    pub fn provision() -> Self { Self { _private: () } }
+}
+
 /// Virtual layout actually used for one process incarnation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DevelopmentProcessLayout {
@@ -100,6 +108,9 @@ pub struct DevelopmentRunReport {
 #[derive(Debug, PartialEq, Eq)]
 pub enum DevelopmentRunError {
     DeveloperExecutionAuthorityRequired,
+    DeveloperInputAuthorityRequired,
+    InputTooLarge,
+    InputProvisionRejected,
     Artifact(DevelopmentShellError),
     InvalidArtifactGeometry,
     ArtifactPlacementMissing,
@@ -174,7 +185,27 @@ pub fn run_registered_artifact_with_config(
     let prepared = prepare_run(
         registry, authority, fabric, placement, selector, config,
     )?;
-    execute_prepared_run(fabric, placement, prepared, config)
+    execute_prepared_run(fabric, placement, prepared, config, None)
+}
+
+/// Run the exact registered artifact with an explicitly authorized input image.
+/// The trusted bridge attaches it to the actual spawned child before that child
+/// executes any instruction. No source is implicitly inherited from its parent.
+pub fn run_registered_artifact_with_input(
+    registry: &DevelopmentArtifactRegistry,
+    authority: Option<&DeveloperExecutionAuthority>,
+    input_authority: Option<&DeveloperInputAuthority>,
+    fabric: &mut Fabric,
+    placement: &mut PhysicalPlacementManager,
+    selector: &str,
+    input: &[u8],
+) -> Result<DevelopmentRunReport, DevelopmentRunError> {
+    let authority = authority.ok_or(DevelopmentRunError::DeveloperExecutionAuthorityRequired)?;
+    input_authority.ok_or(DevelopmentRunError::DeveloperInputAuthorityRequired)?;
+    if input.len() > super::os::MAX_PROCESS_INPUT { return Err(DevelopmentRunError::InputTooLarge); }
+    let config = DevelopmentRunConfig::default();
+    let prepared = prepare_run(registry, authority, fabric, placement, selector, config)?;
+    execute_prepared_run(fabric, placement, prepared, config, Some(input))
 }
 
 fn resolve_artifact<'a>(
@@ -446,6 +477,7 @@ fn execute_prepared_run(
     placement: &mut PhysicalPlacementManager,
     prepared: PreparedRun,
     config: DevelopmentRunConfig,
+    input: Option<&[u8]>,
 ) -> Result<DevelopmentRunReport, DevelopmentRunError> {
     let PreparedRun {
         artifact,
@@ -470,6 +502,34 @@ fn execute_prepared_run(
         teardown_sealed_transient(&mut kernel.fabric, placement, supervisor_obj);
         *fabric = kernel.into_fabric();
         return Err(DevelopmentRunError::Boot(err));
+    }
+
+    if let Some(bytes) = input {
+        // One-instruction rounds until ordinary SYS_SPAWN publishes the child.
+        // The scheduler captures its process range before running the parent;
+        // a newly created child cannot execute in its birth round.
+        let parent = super::state::ProcessKey { slot: 0, generation: kernel.processes[0].generation };
+        let mut target = None;
+        for _ in 0..config.max_rounds {
+            if let Some((slot, proc)) = kernel.processes.iter().enumerate().find(|(_, p)|
+                p.parent == Some(parent) && p.state == super::os::ProcessState::Running
+                && p.core.address_map.resolve(child_layout.code_vaddr)
+                    == Some((artifact.key.object, 0))) {
+                target = Some(super::state::ProcessKey { slot, generation: proc.generation });
+                break;
+            }
+            if kernel.processes[0].exited() { break; }
+            kernel.run(1, 1);
+        }
+        if target.is_none_or(|key| kernel.provision_process_input(key, bytes).is_err()) {
+            kernel.finish_process(0, ProcessResult::ProtectionFault);
+            kernel.reclaim_process(0);
+            scrub_kernel_dynamic_region(&mut kernel, kernel_phys_base);
+            teardown_sealed_transient(&mut kernel.fabric, placement, control_obj);
+            teardown_sealed_transient(&mut kernel.fabric, placement, supervisor_obj);
+            *fabric = kernel.into_fabric();
+            return Err(DevelopmentRunError::InputProvisionRejected);
+        }
     }
 
     kernel.run(config.quantum, config.max_rounds);
@@ -702,6 +762,27 @@ mod tests {
             Some(&ingress), &mut fabric, &mut placement, "hello", &path,
         ).unwrap();
         (loader, fabric, placement, path)
+    }
+
+    #[test]
+    fn p108_input_bridge_requires_separate_authority_and_binds_actual_child() {
+        let (loader, mut fabric, mut placement, path) = imported_exit_artifact(42);
+        let execution = DeveloperExecutionAuthority::provision();
+        let input = DeveloperInputAuthority::provision();
+        assert_eq!(run_registered_artifact_with_input(loader.registry(), Some(&execution),
+            None, &mut fabric, &mut placement, "hello", &[7]),
+            Err(DevelopmentRunError::DeveloperInputAuthorityRequired));
+        assert_eq!(run_registered_artifact_with_input(loader.registry(), None,
+            Some(&input), &mut fabric, &mut placement, "hello", &[7]),
+            Err(DevelopmentRunError::DeveloperExecutionAuthorityRequired));
+        let report = run_registered_artifact_with_input(loader.registry(), Some(&execution),
+            Some(&input), &mut fabric, &mut placement, "hello", &[7]).unwrap();
+        assert_eq!(report.child_result, ProcessResult::Exited(42));
+        // Each subsequent run is a new machine-owned input binding, not leftovers.
+        let report = run_registered_artifact_with_input(loader.registry(), Some(&execution),
+            Some(&input), &mut fabric, &mut placement, "hello", &[]).unwrap();
+        assert_eq!(report.child_result, ProcessResult::Exited(42));
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

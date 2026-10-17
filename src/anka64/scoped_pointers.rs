@@ -98,6 +98,14 @@ impl ScopedPointers {
         a.base.checked_add(pointer.position).ok_or(PointerError::Bounds)
     }
 
+    /// Input direction: the complete capacity must also be writable, even at EOF.
+    pub(crate) fn write_span(&self, pointer: ScopedPointer, domain: u64,
+        owner: u64, length: u64) -> Result<u64, PointerError> {
+        let address = self.read_span(pointer, domain, owner, length)?;
+        if !self.allocation(pointer, domain)?.writable { return Err(PointerError::Rights); }
+        Ok(address)
+    }
+
     pub(crate) fn storage_span(&self, pointer:ScopedPointer) -> Option<(u64,u64)> {
         let a=self.slots.get(pointer.slot)?;
         if a.generation!=pointer.generation { return None; }

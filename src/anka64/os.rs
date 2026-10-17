@@ -43,6 +43,25 @@ pub const SYS_DEV_WAIT: u64 = 16; // dev_wait(slot, gen) → completion status
 pub const SYS_DEV_EVENT_WAIT: u64 = 17; // dev_event_wait(cap_slot, cap_gen, epoch) → status, epoch
 pub const SYS_NIC_RX: u64 = 18; // nic_rx(dev_slot, dev_gen, buf_slot, buf_gen) → status, len
 pub const SYS_NIC_TX: u64 = 19; // nic_tx(dev_slot, dev_gen, buf_slot, buf_gen, len) → status, len
+pub const SYS_READ_BYTES: u64 = 20; // protected R2/R3 destination, R4 capacity
+pub(crate) const MAX_PROCESS_INPUT: usize = 1024 * 1024;
+
+/// Kernel-owned immutable input. Never a guest map, device buffer or global stdin.
+struct ProcessInput {
+    owner: ProcessKey,
+    context: u64,
+    domain: DomainId,
+    id: u64,
+    generation: u64,
+    bytes: Box<[u8]>,
+    cursor: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum InputProvisionError {
+    StaleProcess, AlreadyProvisioned, TooLarge, Exhausted, AllocationFailed,
+}
+
 
 /// Maximum messages per mailbox.  Enforced by all producers:
 /// SYS_SEND, SYS_SEND_KEY, and SYS_SEND_CAP.
@@ -1028,6 +1047,8 @@ pub struct Kernel {
     pub byte_output: Vec<u8>,
     pub(crate) mailboxes: Vec<Vec<Message>>,
     current: usize,
+    input_streams: std::collections::BTreeMap<usize, ProcessInput>,
+    next_input_generation: Option<u64>,
     /// Next available physical address for dynamic allocation.
     pub next_phys: u64,
     /// Next available agent ID for child processes.
@@ -1071,6 +1092,8 @@ impl Kernel {
             byte_output: Vec::new(),
             mailboxes: Vec::new(),
             current: 0,
+            input_streams: Default::default(),
+            next_input_generation: Some(1),
             next_phys: 0x100000,
             next_agent: 100,
             next_pid: 0,
@@ -1082,6 +1105,36 @@ impl Kernel {
             legacy_block_device: None,
             next_delegation_incarnation: 0,
         }
+    }
+
+    /// Trusted host/loader boundary only; no guest syscall can provision/reset.
+    /// Each successful provision uses a fresh nonwrapping generation, even after
+    /// detach or process-slot reuse. Existing live bindings cannot be replaced.
+    pub(crate) fn provision_process_input(&mut self, key: ProcessKey, bytes: &[u8])
+        -> Result<(), InputProvisionError> {
+        let proc = self.processes.get(key.slot).filter(|p|
+            p.generation == key.generation && p.state == ProcessState::Running)
+            .ok_or(InputProvisionError::StaleProcess)?;
+        if self.input_streams.contains_key(&key.slot) { return Err(InputProvisionError::AlreadyProvisioned); }
+        if bytes.len() > MAX_PROCESS_INPUT { return Err(InputProvisionError::TooLarge); }
+        let generation = self.next_input_generation.ok_or(InputProvisionError::Exhausted)?;
+        let id = u64::try_from(key.slot).ok().and_then(|n| n.checked_add(1))
+            .ok_or(InputProvisionError::Exhausted)?;
+        let mut image = Vec::new();
+        image.try_reserve_exact(bytes.len()).map_err(|_| InputProvisionError::AllocationFailed)?;
+        image.extend_from_slice(bytes);
+        let input = ProcessInput { owner: key, context: proc.core.context_identity(),
+            domain: proc.core.domain, id, generation, bytes: image.into_boxed_slice(), cursor: 0 };
+        self.input_streams.insert(key.slot, input);
+        self.next_input_generation = generation.checked_add(1);
+        Ok(())
+    }
+
+    pub(crate) fn detach_process_input(&mut self, key: ProcessKey) -> bool {
+        // &mut Kernel excludes every synchronous reader. No retained lease exists.
+        if !self.input_streams.get(&key.slot).is_some_and(|s| s.owner == key) { return false; }
+        self.input_streams.remove(&key.slot);
+        true
     }
 
     /// Return the owned Fabric after a one-shot kernel session.
@@ -1772,6 +1825,7 @@ impl Kernel {
     /// all incarnation metadata, and advances the slot to
     /// Free(g+1) or Retired.
     pub(crate) fn reclaim_process(&mut self, slot: usize) {
+        self.input_streams.remove(&slot);
         // --- Destroy owned resources (if any) ---
         if let Some(res) = self.processes[slot].resources.take() {
             self.fabric.destroy_object(res.stack_obj);
@@ -1819,6 +1873,7 @@ impl Kernel {
     /// Transition a process to Zombie with a definitive ProcessResult.
     /// Then depth-first terminate any orphaned descendants.
     pub(crate) fn finish_process(&mut self, slot: usize, result: ProcessResult) {
+        self.input_streams.remove(&slot);
         self.processes[slot].core.retire_all_pointer_frames(&mut self.fabric);
         let exit_code = match &result {
             ProcessResult::Exited(code) => *code,
@@ -2592,6 +2647,7 @@ impl Kernel {
                     self.finish_process(idx, ProcessResult::Exited(words[R1 as usize]));
                 }
                 SYS_WRITE => self.handle_protected_buffer_write(idx, words, kinds),
+                SYS_READ_BYTES => self.handle_protected_buffer_read(idx, words, kinds),
                 _ => self.finish_process(idx, ProcessResult::ProtectionFault),
             }
             return;
@@ -2717,6 +2773,48 @@ impl Kernel {
     /// R1 = virtual address of the object to seal.
     /// Returns: R0 = 0 on success, R0 = MAX on error.
     ///
+    /// DN-61: exclusive synchronous input; destination+cursor commit together.
+    /// All fallible checks/staging precede one exact-span atomic Fabric write.
+    /// Neither immutable input nor the borrow is retained beyond this call.
+    fn handle_protected_buffer_read(&mut self, idx: usize, words: [u64; 16],
+        kinds: [Option<super::scoped_pointers::ScopedPointer>; 6]) {
+        let count = (|| -> Option<u64> {
+            let capacity = words[4];
+            if words[0] != SYS_READ_BYTES || words[1] != 0 || words[5] != 0
+                || kinds[0].is_some() || kinds[2].is_some() || capacity > MAX_WRITE { return None; }
+            let pointer = kinds[1]?;
+            if pointer.words() != [words[2], words[3]] { return None; }
+            let proc = &self.processes[idx];
+            let core = &proc.core;
+            let input = self.input_streams.get_mut(&idx)?;
+            if input.owner != (ProcessKey { slot: idx, generation: proc.generation })
+                || input.context != core.context_identity() || input.domain != core.domain
+                || input.id == 0 || input.generation == 0 || input.cursor > input.bytes.len() { return None; }
+            // Authenticate the ENTIRE requested capacity even if planned count=0.
+            let backing = core.syscall_write_span(&self.fabric, pointer, capacity).ok()?;
+            let n = (capacity as usize).min(input.bytes.len() - input.cursor);
+            let end = input.cursor.checked_add(n)?;
+            let mut staged = Vec::new();
+            staged.try_reserve_exact(n).ok()?;
+            staged.extend_from_slice(&input.bytes[input.cursor..end]);
+            // Exclusive borrows keep this same source generation/cursor stable;
+            // final destination and Fabric checks never rely on a cached grant.
+            if core.syscall_write_span(&self.fabric, pointer, capacity).ok()? != backing { return None; }
+            if n != 0 {
+                self.fabric.execute_write(MemoryRequest { context: AccessContext {
+                    agent: core.agent, domain: core.domain, privilege: Privilege::Supervisor },
+                    object: backing.0, offset: backing.1, width: Width::Byte,
+                    length: n as u64, kind: AccessKind::Write }, staged).ok()?;
+            }
+            // No fallible operation after memory commit: source ownership is
+            // still held and assignment cannot fail. No scheduler/device tick.
+            input.cursor = end;
+            Some(n as u64)
+        })().unwrap_or(u64::MAX);
+        self.processes[idx].core.write_syscall_result(R0 as usize, count);
+        self.resume_from_trap(idx);
+    }
+
     /// DN-60: protected R2/R3 source, R4 count; saved scalar R1/R5 zero.
     /// This entire call holds exclusive Kernel/Fabric access: no scheduler,
     /// scope retirement, DMA callback or revocation can interleave or outlive it.
@@ -5432,6 +5530,10 @@ mod tests {
     }
 
     fn typed_output_fixture(length: u64, position: i64) -> (Kernel, ObjectId) {
+        typed_io_fixture(length, position, SYS_WRITE)
+    }
+
+    fn typed_io_fixture(length: u64, position: i64, number: u64) -> (Kernel, ObjectId) {
         use super::super::pointer_frames::{ValidatedPointerProgram, FrameManifest, LocalStorage};
         let mut fabric = Fabric::new(0x400000);
         let (mut core, domain, text, _, stack) = create_process(
@@ -5440,7 +5542,7 @@ mod tests {
         asm.pframe(0); asm.plocal(R2, 0);
         asm.movi(R12, 65); asm.pwrite(R12, R2, 1);
         asm.movi(R12, position as i32); asm.padd(R2, R2, R12);
-        asm.movi(R0, SYS_WRITE as i32); asm.movi(R1, 0);
+        asm.movi(R0, number as i32); asm.movi(R1, 0);
         asm.movi(R4, length as i32); asm.movi(R5, 0); asm.trap(0);
         let exit = asm.here() as u64 * 4;
         asm.punframe(); asm.ret();
@@ -5461,6 +5563,248 @@ mod tests {
         let mut kernel = Kernel::new(fabric); kernel.spawn(core);
         kernel.byte_output.push(90);
         (kernel, stack)
+    }
+
+    fn input_fixture(capacity: u64, position: i64, bytes: Option<&[u8]>) -> (Kernel, ObjectId) {
+        let (mut kernel, stack) = typed_io_fixture(capacity, position, SYS_READ_BYTES);
+        if let Some(bytes) = bytes {
+            let key = ProcessKey { slot: 0, generation: kernel.processes[0].generation };
+            kernel.provision_process_input(key, bytes).unwrap();
+        }
+        (kernel, stack)
+    }
+
+    fn input_buffer(kernel: &Kernel, stack: ObjectId) -> Vec<u8> {
+        kernel.fabric.read_physical(kernel.fabric.translate(stack, 0x3ff0).unwrap(), 4).to_vec()
+    }
+
+    fn repeat_input(kernel: &mut Kernel, capacity: u64) {
+        let core = &mut kernel.processes[0].core;
+        core.write_register(0, SYS_READ_BYTES); core.write_register(1, 0);
+        core.write_register(4, capacity); core.write_register(5, 0);
+        core.enter_event(EventFrame { return_pc: core.pc, return_privilege: Privilege::User,
+            interrupts_were_enabled: true, cause: EventCause::Syscall });
+        kernel.handle_syscall(0);
+    }
+
+    #[test]
+    fn p108_input_full_short_eof_and_untouched_tail() {
+        let (mut kernel, stack) = input_fixture(3, 0, Some(&[65, 0, 255, 66, 67]));
+        // Handler scratch is irrelevant; the private image selects READ_BYTES.
+        kernel.processes[0].core.write_register(0, SYS_EXIT);
+        kernel.handle_syscall(0);
+        assert_eq!(kernel.processes[0].core.r[0], 3);
+        assert_eq!(input_buffer(&kernel, stack), [65, 0, 255, 0]);
+        assert_eq!(kernel.input_streams[&0].cursor, 3);
+        repeat_input(&mut kernel, 4);
+        assert_eq!(kernel.processes[0].core.r[0], 2);
+        assert_eq!(input_buffer(&kernel, stack), [66, 67, 255, 0]);
+        assert_eq!(kernel.input_streams[&0].cursor, 5);
+        repeat_input(&mut kernel, 4);
+        assert_eq!(kernel.processes[0].core.r[0], 0);
+        assert_eq!(input_buffer(&kernel, stack), [66, 67, 255, 0]);
+        assert_eq!(kernel.input_streams[&0].cursor, 5);
+        assert_eq!(kernel.byte_output, [90]);
+    }
+
+    #[test]
+    fn p108_input_rejection_does_not_consume_or_mutate() {
+        let (mut kernel, stack) = input_fixture(5, 0, Some(&[7, 8, 9]));
+        let before = input_buffer(&kernel, stack);
+        kernel.handle_syscall(0);
+        assert_eq!(kernel.processes[0].core.r[0], u64::MAX);
+        assert_eq!(kernel.input_streams[&0].cursor, 0);
+        assert_eq!(input_buffer(&kernel, stack), before);
+        repeat_input(&mut kernel, 2);
+        assert_eq!(kernel.processes[0].core.r[0], 2);
+        assert_eq!(input_buffer(&kernel, stack), [7, 8, 0, 0]);
+    }
+
+    #[test]
+    fn p108_input_missing_stream_is_not_empty_stream() {
+        for source in [None, Some(&[][..])] {
+            let (mut kernel, stack) = input_fixture(4, 0, source);
+            let before = input_buffer(&kernel, stack);
+            kernel.handle_syscall(0);
+            assert_eq!(kernel.processes[0].core.r[0], if source.is_some() { 0 } else { u64::MAX });
+            assert_eq!(input_buffer(&kernel, stack), before);
+        }
+    }
+
+    #[test]
+    fn p108_input_empty_ranges_still_validate_and_never_write() {
+        for (capacity, position, expected) in [(0, 4, 0), (1, 4, u64::MAX),
+            (5, 0, u64::MAX), (65537, 0, u64::MAX)] {
+            let (mut kernel, stack) = input_fixture(capacity, position, Some(&[]));
+            let before = input_buffer(&kernel, stack);
+            kernel.handle_syscall(0);
+            assert_eq!(kernel.processes[0].core.r[0], expected);
+            assert_eq!(kernel.input_streams[&0].cursor, 0);
+            assert_eq!(input_buffer(&kernel, stack), before);
+        }
+        let (mut kernel, stack) = input_fixture(0, 0, Some(&[]));
+        let domain = kernel.processes[0].core.domain;
+        kernel.fabric.domains.get_mut(&domain).unwrap().capabilities.retain(|e| e.cap.object() != stack);
+        kernel.fabric.grant(domain, stack, 0, 0x4000, Permissions::READ);
+        kernel.handle_syscall(0);
+        assert_eq!(kernel.processes[0].core.r[0], u64::MAX);
+    }
+
+    #[test]
+    fn p108_input_revoked_and_read_only_destinations_leave_cursor_unchanged() {
+        for case in 0..3 {
+            let (mut kernel, stack) = input_fixture(4, 0, Some(&[7, 8, 9]));
+            let domain = kernel.processes[0].core.domain;
+            let before = input_buffer(&kernel, stack);
+            if case == 0 { kernel.fabric.revoke(stack); }
+            else {
+                kernel.fabric.domains.get_mut(&domain).unwrap().capabilities.retain(|e| e.cap.object() != stack);
+                if case == 1 { kernel.fabric.grant(domain, stack, 0, 0x4000, Permissions::READ); }
+                else {
+                    kernel.fabric.grant(domain, stack, 0x3ff0, 2, Permissions::WRITE);
+                    kernel.fabric.grant(domain, stack, 0x3ff2, 2, Permissions::WRITE);
+                }
+            }
+            kernel.handle_syscall(0);
+            assert_eq!(kernel.processes[0].core.r[0], u64::MAX);
+            assert_eq!(kernel.input_streams[&0].cursor, 0);
+            assert_eq!(input_buffer(&kernel, stack), before);
+        }
+    }
+
+    #[test]
+    fn p108_input_atomic_fabric_failure_does_not_consume_source() {
+        let (mut kernel, stack) = input_fixture(4, 0, Some(&[7, 8, 9]));
+        let original = kernel.fabric.physical_base(stack).unwrap() + 0x3ff0;
+        let before = kernel.fabric.read_physical(original, 4).to_vec();
+        // Force translation beyond physical memory after local registration.
+        // Identity/whole-range authority remain valid; Fabric precommit rejects.
+        assert!(kernel.fabric.move_object(stack, 0x500000));
+        kernel.handle_syscall(0);
+        assert_eq!(kernel.processes[0].core.r[0], u64::MAX);
+        assert_eq!(kernel.input_streams[&0].cursor, 0);
+        assert_eq!(kernel.fabric.read_physical(original, 4), before);
+    }
+
+    #[test]
+    fn p108_input_eof_and_zero_capacity_issue_no_memory_transaction() {
+        for (capacity, source) in [(4, &[][..]), (0, &[7][..])] {
+            let (mut kernel, stack) = input_fixture(capacity, 0, Some(source));
+            let core = &kernel.processes[0].core;
+            let marker = MemoryRequest { context: AccessContext { agent: core.agent,
+                domain: core.domain, privilege: Privilege::Supervisor }, object: stack,
+                offset: 0x3ff0, length: 1, width: Width::Byte, kind: AccessKind::Read };
+            let before = kernel.fabric.submit(marker, None);
+            kernel.handle_syscall(0);
+            let after = kernel.fabric.submit(marker, None);
+            assert_eq!(kernel.processes[0].core.r[0], 0);
+            assert_eq!(after, before + 1);
+            assert_eq!(kernel.input_streams[&0].cursor, 0);
+        }
+    }
+
+    #[test]
+    fn p108_input_wrong_binding_and_tampered_header_fail_closed() {
+        for case in 0..4 {
+            let (mut kernel, stack) = input_fixture(4, 0, Some(&[7]));
+            let before = input_buffer(&kernel, stack);
+            match case {
+                0 => kernel.input_streams.get_mut(&0).unwrap().context += 1,
+                1 => kernel.input_streams.get_mut(&0).unwrap().owner.generation += 1,
+                2 => kernel.input_streams.get_mut(&0).unwrap().domain = DomainId(999),
+                _ => kernel.processes[0].core.event_frames.last_mut().unwrap().return_pc += 4,
+            }
+            kernel.handle_syscall(0);
+            if case == 3 {
+                assert_eq!(kernel.processes[0].result, Some(ProcessResult::ProtectionFault));
+                assert!(!kernel.input_streams.contains_key(&0));
+            } else {
+                assert_eq!(kernel.processes[0].core.r[0], u64::MAX);
+                assert_eq!(kernel.input_streams[&0].cursor, 0);
+            }
+            assert_eq!(input_buffer(&kernel, stack), before);
+        }
+    }
+
+    #[test]
+    fn p108_input_invalid_kinds_and_reserved_lanes_are_nonconsuming() {
+        for case in 0..6 {
+            let (mut kernel, stack) = input_fixture(0, 0, Some(&[7]));
+            let before = input_buffer(&kernel, stack);
+            let (mut words, mut kinds) = kernel.processes[0].core.protected_syscall_image().unwrap();
+            match case {
+                0 => kinds[1] = None,
+                1 => words[3] += 1,
+                2 => words[1] = 1,
+                3 => words[5] = 1,
+                4 => kinds[2] = kinds[1],
+                _ => kinds[0] = kinds[1],
+            }
+            kernel.handle_protected_buffer_read(0, words, kinds);
+            assert_eq!(kernel.processes[0].core.r[0], u64::MAX);
+            assert_eq!(kernel.input_streams[&0].cursor, 0);
+            assert_eq!(input_buffer(&kernel, stack), before);
+        }
+    }
+
+    #[test]
+    fn p108_input_raw_byte_clears_pointer_cell_kind_only_where_written() {
+        let (mut kernel, stack) = input_fixture(1, 0, Some(&[7]));
+        let (_, kinds) = kernel.processes[0].core.protected_syscall_image().unwrap();
+        let core = &kernel.processes[0].core;
+        let request = |offset, kind| MemoryRequest { context: AccessContext {
+            agent: core.agent, domain: core.domain, privilege: Privilege::Supervisor },
+            object: stack, offset, width: Width::Double, length: 16, kind };
+        let changed = request(0x3ff0, AccessKind::Read);
+        let neighbor = request(0x3fe0, AccessKind::Read);
+        kernel.fabric.store_pointer_cell(request(0x3ff0, AccessKind::Write), kinds[1]).unwrap();
+        kernel.fabric.store_pointer_cell(request(0x3fe0, AccessKind::Write), kinds[1]).unwrap();
+        assert!(kernel.fabric.load_pointer_cell(changed).unwrap().is_some());
+        kernel.handle_syscall(0);
+        assert_eq!(kernel.processes[0].core.r[0], 1);
+        assert!(kernel.fabric.load_pointer_cell(changed).is_err());
+        assert_eq!(kernel.fabric.load_pointer_cell(neighbor).unwrap(), kinds[1]);
+        assert_eq!(kernel.input_streams[&0].cursor, 1);
+        assert!(kernel.processes[0].core.pointer_read(&mut kernel.fabric, R2, Width::Byte).is_ok());
+    }
+
+    #[test]
+    fn p108_input_provision_is_immutable_nonreplaceable_and_nonwrapping() {
+        let (mut kernel, stack) = input_fixture(1, 0, None);
+        let key = ProcessKey { slot: 0, generation: kernel.processes[0].generation };
+        let mut source = vec![7];
+        kernel.provision_process_input(key, &source).unwrap(); source[0] = 99;
+        assert_eq!(kernel.provision_process_input(key, &source), Err(InputProvisionError::AlreadyProvisioned));
+        let generation = kernel.input_streams[&0].generation;
+        kernel.handle_syscall(0);
+        assert_eq!(input_buffer(&kernel, stack)[0], 7);
+        assert!(kernel.detach_process_input(key));
+        assert!(!kernel.detach_process_input(key));
+        assert_eq!(kernel.provision_process_input(key, &vec![0; MAX_PROCESS_INPUT + 1]), Err(InputProvisionError::TooLarge));
+        kernel.provision_process_input(key, &[]).unwrap();
+        assert!(kernel.input_streams[&0].generation > generation);
+        kernel.detach_process_input(key);
+        kernel.next_input_generation = Some(u64::MAX);
+        kernel.provision_process_input(key, &[]).unwrap();
+        assert_eq!(kernel.input_streams[&0].generation, u64::MAX);
+        kernel.detach_process_input(key);
+        assert_eq!(kernel.provision_process_input(key, &[]), Err(InputProvisionError::Exhausted));
+    }
+
+    #[test]
+    fn p108_input_teardown_erases_binding_before_process_slot_reuse() {
+        let (mut kernel, _) = input_fixture(1, 0, Some(&[7]));
+        let old = ProcessKey { slot: 0, generation: kernel.processes[0].generation };
+        kernel.finish_process(0, ProcessResult::Exited(0));
+        assert!(!kernel.input_streams.contains_key(&0));
+        kernel.reclaim_process(0);
+        let domain = kernel.fabric.create_domain();
+        let fresh = kernel.spawn(Anka64Core::new(CPU0, domain));
+        assert_eq!(fresh.slot, old.slot); assert_ne!(fresh.generation, old.generation);
+        assert!(!kernel.input_streams.contains_key(&fresh.slot));
+        assert_eq!(kernel.provision_process_input(old, &[99]), Err(InputProvisionError::StaleProcess));
+        kernel.provision_process_input(fresh, &[99]).unwrap();
+        assert_eq!(kernel.input_streams[&fresh.slot].owner, fresh);
     }
 
     #[test]

@@ -36,6 +36,12 @@ impl RebuiltApplication {
     pub fn run(&mut self, authority: Option<&DeveloperExecutionAuthority>) -> Result<DevelopmentRunReport, DevelopmentRunError> {
         run_registered_artifact(&self.registry, authority, &mut self.fabric, &mut self.placement, "rebuilt-application")
     }
+    pub fn run_with_input(&mut self, authority: Option<&DeveloperExecutionAuthority>,
+        input_authority: Option<&super::dev_runner::DeveloperInputAuthority>, input: &[u8])
+        -> Result<DevelopmentRunReport, DevelopmentRunError> {
+        super::dev_runner::run_registered_artifact_with_input(&self.registry, authority,
+            input_authority, &mut self.fabric, &mut self.placement, "rebuilt-application", input)
+    }
 }
 
 pub fn rebuild_application(
@@ -191,6 +197,22 @@ mod tests {
         for source in [b"int main(){return write_bytes(65536,4);}".as_slice(),
             b"int main(){int b[2];return write_bytes(b,8);}".as_slice(),
             b"int main(){char b[2];return write_bytes(b,b);}".as_slice()] {
+            assert!(matches!(rebuild_protected_application(&producer,&bundle(source),Some(&authority)),
+                Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
+        }
+        // Typed input shares this exact fixed-point producer; do not bootstrap
+        // it again in a separate full-suite test just to exercise read_bytes.
+        let input_source=include_bytes!("../../userspace/bin/typed_input_probe.c");
+        let mut input=rebuild_protected_application(&producer,&bundle(input_source),Some(&authority)).unwrap();
+        let input_authority=super::super::dev_runner::DeveloperInputAuthority::provision();
+        assert!(matches!(input.run_with_input(Some(&authority),None,&[65,0,255,66,67]),
+            Err(DevelopmentRunError::DeveloperInputAuthorityRequired)));
+        let report=input.run_with_input(Some(&authority),Some(&input_authority),&[65,0,255,66,67]).unwrap();
+        assert_eq!(report.child_result,ProcessResult::Exited(0));
+        assert_eq!(report.byte_output,vec![65,0,255,66,67]);
+        for source in [b"int main(){return read_bytes(65536,4);}".as_slice(),
+            b"int main(){int b[2];return read_bytes(b,8);}".as_slice(),
+            b"int main(){char b[2];return read_bytes(b,b);}".as_slice()] {
             assert!(matches!(rebuild_protected_application(&producer,&bundle(source),Some(&authority)),
                 Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
         }

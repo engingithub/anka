@@ -6186,3 +6186,250 @@ cargo test -- --test-threads=1
 No unchanged Kleis rerun is needed for this implementation-only patch. If the
 10.8 contracts change, use `check-anka108-gates.py --only-108`; if a dependency,
 Kleis executable or stdlib changes, expand to the affected/full formal gates.
+
+## DN-61 — Synchronous process-owned input contract (Phase 10.8)
+
+**Status, 2026-10-16: synchronous protected typed input COMPLETE and validated.**
+Formal gates, exact CC2 fixed-point/input-echo integration, and all **1057
+Rust/runtime tests** pass. The previous console-output milestone (DN-60) remains
+complete. This input slice does not close Phase 10.8.
+
+### Concrete requirement and authority
+
+A rebuilt protected application must be able to receive a bounded sequence of
+source/data bytes into a local `char` buffer and process or echo those bytes.
+The initial source is an immutable, trusted-loader-provisioned input image owned
+by one process incarnation. This earns an input facility without first adding
+filesystems, global console routing, device waits, async leases or malloc.
+
+The proposed compiler intrinsic is `read_bytes(char *destination, int capacity)`.
+The proposed protected syscall number is **20** (`SYS_READ_BYTES`); the merged
+runtime currently implements numbers 0 through 19. No legacy syscall is changed
+or repurposed. Number 20 is reserved by this specification, not yet executable.
+
+| Lane | Proposed protected input ABI |
+| --- | --- |
+| R0 | scalar syscall number 20 |
+| R1 | reserved, exactly zero |
+| R2/R3 | protected destination handle and byte position |
+| R4 | scalar unsigned byte capacity, at most 65536 |
+| R5 | flags, exactly zero |
+| Result R0 | bytes copied, or `u64::MAX` on failure |
+
+The R0/R1 and R4/R5 pair kinds must be scalar; R2/R3 must carry authentic protected
+pointer kind. Arguments come from the owned private syscall event image. Only R0
+is a scalar result; event restoration preserves the destination pair and unrelated
+saved state. This trap layout is separate from the ordinary CC2 function-call ABI.
+The intrinsic's type/argument evaluation and typed spill lowering must implement
+this layout; integer addresses and pointer-valued counts remain invalid.
+
+A stream binding holds image identity/generation, owner process slot/generation,
+context, domain, cursor and exact immutable image length. Process generation zero
+is valid, matching the existing process model. Stream identity and generation are
+nonzero. The maximum initial image size is **1 MiB**, independent of the 64 KiB
+per-call limit. The image is not guest-mapped writable storage and cannot alias a
+guest-writeable source or destination. The caller supplies no source address,
+stream number, process selector or capability that could redirect another stream.
+
+Provisioning requires trusted loader authority, a drained inactive binding, and
+an incremented nonwrapping stream generation. Guest read permission does not
+confer provisioning, reset or replacement authority. A live binding cannot be
+replaced in place. Detach/free requires all users drained and trusted owner
+control. Process teardown removes its binding before slot reuse. A new process
+incarnation cannot inherit an old binding merely by occupying the same slot;
+child inheritance is not implicit. Source image owner/content/length remain fixed
+within a live generation; the cursor changes only through accepted reads.
+
+### Destination checks, short reads and EOF
+
+Admission composes the ABI, owned event image, complete destination range, current
+input binding and serialized lease acquisition in `in108_request`. One live
+allocation/view in the caller's context/domain and one generation-current Fabric
+**WRITE** grant must cover the **entire requested capacity**. READ permission
+alone is insufficient. This is the direction reversal from console output.
+Checked subtraction preserves bounds and prevents arithmetic wrap; capability
+fragments cannot be stitched together.
+
+For valid capacity `c`, cursor `p`, and source size `t`, the planned count is
+`n = min(c, t-p)`. A positive request fills its capacity whenever enough source
+bytes remain. A short successful read occurs only at the finite image tail;
+zero means EOF or a zero-capacity request. There is no implicit NUL terminator,
+line editing, encoding conversion or padding.
+
+**EOF is not missing input.** An absent/detached binding returns the error sentinel.
+A live empty image is valid and is already at EOF. Even at EOF or capacity zero,
+source ownership and complete requested destination authority are validated. A
+valid one-past destination with capacity zero is admitted; null, forged, stale,
+READ-only and wrong-context pointers are not exceptions. An EOF call with a
+nonzero out-of-bounds capacity fails even though its planned count is zero.
+
+### Atomicity, pointer kind and lifetime
+
+Preflight the original capacity, stage exactly `n` source bytes and revalidate the
+source identity/generation/cursor and destination authority at final commit.
+`in108_commit` also requires the active bound allocation lease and current Fabric
+authority. The operation ticket binds the caller, destination pointer/range,
+original capacity and selected source snapshot. An old admission result cannot
+be replayed after cursor advancement, input replacement, revocation or retirement.
+
+Destination publication, pointer-kind invalidation and cursor advancement form
+one serialized transition. On success, write exactly `[position, position+n)` and
+advance the cursor by exactly `n`. Bytes outside that interval—including the
+unused capacity after a short read—are unchanged. Every overlapping protected
+16-byte storage cell loses its tag through the ordinary raw-write barrier, even
+when only one byte overlaps or the storage has a physical alias. Input bytes can
+never mint pointer kind. The source image itself is never modified.
+
+On failure, destination bytes, pointer-kind state and stream cursor are unchanged.
+Repeated one-byte writes followed by an error are not an implementation of this
+contract. A future runtime must preflight every fallible step and use one exact-
+range atomic Fabric write, or prove an equivalent combined transaction. It must
+not consume source bytes before a successful destination commit. Source cursor
+serialization must prevent two reads from both consuming the same old snapshot.
+
+EOF and zero-capacity success issue **no destination memory transaction**, alter
+no tags and consume no source bytes. Both success and post-admission failure drain
+all uses and release the borrow before return; pre-admission rejection acquires
+none. Source detach/backing retirement cannot interleave with a live borrow.
+
+The first runtime refinement should retain DN-60's exclusive synchronous Kernel/
+Fabric execution boundary. This makes the source snapshot and backing stable
+without implementing an unused asynchronous lease subsystem. Adding callbacks,
+blocking, DMA or concurrent source mutation requires a separate refinement first.
+The contract does not authorize arbitrary device input, sockets or file reads.
+
+### Formal gates and next implementation witness
+
+The new pair is:
+
+- `theories/anka108_typed_input.kleis`
+- `theories/anka108_typed_input_false_witnesses.kleis`
+
+It imports the unchanged typed-output and protected pointer/event vocabulary,
+adding **no axioms**. The supplied Kleis executable and standard library pass
+**116 positive witnesses**, with **88/88 hostile assertions explicitly disproved
+by Z3**. Universal properties cover bounded counts/cursors, each destination
+WRITE-byte refinement, bounded source indexing, failure noninterference, short-read
+tail preservation and inability of raw input to create pointer tags. Whole-request
+witnesses cover binding ownership, process reincarnation, event integrity, range
+admission and lease acquisition. Hostile cases also cover cursor races, stale
+input generations, missing-stream/EOF confusion and live-source replacement.
+
+These are specification-level refinements and witnesses, not a proof of an
+implemented copy loop or a complete inductive machine theorem. Trusted lookup,
+immutable-image exactness, current-generation certificates, atomic Fabric commit
+and exclusive execution remain implementation obligations.
+
+For this new contract, run only its affected gate pair:
+
+```sh
+python3 scripts/check-anka108-gates.py --kleis /Users/enginatik/.cargo/bin/kleis --only-input
+```
+
+`--only-108` runs both input and output pairs. The default still runs the full
+10.7 prerequisites and both 10.8 pairs for an integration checkpoint. No unchanged
+output/10.7 gates or Rust suite were rerun for this formal-only addition. If an
+imported dependency, Kleis executable or stdlib changes, expand the selected gates.
+Unknown, timeout and evaluation errors never count as hostile rejection.
+
+The implementation witness is one rebuilt protected CC2 application supplied
+an explicitly provisioned image containing ordinary bytes, embedded zero and 255.
+It reads into local buffers, verifies full/short/EOF counts and untouched tail,
+echoes via `write_bytes`, and exercises hostile destinations without consuming
+input. Implementation also needs teardown/reuse, saved-event integrity and raw-
+write pointer-tag invalidation tests, recorded in the implementation checkpoint below.
+
+
+### DN-61 implementation checkpoint — private immutable input and CC2 echo probe
+
+`SYS_READ_BYTES = 20` is now dispatched only for protected applications using the
+owned saved-event image. `ScopedPointers::write_span`, Core range validation and
+Fabric input admission require a writable allocation and one WRITE grant across
+the entire original capacity, including EOF and zero capacity. Existing output
+checks now share the same internal range-admission helper with READ direction.
+Legacy syscall numbers and their calling conventions are unchanged.
+
+Kernel input bindings are private and hold a copied immutable image, process key,
+context, domain, nonzero stream id, nonwrapping generation and cursor. Trusted
+provisioning rejects oversized images, stale process keys and live replacement.
+Caller-owned source mutation after provisioning cannot change the image. Detach
+and process termination/reclamation erase the binding; process-slot reuse carries
+no implicit input. Exhausted generations never wrap.
+
+The synchronous read holds exclusive Kernel/Fabric access and the same input
+binding throughout validation, staging, final authorization, memory commit and
+cursor update. It stages exactly the available bounded count and performs one
+exact-span `Fabric::execute_write`, whose existing precommit path validates the
+whole write and clears all overlapping physical pointer-cell tags before mutation.
+After a successful write, cursor assignment is the only remaining source-state
+operation and cannot fail. Rejection leaves cursor and destination unchanged.
+EOF/zero capacity bypass the memory transaction entirely after all authentication
+checks. No scheduler, device tick, callback or retained buffer can interleave.
+This remains a serialized synchronous refinement, not an implemented SMP/async
+lease protocol.
+
+CC2 reserves `read_bytes` as a two-argument intrinsic in protected profile 2. It
+requires `char *` and scalar capacity, preserves the destination with typed spills
+while evaluating expressions, and emits the established R2/R3 + R4 ABI with scalar
+R0=20, R1=R5=0. No host source address or stream selector is passed by application
+code, and ordinary raw `syscall` arguments are not reinterpreted.
+
+Development execution gains a separate `DeveloperInputAuthority` and
+`RebuiltApplication::run_with_input`. Execution permission alone cannot provision
+input. The bridge runs its sealed supervisor in single-instruction rounds until
+ordinary SYS_SPAWN creates the exact registered artifact's child, binds the image
+to that actual child before its first instruction, then resumes normal scheduling.
+This uses the existing scheduler's fixed process-range iteration at round entry:
+a new child cannot execute in its birth round. The bridge test exercises this
+setup and distinct authority rejection; input is neither inherited by the parent
+nor left for later process incarnations.
+
+`userspace/bin/typed_input_probe.c` attempts an invalid read without consuming
+input, checks a zero-capacity one-past read, then reads and echoes `[65, 0, 255]`
+and the short tail `[66, 67]`. It checks exact counts, EOF and unchanged destination
+tail bytes. The existing fixed-point application integration test supplies the
+explicit input `[65, 0, 255, 66, 67]`, checks exit status zero and exact echoed
+output, and verifies compiler rejection of integer/word pointers and pointer-valued
+capacities. It reuses the same exact CC2 lineage already built for output and the
+10.7 application witnesses, avoiding another expensive bootstrap in the suite.
+
+**Validation run here:** Rust test build passed. All **14 new input tests** pass,
+including the provisioning bridge, atomic Fabric failure, immutable source copy,
+wrong owners/generations, stale stream prevention, empty-range checks and physical
+pointer-tag invalidation. The complete focused `p108` selection passes **20 tests**
+(new input plus existing output); three legacy output, ten protected-event, two
+encoded-frame and six other development-runner tests also pass. The 116-positive/
+88-hostile input theories are unchanged since the user's successful local gate;
+no unchanged formal suite was rerun for this implementation patch.
+
+**Final developer validation, 2026-10-16:** the exact self-hosted CC2 integration
+passed locally in **216.39 seconds**. CC2_0 contained **148376 code/backing bytes**;
+CC2_1 and CC2_2 both contained **168032 code/backing bytes**, with entry **165344**.
+The fixed-point comparison and rebuilt input/echo witness passed, including exact
+output `[65, 0, 255, 66, 67]`, short reads, EOF, unchanged destination tail and
+nonconsuming rejected reads. Compiler rejection and ControlFlowViolation diagnostics
+in that successful test are its deliberate hostile cases.
+
+The full single-threaded Rust/runtime suite then passed:
+
+```text
+test result: ok. 1057 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1009.45s
+```
+
+This supersedes the pending-validation status for typed input and closes the
+synchronous input slice. The 1043-test result in DN-60 remains its historical
+output checkpoint. Input formal validation remains **116 positive / 88 explicitly
+disproved hostile witnesses**; unchanged gates were not rerun for implementation-
+only changes. Broader service/toolchain rebuild work and final CPU-to-HTTP closure
+remain open.
+
+```sh
+cargo test --lib p108_input -- --test-threads=1
+cargo test --lib p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address -- --test-threads=1 --nocapture
+cargo test -- --test-threads=1
+```
+
+No new Kleis run is required unless the contract, its imported theories, the Kleis
+executable or standard library changes. Keep using `--only-input` for changes
+confined to the input theory pair, and reserve full formal runs for affected
+prerequisites or integration checkpoints.

@@ -3373,7 +3373,10 @@ client and an adversarial gate before the next one depends on it:
       - exact CC2 fixed point and rebuilt output probe pass; 1043/1043 Rust tests
       - 113 positive / 86 hostile Kleis checks; 10.7 prerequisites remain green
       - typed trap ABI, exact buffer READ authority, lease drain, atomic output
-      - broader typed I/O requires its next contract; input/async I/O remain open
+      - process-owned immutable input COMPLETE: ABI, runtime/lowering, DN-61
+      - exact CC2 input/echo probe passes; latest full Rust suite 1057/1057
+      - input gates: 116 positive / 88 explicitly disproved hostile witnesses
+      - read_bytes uses protected local buffers; async/device/file I/O remain open
       - compiler/toolchain modularization, headers, modules, and libraries
       - persistent tool/source receipts and rebuilt socket/HTTP services
 10.9  supply-chain closure, hostile audit, and CPU-to-HTTP rebuild gate

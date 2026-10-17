@@ -348,6 +348,24 @@ impl Anka64Core {
         Ok(backing)
     }
 
+    pub(crate) fn context_identity(&self) -> u64 { self.context_id }
+
+    /// Input requires WRITE over the entire original capacity, including EOF.
+    pub(crate) fn syscall_write_span(&self, fabric: &Fabric,
+        pointer: super::scoped_pointers::ScopedPointer, length: u64)
+        -> Result<(ObjectId, u64), PointerMachineError> {
+        let address = fabric.scoped_pointers.write_span(pointer, self.domain.0,
+            self.context_id, length).map_err(PointerMachineError::Pointer)?;
+        let backing = fabric.scoped_pointer_backing(pointer, self.domain)?;
+        if length != 0 && self.checked_pointer_mapping(address, length)? != backing {
+            return Err(PointerMachineError::Unmapped);
+        }
+        if !fabric.authorize_pointer_input(self.agent, self.domain, backing.0, backing.1, length) {
+            return Err(PointerMachineError::MissingKind);
+        }
+        Ok(backing)
+    }
+
     /// Explicit scalar syscall result, distinct from handler scratch registers.
     /// Interrupt frames never export result lanes. No call can mint pointer kind.
     pub(crate) fn write_syscall_result(&mut self, register: usize, value: u64) {
@@ -1350,6 +1368,18 @@ mod tests {
         fabric.register_agent(core.agent,AgentKind::Cpu(CoreId(0)),domain);
         core.admit_pointer_program(&mut fabric,program,0,0x8000,0x9000).unwrap();
         (fabric,core,exit0 as usize/4)
+    }
+
+    #[test]
+    fn p108_input_span_requires_writable_descriptor_even_for_empty_range() {
+        let (mut fabric, _, _, _, mut core) = setup();
+        fabric.register_agent(core.agent, AgentKind::Cpu(CoreId(0)), core.domain);
+        let scope = fabric.scoped_pointers.enter_scope_for(core.context_id).unwrap();
+        core.register_local_pointer(&mut fabric, scope, R2, 0x8000, 4, false).unwrap();
+        let pointer = core.captured_pointer(R2).unwrap().unwrap();
+        assert!(core.syscall_read_span(&fabric, pointer, 0).is_ok());
+        assert!(core.syscall_write_span(&fabric, pointer, 0).is_err());
+        assert!(core.syscall_write_span(&fabric, pointer, 1).is_err());
     }
 
     #[test]
