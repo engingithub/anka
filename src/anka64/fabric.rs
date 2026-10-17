@@ -1515,6 +1515,13 @@ impl Fabric {
 
     // ───────────────── Observation ───────────────────────────────
 
+    /// Checked before each compiler trace collection, including the final round.
+    /// Even a faulted attempt to fetch generated output invalidates compile-only.
+    pub(crate) fn compiler_trace_safe(&self, output: ObjectId) -> bool {
+        self.transactions.iter().all(|tx| tx.state.is_terminal()
+            && !(tx.request.object == output && tx.request.kind == AccessKind::Fetch))
+    }
+
     /// CPU-only transient compiler harness: no device ledger retains vector
     /// indices. Drop terminal diagnostic history, preserving monotonic Tx IDs.
     pub(crate) fn discard_completed_compiler_trace(&mut self) -> bool {
@@ -1663,8 +1670,10 @@ mod tests {
         let domain=fabric.create_domain();fabric.grant(domain,object,0,8,Permissions::RW);
         let request=read_req(CPU0,domain,object,0);
         let index=fabric.submit(request,None);let first=fabric.transaction(index).id;
+        assert!(!fabric.compiler_trace_safe(object));
         assert!(!fabric.discard_completed_compiler_trace());
         fabric.advance(index);fabric.advance(index);fabric.advance(index);
+        assert!(fabric.compiler_trace_safe(object));
         assert!(fabric.discard_completed_compiler_trace());
         let next=fabric.submit(request,None);
         assert!(fabric.transaction(next).id.0>first.0);

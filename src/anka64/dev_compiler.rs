@@ -83,6 +83,8 @@ pub enum DevelopmentCompileError {
     InvalidOutputGeometry,
     CompileCommandExecutedOutput,
     BootstrappedCompilerHasLiterals,
+    AdapterStateChanged,
+    AdapterReadDenied,
 }
 
 /// Compile one C translation unit through the real self-hosted CC_B.
@@ -296,6 +298,31 @@ fn compile_c_with_geometry(
     linked: Option<&super::ankald::AnkaldLinkedImage>,
     compiler_profile: u64,
 ) -> Result<CompiledCImage, DevelopmentCompileError> {
+    run_compiler(compiler_image, seed_at_zero, source, output_limit, linked,
+        compiler_profile, false).map(|run| run.image)
+}
+
+struct CompilerRun {
+    image: CompiledCImage,
+    adapter: Option<super::compiler_adapter::CompilerOutput>,
+}
+
+pub(crate) fn compile_for_adapter(image: &super::ankald::AnkaldLinkedImage,
+    source: &[u8]) -> Result<super::compiler_adapter::CompilerOutput, DevelopmentCompileError> {
+    if image.code_size == 0 || image.code_size > image.bytes.len() as u64
+        || image.entry >= image.code_size || image.entry % 8 != 0
+        || (image.lit_start == 0 && image.code_size != image.bytes.len() as u64)
+        || (image.lit_start != 0 && (image.lit_start < image.code_size
+            || image.lit_start >= image.bytes.len() as u64)) {
+        return Err(DevelopmentCompileError::InvalidOutputGeometry);
+    }
+    run_compiler(&image.bytes, false, source, DEVELOPMENT_COMPILER_OUTPUT_SIZE,
+        Some(image), 2, true)?.adapter.ok_or(DevelopmentCompileError::AdapterStateChanged)
+}
+
+fn run_compiler(compiler_image: &[u8], seed_at_zero: bool, source: &[u8],
+    output_limit: u64, linked: Option<&super::ankald::AnkaldLinkedImage>,
+    compiler_profile: u64, strict_adapter: bool) -> Result<CompilerRun, DevelopmentCompileError> {
     if compiler_image.is_empty() {
         return Err(DevelopmentCompileError::EmptyCompilerImage);
     }
@@ -352,6 +379,8 @@ fn compile_c_with_geometry(
     {
         return Err(DevelopmentCompileError::InitializationRejected);
     }
+    let compiler_generation = fabric.objects[&compiler_obj].generation;
+    let workspace_generation = fabric.objects[&workspace_obj].generation;
 
     let source_len = source.len() as u64;
     if !fabric.initialize_object(source_obj, 0, &source_len.to_le_bytes())
@@ -359,6 +388,26 @@ fn compile_c_with_geometry(
     {
         return Err(DevelopmentCompileError::InitializationRejected);
     }
+
+    if strict_adapter && !fabric.seal_object(source_obj) {
+        return Err(DevelopmentCompileError::InitializationRejected);
+    }
+    let source_generation = fabric.objects[&source_obj].generation;
+    let arena_before = fabric.objects[&output_obj].generation;
+    if strict_adapter && arena_before.0.checked_add(1).is_none() {
+        return Err(DevelopmentCompileError::AdapterStateChanged);
+    }
+    // Bind immutable configuration before launch. It is not mapped into the
+    // compiler; mutable workspace controls are checked against this profile.
+    let profile_key = if strict_adapter {
+        let bytes = super::compiler_adapter::profile_bytes();
+        let object = allocate_placed(&mut fabric, &mut placement, "rebuild-profile", bytes.len() as u64)?;
+        if !fabric.zero_object_extent(object) || !fabric.initialize_object(object, 0, &bytes)
+            || !fabric.seal_object(object) {
+            return Err(DevelopmentCompileError::InitializationRejected);
+        }
+        Some(super::ankald::LinkedArtifactKey { object, generation: fabric.objects[&object].generation })
+    } else { None };
 
     // The Rust AST seed compiler (CC_A) historically relies on the harness to
     // initialize the downward-growing literal frontier.  Canonical CC_B also
@@ -406,7 +455,7 @@ fn compile_c_with_geometry(
         return Err(DevelopmentCompileError::InitializationRejected);
     }
 
-    if source_size>SOURCE_SIZE as u64 {
+    if strict_adapter || source_size>SOURCE_SIZE as u64 {
         for (at,value) in [(68488u64,layout.source_base),(68496,source_size-8)] {
             if !fabric.initialize_object(workspace_obj,at-LAYOUT_WS as u64,&value.to_le_bytes()) {
                 return Err(DevelopmentCompileError::InitializationRejected);
@@ -536,10 +585,17 @@ fn compile_c_with_geometry(
     let mut kernel = Kernel::new(fabric);
     kernel.next_phys = DEVELOPMENT_KERNEL_PHYS_BASE;
     kernel.boot(&info).map_err(DevelopmentCompileError::Boot)?;
+    let owner = {
+        let process = kernel.processes.first().ok_or(DevelopmentCompileError::SupervisorDidNotExit)?;
+        (process.pid, process.generation, process.core.context_identity(), process.core.domain)
+    };
     // Compiler machines have no devices or asynchronous transaction handles.
     // Bound retained diagnostic history without changing transaction execution.
     for _ in 0..COMPILER_MAX_ROUNDS {
         kernel.run(COMPILER_QUANTUM,1);
+        if strict_adapter && !kernel.fabric.compiler_trace_safe(output_obj) {
+            return Err(DevelopmentCompileError::CompileCommandExecutedOutput);
+        }
         if kernel.processes.first().is_some_and(|p| p.exited()) {break;}
         assert!(kernel.fabric.discard_completed_compiler_trace());
     }
@@ -594,6 +650,32 @@ fn compile_c_with_geometry(
     let out_pos = read_ws((WS_OUT_POS - LAYOUT_WS) as u64);
     let function_count = read_ws((WS_FUNC_COUNT - LAYOUT_WS) as u64);
     let raw_lit_pos = read_ws((WS_LIT_POS - LAYOUT_WS) as u64);
+    if strict_adapter {
+        let source_object = kernel.fabric.objects.get(&source_obj)
+            .ok_or(DevelopmentCompileError::AdapterStateChanged)?;
+        let compiler_object = kernel.fabric.objects.get(&compiler_obj)
+            .ok_or(DevelopmentCompileError::AdapterStateChanged)?;
+        let workspace_object = kernel.fabric.objects.get(&workspace_obj)
+            .ok_or(DevelopmentCompileError::AdapterStateChanged)?;
+        if kernel.processes.len() != 1
+            || owner != (init.pid, init.generation, init.core.context_identity(), init.core.domain)
+            || !init.async_requests.is_empty() || init.io_wait.is_some()
+            || compiler_object.state != ObjectState::Sealed || compiler_object.generation != compiler_generation
+            || workspace_object.state != ObjectState::Active || workspace_object.generation != workspace_generation
+            || source_object.state != ObjectState::Sealed || source_object.generation != source_generation
+            || output_object.generation.0 != arena_before.0.checked_add(1).unwrap()
+            || read_ws(0) != source_len || read_ws(8) != source_len
+            || read_ws(16) != layout.source_base + 8
+            || read_ws((WS_MODE-LAYOUT_WS) as u64) != CCB_MODE_COMPILE_ONLY
+            || read_ws((WS_OUTPUT_LIMIT-LAYOUT_WS) as u64) != output_limit
+            || read_ws(WS_AC2_BOOTSTRAP_WORD_DEREF-LAYOUT_WS as u64) != 2
+            || read_ws(68488-LAYOUT_WS as u64) != layout.source_base
+            || read_ws(68496-LAYOUT_WS as u64) != source_size-8
+            || out_pos < super::aom::AOM_HEADER_SIZE || out_pos % 8 != 0
+            || out_pos > raw_lit_pos || raw_lit_pos > output_limit {
+            return Err(DevelopmentCompileError::AdapterStateChanged);
+        }
+    }
     if out_pos == 0 || out_pos > output_limit || raw_lit_pos > output_limit {
         return Err(DevelopmentCompileError::InvalidOutputGeometry);
     }
@@ -610,7 +692,22 @@ fn compile_c_with_geometry(
         raw_lit_pos
     };
     let image_size = if lit_start == 0 { out_pos } else { output_limit };
-    let bytes = kernel.fabric.read_physical(output_phys, image_size).to_vec();
+    let mut adapter_output = None;
+    let bytes = if strict_adapter {
+        let arena_key = super::ankald::LinkedArtifactKey {
+            object: output_obj, generation: output_object.generation,
+        };
+        let reader = kernel.fabric.create_domain();
+        if kernel.fabric.grant(reader, output_obj, 0, out_pos, Permissions::READ).is_none() {
+            return Err(DevelopmentCompileError::AdapterReadDenied);
+        }
+        let staged = super::compiler_adapter::copy_sealed_prefix(&mut kernel.fabric,
+            reader, arena_key, out_pos)?;
+        adapter_output = Some((arena_key, reader));
+        staged
+    } else {
+        kernel.fabric.read_physical(output_phys, image_size).to_vec()
+    };
 
     // With compile-only mode ankad spawns exactly CC_B.  A third slot would be
     // evidence that the produced program was executed during `compile`.
@@ -619,13 +716,22 @@ fn compile_c_with_geometry(
         return Err(DevelopmentCompileError::CompileCommandExecutedOutput);
     }
 
-    Ok(CompiledCImage {
-        bytes,
-        code_size: out_pos,
-        lit_start,
-        function_count,
-        process_slots_observed,
-    })
+    let adapter = adapter_output.map(|(arena_key, reader)| {
+        let compiler_key = super::ankald::LinkedArtifactKey {
+            object: compiler_obj, generation: compiler_generation,
+        };
+        super::compiler_adapter::CompilerOutput {
+            bytes: bytes.clone(), fabric: kernel.fabric, placement, reader,
+            compiler_key, arena_key, workspace_object: workspace_obj,
+            source_key: super::ankald::LinkedArtifactKey { object: source_obj, generation: source_generation },
+            profile_key: profile_key.expect("strict adapter binds profile before launch"),
+            process_slot: 0, process_generation: u64::from(owner.1) + 1,
+            context: owner.2, domain: owner.3, source_length: source_len,
+        }
+    });
+    Ok(CompilerRun { image: CompiledCImage {
+        bytes, code_size: out_pos, lit_start, function_count, process_slots_observed,
+    }, adapter })
 }
 
 fn allocate_placed(
@@ -698,6 +804,27 @@ fn compiler_virtual_layout_with_source(compiler_len:usize,seed_at_zero:bool,outp
 #[cfg(test)]
 mod virtual_layout_tests {
     use super::*;
+    #[test]
+    fn adapter_rejects_fetch_of_its_own_sealed_output_without_a_child() {
+        use super::super::isa::{Asm64, R0, R1, R2};
+        let mut asm = Asm64::new();
+        asm.movi(R1, LAYOUT_OUT as i32); asm.movi(R2, 0); asm.st(R2, R1, 0);
+        asm.movi(R0, super::super::os::SYS_SEAL as i32); asm.trap(0);
+        let call_at = asm.to_bytes().len();
+        asm.call(0); asm.movi(R0, 0); asm.ret();
+        let length = asm.to_bytes().len();
+        let layout = compiler_virtual_layout(length, false, DEVELOPMENT_COMPILER_OUTPUT_SIZE).unwrap();
+        let target = LAYOUT_OUT as i64 - layout.child_code as i64 - call_at as i64;
+        let mut call = Asm64::new(); call.call((target / 4) as i32);
+        asm.words_mut()[call_at / 4] = call.words_mut()[0];
+        let bytes = asm.to_bytes();
+        let image = super::super::ankald::AnkaldLinkedImage {
+            code_size: bytes.len() as u64, bytes, lit_start: 0, entry: 0, process_slots_observed: 1,
+        };
+        assert!(matches!(compile_for_adapter(&image, b"probe"),
+            Err(DevelopmentCompileError::CompileCommandExecutedOutput)));
+    }
+
     #[test]
     fn p106_bootstrap_profile_is_enabled_on_both_edges_but_not_ordinary_aom() {
         use super::super::isa::{Asm64, R0, R1, R2, R3};

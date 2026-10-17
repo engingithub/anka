@@ -1,0 +1,678 @@
+// Phase 10.8: bounded rebuild artifact channel and atomic publication receipt.
+// SPECIFICATION ONLY. No new axioms, syscall number, runtime or durability claim.
+// Imports are authoritative prerequisites, not evidence that their C/Rust
+// implementations refine these predicates. Certificates below MUST be derived
+// by trusted checks; no certificate is an application-supplied success bit.
+import "anka107_userspace_rebuild.kleis"
+import "anka108_typed_input.kleis"
+
+// One session, one output, no seek/overwrite. Artifact bound is 1 MiB;
+// individual copies use the existing <=64 KiB exact-range I/O discipline.
+// Phases: 0 collecting, 1 frozen/validated, 2 published, 3 aborted.
+define rb108_limit() = bvconst(1048576,64)
+define rb108_capacity(capacity : BitVec64) =
+    bvugt(capacity,bvconst(0,64)) ∧ bvule(capacity,rb108_limit())
+
+// A private session is bound to the actual process incarnation, context/domain,
+// and a nonreused session identity. Neither a logical name nor an address is key.
+define rb108_owner(session : BitVec64, presented_session : BitVec64,
+    slot : BitVec64, caller_slot : BitVec64,
+    process_gen : BitVec64, caller_gen : BitVec64,
+    context : BitVec64, caller_context : BitVec64,
+    domain : BitVec64, caller_domain : BitVec64) =
+    bvugt(session,bvconst(0,64)) ∧ bvugt(process_gen,bvconst(0,64)) ∧
+    (session=presented_session) ∧ (slot=caller_slot) ∧
+    (process_gen=caller_gen) ∧ (context=caller_context) ∧ (domain=caller_domain)
+
+// Identity comparison is in addition to exact immutable bytes/profile checks.
+// source is the exact effective input publication; its source-bundle/include/
+// preprocessing lineage is checked by rebuild107_sources_valid, not by a name.
+// profile is an immutable versioned profile publication, not a mutable enum.
+define rb108_binding(compiler : BitVec64, actual_compiler : BitVec64,
+    compiler_gen : BitVec64, actual_compiler_gen : BitVec64,
+    source : BitVec64, actual_source : BitVec64,
+    source_gen : BitVec64, actual_source_gen : BitVec64,
+    profile : BitVec64, actual_profile : BitVec64,
+    profile_gen : BitVec64, actual_profile_gen : BitVec64) =
+    bvugt(compiler_gen,bvconst(0,64)) ∧ bvugt(source_gen,bvconst(0,64)) ∧
+    bvugt(profile_gen,bvconst(0,64)) ∧
+    (compiler=actual_compiler) ∧ (compiler_gen=actual_compiler_gen) ∧
+    (source=actual_source) ∧ (source_gen=actual_source_gen) ∧
+    (profile=actual_profile) ∧ (profile_gen=actual_profile_gen)
+
+// Restates rebuild107_producer_valid using canonical BitVec8 certificates.
+// source/profile certificates require existing source-bundle/profile checks;
+// host certificate requires all five flags false in rebuild107_host_boundary_valid.
+// Execution does not grant publication. Only certificate value 1 is accepted.
+// The system-compiler workspace profile needs an explicit adapter refinement;
+// it is not silently reclassified as a protected-pointer application.
+define rb108_open(fixed_point : BitVec8, expected_compiler : BitVec64,
+    compiler : BitVec64, expected_gen : BitVec64, compiler_gen : BitVec64,
+    sealed : BitVec8, current : BitVec8, execute : BitVec8,
+    owner_checked : BitVec8, binding_checked : BitVec8,
+    sources_checked : BitVec8, profile_checked : BitVec8, host_checked : BitVec8,
+    fresh_session : BitVec8, publication_authority : BitVec8, capacity : BitVec64) =
+    bvugt(compiler_gen,bvconst(0,64)) ∧
+    (fixed_point=bvconst(1,8)) ∧ (expected_compiler=compiler) ∧ (expected_gen=compiler_gen) ∧
+    (sealed=bvconst(1,8)) ∧ (current=bvconst(1,8)) ∧ (execute=bvconst(1,8)) ∧
+    (owner_checked=bvconst(1,8)) ∧ (binding_checked=bvconst(1,8)) ∧ (sources_checked=bvconst(1,8)) ∧ (profile_checked=bvconst(1,8)) ∧
+    (host_checked=bvconst(1,8)) ∧ (fresh_session=bvconst(1,8)) ∧ (publication_authority=bvconst(1,8)) ∧ rb108_capacity(capacity)
+
+// owner/binding and Fabric READ/lease evidence must be rechecked at copying.
+// span_checked authenticates the FULL requested range. Protected application
+// syscalls use io108_buffer plus protected event ownership. Trusted compiler
+// transport uses ad108_read's selected private arena/current READ grant (DN-63),
+// never invented pointer tags. The adapter is a distinct trusted interface.
+// Exact transaction rights apply in either case; copy_complete means private
+// staging finished before the single serialized append. No borrowed address
+// may survive return. The output accumulator itself has no guest write grant.
+define rb108_append(phase : BitVec8, used : BitVec64, capacity : BitVec64,
+    offset : BitVec64, count : BitVec64, owner_checked : BitVec8,
+    binding_current : BitVec8, span_checked : BitVec8, copy_complete : BitVec8,
+    serialized : BitVec8, drained : BitVec8) =
+    (phase=bvconst(0,8)) ∧ rb108_capacity(capacity) ∧ bvule(used,capacity) ∧
+    (offset=used) ∧ bvugt(count,bvconst(0,64)) ∧ bvule(count,io108_limit()) ∧
+    bvule(count,bvsub(capacity,used)) ∧ (owner_checked=bvconst(1,8)) ∧ (binding_current=bvconst(1,8)) ∧
+    (span_checked=bvconst(1,8)) ∧ (copy_complete=bvconst(1,8)) ∧ (serialized=bvconst(1,8)) ∧ (drained=bvconst(1,8))
+
+define rb108_used(accepted : BitVec8, used : BitVec64, count : BitVec64) =
+    if (accepted=bvconst(1,8)) then bvadd(used,count) else used
+
+// Pointwise copy model: staged is the byte from the authenticated source at
+// query-used. Equality is exact byte equality, not an assumed collision-free hash.
+define rb108_byte(accepted : BitVec8, used : BitVec64, count : BitVec64,
+    query : BitVec64, staged : BitVec8, old : BitVec8) =
+    if (accepted=bvconst(1,8)) ∧ bvuge(query,used) ∧ bvult(bvsub(query,used),count)
+    then staged else old
+
+// EOF alone is not compile success. AOM validation is over exactly used bytes,
+// consumes the whole object (no trailing garbage), and checks its admitted
+// target profile. Producer identity is coordinator-owned receipt metadata,
+// not an AOM header field. The source cursor is the actual private input cursor
+// or the exact compiler-source position checked by the DN-63 adapter.
+// Error, abort, nonzero exit, truncated output, live leases or mutable staging
+// cannot prepare a publication. AOM v1 object data is NOT a linked executable.
+define rb108_prepare(phase : BitVec8, used : BitVec64, capacity : BitVec64,
+    declared : BitVec64, cursor : BitVec64, source_size : BitVec64,
+    exit_code : BitVec64, aom_exact : BitVec8, binding_current : BitVec8,
+    owner_checked : BitVec8, source_exact : BitVec8, frozen : BitVec8, drained : BitVec8) =
+    (phase=bvconst(0,8)) ∧ rb108_capacity(capacity) ∧
+    bvugt(used,bvconst(0,64)) ∧ bvule(used,capacity) ∧ (used=declared) ∧
+    bvule(source_size,rb108_limit()) ∧ (cursor=source_size) ∧
+    (exit_code=bvconst(0,64)) ∧ (aom_exact=bvconst(1,8)) ∧ (binding_current=bvconst(1,8)) ∧ (owner_checked=bvconst(1,8)) ∧
+    (source_exact=bvconst(1,8)) ∧ (frozen=bvconst(1,8)) ∧ (drained=bvconst(1,8))
+
+define rb108_prepared_phase(accepted : BitVec8, old : BitVec8) =
+    if (accepted=bvconst(1,8)) then bvconst(1,8) else old
+
+// Exact receipt equality includes compiler/source/profile identity+generation,
+// output identity+generation and length. Receipt bytes also contain versioned
+// source-bundle/root/include/preprocessing lineage checked above. A digest may
+// be an index, but is not substituted for exact identity or byte validation.
+define rb108_receipt(binding_checked : BitVec8,
+    output : BitVec64, receipt_output : BitVec64,
+    generation : BitVec64, receipt_generation : BitVec64,
+    used : BitVec64, receipt_length : BitVec64,
+    lineage_exact : BitVec8, bytes_exact : BitVec8) =
+    (binding_checked=bvconst(1,8)) ∧ (output=receipt_output) ∧
+    (generation=receipt_generation) ∧ (used=receipt_length) ∧
+    (lineage_exact=bvconst(1,8)) ∧ (bytes_exact=bvconst(1,8))
+
+// Linearization point: output + receipt become visible together, or neither.
+// expected epoch prevents stale concurrent commits; epoch increment cannot wrap.
+// A reserved fresh object generation must be rechecked under serialization.
+// atomic_pair requires one indivisible artifact+receipt publication. This is
+// process-visible atomicity, NOT a claim of persistent crash consistency. A
+// future durable implementation additionally needs a storage/recovery refinement.
+// Published AOM has READ only. Link/seal/execute remain separate downstream gates.
+define rb108_publish(phase : BitVec8, expected_epoch : BitVec64,
+    current_epoch : BitVec64, output : BitVec64, generation : BitVec64,
+    source : BitVec64, compiler : BitVec64, rights : BitVec64,
+    owner_checked : BitVec8, binding_current : BitVec8, publication_authority : BitVec8,
+    reservation_current : BitVec8, immutable_exact : BitVec8, receipt_checked : BitVec8,
+    atomic_pair : BitVec8, serialized : BitVec8, drained : BitVec8) =
+    (phase=bvconst(1,8)) ∧ (expected_epoch=current_epoch) ∧
+    bvult(current_epoch,ptr107_max()) ∧ bvugt(generation,bvconst(0,64)) ∧
+    ¬(output=source) ∧ ¬(output=compiler) ∧ (rights=bvconst(1,64)) ∧
+    (owner_checked=bvconst(1,8)) ∧ (binding_current=bvconst(1,8)) ∧ (publication_authority=bvconst(1,8)) ∧
+    (reservation_current=bvconst(1,8)) ∧ (immutable_exact=bvconst(1,8)) ∧ (receipt_checked=bvconst(1,8)) ∧
+    (atomic_pair=bvconst(1,8)) ∧ (serialized=bvconst(1,8)) ∧ (drained=bvconst(1,8))
+
+define rb108_epoch(committed : BitVec8, old : BitVec64) =
+    if (committed=bvconst(1,8)) then bvadd(old,bvconst(1,64)) else old
+define rb108_phase(committed : BitVec8, old : BitVec8) =
+    if (committed=bvconst(1,8)) then bvconst(2,8) else old
+// One shared commit decision is used for BOTH visibility slots. Existing
+// unrelated publications are preserved; failure never exposes the staged pair.
+define rb108_visible(committed : BitVec8, new_key : BitVec64, old_key : BitVec64) =
+    if (committed=bvconst(1,8)) then new_key else old_key
+// Abort is terminal for an unpublished session. It cannot undo publication.
+// Lease drain and private staging destruction are required before reclaim/reuse.
+define rb108_abort(phase : BitVec8, drained : BitVec8) =
+    ((phase=bvconst(0,8)) ∨ (phase=bvconst(1,8))) ∧ (drained=bvconst(1,8))
+
+define rb108_names_grant_authority() = (bvconst(0,8)=bvconst(1,8))
+define rb108_object_grants_execution() = (bvconst(0,8)=bvconst(1,8))
+
+// Operation: 0 append, 1 prepare, 2 publish, 3 abort. Only phase transitions
+// are projected here: append byte/length changes use rb108_byte/rb108_used.
+// Certificates MUST equal the corresponding actual predicate above; they
+// cannot be independently chosen. State/certificates are protected, not syscall
+// arguments. Operation validation and the effect occur in the same critical
+// section. A rejected operation stutters; an explicit drained abort retires.
+// A published session and an aborted session are terminal even with forged
+// operation certificates in this abstract transition projection.
+define rb108_step(phase : BitVec8, operation : BitVec8,
+    prepare_checked : BitVec8,
+    publish_checked : BitVec8, drained : BitVec8) =
+    if (operation=bvconst(1,8)) ∧ (phase=bvconst(0,8)) ∧
+        (prepare_checked=bvconst(1,8)) then bvconst(1,8)
+    else if (operation=bvconst(2,8)) ∧ (phase=bvconst(1,8)) ∧
+        (publish_checked=bvconst(1,8)) then bvconst(2,8)
+    else if (operation=bvconst(3,8)) ∧ rb108_abort(phase,drained)
+        then bvconst(3,8)
+    else phase
+
+// Reclaim a private accumulator only after a terminal state and complete drain;
+// published immutable bytes/receipt remain owned by the artifact store.
+define rb108_reclaim(phase : BitVec8, drained : BitVec8,
+    pending_cpu : BitVec64, pending_dma : BitVec64) =
+    ((phase=bvconst(2,8)) ∨ (phase=bvconst(3,8))) ∧
+    (drained=bvconst(1,8)) ∧ (pending_cpu=bvconst(0,64)) ∧
+    (pending_dma=bvconst(0,64))
+
+example "rb108_owner accepts complete evidence" {
+    assert(rb108_owner(bvconst(9,64),bvconst(9,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(4,64),bvconst(4,64),bvconst(5,64),bvconst(5,64)))
+}
+
+example "rb108_owner rejects wrong session" {
+    assert(¬(rb108_owner(bvconst(9,64),bvconst(10,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(4,64),bvconst(4,64),bvconst(5,64),bvconst(5,64))))
+}
+
+example "rb108_owner rejects zero session" {
+    assert(¬(rb108_owner(bvconst(0,64),bvconst(9,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(4,64),bvconst(4,64),bvconst(5,64),bvconst(5,64))))
+}
+
+example "rb108_owner rejects other process" {
+    assert(¬(rb108_owner(bvconst(9,64),bvconst(9,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(3,64),bvconst(4,64),bvconst(4,64),bvconst(5,64),bvconst(5,64))))
+}
+
+example "rb108_owner rejects reused process slot" {
+    assert(¬(rb108_owner(bvconst(9,64),bvconst(9,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(4,64),bvconst(4,64),bvconst(5,64),bvconst(5,64))))
+}
+
+example "rb108_owner rejects other context" {
+    assert(¬(rb108_owner(bvconst(9,64),bvconst(9,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(5,64),bvconst(5,64))))
+}
+
+example "rb108_owner rejects other domain" {
+    assert(¬(rb108_owner(bvconst(9,64),bvconst(9,64),bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(4,64),bvconst(4,64),bvconst(5,64),bvconst(6,64))))
+}
+
+example "rb108_binding accepts complete evidence" {
+    assert(rb108_binding(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(8,64),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(5,64),bvconst(5,64)))
+}
+
+example "rb108_binding rejects other compiler" {
+    assert(¬(rb108_binding(bvconst(7,64),bvconst(10,64),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(8,64),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(5,64),bvconst(5,64))))
+}
+
+example "rb108_binding rejects stale compiler" {
+    assert(¬(rb108_binding(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(2,64),bvconst(8,64),bvconst(8,64),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(5,64),bvconst(5,64))))
+}
+
+example "rb108_binding rejects other source" {
+    assert(¬(rb108_binding(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(10,64),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(5,64),bvconst(5,64))))
+}
+
+example "rb108_binding rejects stale source" {
+    assert(¬(rb108_binding(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(8,64),bvconst(4,64),bvconst(3,64),bvconst(9,64),bvconst(9,64),bvconst(5,64),bvconst(5,64))))
+}
+
+example "rb108_binding rejects other profile" {
+    assert(¬(rb108_binding(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(8,64),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(10,64),bvconst(5,64),bvconst(5,64))))
+}
+
+example "rb108_binding rejects stale profile" {
+    assert(¬(rb108_binding(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(8,64),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(5,64),bvconst(4,64))))
+}
+
+example "rb108_binding rejects zero compiler generation" {
+    assert(¬(rb108_binding(bvconst(7,64),bvconst(7,64),bvconst(0,64),bvconst(3,64),bvconst(8,64),bvconst(8,64),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(5,64),bvconst(5,64))))
+}
+
+example "rb108_binding rejects zero source generation" {
+    assert(¬(rb108_binding(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(8,64),bvconst(0,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(5,64),bvconst(5,64))))
+}
+
+example "rb108_binding rejects zero profile generation" {
+    assert(¬(rb108_binding(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(8,64),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(0,64),bvconst(5,64))))
+}
+
+example "rb108_open accepts complete evidence" {
+    assert(rb108_open(bvconst(1,8),bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1048576,64)))
+}
+
+example "rb108_open rejects unverified lineage" {
+    assert(¬(rb108_open(bvconst(0,8),bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1048576,64))))
+}
+
+example "rb108_open rejects unsealed compiler" {
+    assert(¬(rb108_open(bvconst(1,8),bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1048576,64))))
+}
+
+example "rb108_open rejects stale producer" {
+    assert(¬(rb108_open(bvconst(1,8),bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1048576,64))))
+}
+
+example "rb108_open rejects no compiler execution" {
+    assert(¬(rb108_open(bvconst(1,8),bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1048576,64))))
+}
+
+example "rb108_open rejects wrong owner" {
+    assert(¬(rb108_open(bvconst(1,8),bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1048576,64))))
+}
+
+example "rb108_open rejects wrong binding" {
+    assert(¬(rb108_open(bvconst(1,8),bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1048576,64))))
+}
+
+example "rb108_open rejects unchecked source" {
+    assert(¬(rb108_open(bvconst(1,8),bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1048576,64))))
+}
+
+example "rb108_open rejects unchecked profile" {
+    assert(¬(rb108_open(bvconst(1,8),bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1048576,64))))
+}
+
+example "rb108_open rejects host semantic substitution" {
+    assert(¬(rb108_open(bvconst(1,8),bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1048576,64))))
+}
+
+example "rb108_open rejects reused session" {
+    assert(¬(rb108_open(bvconst(1,8),bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1048576,64))))
+}
+
+example "rb108_open rejects execution without publication authority" {
+    assert(¬(rb108_open(bvconst(1,8),bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1048576,64))))
+}
+
+example "rb108_open rejects oversized accumulator" {
+    assert(¬(rb108_open(bvconst(1,8),bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1048577,64))))
+}
+
+example "rb108_open rejects zero accumulator" {
+    assert(¬(rb108_open(bvconst(1,8),bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64))))
+}
+
+example "rb108_append accepts complete evidence" {
+    assert(rb108_append(bvconst(0,8),bvconst(16,64),bvconst(128,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "rb108_append rejects frozen output" {
+    assert(¬(rb108_append(bvconst(1,8),bvconst(16,64),bvconst(128,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_append rejects published output" {
+    assert(¬(rb108_append(bvconst(2,8),bvconst(16,64),bvconst(128,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_append rejects aborted output" {
+    assert(¬(rb108_append(bvconst(3,8),bvconst(16,64),bvconst(128,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_append rejects seek gap" {
+    assert(¬(rb108_append(bvconst(0,8),bvconst(16,64),bvconst(128,64),bvconst(17,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_append rejects overwrite prefix" {
+    assert(¬(rb108_append(bvconst(0,8),bvconst(16,64),bvconst(128,64),bvconst(0,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_append rejects zero chunk" {
+    assert(¬(rb108_append(bvconst(0,8),bvconst(16,64),bvconst(128,64),bvconst(16,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_append rejects capacity overflow" {
+    assert(¬(rb108_append(bvconst(0,8),bvconst(16,64),bvconst(128,64),bvconst(16,64),bvconst(113,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_append rejects oversized chunk" {
+    assert(¬(rb108_append(bvconst(0,8),bvconst(16,64),bvconst(128,64),bvconst(16,64),bvconst(65537,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_append rejects used beyond capacity" {
+    assert(¬(rb108_append(bvconst(0,8),bvconst(129,64),bvconst(128,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_append rejects wrapped used" {
+    assert(¬(rb108_append(bvconst(0,8),ptr107_max(),bvconst(128,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_append rejects wrong owner" {
+    assert(¬(rb108_append(bvconst(0,8),bvconst(16,64),bvconst(128,64),bvconst(16,64),bvconst(32,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_append rejects revoked binding" {
+    assert(¬(rb108_append(bvconst(0,8),bvconst(16,64),bvconst(128,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_append rejects unauthorized full span" {
+    assert(¬(rb108_append(bvconst(0,8),bvconst(16,64),bvconst(128,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_append rejects partial copy" {
+    assert(¬(rb108_append(bvconst(0,8),bvconst(16,64),bvconst(128,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_append rejects racing append" {
+    assert(¬(rb108_append(bvconst(0,8),bvconst(16,64),bvconst(128,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "rb108_append rejects retained borrow" {
+    assert(¬(rb108_append(bvconst(0,8),bvconst(16,64),bvconst(128,64),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "maximum chunk exactly fits" {
+    assert(rb108_append(bvconst(0,8),bvconst(983040,64),bvconst(1048576,64),bvconst(983040,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "rb108_prepare accepts complete evidence" {
+    assert(rb108_prepare(bvconst(0,8),bvconst(96,64),bvconst(128,64),bvconst(96,64),bvconst(72,64),bvconst(72,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "rb108_prepare rejects prepare twice" {
+    assert(¬(rb108_prepare(bvconst(1,8),bvconst(96,64),bvconst(128,64),bvconst(96,64),bvconst(72,64),bvconst(72,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_prepare rejects prepare after abort" {
+    assert(¬(rb108_prepare(bvconst(3,8),bvconst(96,64),bvconst(128,64),bvconst(96,64),bvconst(72,64),bvconst(72,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_prepare rejects empty artifact" {
+    assert(¬(rb108_prepare(bvconst(0,8),bvconst(0,64),bvconst(128,64),bvconst(96,64),bvconst(72,64),bvconst(72,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_prepare rejects truncated object" {
+    assert(¬(rb108_prepare(bvconst(0,8),bvconst(96,64),bvconst(128,64),bvconst(100,64),bvconst(72,64),bvconst(72,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_prepare rejects beyond accumulator" {
+    assert(¬(rb108_prepare(bvconst(0,8),bvconst(129,64),bvconst(128,64),bvconst(96,64),bvconst(72,64),bvconst(72,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_prepare rejects unconsumed source" {
+    assert(¬(rb108_prepare(bvconst(0,8),bvconst(96,64),bvconst(128,64),bvconst(96,64),bvconst(71,64),bvconst(72,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_prepare rejects cursor beyond source" {
+    assert(¬(rb108_prepare(bvconst(0,8),bvconst(96,64),bvconst(128,64),bvconst(96,64),bvconst(73,64),bvconst(72,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_prepare rejects oversized source" {
+    assert(¬(rb108_prepare(bvconst(0,8),bvconst(96,64),bvconst(128,64),bvconst(96,64),bvconst(72,64),bvconst(1048577,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_prepare rejects compiler failure" {
+    assert(¬(rb108_prepare(bvconst(0,8),bvconst(96,64),bvconst(128,64),bvconst(96,64),bvconst(72,64),bvconst(72,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_prepare rejects malformed or trailing AOM" {
+    assert(¬(rb108_prepare(bvconst(0,8),bvconst(96,64),bvconst(128,64),bvconst(96,64),bvconst(72,64),bvconst(72,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_prepare rejects stale lineage" {
+    assert(¬(rb108_prepare(bvconst(0,8),bvconst(96,64),bvconst(128,64),bvconst(96,64),bvconst(72,64),bvconst(72,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_prepare rejects wrong owner" {
+    assert(¬(rb108_prepare(bvconst(0,8),bvconst(96,64),bvconst(128,64),bvconst(96,64),bvconst(72,64),bvconst(72,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_prepare rejects substituted source" {
+    assert(¬(rb108_prepare(bvconst(0,8),bvconst(96,64),bvconst(128,64),bvconst(96,64),bvconst(72,64),bvconst(72,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_prepare rejects mutable output" {
+    assert(¬(rb108_prepare(bvconst(0,8),bvconst(96,64),bvconst(128,64),bvconst(96,64),bvconst(72,64),bvconst(72,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "rb108_prepare rejects undrained producer" {
+    assert(¬(rb108_prepare(bvconst(0,8),bvconst(96,64),bvconst(128,64),bvconst(96,64),bvconst(72,64),bvconst(72,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "rb108_receipt accepts complete evidence" {
+    assert(rb108_receipt(bvconst(1,8),bvconst(11,64),bvconst(11,64),bvconst(6,64),bvconst(6,64),bvconst(96,64),bvconst(96,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "rb108_receipt rejects wrong lineage tuple" {
+    assert(¬(rb108_receipt(bvconst(0,8),bvconst(11,64),bvconst(11,64),bvconst(6,64),bvconst(6,64),bvconst(96,64),bvconst(96,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_receipt rejects wrong output" {
+    assert(¬(rb108_receipt(bvconst(1,8),bvconst(11,64),bvconst(12,64),bvconst(6,64),bvconst(6,64),bvconst(96,64),bvconst(96,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_receipt rejects wrong output generation" {
+    assert(¬(rb108_receipt(bvconst(1,8),bvconst(11,64),bvconst(11,64),bvconst(6,64),bvconst(5,64),bvconst(96,64),bvconst(96,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_receipt rejects wrong length" {
+    assert(¬(rb108_receipt(bvconst(1,8),bvconst(11,64),bvconst(11,64),bvconst(6,64),bvconst(6,64),bvconst(96,64),bvconst(95,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_receipt rejects wrong transitive source lineage" {
+    assert(¬(rb108_receipt(bvconst(1,8),bvconst(11,64),bvconst(11,64),bvconst(6,64),bvconst(6,64),bvconst(96,64),bvconst(96,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "rb108_receipt rejects different exact bytes" {
+    assert(¬(rb108_receipt(bvconst(1,8),bvconst(11,64),bvconst(11,64),bvconst(6,64),bvconst(6,64),bvconst(96,64),bvconst(96,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "rb108_publish accepts complete evidence" {
+    assert(rb108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "rb108_publish rejects unprepared object" {
+    assert(¬(rb108_publish(bvconst(0,8),bvconst(4,64),bvconst(4,64),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects commit twice" {
+    assert(¬(rb108_publish(bvconst(2,8),bvconst(4,64),bvconst(4,64),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects aborted session" {
+    assert(¬(rb108_publish(bvconst(3,8),bvconst(4,64),bvconst(4,64),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects stale competing commit" {
+    assert(¬(rb108_publish(bvconst(1,8),bvconst(3,64),bvconst(4,64),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects epoch wrap" {
+    assert(¬(rb108_publish(bvconst(1,8),bvconst(4,64),ptr107_max(),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects unversioned output" {
+    assert(¬(rb108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(11,64),bvconst(0,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects overwrite source" {
+    assert(¬(rb108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(8,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects overwrite compiler" {
+    assert(¬(rb108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(7,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects writable publication" {
+    assert(¬(rb108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects executable publication" {
+    assert(¬(rb108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects wrong owner" {
+    assert(¬(rb108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects stale source or compiler" {
+    assert(¬(rb108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects no publish authority" {
+    assert(¬(rb108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects stale reservation" {
+    assert(¬(rb108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects output changed after validation" {
+    assert(¬(rb108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects invalid receipt" {
+    assert(¬(rb108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects nonatomic artifact receipt pair" {
+    assert(¬(rb108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects race at publication" {
+    assert(¬(rb108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "rb108_publish rejects pending producer access" {
+    assert(¬(rb108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "equal maximum epochs cannot wrap" {
+    assert(¬(rb108_publish(bvconst(1,8),ptr107_max(),ptr107_max(),bvconst(11,64),bvconst(6,64),bvconst(8,64),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "rb108_abort accepts complete evidence" {
+    assert(rb108_abort(bvconst(0,8),bvconst(1,8)))
+}
+
+example "rb108_abort rejects published rollback" {
+    assert(¬(rb108_abort(bvconst(2,8),bvconst(1,8))))
+}
+
+example "rb108_abort rejects already terminal" {
+    assert(¬(rb108_abort(bvconst(3,8),bvconst(1,8))))
+}
+
+example "rb108_abort rejects undrained reclaim" {
+    assert(¬(rb108_abort(bvconst(0,8),bvconst(0,8))))
+}
+
+example "frozen unpublished object can abort" {
+    assert(rb108_abort(bvconst(1,8),bvconst(1,8)))
+}
+
+example "logical names never authorize" {
+    assert(¬(rb108_names_grant_authority()))
+}
+
+example "object publication never grants execution" {
+    assert(¬(rb108_object_grants_execution()))
+}
+
+example "failed append preserves exact length" {
+    assert(∀(u : BitVec64). ∀(n : BitVec64). rb108_used(bvconst(0,8),u,n)=u)
+}
+
+example "failed append preserves every byte" {
+    assert(∀(u : BitVec64). ∀(n : BitVec64). ∀(q : BitVec64). ∀(b : BitVec8). ∀(old : BitVec8). rb108_byte(bvconst(0,8),u,n,q,b,old)=old)
+}
+
+example "append preserves prefix" {
+    assert(∀(u : BitVec64). ∀(n : BitVec64). ∀(q : BitVec64). ∀(b : BitVec8). ∀(old : BitVec8). bvult(q,u) → (rb108_byte(bvconst(1,8),u,n,q,b,old)=old))
+}
+
+example "append preserves suffix" {
+    assert(∀(u : BitVec64). ∀(n : BitVec64). ∀(q : BitVec64). ∀(b : BitVec8). ∀(old : BitVec8). (bvuge(q,u) ∧ bvuge(bvsub(q,u),n)) → (rb108_byte(bvconst(1,8),u,n,q,b,old)=old))
+}
+
+example "accepted bytes equal authenticated staging" {
+    assert(∀(u : BitVec64). ∀(n : BitVec64). ∀(q : BitVec64). ∀(b : BitVec8). ∀(old : BitVec8). (bvuge(q,u) ∧ bvult(bvsub(q,u),n)) → (rb108_byte(bvconst(1,8),u,n,q,b,old)=b))
+}
+
+example "bounded append cannot wrap" {
+    assert(∀(u : BitVec64). ∀(c : BitVec64). ∀(n : BitVec64). (rb108_capacity(c) ∧ bvule(u,c) ∧ bvule(n,bvsub(c,u))) → (bvuge(rb108_used(bvconst(1,8),u,n),u) ∧ bvule(rb108_used(bvconst(1,8),u,n),c)))
+}
+
+example "failed publication preserves previous artifact and receipt" {
+    assert(∀(a : BitVec64). ∀(r : BitVec64). ∀(old_a : BitVec64). ∀(old_r : BitVec64). (rb108_visible(bvconst(0,8),a,old_a)=old_a) ∧ (rb108_visible(bvconst(0,8),r,old_r)=old_r))
+}
+
+example "successful publication exposes exact pair" {
+    assert(∀(a : BitVec64). ∀(r : BitVec64). ∀(old_a : BitVec64). ∀(old_r : BitVec64). (rb108_visible(bvconst(1,8),a,old_a)=a) ∧ (rb108_visible(bvconst(1,8),r,old_r)=r))
+}
+
+example "failed publication preserves epoch and phase" {
+    assert(∀(e : BitVec64). ∀(p : BitVec8). (rb108_epoch(bvconst(0,8),e)=e) ∧ (rb108_phase(bvconst(0,8),p)=p))
+}
+
+example "successful publication retires session" {
+    assert(∀(p : BitVec8). rb108_phase(bvconst(1,8),p)=bvconst(2,8))
+}
+
+example "publication epoch strictly advances without wrap" {
+    assert(∀(e : BitVec64). bvult(e,ptr107_max()) → bvugt(rb108_epoch(bvconst(1,8),e),e))
+}
+
+example "published phase rejects append for every offset" {
+    assert(∀(u : BitVec64). ∀(c : BitVec64). ∀(o : BitVec64). ∀(n : BitVec64). ¬(rb108_append(bvconst(2,8),u,c,o,n,bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "frozen phase rejects append for every offset" {
+    assert(∀(u : BitVec64). ∀(c : BitVec64). ∀(o : BitVec64). ∀(n : BitVec64). ¬(rb108_append(bvconst(1,8),u,c,o,n,bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "failed preparation preserves phase" {
+    assert(∀(p : BitVec8). rb108_prepared_phase(bvconst(0,8),p)=p)
+}
+
+example "terminal abort cannot be revived" {
+    assert(∀(op : BitVec8). ∀(p : BitVec8). ∀(c : BitVec8). ∀(d : BitVec8). rb108_step(bvconst(3,8),op,p,c,d)=bvconst(3,8))
+}
+
+example "publication cannot be undone" {
+    assert(∀(op : BitVec8). ∀(p : BitVec8). ∀(c : BitVec8). ∀(d : BitVec8). rb108_step(bvconst(2,8),op,p,c,d)=bvconst(2,8))
+}
+
+example "no direct collection to publication" {
+    assert(∀(op : BitVec8). ∀(p : BitVec8). ∀(c : BitVec8). ∀(d : BitVec8). ¬(rb108_step(bvconst(0,8),op,p,c,d)=bvconst(2,8)))
+}
+
+example "publication transition requires frozen state and matching operation" {
+    assert(∀(phase : BitVec8). ∀(op : BitVec8). ∀(p : BitVec8). ∀(c : BitVec8). ∀(d : BitVec8). ((rb108_step(phase,op,p,c,d)=bvconst(2,8)) ∧ ¬(phase=bvconst(2,8))) → ((phase=bvconst(1,8)) ∧ (op=bvconst(2,8)) ∧ (c=bvconst(1,8))))
+}
+
+example "unknown operation preserves state" {
+    assert(∀(phase : BitVec8). ∀(p : BitVec8). ∀(c : BitVec8). ∀(d : BitVec8). rb108_step(phase,bvconst(255,8),p,c,d)=phase)
+}
+
+example "pending DMA prevents reclaim" {
+    assert(∀(p : BitVec8). ¬(rb108_reclaim(p,bvconst(1,8),bvconst(0,64),bvconst(1,64))))
+}
+
+example "pending CPU access prevents reclaim" {
+    assert(∀(p : BitVec8). ¬(rb108_reclaim(p,bvconst(1,8),bvconst(1,64),bvconst(0,64))))
+}
+
+example "reject collecting storage reclaim" {
+    assert(¬(rb108_reclaim(bvconst(0,8),bvconst(1,8),bvconst(0,64),bvconst(0,64))))
+}
+
+example "reject frozen storage reclaim" {
+    assert(¬(rb108_reclaim(bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64))))
+}
+
+example "reject aborted undrained storage reclaim" {
+    assert(¬(rb108_reclaim(bvconst(3,8),bvconst(0,8),bvconst(0,64),bvconst(0,64))))
+}

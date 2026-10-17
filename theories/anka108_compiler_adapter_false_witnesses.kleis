@@ -1,0 +1,550 @@
+// Deliberately false; every assertion requires explicit Z3 disproof.
+import "anka108_compiler_adapter.kleis"
+
+example "FALSE ad108_source rejects oversized payload" {
+    assert(ad108_source(bvconst(28672,64),bvconst(20480,64),bvconst(65529,64),bvconst(72,64),bvconst(28680,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_source rejects wrong envelope length" {
+    assert(ad108_source(bvconst(28672,64),bvconst(20480,64),bvconst(72,64),bvconst(71,64),bvconst(28680,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_source rejects misaligned mapping" {
+    assert(ad108_source(bvconst(28673,64),bvconst(20480,64),bvconst(72,64),bvconst(72,64),bvconst(28680,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_source rejects wrong payload base" {
+    assert(ad108_source(bvconst(28672,64),bvconst(20480,64),bvconst(72,64),bvconst(72,64),bvconst(28672,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_source rejects wrong extent" {
+    assert(ad108_source(bvconst(28672,64),bvconst(24576,64),bvconst(72,64),bvconst(72,64),bvconst(28680,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_source rejects writable source" {
+    assert(ad108_source(bvconst(28672,64),bvconst(20480,64),bvconst(72,64),bvconst(72,64),bvconst(28680,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_source rejects different payload" {
+    assert(ad108_source(bvconst(28672,64),bvconst(20480,64),bvconst(72,64),bvconst(72,64),bvconst(28680,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_source rejects uninitialized padding" {
+    assert(ad108_source(bvconst(28672,64),bvconst(20480,64),bvconst(72,64),bvconst(72,64),bvconst(28680,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_source rejects unchecked layout" {
+    assert(ad108_source(bvconst(28672,64),bvconst(20480,64),bvconst(72,64),bvconst(72,64),bvconst(28680,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_controls rejects unknown ABI" {
+    assert(ad108_controls(bvconst(2,64),bvconst(1,64),bvconst(262144,64),bvconst(2,64),bvconst(262144,64),bvconst(28672,64),bvconst(20472,64),bvconst(28672,64),bvconst(20480,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_controls rejects compile and run" {
+    assert(ad108_controls(bvconst(1,64),bvconst(0,64),bvconst(262144,64),bvconst(2,64),bvconst(262144,64),bvconst(28672,64),bvconst(20472,64),bvconst(28672,64),bvconst(20480,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_controls rejects wrong arena size" {
+    assert(ad108_controls(bvconst(1,64),bvconst(1,64),bvconst(81920,64),bvconst(2,64),bvconst(262144,64),bvconst(28672,64),bvconst(20472,64),bvconst(28672,64),bvconst(20480,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_controls rejects bootstrap target profile" {
+    assert(ad108_controls(bvconst(1,64),bvconst(1,64),bvconst(262144,64),bvconst(1,64),bvconst(262144,64),bvconst(28672,64),bvconst(20472,64),bvconst(28672,64),bvconst(20480,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_controls rejects legacy target profile" {
+    assert(ad108_controls(bvconst(1,64),bvconst(1,64),bvconst(262144,64),bvconst(0,64),bvconst(262144,64),bvconst(28672,64),bvconst(20472,64),bvconst(28672,64),bvconst(20480,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_controls rejects wrong scratch start" {
+    assert(ad108_controls(bvconst(1,64),bvconst(1,64),bvconst(262144,64),bvconst(2,64),bvconst(81920,64),bvconst(28672,64),bvconst(20472,64),bvconst(28672,64),bvconst(20480,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_controls rejects implicit source fallback" {
+    assert(ad108_controls(bvconst(1,64),bvconst(1,64),bvconst(262144,64),bvconst(2,64),bvconst(262144,64),bvconst(0,64),bvconst(20472,64),bvconst(28672,64),bvconst(20480,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_controls rejects incorrect source capacity" {
+    assert(ad108_controls(bvconst(1,64),bvconst(1,64),bvconst(262144,64),bvconst(2,64),bvconst(262144,64),bvconst(28672,64),bvconst(20480,64),bvconst(28672,64),bvconst(20480,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_controls rejects dirty workspace" {
+    assert(ad108_controls(bvconst(1,64),bvconst(1,64),bvconst(262144,64),bvconst(2,64),bvconst(262144,64),bvconst(28672,64),bvconst(20472,64),bvconst(28672,64),bvconst(20480,64),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_controls rejects unbound request" {
+    assert(ad108_controls(bvconst(1,64),bvconst(1,64),bvconst(262144,64),bvconst(2,64),bvconst(262144,64),bvconst(28672,64),bvconst(20472,64),bvconst(28672,64),bvconst(20480,64),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_controls rejects shared compiler machine" {
+    assert(ad108_controls(bvconst(1,64),bvconst(1,64),bvconst(262144,64),bvconst(2,64),bvconst(262144,64),bvconst(28672,64),bvconst(20472,64),bvconst(28672,64),bvconst(20480,64),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_grants rejects source aliases compiler" {
+    assert(ad108_grants(bvconst(1,64),bvconst(1,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(1,64),bvconst(3,64),bvconst(19,64),bvconst(1,8)))
+}
+
+example "FALSE ad108_grants rejects workspace aliases source" {
+    assert(ad108_grants(bvconst(1,64),bvconst(2,64),bvconst(2,64),bvconst(4,64),bvconst(5,64),bvconst(1,64),bvconst(3,64),bvconst(19,64),bvconst(1,8)))
+}
+
+example "FALSE ad108_grants rejects arena aliases workspace" {
+    assert(ad108_grants(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(5,64),bvconst(1,64),bvconst(3,64),bvconst(19,64),bvconst(1,8)))
+}
+
+example "FALSE ad108_grants rejects arena aliases source" {
+    assert(ad108_grants(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(2,64),bvconst(5,64),bvconst(1,64),bvconst(3,64),bvconst(19,64),bvconst(1,8)))
+}
+
+example "FALSE ad108_grants rejects writable compiler" {
+    assert(ad108_grants(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(7,64),bvconst(1,64),bvconst(3,64),bvconst(19,64),bvconst(1,8)))
+}
+
+example "FALSE ad108_grants rejects writable source" {
+    assert(ad108_grants(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(3,64),bvconst(3,64),bvconst(19,64),bvconst(1,8)))
+}
+
+example "FALSE ad108_grants rejects executable workspace" {
+    assert(ad108_grants(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(1,64),bvconst(7,64),bvconst(19,64),bvconst(1,8)))
+}
+
+example "FALSE ad108_grants rejects executable arena before seal" {
+    assert(ad108_grants(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(1,64),bvconst(3,64),bvconst(23,64),bvconst(1,8)))
+}
+
+example "FALSE ad108_grants rejects missing seal authority" {
+    assert(ad108_grants(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(1,64),bvconst(3,64),bvconst(3,64),bvconst(1,8)))
+}
+
+example "FALSE ad108_grants rejects unchecked placement" {
+    assert(ad108_grants(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(1,64),bvconst(3,64),bvconst(19,64),bvconst(0,8)))
+}
+
+example "FALSE ad108_seal rejects preseal generation" {
+    assert(ad108_seal(bvconst(1,64),bvconst(1,64),bvconst(1,8)))
+}
+
+example "FALSE ad108_seal rejects wrong successor" {
+    assert(ad108_seal(bvconst(1,64),bvconst(3,64),bvconst(1,8)))
+}
+
+example "FALSE ad108_seal rejects unsealed output" {
+    assert(ad108_seal(bvconst(1,64),bvconst(2,64),bvconst(0,8)))
+}
+
+example "FALSE ad108_seal rejects wrong successor from zero" {
+    assert(ad108_seal(bvconst(0,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE ad108_seal rejects exhausted generation" {
+    assert(ad108_seal(ptr107_max(),bvconst(2,64),bvconst(1,8)))
+}
+
+example "FALSE seal exhaustion cannot wrap" {
+    assert(ad108_seal(ptr107_max(),bvconst(0,64),bvconst(1,8)))
+}
+
+example "FALSE ad108_completed rejects fault with zero exit status" {
+    assert(ad108_completed(bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(72,64),bvconst(72,64),bvconst(72,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_completed rejects nonzero compiler return" {
+    assert(ad108_completed(bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(72,64),bvconst(72,64),bvconst(72,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_completed rejects workspace error" {
+    assert(ad108_completed(bvconst(1,8),bvconst(0,64),bvconst(9,64),bvconst(72,64),bvconst(72,64),bvconst(72,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_completed rejects unconsumed source" {
+    assert(ad108_completed(bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(71,64),bvconst(72,64),bvconst(72,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_completed rejects cursor beyond end" {
+    assert(ad108_completed(bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(73,64),bvconst(72,64),bvconst(72,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_completed rejects changed declared source" {
+    assert(ad108_completed(bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(72,64),bvconst(73,64),bvconst(72,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_completed rejects extra child" {
+    assert(ad108_completed(bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(72,64),bvconst(72,64),bvconst(72,64),bvconst(2,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_completed rejects executed output in same process" {
+    assert(ad108_completed(bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(72,64),bvconst(72,64),bvconst(72,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_completed rejects stale snapshot" {
+    assert(ad108_completed(bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(72,64),bvconst(72,64),bvconst(72,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_completed rejects live writer" {
+    assert(ad108_completed(bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(72,64),bvconst(72,64),bvconst(72,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_completed rejects outstanding access" {
+    assert(ad108_completed(bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(72,64),bvconst(72,64),bvconst(72,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_completed rejects changed binding" {
+    assert(ad108_completed(bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(72,64),bvconst(72,64),bvconst(72,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_completed rejects tampered controls" {
+    assert(ad108_completed(bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(72,64),bvconst(72,64),bvconst(72,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_geometry rejects truncated header" {
+    assert(ad108_geometry(bvconst(104,64),bvconst(262000,64),bvconst(176,64),bvconst(112,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_geometry rejects output overlaps scratch" {
+    assert(ad108_geometry(bvconst(176,64),bvconst(168,64),bvconst(176,64),bvconst(112,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_geometry rejects frontier outside arena" {
+    assert(ad108_geometry(bvconst(176,64),bvconst(262145,64),bvconst(176,64),bvconst(112,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_geometry rejects whole arena as artifact" {
+    assert(ad108_geometry(bvconst(176,64),bvconst(262000,64),bvconst(262144,64),bvconst(112,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_geometry rejects wrong header size" {
+    assert(ad108_geometry(bvconst(176,64),bvconst(262000,64),bvconst(176,64),bvconst(104,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_geometry rejects wrong AOM version" {
+    assert(ad108_geometry(bvconst(176,64),bvconst(262000,64),bvconst(176,64),bvconst(112,64),bvconst(2,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_geometry rejects unaligned output length" {
+    assert(ad108_geometry(bvconst(177,64),bvconst(262000,64),bvconst(176,64),bvconst(112,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_geometry rejects malformed AOM" {
+    assert(ad108_geometry(bvconst(176,64),bvconst(262000,64),bvconst(176,64),bvconst(112,64),bvconst(1,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_geometry rejects wrong manifest or target profile" {
+    assert(ad108_geometry(bvconst(176,64),bvconst(262000,64),bvconst(176,64),bvconst(112,64),bvconst(1,64),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_read rejects different object" {
+    assert(ad108_read(bvconst(4,64),bvconst(5,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_read rejects stale snapshot generation" {
+    assert(ad108_read(bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(3,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_read rejects preseal grant generation" {
+    assert(ad108_read(bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(7,64),bvconst(7,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_read rejects wrong adapter domain" {
+    assert(ad108_read(bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(8,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_read rejects scratch included in grant" {
+    assert(ad108_read(bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(0,64),bvconst(262144,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_read rejects nonzero grant start" {
+    assert(ad108_read(bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(8,64),bvconst(176,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_read rejects compiler RX reused as adapter grant" {
+    assert(ad108_read(bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_read rejects writable grant" {
+    assert(ad108_read(bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(3,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_read rejects zero copy" {
+    assert(ad108_read(bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(176,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(176,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_read rejects copy beyond prefix" {
+    assert(ad108_read(bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(176,64),bvconst(0,64),bvconst(177,64),bvconst(0,64),bvconst(176,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_read rejects wrapped offset" {
+    assert(ad108_read(bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(176,64),bvsub(ptr107_max(),bvconst(1,64)),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_read rejects not sealed current" {
+    assert(ad108_read(bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_read rejects unbound source arena" {
+    assert(ad108_read(bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_read rejects still running compiler" {
+    assert(ad108_read(bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_read rejects wrong session owner" {
+    assert(ad108_read(bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(0,64),bvconst(176,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_append rejects frozen accumulator" {
+    assert(ad108_append(bvconst(1,8),bvconst(176,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_append rejects already copied all bytes" {
+    assert(ad108_append(bvconst(0,8),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_append rejects oversized arena image" {
+    assert(ad108_append(bvconst(0,8),bvconst(262145,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_append rejects unchecked exact READ" {
+    assert(ad108_append(bvconst(0,8),bvconst(176,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_append rejects wrong owner" {
+    assert(ad108_append(bvconst(0,8),bvconst(176,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_append rejects stale lineage" {
+    assert(ad108_append(bvconst(0,8),bvconst(176,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_append rejects partial transfer" {
+    assert(ad108_append(bvconst(0,8),bvconst(176,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_append rejects racing append" {
+    assert(ad108_append(bvconst(0,8),bvconst(176,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_append rejects retained transaction" {
+    assert(ad108_append(bvconst(0,8),bvconst(176,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_prepare rejects partial staging" {
+    assert(ad108_prepare(bvconst(0,8),bvconst(168,64),bvconst(176,64),bvconst(72,64),bvconst(72,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_prepare rejects overlong staging" {
+    assert(ad108_prepare(bvconst(0,8),bvconst(184,64),bvconst(176,64),bvconst(72,64),bvconst(72,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_prepare rejects incomplete source" {
+    assert(ad108_prepare(bvconst(0,8),bvconst(176,64),bvconst(176,64),bvconst(71,64),bvconst(72,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_prepare rejects aborted session" {
+    assert(ad108_prepare(bvconst(3,8),bvconst(176,64),bvconst(176,64),bvconst(72,64),bvconst(72,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_prepare rejects failed producer" {
+    assert(ad108_prepare(bvconst(0,8),bvconst(176,64),bvconst(176,64),bvconst(72,64),bvconst(72,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_prepare rejects unvalidated AOM" {
+    assert(ad108_prepare(bvconst(0,8),bvconst(176,64),bvconst(176,64),bvconst(72,64),bvconst(72,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_prepare rejects stale binding" {
+    assert(ad108_prepare(bvconst(0,8),bvconst(176,64),bvconst(176,64),bvconst(72,64),bvconst(72,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_prepare rejects wrong owner" {
+    assert(ad108_prepare(bvconst(0,8),bvconst(176,64),bvconst(176,64),bvconst(72,64),bvconst(72,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_prepare rejects substituted source bytes" {
+    assert(ad108_prepare(bvconst(0,8),bvconst(176,64),bvconst(176,64),bvconst(72,64),bvconst(72,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_prepare rejects mutable staging" {
+    assert(ad108_prepare(bvconst(0,8),bvconst(176,64),bvconst(176,64),bvconst(72,64),bvconst(72,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_prepare rejects pending accesses" {
+    assert(ad108_prepare(bvconst(0,8),bvconst(176,64),bvconst(176,64),bvconst(72,64),bvconst(72,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_export rejects reused sealed arena" {
+    assert(ad108_export(bvconst(4,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_export rejects workspace publication" {
+    assert(ad108_export(bvconst(3,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_export rejects source replacement" {
+    assert(ad108_export(bvconst(2,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_export rejects compiler replacement" {
+    assert(ad108_export(bvconst(1,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_export rejects arena padding exported" {
+    assert(ad108_export(bvconst(9,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(262144,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_export rejects changed bytes" {
+    assert(ad108_export(bvconst(9,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(0,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_export rejects unsealed publication" {
+    assert(ad108_export(bvconst(9,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(0,8),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_export rejects RX publication" {
+    assert(ad108_export(bvconst(9,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_export rejects RWS publication" {
+    assert(ad108_export(bvconst(9,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(19,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_export rejects missing receipt" {
+    assert(ad108_export(bvconst(9,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_export rejects host C compilation" {
+    assert(ad108_export(bvconst(9,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_export rejects host preprocessing" {
+    assert(ad108_export(bvconst(9,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_export rejects host linking" {
+    assert(ad108_export(bvconst(9,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_export rejects host symbol resolution" {
+    assert(ad108_export(bvconst(9,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE ad108_export rejects host byte rewriting" {
+    assert(ad108_export(bvconst(9,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE ad108_cleanup rejects nonterminal producer" {
+    assert(ad108_cleanup(bvconst(0,8),bvconst(1,8),bvconst(0,64),bvconst(0,64)))
+}
+
+example "FALSE ad108_cleanup rejects writer still alive" {
+    assert(ad108_cleanup(bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)))
+}
+
+example "FALSE ad108_cleanup rejects pending CPU access" {
+    assert(ad108_cleanup(bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(0,64)))
+}
+
+example "FALSE ad108_cleanup rejects pending DMA" {
+    assert(ad108_cleanup(bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64)))
+}
+
+example "FALSE stale concrete cap" {
+    assert(ad108_copy(bvconst(0,8),bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(7,64),bvconst(7,64),bvconst(168032,64),bvconst(131072,64),bvconst(0,64),bvconst(168032,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE scratch in concrete grant" {
+    assert(ad108_copy(bvconst(0,8),bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(168032,64),bvconst(131072,64),bvconst(0,64),bvconst(262144,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE unowned concrete copy" {
+    assert(ad108_copy(bvconst(0,8),bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(168032,64),bvconst(131072,64),bvconst(0,64),bvconst(168032,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE incomplete concrete copy" {
+    assert(ad108_copy(bvconst(0,8),bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(168032,64),bvconst(131072,64),bvconst(0,64),bvconst(168032,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE noncanonical read certificate" {
+    assert(ad108_copy(bvconst(0,8),bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(168032,64),bvconst(131072,64),bvconst(0,64),bvconst(168032,64),bvconst(1,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE publish without authority" {
+    assert(ad108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE reuse arena despite abstract guard" {
+    assert(ad108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(4,64),bvconst(2,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE different receipt cannot publish" {
+    assert(ad108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE publish from collecting" {
+    assert(ad108_publish(bvconst(0,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE noncanonical atomic certificate" {
+    assert(ad108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE nonatomic concrete publication" {
+    assert(ad108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE stale concrete publication" {
+    assert(ad108_publish(bvconst(1,8),bvconst(3,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE concrete executable publication" {
+    assert(ad108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "FALSE concrete host mutation" {
+    assert(ad108_publish(bvconst(1,8),bvconst(4,64),bvconst(4,64),bvconst(9,64),bvconst(2,64),bvconst(4,64),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(176,64),bvconst(176,64),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE entry outside compiler" {
+    assert(ad108_entry(bvconst(335872,64),bvconst(168032,64),bvconst(168032,64),bvconst(168032,64),bvconst(0,64),bvconst(501216,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE wrong CALL target" {
+    assert(ad108_entry(bvconst(335872,64),bvconst(168032,64),bvconst(168032,64),bvconst(165344,64),bvconst(0,64),bvconst(335872,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE entry not aligned" {
+    assert(ad108_entry(bvconst(335872,64),bvconst(168032,64),bvconst(168032,64),bvconst(165345,64),bvconst(0,64),bvconst(501216,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE overlapping compiler mapping" {
+    assert(ad108_entry(bvconst(73728,64),bvconst(168032,64),bvconst(168032,64),bvconst(165344,64),bvconst(0,64),bvconst(501216,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE missing layout proof" {
+    assert(ad108_entry(bvconst(335872,64),bvconst(168032,64),bvconst(168032,64),bvconst(165344,64),bvconst(0,64),bvconst(501216,64),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE substituted compiler geometry" {
+    assert(ad108_entry(bvconst(335872,64),bvconst(168032,64),bvconst(168032,64),bvconst(165344,64),bvconst(0,64),bvconst(501216,64),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "FALSE jump without return authority" {
+    assert(ad108_entry(bvconst(335872,64),bvconst(168032,64),bvconst(168032,64),bvconst(165344,64),bvconst(0,64),bvconst(501216,64),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "FALSE CALL displacement out of range" {
+    assert(ad108_entry(bvconst(2097152,64),bvconst(168032,64),bvconst(168032,64),bvconst(165344,64),bvconst(0,64),bvconst(2262496,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "FALSE launcher cannot erase nonzero result" {
+    assert(ad108_return(bvconst(9,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8)))
+}
+
+example "FALSE launcher cannot spawn output" {
+    assert(ad108_return(bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(0,64),bvconst(1,8)))
+}
+
+example "FALSE fault is not a normal return" {
+    assert(ad108_return(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)))
+}

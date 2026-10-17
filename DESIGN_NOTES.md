@@ -6433,3 +6433,446 @@ No new Kleis run is required unless the contract, its imported theories, the Kle
 executable or standard library changes. Keep using `--only-input` for changes
 confined to the input theory pair, and reserve full formal runs for affected
 prerequisites or integration checkpoints.
+
+## DN-62 — Bounded rebuild artifact channel and publication receipt (Phase 10.8)
+
+**Status: first trusted in-memory implementation and acceptance complete; see
+DN-64 for the CC2 witness and 1064-test full-suite checkpoint.** Typed input and
+output remain complete at the DN-61 checkpoint of 1057 passing Rust tests. This
+slice advances the compile-only path: an explicitly selected producer consumes
+an exact immutable source image, emits a bounded AOM v1 object into private
+staging, and publishes the complete object and its exact receipt together. It
+does not close Phase 10.8 or the final CPU-to-HTTP rebuild milestone.
+
+The contract is in `theories/anka108_rebuild_artifact.kleis`, with deliberately
+false claims in `anka108_rebuild_artifact_false_witnesses.kleis`. It imports the
+existing userspace rebuild and typed-input contracts, including their source,
+compiler-lineage, pointer, event and transaction prerequisites. It adds no axioms.
+It uses canonical BitVec8 certificates (only 1 means admitted); certificates and
+session state are protected trusted state, never caller-supplied success flags.
+The producer requirements of `rebuild107_producer_valid` are restated in this
+representation; source/profile and host-boundary admission remain obligations
+of the existing checks, not consequences of matching names.
+
+The concrete first channel has these rules:
+
+- One private session belongs to one process slot/generation, context and domain,
+  with a fresh nonreused session identity. Reuse requires a new identity and a
+  drained previous incarnation. No guest allocator or general filesystem is
+  introduced.
+- The compiler, effective source and immutable versioned profile are bound by
+  exact publication identities and generations. Source admission includes the
+  exact bundle, root, include/preprocessing lineage and effective bytes. The
+  initial single-source case does not require inventing host preprocessing.
+- A session reserves at most **1 MiB** of private output capacity. Nonempty
+  appends are at most **64 KiB**, must start exactly at the current length and
+  fit by subtraction without wrap. Zero appends are rejected without mutation;
+  there is no seek, overwrite or sparse output. This is a channel bound, not an
+  enlargement of the compiler's current code arena or an ISA change.
+- Each append must authenticate the whole source range with current Fabric READ
+  authority. Protected syscalls use the existing event and pointer descriptor;
+  the DN-63 trusted compiler adapter uses its selected private arena and exact
+  object/generation/range grant. This is a separate trusted interface, not a
+  conversion of numeric addresses to application pointers. Copy
+  into private staging completes before serialized append; no live CPU/DMA lease
+  or borrowed guest pointer survives return. Failed appends preserve every byte
+  and the previous length. Console diagnostics are outside the artifact channel.
+- Preparation requires successful compiler termination, exact consumed input,
+  nonempty complete output, exact declared length, full AOM validation with no
+  trailing bytes, current lineage, immutable staging and drained accesses. EOF
+  alone never proves successful compilation. The validator examines the exact
+  staged object; an application's reported length or success is insufficient.
+- Publication rechecks owner, lineage and reserved output generation under one
+  serialized commit. Output must differ from source and compiler. A matching
+  publication epoch prevents competing stale commits; the epoch cannot wrap.
+  The object and its receipt become visible together or neither does. Failure
+  preserves previous visible publications and the epoch.
+- The receipt binds exact compiler/source/profile identities and generations,
+  transitive source lineage, output identity/generation, length and exact bytes.
+  A digest can index a record but does not replace exact validation. Logical
+  names remain metadata. Published AOM data is immutable **READ only**: it grants
+  no write, seal, linking or execution authority. Downstream linker and explicit
+  application execution gates still apply.
+
+Protected phases are collecting (0), frozen/validated (1), published (2), and
+aborted (3). Preparation is the only collecting-to-frozen transition, and
+publication requires frozen state. Published and aborted states are terminal;
+there is no direct collecting-to-published transition or rollback of a published
+artifact. Explicit abort requires drain. Reclaiming private storage requires a
+terminal phase, zero CPU/DMA accesses and complete drain; published store-owned
+bytes and receipt are retained. Rejected operations stutter. Transition
+certificates must be derived from the corresponding actual operation predicate
+in the same critical section, rather than being chosen independently.
+
+**Proof scope:** the quantified checks establish append bounds/nonwrap, exact
+pointwise byte effects and frame rules, rejection preservation, terminal phases,
+publication ordering and shared artifact/receipt visibility in this model. Other
+checks exercise authority, owner/generation substitution, malformed/truncated
+objects, stale competing commits, executable output and invalid receipt rejection.
+This is a conditional contract, not a verified AOM parser, compiler semantics,
+concurrent Rust implementation or storage recovery proof. Atomic visibility here
+is process-visible atomicity. Persistent crash-consistent receipts require a
+separate storage/recovery refinement; no disk journal is assumed or required for
+the first in-memory implementation.
+
+**Implementation scope (now implemented in DN-64):** provide the bounded private accumulator and
+atomic in-memory AOM/receipt publication, with a concrete producer adapter and
+source/profile binding. The current CC2 system compiler uses its admitted raw
+workspace bootstrap profile; it is not already a protected-pointer application
+using `read_bytes`. DN-63 now establishes the concrete adapter ABI and transfer
+refinement. Implement those checks before connecting the producer to publication.
+Do not reinterpret raw numeric addresses as protected pointers, grant the guest
+new raw-address authority, or claim that an echo probe is a compiler rebuild.
+The first compiler-backed witness must consume the selected exact source, publish
+an admitted AOM object with matching receipt, pass it through the existing linker,
+and execute only under separately granted execution authority.
+
+**Validation here:** **124 positive witnesses pass; all 99 hostile assertions are
+explicitly disproved by Z3.** No unknown, timeout or evaluation error counts as a
+hostile disproof. Only this new pair was run for acceptance. One unchanged
+65-witness pointer-metadata theory was run while diagnosing local Kleis expression
+translation; the unchanged full formal suite was not rerun. No Rust or long CC2
+suite was run because this patch changes only formal contracts, gate selection
+and documentation. The user's 1057-test result remains the runtime checkpoint.
+
+```sh
+python3 scripts/check-anka108-gates.py \
+  --kleis /Users/enginatik/.cargo/bin/kleis --only-rebuild
+```
+
+`--only-rebuild` selects just the new pair; `--only-input` retains its meaning.
+`--only-108` includes output, input, rebuild-artifact and the DN-63 compiler-adapter
+pairs. The default also runs the 10.7 prerequisites. Rerun affected imported gates when dependencies
+change, and reserve a full formal run for integration or a changed Kleis binary
+or standard library. No new standalone notes file is needed.
+
+## DN-63 — Concrete CC2 compiler-adapter ABI refinement (Phase 10.8)
+
+**Status: formal refinement and first runtime implementation validated; see
+DN-64 for the CC2 witness and 1064-test full-suite checkpoint.** This
+selects the concrete first producer for DN-62: the exact linked CC2 publication
+from the established fixed-point lineage, running in its isolated system-compiler
+machine and emitting protected application AOM under target profile 2. The
+compiler's own admitted raw-workspace execution and the output language profile
+are distinct. This slice neither changes the compiler into a protected-pointer
+application nor adds a raw-address application syscall.
+
+`anka108_compiler_adapter.kleis` and its hostile pair refine the existing
+rebuild-artifact contract. The ABI is an internal trusted launch/result interface,
+version 1. No guest-supplied structure contains authority-bearing host addresses.
+The coordinator retains exact compiler/source/profile publication identities and
+generations, the actual process/session owner, output reservation and publication
+authority. Workspace words and AOM names never replace those identities.
+
+### Concrete invocation and result layout
+
+The first adapter supports only target profile **2**. Profiles 0 and 1 remain
+outside this adapter even though existing compiler helpers support them. Values
+below come from `dev_compiler.rs`, `guest_compiler.rs` and the exact stage-3 C
+compiler. Existing placement managers allocate physical extents and virtual
+suffixes; the table records the compiler ABI rather than new placement arithmetic.
+
+| Item | Concrete representation and rule |
+| --- | --- |
+| Source object | Immutable READ object; little-endian u64 payload length at offset 0; exact payload at offset 8; remaining allocation bytes zero |
+| Source bound | At most 65528 payload bytes; envelope is at least 20480 bytes, rounded up by 4096-byte pages when larger, at most 65536 bytes |
+| Source placement | Small source normally maps at 28672; larger source gets a disjoint region from `VirtualLayoutBuilder`; all mappings require exact identity and placement checks |
+| Workspace | Fresh private 24576-byte RW object at virtual 49152 |
+| Source position / length / text base | Workspace offsets 0 / 8 / 16; terminal position and length must match the exact selected payload; text base is selected source mapping + 8 |
+| Error | Workspace offset 24, virtual 49176; must be zero alongside a normal zero process exit |
+| Serialized output length | Workspace offset 72, virtual 49224; checked against actual AOM total length |
+| Scratch frontier | Workspace offset 19304, virtual 68456; initially 262144; result must satisfy `out_pos <= frontier <= 262144` |
+| Compile-only mode | Workspace offset 19312, virtual 68464; set to 1 |
+| Output limit | Workspace offset 19320, virtual 68472; exactly 262144 bytes |
+| Target profile | Workspace offset 19328, virtual 68480; exactly 2 |
+| Source overrides | Workspace offsets 19336 / 19344, virtual 68488 / 68496; explicitly set to selected source base and envelope size minus 8, for small inputs too |
+| Private output arena | 262144 bytes at virtual 73728; compiler initially receives RWS, workspace RW, source READ, compiler code RX |
+| Compiler entry | Separate launcher at PC 0 CALLs `code_base + entry`; target is 8-byte aligned, lies in exact compiler code and fits the signed CALL_PC20 displacement |
+| Return | Compiler main returns R0; launcher copies that value to R1, sets R0 to SYS_EXIT (0), then TRAP 0; errors cannot be replaced by zero |
+
+Normalizing both source overrides deliberately removes the old zero/fallback
+choice from the new adapter. It is compatible with the compiler's current C
+entry point, but requires new adapter initialization. The private source envelope
+also accounts for the legacy compiler lexer reading aligned words: the theory
+proves that an aligned word containing any admitted payload byte stays inside the
+allocated envelope. Zero padding is private, grants no additional application
+pointer range, and is excluded from source identity/receipt length.
+
+### Snapshot and exact transfer
+
+The adapter first checks exact launch identity/geometry, source bytes, controls,
+rights and isolation. The linked compiler route has one process; success requires
+normal termination, exact preserved return status zero, workspace error zero,
+complete source position, current bindings and no pending access. Process count
+alone is **not** evidence that generated output was never executed: the
+compile-only/no-output-execution obligation must be checked separately.
+
+Workspace results become usable only after all writers stop and the snapshot is
+current. They remain reports to validate, not trusted capabilities. Rechecking
+controls at the end is not a proof that arbitrary producer code could never
+modify them transiently; exact admitted producer identity and execution isolation
+remain prerequisites of this conditional model.
+
+Current SYS_SEAL (5) transitions the arena to Sealed, increments its generation,
+and grants RX inside the compiler's private domain. Consequently the adapter must:
+
+1. Refuse an exhausted generation before launch; the generic runtime generation
+   counter currently wraps, so its existence alone does not establish this rule.
+2. Verify the actual post-seal generation and acquire an explicit READ-only grant
+   in the adapter domain to **exactly `[0, out_pos)`** of that selected arena.
+3. Validate AOM magic/version/geometry/tables and the admitted target profile over
+   exactly that prefix. The full existing validator remains an obligation;
+   checking the header alone is insufficient.
+4. Copy consecutive chunks of `min(65536, out_pos - used)` into a private exact-size
+   accumulator, using the same object, generation, domain, range and chunk values
+   in the concrete READ check and the abstract append guard.
+5. Freeze and prepare only when the copied length equals `out_pos` and the exact
+   source-consumption and successful-completion checks hold.
+
+In profile 2 the downward-growing portion of the arena holds compiler metadata
+scratch. It must not be appended as a literal tail. The serialized AOM prefix
+already contains its protected-frame manifest and symbol/relocation data. Full
+arena copying or carrying a legacy backing-image length into this path would
+leak unrelated bytes and fail the contract.
+
+The trusted transport interface authenticates a selected Fabric object and READ
+range; it does not fabricate protected pointer kinds or a protected event image.
+DN-62's `span_checked` documentation is refined accordingly: protected syscall
+transport and this trusted isolated-compiler transport discharge the same exact
+READ-range obligation through their respective checks. Its abstract predicates
+and existing witness expectations are unchanged. The compiler source cursor is
+its checked workspace source position here, not a claim that CC2 called
+`read_bytes` or that a host parser consumed its source.
+
+### Publication and receipt composition
+
+Publication creates a fresh sealed exact-length object distinct from compiler,
+source, workspace and private arena. The exported capability is READ only; the
+arena's compiler-local RX/SEAL authority is never transferred. Physical page
+allocation can round up internally, but logical artifact length and admitted
+readable range remain exact. The recipe is transport plus structural validation;
+no host C parsing, preprocessing, symbol resolution, relocation or byte patching
+is admitted.
+
+`ad108_copy` composes the actual range check with the DN-62 append guard over the
+same chunk. `ad108_prepare` maps the completed source/output counts into the
+abstract prepare guard. `ad108_publish` composes fresh-object export with the
+abstract atomic artifact/receipt publication over the same keys, rights, epoch
+and receipt. A separate success flag cannot bypass either side. Exact receipt
+lineage comes from coordinator-owned bindings (`rb108_binding` and
+`rb108_receipt`), not invented compiler-identity fields in the AOM header.
+
+Timeout, fault, seal failure, malformed output, wrong generation, partial copy
+or rejected publication exposes no new artifact/receipt. Cleanup requires a
+terminal producer, stopped writers and zero pending CPU/DMA accesses. Existing
+published objects retain their own ownership. Persistent storage recovery remains
+outside this in-memory publication refinement.
+
+### Validation and implementation boundary
+
+At the original formal checkpoint, the adapter gates passed **169 positive witnesses**, and all **137 hostile
+assertions are explicitly disproved by Z3**. Quantified properties establish
+source-envelope bounds, safe private lexer word coverage, nonwrapping chunk
+progress, completion in at most four 64 KiB copies, and copy/prepare/publication
+refinement to the abstract guards. Hostile cases cover stale pre-seal grants,
+wrong owner/domain, scratch inclusion, profile substitution, unaligned/out-of-range
+entry, missing return authority, erased errors, live writers, partial staging,
+reused arena publication, amplified rights and missing publication authority.
+
+The affected abstract rebuild gates were also rerun: **124 positive / 99 hostile**.
+No unrelated full formal suite or Rust/long CC2 suite is required for this formal
+patch. At that formal-only checkpoint, DN-61 recorded 1057 passing runtime tests;
+DN-64 now records the 1064-test implementation acceptance. These proofs are
+conditional on the explicitly stated trusted checks; they do not prove the C
+compiler, AOM parser, Rust adapter or scheduler correct.
+
+```sh
+python3 scripts/check-anka108-gates.py \
+  --kleis /Users/enginatik/.cargo/bin/kleis --only-adapter
+```
+
+For an external Kleis standard library, configure the parent of `stdlib/` before
+running the gate (replace the example path with the actual Kleis checkout):
+
+```sh
+export KLEIS_ROOT="/absolute/path/to/kleis"
+```
+
+Alternatively pass `--kleis-root /absolute/path/to/kleis` to the gate runner.
+The runner verifies `stdlib/prelude.kleis`, forwards `KLEIS_ROOT`, and runs each
+10.8 Kleis command from that directory using absolute theory paths. This also
+supports supplied CLI builds whose test-import resolver uses the working
+directory rather than `KLEIS_ROOT` alone. Without either setting, the runner
+retains its repository-local behavior. It never copies the standard library
+into Anka or changes any theory to bypass an import.
+
+**External-library validation:** reproduced the missing-prelude failure with an
+isolated Anka checkout, then passed **169 positive / 137 explicitly disproved
+hostile witnesses** with a separate stdlib tree selected through `KLEIS_ROOT`.
+An invalid explicit root fails clearly before running witnesses. The original
+local validation had a repository-local stdlib, which masked this setup need.
+
+`--only-adapter` selects the new pair. `--only-rebuild` keeps selecting the abstract
+artifact pair. `--only-108` and the default include both. Rerun both affected pairs
+when changing their shared contract; unchanged unrelated theories can wait for
+an integration checkpoint.
+
+**Implementation scope (now implemented in DN-64):** implement the trusted adapter with explicit
+source controls, terminal snapshot checks, post-seal exact READ authorization,
+private bounded accumulation, fresh READ-only AOM publication and an atomic
+in-memory receipt. Reuse the exact fixed-point producer and existing linker in
+one compiler-backed acceptance witness. The user runs that long integration test
+and the full single-threaded Rust suite locally; focused adapter tests can run
+here. No further speculative formal layer is needed before this implementation
+unless coding exposes a change to the contract.
+
+
+## DN-64 — Concrete CC2 adapter and atomic AOM receipt (Phase 10.8)
+
+**Status: COMPLETE for the first trusted in-memory adapter/publication slice.**
+The user reported the long CC2 acceptance witness passing in **216.85s**, followed
+by the full single-threaded suite: **1064 passed, 0 failed**, in **1027.13s** on
+2026-10-16 (America/Chicago). This supersedes DN-61's 1057-test checkpoint and
+closes the implementation acceptance for DN-62/DN-63; broader Phase 10.8 work
+remains open.
+
+### Execution and transport
+
+`compiler_adapter.rs` admits the exact fixed-point CC2 producer through
+`Cc2FixedPointWitness::application_tools`, before execution and again before
+publication. The existing guest `ankapp` supplies the effective source. The
+strict path in `dev_compiler.rs` seals the length-prefixed, zero-padded source
+object and an immutable version-1/profile-2 configuration object before launch.
+Both source override words are explicit, including for small inputs. Compiler
+execution still uses the existing placement managers and protected launcher CALL
+and return; no compiler C source, host parser or linker was introduced.
+
+After termination the bridge checks the same process incarnation, context and
+domain, normal zero exit, zero compiler error, complete source cursor, unchanged
+controls, source identity, single process, drained accesses and post-seal arena
+generation. It checks every retained transaction batch for a Fetch from the
+output arena before discarding the batch. An attempt to execute the output in
+the compiler's own process therefore fails even when no second process exists.
+
+A fresh adapter domain receives exactly READ to `[0, out_pos)` at the current
+sealed generation. Copying uses committed Fabric READ transactions, in consecutive
+chunks of at most 65536 bytes, with the same domain/object/generation/range used
+for admission. The maximum is four chunks. Private downward-growing scratch,
+source padding and arena slack are excluded. The resulting bytes pass the existing
+full `AomModule::parse` and protected-frame validator before publication.
+
+This first profile admits closed protected translation units: unresolved imports
+or relocations are rejected. This matches the current standalone protected CC2
+path. Adding separately compiled modules needs a corresponding profile and
+relocation/manifest admission design; the host must not repair their bytes.
+
+### Publication, identity and authority
+
+`RebuildArtifactStore::compile(expected_epoch, producer, bundle, execution,
+publication)` returns a committed epoch. `receipt(epoch)` and
+`artifact_bytes(epoch)` expose immutable observations of the same record.
+
+Publication allocates a fresh exact-length object, initializes and seals it, and
+grants READ only. It is distinct from the compiler, source, profile, workspace and
+private arena. The compiler-local RX grant on the arena is never exported.
+Artifact and receipt become visible through one complete record insertion under
+exclusive mutable access. Expected epochs reject stale commits; increment is
+checked for exhaustion. All fallible preparation precedes insertion. Failed
+attempts discard their private machine and cannot alter prior published records.
+
+The receipt binds the actual compiler/source/profile/artifact object generations,
+exact compiler bytes and geometry, fixed-point origin publication, exact source
+bundle and effective source, preprocessing/linking tool images, target profile,
+logical output length and process/context owner. Object IDs are local to a Fabric;
+the receipt's nonreused execution context supplies the namespace. Comparing bare
+object numbers across machines is not an identity check. Concrete u32 process
+generation `g` is represented as `u64(g) + 1`, preserving injectivity while
+reserving the abstract zero sentinel.
+
+`RebuildPublicationAuthority::provision()` is explicit developer policy, separate
+from `DeveloperExecutionAuthority`. The protected rebuild API now requires it as
+a fourth argument. Missing authority is rejected before expensive work. A receipt
+or its copied fields grant no authority. The public store accepts a verified
+fixed-point witness; it has no public method for publishing arbitrary host bytes.
+
+`rebuild_protected_application` retains the committed AOM and receipt, passes the
+exact published bytes to the existing guest `ankald`, validates the linked
+protected image, and registers it through the existing application path. Its
+`compiled_aom()` and `rebuild_receipt()` accessors expose the retained evidence.
+Running the linked application still requires explicit execution authority.
+Legacy profile-0 rebuild behavior is unchanged.
+
+This is an isolated trusted adapter, not a new guest syscall or a conversion of
+raw addresses into protected pointers. The store retains each private compiler
+Fabric and its placement ownership to keep bound objects alive; this first bridge
+therefore retains a 16 MiB Fabric backing per committed record. Persistent disk
+receipts, crash recovery, artifact eviction and a general concurrent compilation
+service remain outside this milestone. No runnable compiler process is retained.
+
+### Formal correction and validation
+
+Implementation exposed one concrete refinement mismatch: fresh Fabric objects
+start at generation **0** and their first seal produces **1**. `ad108_seal` now
+admits `0 -> 1` while still rejecting wrap and any wrong successor. A positive
+witness covers the initial transition; the hostile `0 -> 2` case remains rejected.
+The affected adapter gate passes **170 positive witnesses / 137 explicitly
+disproved hostile assertions**. No unchanged full formal suite was rerun.
+
+Focused runtime validation completed here:
+
+- Seven new adapter tests pass: exact chunk boundaries, narrow READ admission,
+  stale/wrong-domain/amplified grants, small and maximum source envelopes,
+  modified controls/cursors, preserved failure return status, and same-process
+  output-fetch rejection.
+- Publication tests cover exact lineage and READ-only rights, malformed/truncated
+  AOM and invalid manifest rejection, partial accumulation, stale epochs, missing
+  authority, pool exhaustion, epoch exhaustion, and preservation of earlier
+  artifacts/receipts across failures and a later successful publication.
+- Existing compiler-layout/transport tests, transaction-trace collection and exact
+  application registration pass. These runs cover **15 distinct focused tests**.
+- `cargo check --all-targets` passes; existing repository warnings remain.
+
+The existing long test
+`p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address` now exercises
+the adapter for protected applications, including typed input/output probes. It
+checks the retained receipt, exact AOM, fixed-point producer identity and separate
+publication authority, reusing its one CC2 bootstrap. No additional long
+fixed-point test was added.
+
+### Local acceptance checkpoint — 2026-10-16
+
+The user ran the existing long witness locally: **1 passed, 0 failed**, in
+**216.85s**. CC2_0 remained 148376 code/backing bytes. CC2_1 and CC2_2 remained
+identical at 168032 code/backing bytes, with entry 165344. The protected rebuild
+path passed its publication, receipt, linking, typed I/O and execution checks.
+The compiler rejections and ControlFlowViolation messages in this test are the
+expected hostile cases.
+
+The subsequent full single-threaded run reported:
+
+```text
+test result: ok. 1064 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1027.13s
+```
+
+Warning cleanup remains deferred by agreement. This acceptance update changes
+only documentation; it does not alter the tested implementation or formal gates.
+The bounded compiler-adapter/AOM-receipt slice is ready to commit. No merge is
+claimed by this checkpoint.
+
+Reproduction commands for the formal and runtime acceptance paths (the unchanged
+formal gate was not rerun for this documentation update):
+
+```sh
+python3 scripts/check-anka108-gates.py \
+  --kleis /Users/enginatik/.cargo/bin/kleis \
+  --kleis-root ~/git/cee/kleis --only-adapter
+
+cargo test --lib p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address \
+  -- --test-threads=1 --nocapture
+
+cargo test -- --test-threads=1
+```
+
+The passing long witness establishes the concrete compiler-to-AOM-to-link-to-run
+path with a retained in-memory receipt. Phase 10.8 remains open for
+compiler/toolchain modularization, broader I/O and rebuilt services.

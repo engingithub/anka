@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run 10.7 prerequisites and the 10.8 typed-I/O proofs/disproofs.
+"""Run 10.7 prerequisites and the 10.8 typed-I/O and rebuild proofs/disproofs.
 
 Unknown, timeout, parse/evaluation errors and absent witnesses fail closed.
 The hostile Kleis test command intentionally reports failing examples; only
@@ -16,11 +16,18 @@ import sys
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kleis', default='kleis')
+    parser.add_argument('--kleis-root', default=os.environ.get('KLEIS_ROOT'),
+                        help='directory containing stdlib/prelude.kleis '
+                             '(default: KLEIS_ROOT environment variable)')
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument('--only-108', action='store_true',
-                           help='run output and input gates, skipping 10.7')
+                           help='run all 10.8 gates, skipping 10.7')
     selection.add_argument('--only-input', action='store_true',
                            help='run only the new typed-input gate pair')
+    selection.add_argument('--only-rebuild', action='store_true',
+                           help='run only the rebuild-artifact gate pair')
+    selection.add_argument('--only-adapter', action='store_true',
+                           help='run only the concrete compiler-adapter gate pair')
     parser.add_argument('--timeout', type=int, default=120,
                         help='wall-clock seconds per command (default: 120)')
     args = parser.parse_args()
@@ -28,19 +35,38 @@ def main():
         parser.error('--timeout must be positive')
     root = Path(__file__).resolve().parents[1]
     executable = str(Path(args.kleis).resolve()) if '/' in args.kleis else args.kleis
-    if not (args.only_108 or args.only_input):
+    kleis_env = os.environ.copy()
+    kleis_cwd = root
+    if args.kleis_root:
+        kleis_cwd = Path(args.kleis_root).expanduser().resolve()
+        if not (kleis_cwd / 'stdlib/prelude.kleis').is_file():
+            parser.error('--kleis-root/KLEIS_ROOT must name the directory '
+                         'containing stdlib/prelude.kleis: ' + str(kleis_cwd))
+        kleis_env['KLEIS_ROOT'] = str(kleis_cwd)
+    # Some supplied Kleis CLI builds resolve stdlib imports from cwd even when
+    # KLEIS_ROOT is set. Keep theory paths absolute and run from the selected
+    # root so external stdlib installations work without copying into Anka.
+    if not (args.only_108 or args.only_input or args.only_rebuild or args.only_adapter):
         try:
             previous = subprocess.run(
                 [sys.executable, str(root / 'scripts/check-anka107-gates.py'),
-                 '--kleis', executable], cwd=root, timeout=args.timeout)
+                 '--kleis', executable], cwd=root, env=kleis_env,
+                timeout=args.timeout)
         except (OSError, subprocess.TimeoutExpired) as error:
             print(f'FAIL: 10.7 prerequisites: {error}', file=sys.stderr)
             return 1
         if previous.returncode:
             return 1
     all_ok = True
-    stems = ('anka108_typed_input',) if args.only_input else (
-        'anka108_typed_syscall_io', 'anka108_typed_input')
+    if args.only_adapter:
+        stems = ('anka108_compiler_adapter',)
+    elif args.only_rebuild:
+        stems = ('anka108_rebuild_artifact',)
+    elif args.only_input:
+        stems = ('anka108_typed_input',)
+    else:
+        stems = ('anka108_typed_syscall_io', 'anka108_typed_input',
+                 'anka108_rebuild_artifact', 'anka108_compiler_adapter')
     for stem in stems:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')
@@ -51,8 +77,8 @@ def main():
                 all_ok = False
                 continue
             try:
-                result = subprocess.run([executable, 'test', str(path)], cwd=root,
-                                        env=os.environ, capture_output=True, text=True,
+                result = subprocess.run([executable, 'test', str(path)], cwd=kleis_cwd,
+                                        env=kleis_env, capture_output=True, text=True,
                                         timeout=args.timeout)
             except (OSError, subprocess.TimeoutExpired) as error:
                 print(f'FAIL: {path.name}: {error}', file=sys.stderr)

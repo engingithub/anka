@@ -3374,9 +3374,15 @@ client and an adversarial gate before the next one depends on it:
       - 113 positive / 86 hostile Kleis checks; 10.7 prerequisites remain green
       - typed trap ABI, exact buffer READ authority, lease drain, atomic output
       - process-owned immutable input COMPLETE: ABI, runtime/lowering, DN-61
-      - exact CC2 input/echo probe passes; latest full Rust suite 1057/1057
+      - exact CC2 input/echo probe passes; input checkpoint 1057/1057
       - input gates: 116 positive / 88 explicitly disproved hostile witnesses
       - read_bytes uses protected local buffers; async/device/file I/O remain open
+      - bounded AOM artifact channel + atomic receipt COMPLETE: DN-62/DN-64
+      - 124 positive / 99 hostile formal checks; full CC2 acceptance passed
+      - exact lineage, separate publication authority, fresh READ-only AOM publication
+      - concrete CC2 adapter ABI COMPLETE: DN-63/DN-64; 170 positive / 137 hostile checks
+      - 7 new focused Rust tests pass; protected rebuild now retains the AOM receipt
+      - latest full suite: 1064/1064 passed in 1027.13s; CC2 witness passed in 216.85s
       - compiler/toolchain modularization, headers, modules, and libraries
       - persistent tool/source receipts and rebuilt socket/HTTP services
 10.9  supply-chain closure, hostile audit, and CPU-to-HTTP rebuild gate

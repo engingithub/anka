@@ -70,3 +70,5 @@ pub mod host_net;
 pub mod scoped_pointers;
 
 pub mod pointer_frames;
+
+pub mod compiler_adapter;

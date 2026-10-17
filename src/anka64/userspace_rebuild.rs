@@ -6,12 +6,15 @@ use super::dev_compiler::{compile_application_aom_with_linked_compiler, Developm
 use super::dev_runner::{run_registered_artifact, DeveloperExecutionAuthority, DevelopmentRunError, DevelopmentRunReport};
 use super::dev_shell::{DevelopmentArtifactRegistry, DevelopmentShellError};
 use super::fabric::Fabric;
+use super::compiler_adapter::{CompilerAdapterError, RebuildArtifactStore, RebuildPublicationAuthority, RebuildReceipt};
 use super::placement::PhysicalPlacementManager;
 use super::source_bundle::{run_ankapp, AnkaPreprocessError, SourceBundle};
 
 #[derive(Debug)]
 pub enum RebuildError {
     CompilerExecutionAuthorityRequired,
+    PublicationAuthorityRequired,
+    Adapter(CompilerAdapterError),
     Producer(Cc2FixedPointError),
     Preprocess(AnkaPreprocessError),
     Compile(DevelopmentCompileError),
@@ -28,10 +31,19 @@ pub struct RebuiltApplication {
     registry: DevelopmentArtifactRegistry,
     key: LinkedArtifactKey,
     effective_source: Vec<u8>,
+    compiler_artifacts: Option<RebuildArtifactStore>,
 }
 impl RebuiltApplication {
     pub fn key(&self) -> LinkedArtifactKey { self.key }
     pub fn effective_source(&self) -> &[u8] { &self.effective_source }
+    pub fn rebuild_receipt(&self) -> Option<&RebuildReceipt> {
+        let store = self.compiler_artifacts.as_ref()?;
+        store.receipt(store.epoch())
+    }
+    pub fn compiled_aom(&self) -> Option<&[u8]> {
+        let store = self.compiler_artifacts.as_ref()?;
+        store.artifact_bytes(store.epoch())
+    }
     /// Compilation authority does not authorize execution of the resulting application.
     pub fn run(&mut self, authority: Option<&DeveloperExecutionAuthority>) -> Result<DevelopmentRunReport, DevelopmentRunError> {
         run_registered_artifact(&self.registry, authority, &mut self.fabric, &mut self.placement, "rebuilt-application")
@@ -49,22 +61,46 @@ pub fn rebuild_application(
     bundle: &SourceBundle,
     compiler_authority: Option<&DeveloperExecutionAuthority>,
 ) -> Result<RebuiltApplication, RebuildError> {
-    rebuild_application_profile(producer,bundle,compiler_authority,false)
+    rebuild_application_profile(producer,bundle,compiler_authority,None,false)
 }
 
 pub fn rebuild_protected_application(producer:&Cc2FixedPointWitness,bundle:&SourceBundle,
-    compiler_authority:Option<&DeveloperExecutionAuthority>) -> Result<RebuiltApplication,RebuildError> {
-    rebuild_application_profile(producer,bundle,compiler_authority,true)
+    compiler_authority:Option<&DeveloperExecutionAuthority>,
+    publication_authority:Option<&RebuildPublicationAuthority>) -> Result<RebuiltApplication,RebuildError> {
+    rebuild_application_profile(producer,bundle,compiler_authority,publication_authority,true)
+}
+fn adapter_error(error: CompilerAdapterError) -> RebuildError {
+    match error {
+        CompilerAdapterError::ExecutionAuthorityRequired => RebuildError::CompilerExecutionAuthorityRequired,
+        CompilerAdapterError::PublicationAuthorityRequired => RebuildError::PublicationAuthorityRequired,
+        CompilerAdapterError::Producer(error) => RebuildError::Producer(error),
+        CompilerAdapterError::Preprocess(error) => RebuildError::Preprocess(error),
+        CompilerAdapterError::Compile(error) => RebuildError::Compile(error),
+        error => RebuildError::Adapter(error),
+    }
 }
 fn rebuild_application_profile(producer:&Cc2FixedPointWitness,bundle:&SourceBundle,
-    compiler_authority:Option<&DeveloperExecutionAuthority>,protected:bool) -> Result<RebuiltApplication,RebuildError> {
+    compiler_authority:Option<&DeveloperExecutionAuthority>,
+    publication_authority:Option<&RebuildPublicationAuthority>,protected:bool) -> Result<RebuiltApplication,RebuildError> {
     let authority = compiler_authority.ok_or(RebuildError::CompilerExecutionAuthorityRequired)?;
+    if protected && publication_authority.is_none() { return Err(RebuildError::PublicationAuthorityRequired); }
     let (compiler, preprocessor, linker) = producer.application_tools().map_err(RebuildError::Producer)?;
-    let effective = run_ankapp(&preprocessor.bytes, bundle).map_err(RebuildError::Preprocess)?;
-    let aom = if protected {
-        super::dev_compiler::compile_protected_application_aom_with_linked_compiler(compiler,&effective.bytes,authority)
-    } else {compile_application_aom_with_linked_compiler(compiler,&effective.bytes,authority)}.map_err(RebuildError::Compile)?;
-    let image = run_ankald(&linker.bytes, &[&aom.bytes], "main").map_err(RebuildError::Link)?;
+    let mut compiler_artifacts = None;
+    let (effective_source, aom) = if protected {
+        let mut store = RebuildArtifactStore::new();
+        let epoch = store.compile(0, producer, bundle, Some(authority), publication_authority)
+            .map_err(adapter_error)?;
+        let source = store.receipt(epoch).expect("atomic receipt").effective_source.clone();
+        let bytes = store.artifact_bytes(epoch).expect("atomic sealed AOM").to_vec();
+        compiler_artifacts = Some(store);
+        (source, bytes)
+    } else {
+        let effective = run_ankapp(&preprocessor.bytes, bundle).map_err(RebuildError::Preprocess)?;
+        let aom = compile_application_aom_with_linked_compiler(compiler,&effective.bytes,authority)
+            .map_err(RebuildError::Compile)?;
+        (effective.bytes, aom.bytes)
+    };
+    let image = run_ankald(&linker.bytes, &[&aom], "main").map_err(RebuildError::Link)?;
     if protected {
         let code=image.bytes.get(..image.code_size as usize).ok_or(RebuildError::InvalidProtectedManifest)?;
         let metadata=image.bytes.get(image.lit_start as usize..).ok_or(RebuildError::InvalidProtectedManifest)?;
@@ -80,7 +116,7 @@ fn rebuild_application_profile(producer:&Cc2FixedPointWitness,bundle:&SourceBund
         .map_err(RebuildError::Publish)?;
     let mut registry = DevelopmentArtifactRegistry::new();
     registry.register_linked_application(&fabric, &artifact).map_err(RebuildError::Register)?;
-    Ok(RebuiltApplication { fabric, placement, registry, key: artifact.key, effective_source: effective.bytes })
+    Ok(RebuiltApplication { fabric, placement, registry, key: artifact.key, effective_source, compiler_artifacts })
 }
 
 #[cfg(test)]
@@ -105,7 +141,7 @@ mod tests {
         let artifact = publish_linked_image(&mut fabric, &mut placement, "probe", &image).unwrap();
         let mut registry = DevelopmentArtifactRegistry::new();
         registry.register_linked_application(&fabric, &artifact).unwrap();
-        let mut app = RebuiltApplication { fabric, placement, registry, key: artifact.key, effective_source: vec![] };
+        let mut app = RebuiltApplication { fabric, placement, registry, key: artifact.key, effective_source: vec![], compiler_artifacts: None };
         assert!(matches!(app.run(None), Err(DevelopmentRunError::DeveloperExecutionAuthorityRequired)));
         let authority = DeveloperExecutionAuthority::provision();
         let report = app.run(Some(&authority)).unwrap();
@@ -120,6 +156,7 @@ mod tests {
     #[test]
     fn p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address() {
         let authority = DeveloperExecutionAuthority::provision();
+        let publication = RebuildPublicationAuthority::provision();
         let mut producer = witness_cc2_fixed_point(Some(&authority),
             include_bytes!("../../userspace/system/compiler/ankacc2_stage3.c"),
             include_bytes!("../../userspace/system/compiler/ankapp.c"),
@@ -157,8 +194,21 @@ mod tests {
         assert!(matches!(rebuild_application(&producer, &bundle(b"typedef void *VP;int main(){VP p;return *p;}"), Some(&authority)), Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
         // Same exact CC2_1 lineage now emits protected ABI v2 code and manifests.
         let protected_source=include_bytes!("../../userspace/bin/protected_pointer_probe.c");
-        let mut protected=rebuild_protected_application(&producer,&bundle(protected_source),Some(&authority)).unwrap();
+        assert!(matches!(rebuild_protected_application(&producer,&bundle(protected_source),Some(&authority),None),
+            Err(RebuildError::PublicationAuthorityRequired)));
+        let mut protected=rebuild_protected_application(&producer,&bundle(protected_source),Some(&authority),Some(&publication)).unwrap();
         assert_eq!(protected.effective_source(),protected_source);
+        let receipt = protected.rebuild_receipt().unwrap();
+        assert_eq!(receipt.effective_source, protected_source);
+        assert_eq!(receipt.source_bundle, bundle(protected_source));
+        assert_eq!(receipt.origin_compiler_key, producer.cc2_1_key);
+        assert_eq!(receipt.compiler_image, producer.cc2_1);
+        assert_eq!(receipt.target_profile, 2);
+        assert_ne!(receipt.artifact_key.object, receipt.compiler_key.object);
+        assert_ne!(receipt.artifact_key.object, receipt.source_key.object);
+        let aom = protected.compiled_aom().unwrap();
+        assert_eq!(receipt.artifact_length, aom.len() as u64);
+        assert!(super::super::aom::AomModule::parse(aom).is_ok());
         let artifact=protected.registry.get("rebuilt-application").unwrap();
         let extent=protected.placement.allocated_extent(artifact.key.object).unwrap();
         let code=protected.fabric.read_physical(extent.base,artifact.code_size);
@@ -176,34 +226,34 @@ mod tests {
             b"int main(){int b[2];int *p=b;*(p+2305843009213693952)=42;return syscall(0,*p,0,0);}".as_slice(),
             b"int main(){int b[2];int *p=b;return syscall(0,*(p-9223372036854775808),0,0);}".as_slice(),
         ] {
-            let mut app=rebuild_protected_application(&producer,&bundle(source),Some(&authority)).unwrap();
+            let mut app=rebuild_protected_application(&producer,&bundle(source),Some(&authority),Some(&publication)).unwrap();
             assert_eq!(app.run(Some(&authority)).unwrap().child_result,ProcessResult::ProtectionFault);
         }
         let source=b"int main(){int b[2];int *p=b;*(p+1)=42;return syscall(0,*(p+1),0,0);}";
-        let mut app=rebuild_protected_application(&producer,&bundle(source),Some(&authority)).unwrap();
+        let mut app=rebuild_protected_application(&producer,&bundle(source),Some(&authority),Some(&publication)).unwrap();
         assert_eq!(app.run(Some(&authority)).unwrap().child_result,ProcessResult::Exited(42));
-        assert!(matches!(rebuild_protected_application(&producer,&bundle(b"int main(){char b[4];char *p=b;return p+p;}"),Some(&authority)),Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
+        assert!(matches!(rebuild_protected_application(&producer,&bundle(b"int main(){char b[4];char *p=b;return p+p;}"),Some(&authority),Some(&publication)),Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
         let source=b"int main(){char b[1];char *p=b;*p=42;return syscall(0,*p,0,0);}";
-        let mut app=rebuild_protected_application(&producer,&bundle(source),Some(&authority)).unwrap();
+        let mut app=rebuild_protected_application(&producer,&bundle(source),Some(&authority),Some(&publication)).unwrap();
         assert_eq!(app.run(Some(&authority)).unwrap().child_result,ProcessResult::Exited(42));
-        assert!(matches!(rebuild_protected_application(&producer,&bundle(b"int main(){if(1){char b;}return syscall(0,0,0,0);}"),Some(&authority)),Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
+        assert!(matches!(rebuild_protected_application(&producer,&bundle(b"int main(){if(1){char b;}return syscall(0,0,0,0);}"),Some(&authority),Some(&publication)),Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
         // Phase 10.8 shares this exact fixed-point lineage, avoiding a second
         // expensive bootstrap solely for the typed-output integration witness.
         let output_source=include_bytes!("../../userspace/bin/typed_output_probe.c");
-        let mut output=rebuild_protected_application(&producer,&bundle(output_source),Some(&authority)).unwrap();
+        let mut output=rebuild_protected_application(&producer,&bundle(output_source),Some(&authority),Some(&publication)).unwrap();
         let report=output.run(Some(&authority)).unwrap();
         assert_eq!(report.child_result,ProcessResult::Exited(0));
         assert_eq!(report.byte_output,vec![65,0,255,66]);
         for source in [b"int main(){return write_bytes(65536,4);}".as_slice(),
             b"int main(){int b[2];return write_bytes(b,8);}".as_slice(),
             b"int main(){char b[2];return write_bytes(b,b);}".as_slice()] {
-            assert!(matches!(rebuild_protected_application(&producer,&bundle(source),Some(&authority)),
+            assert!(matches!(rebuild_protected_application(&producer,&bundle(source),Some(&authority),Some(&publication)),
                 Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
         }
         // Typed input shares this exact fixed-point producer; do not bootstrap
         // it again in a separate full-suite test just to exercise read_bytes.
         let input_source=include_bytes!("../../userspace/bin/typed_input_probe.c");
-        let mut input=rebuild_protected_application(&producer,&bundle(input_source),Some(&authority)).unwrap();
+        let mut input=rebuild_protected_application(&producer,&bundle(input_source),Some(&authority),Some(&publication)).unwrap();
         let input_authority=super::super::dev_runner::DeveloperInputAuthority::provision();
         assert!(matches!(input.run_with_input(Some(&authority),None,&[65,0,255,66,67]),
             Err(DevelopmentRunError::DeveloperInputAuthorityRequired)));
@@ -213,7 +263,7 @@ mod tests {
         for source in [b"int main(){return read_bytes(65536,4);}".as_slice(),
             b"int main(){int b[2];return read_bytes(b,8);}".as_slice(),
             b"int main(){char b[2];return read_bytes(b,b);}".as_slice()] {
-            assert!(matches!(rebuild_protected_application(&producer,&bundle(source),Some(&authority)),
+            assert!(matches!(rebuild_protected_application(&producer,&bundle(source),Some(&authority),Some(&publication)),
                 Err(RebuildError::Compile(DevelopmentCompileError::CompilerRejected(9)))));
         }
         let original_key = producer.cc2_1_key;
