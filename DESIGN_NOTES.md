@@ -7389,7 +7389,8 @@ after correcting that fixture's process-exit path, the expanded fixed-point
 acceptance passed in **249.49s** (1 passed, 1093 filtered out). All 1094 library
 tests have passing evidence across those runs. A new full-suite run on the
 corrected tree has not been reported. Work was performed on
-`feat/anka108-protected-modules`; this records acceptance, not a branch merge.
+`feat/anka108-protected-modules`; the developer subsequently confirmed its merge
+to `main` on 2026-10-17.
 
 ### Formal boundary and exact application identity
 
@@ -7645,3 +7646,188 @@ justify bypassing an authority check.
 The separate FPGA proposal has been absorbed into ARCHITECTURE.md and this note.
 The separate headless-web proposal is retired; the single-trust-anchor direction
 is stated briefly in ARCHITECTURE.md. Neither consolidation starts implementation.
+
+<a id="dn-71"></a>
+
+## DN-71 — Compiler resource growth without per-program capacity tuning (Phase 10.8)
+
+**Status: planned, 2026-10-17.** This is the next development slice after the
+protected-module checkpoint merged to `main`. No new Kleis gate, resource ABI
+or compiler implementation is claimed by this plan. Keep the plan here and
+the current status in ARCHITECTURE.md; do not create another standalone note.
+Suggested implementation branch: `feat/anka108-compiler-resources`.
+
+### Goal and completion boundary
+
+A developer should submit a valid program in the supported AC2 profile without
+predicting its output size or editing compiler capacity constants. The build
+path should size resources or grow and retry automatically within a declared
+build budget. Available memory, the supported language/calling convention and
+representable instruction/format ranges still determine what can run. Resource
+failure must identify the exhausted resource and budget without publishing a
+partial artifact or disturbing an earlier successful publication.
+
+This extends the toolchain's storage policy. It does not require general-purpose
+C `malloc`, a new pointer representation, a new optimizer or an IR/register
+allocator. It also does not reopen the completed Phase 10.6/10.7 milestones.
+The eventual closure client remains the source rebuild of the real service stack.
+
+### Inventory: output size is only one limit
+
+The following are observed current limits, not proposed permanent capacities:
+
+| Resource or boundary | Current implementation | Planned treatment |
+|---|---|---|
+| Effective source | 65528 bytes after preprocessing; 8-byte envelope header | Size the immutable source object from actual bytes; give preprocessing its own growth/result contract. Preserve checked padding for lexer word reads. |
+| Compiler image and output | Compiler image admission and each AOM are bounded by the 262144-byte policy | Admit the producer by its exact image and negotiated budget; separate executable-tool size from output reservation. Grow the private output region through the resource protocol. |
+| Workspace tables | CC2 has 64 function entries, 128 deferred-call entries and 32 local-name entries, among other fixed tables | Inventory every table and replace storage ceilings with explicit region bases, counts and capacities. Count prototypes as well as definitions where the current table does so. |
+| Protected locals and manifests | 1024-element local-array limit, 8192-byte local allocation bound and 4096 frame/local-record checks appear at different layers | Classify each limit as storage policy, language profile or encoding constraint. Change compiler, admission, runtime and theory together when widening a policy. |
+| Linked artifact and publication | Code plus merged metadata capped at 1 MiB; publication also checks a 1 MiB bound | Carry an explicit artifact budget through guest linking, exact-byte validation, publication and loader admission. Preserve per-transaction copy limits while allowing multiple chunks. |
+| Linker scratch | Currently derived as three times total input-container bytes | Retain checked input-based sizing or use a guest sizing result; charge the allocation against the same job budget. The host does not compute authoritative link semantics. |
+| Machine and runner | Fixed private Fabric/placement pools, virtual ceilings, stacks and execution-round budgets | Provision through PhysicalPlacementManager and VirtualLayoutBuilder; account for the complete live memory footprint and cumulative work across retries. |
+| Instruction/format representation | Finite immediates, branch/call displacements, indices, lengths and alignment rules | Keep checked encodability separate from memory policy. Never truncate a value to make a larger image fit an instruction. Any required far-call/branch or format extension gets its own formal refinement. |
+
+The first audit must also cover typedef/struct/field tables, parser work stacks,
+preprocessor members/include depth and cycles, fixup storage, string/literal
+packing, compiler stacks and protected runtime tables. Increasing the output
+constant alone would simply move the first failure to another fixed table.
+
+### Selected first design: explicit resource plan and fresh-attempt retry
+
+1. **Freeze the job.** Bind the exact immutable source bundle, root member,
+   preprocessing/compiler/linker lineage, target profile and ordered module
+   dependencies. Keep execution and publication authorities separate. Recheck
+   their current identities on every attempt; revocation or substitution aborts
+   the job instead of selecting a different tool or source.
+2. **Admit a resource budget.** Use one versioned, immutable job resource plan
+   with limits for source, tables/workspace, output, linked artifact, peak live
+   memory and cumulative execution/retry work. Charge page rounding, scratch,
+   staging copies, tool images, retained publications and metadata. A guest
+   capacity request is a request for resources, not authority to obtain them.
+3. **Describe the actual regions.** A new compiler-adapter ABI conveys exact
+   object/incarnation bindings, selected mappings, lengths, capacities and
+   region roles. Keep any fixed bootstrap control block small; growing tables
+   and buffers use region-relative offsets/indices. Do not silently reinterpret
+   revision-1 control words. Use the existing placement managers for both
+   physical allocation and nonoverlapping virtual layouts.
+4. **Return a typed outcome.** Distinguish `Success(exact_length)`,
+   `NeedCapacity(resource, minimum)`, ordinary source rejection,
+   representation/profile rejection, budget denial and execution failure.
+   `minimum` is a checked requirement for a blocked reservation, not a promise
+   about final output size. Validate it as untrusted protocol data. The present
+   generic compiler error 8 is insufficient to authorize an automatic retry.
+5. **Grow only on resource exhaustion.** Select a larger page-aligned capacity
+   using checked geometric growth and any valid minimum request, within the
+   admitted budget. Require strict progress and a finite retry/work allowance.
+   A syntax error, protection fault, timeout or malformed result is terminal.
+   Diagnose which resource needed more space and why the request was denied.
+6. **Restart cleanly.** Stop and drain the failed attempt; revoke its temporary
+   grants and reclaim/scrub its resources before reusing backing storage.
+   Restart from the frozen inputs in a fresh attempt with fresh identity and
+   workspace. Do not copy a partly constructed compiler arena into a larger
+   object and assume its embedded addresses remain valid. Previously published
+   artifacts and receipts survive unchanged; failed attempts consume no public
+   publication epoch.
+7. **Publish one complete result.** After normal completion and drain, validate
+   the exact packed AOM/linked image, transfer only its used bytes through
+   bounded Fabric reads, and publish a fresh sealed READ artifact with the
+   actual producer/dependency/resource-ABI binding. Scratch, padding and unused
+   capacity remain private. Execution still requires independent authority.
+
+Fresh-attempt retry is the first implementation strategy because it avoids
+relocating live compiler pointers. Accurate guest sizing passes or resumable
+growth can be considered later if measured retry cost warrants them. General
+application heap allocation is not a prerequisite.
+
+### Determinism and bootstrap obligations
+
+Two successful executions of the same frozen job under different sufficient
+storage capacities must produce the same canonical artifact bytes. Arena size,
+physical location, retry count, padding and private metadata addresses must not
+leak into the emitted AOM or final linked image. Receipts may have different
+object/attempt identities; byte equality does not mean receipt identity equality.
+Guest packing and relocation must establish this property, rather than host
+rewriting of compiler output.
+
+Preserve the established seed lineage and produce the new resource-aware CC2
+through guest tools. Keep legacy bootstrap entry points explicitly versioned
+until their callers migrate. Larger compiler source, image, function tables and
+metadata must themselves fit the bootstrap transition; do not use a host C
+compiler or change the frozen CC_A's language semantics to bypass that gate.
+Re-establish exact CC2_1 == CC2_2 after changes to the compiler or its artifact
+geometry. Capacity-independent output is a separate required witness from the
+ordinary same-capacity fixed-point check.
+
+### Kleis gates before implementation
+
+Start with a resource/lifecycle theory and its hostile counterpart, provisionally
+`anka108_compiler_resources.kleis` and
+`anka108_compiler_resources_false_witnesses.kleis`. These are proposed filenames,
+not files or passing results delivered with this plan. Then refine the concrete
+adapter and the affected preprocessing, rebuild, module and pointer-admission
+contracts. Existing constants remain the enforced contract until those
+refinements and their implementations are accepted together.
+
+The formal work must establish:
+
+- checked size arithmetic, alignment, count-times-stride and pairwise region
+  nonoverlap; a reservation either fits or returns a capacity outcome before
+  touching bytes outside its region;
+- exact immutable request/tool/profile binding, trusted owner/context identity
+  and non-amplifying resource grants across every attempt;
+- monotone progress, bounded retries and cumulative work, including hostile
+  hints that understate, overstate, wrap or repeatedly change a requirement;
+- stop/drain/revoke/reclaim ordering, stale-generation rejection and isolation
+  of partial outputs from the publication namespace;
+- budget accounting for peak simultaneous storage, not just the final output;
+  allocation failure leaves earlier artifacts/receipts intact and permits a
+  later separately authorized retry;
+- guest-authoritative compilation/linking, exact used-prefix transfer and
+  atomic publication, including rejection of forged success or changed controls;
+- correspondence between variable-capacity region/table operations and the
+  existing compiler ABI, protected frame, call and artifact invariants;
+- capacity-independent canonicalization and deterministic retry composition,
+  with explicit compiler/serializer assumptions identified rather than treated
+  as a proof of complete C semantics.
+
+Imported contracts needing review include
+`anka106_compiler_virtual_layout.kleis`, `anka108_compiler_adapter.kleis`,
+`anka108_rebuild_artifact.kleis`, `anka108_protected_modules.kleis`, and the
+source-bundle/preprocessing and protected-pointer frame/artifact theories.
+Run changed gates and their affected dependents; unchanged independent theories
+need not be rerun for every piece. A Kleis/stdlib change invalidates that
+assumption and requires rechecking the affected proof environment.
+
+### Bounded implementation handoffs
+
+Each row is a separately reviewable handoff with its relevant formal gate
+accepted before executable changes. Preserve a working legacy path throughout.
+
+| Piece | Concrete deliverable | Acceptance evidence |
+|---|---|---|
+| 1 — contract and ABI | Finish the limit inventory; prove budget, outcome, region-layout and retry lifecycle laws; specify the adapter ABI revision and diagnostics | Positive and hostile Kleis gates; every current hard limit classified, with no claim of executable growth yet |
+| 2 — output growth | Implement validated resource plans, typed output-exhaustion status and fresh-attempt retries for the CC2 adapter; update validators/receipts and producer-image admission consistently | The same valid C input fails a deliberately small initial arena, retries automatically and emits an AOM larger than 256 KiB; two adequate capacities yield identical bytes; budget denial preserves prior publications |
+| 3 — source and workspace | Add preprocessing/source growth and replace fixed compiler tables with described regions; eliminate hard-coded table-address assumptions | Meaningful source beyond 65528 bytes, more than 64 function entries, more than 128 deferred calls and more than 32 local names compile where permitted by the target profile; boundary failures remain explicit |
+| 4 — link and admission | Extend the budget contract through guest ankald, publication, closed-image validation and ordinary loading; parameterize policy-only frame/metadata bounds | Modules link and execute beyond the old 1 MiB cap within encoding and memory bounds; rebased frames/calls, metadata, stale authority and denial/retry are checked; widened frame limits have witnesses beyond their old bounds |
+| 5 — self-hosted closure | Connect the resource-aware path to the rebuild driver/development entry point and use it on real service code | Exact CC2 generation fixed point, automatic growth, matching direct-vs-retried artifacts, protected-module execution, and the affected regression suite; document the remaining genuine language/encoding limits |
+
+For larger local arrays/frames, stacks or parser nesting, piece 3 first identifies
+the limiting contract and piece 4 widens admission/runtime policy only where its
+formal refinement permits it. If instruction or calling-convention changes are
+needed, split out that refinement rather than hiding it inside arena growth.
+No piece is accepted merely because a constant was raised.
+
+### Validation cost and immediate next action
+
+Use small forced-capacity witnesses for most success, retry, denial, overflow
+and stale-attempt paths. Retain concrete witnesses beyond the old source,
+output, table and linked-image boundaries so reduced test budgets cannot hide a
+production limit. Reuse producer images within an acceptance run when lineage
+checks permit it. The developer runs the long fixed-point and single-threaded
+regression tests locally; reserve a complete suite for the coherent integration
+checkpoint or a specific cross-cutting risk, rather than every small handoff.
+
+**Next action:** start piece 1 on `feat/anka108-compiler-resources`: formalize
+the resource plan, typed capacity result, fresh-attempt lifecycle and concrete
+adapter ABI. Stop that handoff at the passing Kleis gate and a documented ABI;
+implementation begins with piece 2 after that evidence is available.

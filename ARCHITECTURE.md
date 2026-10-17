@@ -1591,6 +1591,7 @@ test totals in historical milestone sections describe those earlier checkpoints.
 | Regression evidence | 1093 passed in the full run; the one failed probe was corrected and its acceptance rerun passed in 249.49s; no fresh all-green full run claimed |
 | Protected modules | Two C units, four frames, 3336 code + 2048 metadata bytes; receipt-bound execution and hostile lifetime/bounds checks accepted (DN-69) |
 | Module formal gate | 217 positive / 168 explicitly disproved hostile witnesses |
+| Compiler resource growth | Planned in DN-71; current source, output, workspace and linked-image caps remain enforced |
 | Protected application ABI | Metadata-bearing pointers, checked arithmetic, local-frame lifetimes, protected calls/spills and event-context save/restore |
 | Typed I/O | Exact protected-buffer output and process-owned immutable input |
 | Toolchain artifacts | Guest preprocessing, AOM emission, static linking, separate admission/publication/execution authority and ordered dependency receipts |
@@ -3541,6 +3542,8 @@ client and an adversarial gate before the next one depends on it:
       - all 1094 library tests have passing evidence across those runs; no fresh full run
       - 2 modules / 4 frames / 3336 code + 2048 metadata bytes; exact output and exit 0
       - escaped-local and one-past cases both reject with ProtectionFault and no output
+      - NEXT: automatic compiler resource sizing/growth within explicit build budgets (DN-71)
+      - formal-first adapter/lifecycle refinement, then output, source/workspace and link growth
       - compiler/toolchain modularization, headers, modules, and libraries
       - persistent tool/source receipts and rebuilt socket/HTTP services
 10.9  supply-chain closure, hostile audit, and CPU-to-HTTP rebuild gate
@@ -3554,6 +3557,16 @@ on 2026-10-15. Broader I/O and service rebuilds remain future milestones, not
 outstanding requirements for the completed protected local application checkpoint. The final Phase 10 acceptance conditions remain unchanged: rebuilding
 the exact socket/HTTP artifacts and producing the alive response are still
 required before Phase 10 as a whole closes.
+
+The next planned slice is [DN-71: compiler resource growth](DESIGN_NOTES.md#dn-71).
+Its goal is compilation without per-program tuning of fixed buffer/table sizes,
+using automatic sizing or fresh-attempt retries within an explicit build budget.
+The plan covers preprocessing/source, compiler tables and output, producer-image
+admission, linker storage, publication and loader checks. Real ISA/ABI bounds
+remain explicit. This is planned work: the present 65528-byte effective-source,
+256 KiB compiler-output and 1 MiB protected-linked-image policies still apply.
+Begin with the Kleis resource/lifecycle and concrete adapter ABI refinements;
+the implementation follows in bounded pieces.
 
 #### Phase 10.0 closure: AC2, bootstrap, and AOM/link contracts
 
