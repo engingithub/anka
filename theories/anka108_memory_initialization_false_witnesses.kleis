@@ -1,0 +1,290 @@
+// Intentionally false claims. Require explicit Z3 disproof for every example.
+import "anka108_memory_initialization.kleis"
+
+example "HOSTILE init108_begin rejects live old lifetime" {
+    assert(init108_begin(bvconst(2,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_begin rejects closing before retirement" {
+    assert(init108_begin(bvconst(2,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_begin rejects pending CPU write" {
+    assert(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(1,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_begin rejects pending DMA write" {
+    assert(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(1,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_begin rejects same lifetime generation" {
+    assert(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(8,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_begin rejects wrapped generation" {
+    assert(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvsub(ptr107_max(),bvconst(0,64)),bvconst(0,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_begin rejects published reservation" {
+    assert(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_begin rejects old alternate authority" {
+    assert(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_begin rejects timer instead of terminal visibility" {
+    assert(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_begin rejects unserialized scrub admission" {
+    assert(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "HOSTILE init108_begin rejects unknown memory class" {
+    assert(init108_begin(bvconst(0,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_begin rejects unaligned physical span" {
+    assert(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8193,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_begin rejects partial storage granule" {
+    assert(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(17,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_begin rejects wrapped storage end" {
+    assert(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvsub(ptr107_max(),bvconst(15,64)),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_chunk rejects before initialization begins" {
+    assert(init108_chunk(bvconst(0,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_chunk rejects after publication" {
+    assert(init108_chunk(bvconst(2,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_chunk rejects empty pretend progress" {
+    assert(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_chunk rejects skip to interior byte" {
+    assert(init108_chunk(bvconst(1,8),bvconst(1,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_chunk rejects partial storage granule" {
+    assert(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(15,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_chunk rejects overrun rounded backing" {
+    assert(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(48,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_chunk rejects cursor past end" {
+    assert(init108_chunk(bvconst(1,8),bvconst(48,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_chunk rejects counter wrap" {
+    assert(init108_chunk(bvconst(1,8),bvconst(0,64),bvsub(ptr107_max(),bvconst(15,64)),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_chunk rejects stale version" {
+    assert(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(4,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_chunk rejects exhausted version" {
+    assert(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvsub(ptr107_max(),bvconst(0,64)),bvsub(ptr107_max(),bvconst(0,64)),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_chunk rejects lost reservation" {
+    assert(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_chunk rejects unserialized progress" {
+    assert(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(0,8)))
+}
+
+example "HOSTILE init108_binding rejects different clean reservation" {
+    assert(init108_binding(bvconst(50,64),bvconst(51,64),bvconst(12,64),bvconst(12,64),bvconst(9,64),bvconst(9,64),bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(32,64),bvconst(32,64)))
+}
+
+example "HOSTILE init108_binding rejects different object at same address" {
+    assert(init108_binding(bvconst(50,64),bvconst(50,64),bvconst(12,64),bvconst(13,64),bvconst(9,64),bvconst(9,64),bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(32,64),bvconst(32,64)))
+}
+
+example "HOSTILE init108_binding rejects previous allocation receipt" {
+    assert(init108_binding(bvconst(50,64),bvconst(50,64),bvconst(12,64),bvconst(12,64),bvconst(9,64),bvconst(8,64),bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(32,64),bvconst(32,64)))
+}
+
+example "HOSTILE init108_binding rejects wrong client incarnation" {
+    assert(init108_binding(bvconst(50,64),bvconst(50,64),bvconst(12,64),bvconst(12,64),bvconst(9,64),bvconst(9,64),bvconst(101,64),bvconst(102,64),bvconst(8192,64),bvconst(8192,64),bvconst(32,64),bvconst(32,64)))
+}
+
+example "HOSTILE init108_binding rejects different physical backing" {
+    assert(init108_binding(bvconst(50,64),bvconst(50,64),bvconst(12,64),bvconst(12,64),bvconst(9,64),bvconst(9,64),bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(12288,64),bvconst(32,64),bvconst(32,64)))
+}
+
+example "HOSTILE init108_binding rejects short scrub receipt" {
+    assert(init108_binding(bvconst(50,64),bvconst(50,64),bvconst(12,64),bvconst(12,64),bvconst(9,64),bvconst(9,64),bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(32,64),bvconst(16,64)))
+}
+
+example "HOSTILE init108_binding rejects reserved identity" {
+    assert(init108_binding(bvconst(0,64),bvconst(0,64),bvconst(12,64),bvconst(12,64),bvconst(9,64),bvconst(9,64),bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(32,64),bvconst(32,64)))
+}
+
+example "HOSTILE init108_publish rejects different receipt binding" {
+    assert(init108_publish((bvconst(0,8)=bvconst(1,8)),bvconst(1,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_publish rejects dirty phase" {
+    assert(init108_publish(init108_trace_binding(),bvconst(0,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_publish rejects already published allocation" {
+    assert(init108_publish(init108_trace_binding(),bvconst(2,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_publish rejects partial prefix" {
+    assert(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(16,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_publish rejects only logical bytes scrubbed" {
+    assert(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(17,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_publish rejects oversized cursor" {
+    assert(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(48,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_publish rejects stale completion stamp" {
+    assert(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(6,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_publish rejects lost reservation" {
+    assert(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_publish rejects early reader already admitted" {
+    assert(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_publish rejects late writer still admitted" {
+    assert(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_publish rejects bytes or pointer tags not visible" {
+    assert(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_publish rejects unserialized grant publication" {
+    assert(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(0,8)))
+}
+
+example "HOSTILE init108_mutation rejects untrusted writer" {
+    assert(init108_mutation(bvconst(1,8),bvconst(7,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_mutation rejects counter wrap" {
+    assert(init108_mutation(bvconst(1,8),bvsub(ptr107_max(),bvconst(0,64)),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_mutation rejects unserialized invalidation" {
+    assert(init108_mutation(bvconst(1,8),bvconst(7,64),bvconst(1,8),bvconst(0,8)))
+}
+
+example "HOSTILE init108_new_read rejects read during scrub" {
+    assert(init108_new_read(bvconst(1,8),bvconst(17,64),bvconst(32,64),bvconst(0,64),bvconst(1,64),bvconst(1,8)))
+}
+
+example "HOSTILE init108_new_read rejects read before scrub" {
+    assert(init108_new_read(bvconst(0,8),bvconst(17,64),bvconst(32,64),bvconst(0,64),bvconst(1,64),bvconst(1,8)))
+}
+
+example "HOSTILE init108_new_read rejects read rounded padding" {
+    assert(init108_new_read(bvconst(2,8),bvconst(17,64),bvconst(32,64),bvconst(17,64),bvconst(1,64),bvconst(1,8)))
+}
+
+example "HOSTILE init108_new_read rejects straddling logical end" {
+    assert(init108_new_read(bvconst(2,8),bvconst(17,64),bvconst(32,64),bvconst(16,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "HOSTILE init108_new_read rejects invalid authority" {
+    assert(init108_new_read(bvconst(2,8),bvconst(17,64),bvconst(32,64),bvconst(0,64),bvconst(1,64),bvconst(0,8)))
+}
+
+example "HOSTILE init108_new_read rejects oversized logical allocation" {
+    assert(init108_new_read(bvconst(2,8),bvconst(33,64),bvconst(32,64),bvconst(0,64),bvconst(1,64),bvconst(1,8)))
+}
+
+example "HOSTILE init108_new_read rejects overflowing width" {
+    assert(init108_new_read(bvconst(2,8),bvconst(17,64),bvconst(32,64),bvconst(0,64),bvsub(ptr107_max(),bvconst(0,64)),bvconst(1,8)))
+}
+
+example "HOSTILE init108_write rejects old DMA or CPU epoch" {
+    assert(init108_write(bvconst(2,8),bvconst(8,64),bvconst(9,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_write rejects writer during scrub" {
+    assert(init108_write(bvconst(1,8),bvconst(9,64),bvconst(9,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_write rejects writer before scrub" {
+    assert(init108_write(bvconst(0,8),bvconst(9,64),bvconst(9,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_write rejects duplicate completion" {
+    assert(init108_write(bvconst(2,8),bvconst(9,64),bvconst(9,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE init108_write rejects revoked grant" {
+    assert(init108_write(bvconst(2,8),bvconst(9,64),bvconst(9,64),bvconst(1,8),bvconst(0,8)))
+}
+
+example "HOSTILE init108_heap_gate rejects uninitialized memory" {
+    assert(init108_heap_gate((bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(17,64),bvconst(4096,64),bvconst(4096,64)))
+}
+
+example "HOSTILE init108_heap_gate rejects unprepared allocation" {
+    assert(init108_heap_gate((bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),bvconst(17,64),bvconst(4096,64),bvconst(4096,64)))
+}
+
+example "HOSTILE init108_heap_gate rejects scrub only logical bytes" {
+    assert(init108_heap_gate((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(17,64),bvconst(4096,64),bvconst(17,64)))
+}
+
+example "HOSTILE init108_heap_gate rejects different rounded backing" {
+    assert(init108_heap_gate((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(17,64),bvconst(4096,64),bvconst(8192,64)))
+}
+
+example "HOSTILE new valid pointer cannot recover old secret" {
+    assert(init108_trace_byte(bvconst(165,8),bvconst(0,64))=bvconst(165,8))
+}
+
+example "HOSTILE new storage cannot inherit old pointer kind" {
+    assert(init108_trace_tag(bvconst(1,8),bvconst(8192,64))=bvconst(1,8))
+}
+
+example "HOSTILE partial scrub cannot become observable" {
+    assert(init108_publish(init108_trace_binding(),bvconst(1,8),init108_trace_done1(),bvconst(32,64),init108_trace_version1(),bvconst(6,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE failed scrub cannot forge completion" {
+    assert(init108_publish(init108_trace_binding(),bvconst(1,8),init108_done(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(4,64),bvconst(1,8),bvconst(1,8)),bvconst(0,64),bvconst(32,64)),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE intervening write rejects old receipt" {
+    assert(init108_publish(init108_trace_binding(),bvconst(1,8),init108_dirty_done(init108_mutation(bvconst(1,8),bvconst(7,64),bvconst(1,8),bvconst(1,8)),bvconst(32,64)),bvconst(32,64),init108_version(init108_mutation(bvconst(1,8),bvconst(7,64),bvconst(1,8),bvconst(1,8)),bvconst(7,64)),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE restoring cursor alone cannot restore stale receipt" {
+    assert(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(32,64),bvconst(32,64),init108_version(init108_mutation(bvconst(1,8),bvconst(7,64),bvconst(1,8),bvconst(1,8)),bvconst(7,64)),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE late completion cannot contaminate new allocation" {
+    assert(init108_write_byte(init108_write(init108_trace_live(),bvconst(8,64),bvconst(9,64),bvconst(1,8),bvconst(1,8)),bvconst(165,8),init108_trace_byte(bvconst(165,8),bvconst(0,64)))=bvconst(165,8))
+}
+
+example "HOSTILE unapproved initializer does not restore old payload" {
+    assert(init108_overlay((bvconst(0,8)=bvconst(1,8)),bvconst(4,64),bvconst(0,64),bvconst(165,8),init108_trace_byte(bvconst(165,8),bvconst(0,64)))=bvconst(165,8))
+}

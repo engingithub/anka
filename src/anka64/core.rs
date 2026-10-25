@@ -15,6 +15,8 @@ use super::fabric::Fabric;
 use super::isa::*;
 use super::state::*;
 use std::sync::atomic::{AtomicU64, Ordering};
+mod heap;
+pub(crate) use heap::HeapEventPermit;
 
 // Trusted execution-context identities are independent of physical CPU agents.
 // Exhaustion fails closed without wrapping or changing the counter.
@@ -43,6 +45,8 @@ struct EventRegisterImage {
 /// Not user memory, and not reconstructible from the public control header.
 #[derive(Debug, Clone)]
 struct SavedEventContext {
+    event_id: u64,
+    result_consumed: bool,
     header: EventFrame,
     context_id: u64,
     domain: DomainId,
@@ -70,6 +74,11 @@ pub struct AddressMap {
 
 impl AddressMap {
     pub fn new() -> Self { Self { entries: Vec::new() } }
+
+    /// Retirement inspects every retained entry, even empty/malformed ranges.
+    pub(crate) fn references_object(&self, object: ObjectId) -> bool {
+        self.entries.iter().any(|entry| entry.object == object)
+    }
 
     pub fn add(&mut self, virt_base: u64, size: u64, object: ObjectId) {
         self.entries.push(AddressMapEntry { virt_base, size, object, obj_offset: 0 });
@@ -211,6 +220,8 @@ pub enum InterruptTurn {
 
 #[derive(Debug, Clone)]
 pub struct Anka64Core {
+    heap_owner: Option<super::scoped_pointers::heap::AllocationOwner>,
+    next_event_id: u64,
     context_id: u64,
     protected_context_enabled: bool,
     saved_event_contexts: Vec<SavedEventContext>,
@@ -289,7 +300,7 @@ pub struct Anka64Core {
 #[derive(Debug)]
 pub(crate) enum PointerMachineError {
     InvalidPair, MissingKind, Unmapped, Unaligned,
-    Frame(super::pointer_frames::FrameError), ContextMode, Pointer(super::scoped_pointers::PointerError), Fabric(FaultRecord),
+    Frame(super::pointer_frames::FrameError), ContextMode, Pointer(super::scoped_pointers::PointerError), Heap(super::scoped_pointers::heap::HeapError), Fabric(FaultRecord),
 }
 
 impl Anka64Core {
@@ -336,6 +347,11 @@ impl Anka64Core {
     pub(crate) fn syscall_read_span(&self, fabric: &Fabric,
         pointer: super::scoped_pointers::ScopedPointer, length: u64)
         -> Result<(ObjectId, u64), PointerMachineError> {
+        if fabric.scoped_pointers.is_heap_pointer(pointer) {
+            let owner=self.heap_owner().map_err(PointerMachineError::Heap)?;
+            fabric.check_heap_application_span(owner,self.agent,pointer,length).map_err(PointerMachineError::Heap)?;
+            return Ok((fabric.heap_object_for_pointer(owner,self.agent,pointer).map_err(PointerMachineError::Heap)?,pointer.words()[1]));
+        }
         let address = fabric.scoped_pointers.read_span(pointer, self.domain.0,
             self.context_id, length).map_err(PointerMachineError::Pointer)?;
         let backing = fabric.scoped_pointer_backing(pointer, self.domain)?;
@@ -354,6 +370,11 @@ impl Anka64Core {
     pub(crate) fn syscall_write_span(&self, fabric: &Fabric,
         pointer: super::scoped_pointers::ScopedPointer, length: u64)
         -> Result<(ObjectId, u64), PointerMachineError> {
+        if fabric.scoped_pointers.is_heap_pointer(pointer) {
+            let owner=self.heap_owner().map_err(PointerMachineError::Heap)?;
+            fabric.check_heap_application_span(owner,self.agent,pointer,length).map_err(PointerMachineError::Heap)?;
+            return Ok((fabric.heap_object_for_pointer(owner,self.agent,pointer).map_err(PointerMachineError::Heap)?,pointer.words()[1]));
+        }
         let address = fabric.scoped_pointers.write_span(pointer, self.domain.0,
             self.context_id, length).map_err(PointerMachineError::Pointer)?;
         let backing = fabric.scoped_pointer_backing(pointer, self.domain)?;
@@ -373,7 +394,7 @@ impl Anka64Core {
         if register > 12 || self.privilege != Privilege::Supervisor { return; }
         if let Some(saved) = self.saved_event_contexts.last_mut() {
             if saved.context_id == self.context_id && saved.domain == self.domain
-                && saved.header.cause == EventCause::Syscall && saved.image.is_some() {
+                && saved.header.cause == EventCause::Syscall && saved.image.is_some() && !saved.result_consumed {
                 saved.scalar_results[register] = Some(value);
             }
         }
@@ -386,7 +407,9 @@ impl Anka64Core {
                 flags: self.flags, return_stack: std::mem::take(&mut self.return_stack),
                 halted: self.halted, frames: self.pointer_frames.take() })
         } else { None };
-        self.saved_event_contexts.push(SavedEventContext { header: header.clone(),
+        let event_id = self.next_event_id;
+        self.next_event_id = if event_id == 0 { 0 } else { event_id.checked_add(1).unwrap_or(0) };
+        self.saved_event_contexts.push(SavedEventContext { event_id, result_consumed: false, header: header.clone(),
             context_id: self.context_id, domain: self.domain, image,
             scalar_results: [None; 13] });
         self.event_frames.push(header);
@@ -545,7 +568,7 @@ impl Anka64Core {
     fn authenticated_pointer(&self, fabric: &Fabric, start: u8) -> Result<Option<super::scoped_pointers::ScopedPointer>, PointerMachineError> {
         let pointer = self.captured_pointer(start)?;
         if let Some(pointer) = pointer {
-            fabric.scoped_pointer_backing(pointer, self.domain)?;
+            self.check_application_pointer(fabric, pointer)?;
         }
         Ok(pointer)
     }
@@ -559,7 +582,7 @@ impl Anka64Core {
     pub(crate) fn pointer_add(&mut self, fabric: &Fabric, dst: u8, src: u8, delta: i64) -> Result<(), PointerMachineError> {
         Self::pointer_pair_index(dst)?;
         let pointer = self.authenticated_pointer(fabric, src)?.ok_or(PointerMachineError::MissingKind)?;
-        let pointer = fabric.scoped_pointers.add(pointer, self.domain.0, delta).map_err(PointerMachineError::Pointer)?;
+        let pointer = self.add_application_pointer(fabric, pointer, delta)?;
         self.install_pointer(dst, Some(pointer))
     }
 
@@ -589,7 +612,9 @@ impl Anka64Core {
     pub(crate) fn pointer_store(&self, fabric: &mut Fabric, src: u8, address: u64) -> Result<(), PointerMachineError> {
         let captured = self.authenticated_pointer(fabric, src)?;
         let request = self.pointer_cell_request(address, AccessKind::Write)?;
-        fabric.store_pointer_cell(request, captured).map_err(PointerMachineError::Fabric)
+        if let Some(pointer) = captured.filter(|p| fabric.scoped_pointers.is_heap_pointer(*p)) {
+            fabric.store_heap_token_in_local(request, self.heap_owner().map_err(PointerMachineError::Heap)?, pointer).map_err(PointerMachineError::Fabric)
+        } else { fabric.store_pointer_cell(request, captured).map_err(PointerMachineError::Fabric) }
     }
 
     pub(crate) fn pointer_load(&mut self, fabric: &mut Fabric, dst: u8, address: u64) -> Result<(), PointerMachineError> {
@@ -597,13 +622,18 @@ impl Anka64Core {
         let request = self.pointer_cell_request(address, AccessKind::Read)?;
         let pointer = fabric.load_pointer_cell(request).map_err(PointerMachineError::Fabric)?;
         if let Some(pointer) = pointer {
-            fabric.scoped_pointer_backing(pointer, self.domain)?;
+            self.check_application_pointer(fabric, pointer)?;
         }
         self.install_pointer(dst, pointer)
     }
 
     pub(crate) fn pointer_read(&mut self, fabric: &mut Fabric, start: u8, width: Width) -> Result<Vec<u8>, PointerMachineError> {
         let pointer = self.authenticated_pointer(fabric, start)?.ok_or(PointerMachineError::MissingKind)?;
+        if fabric.scoped_pointers.is_heap_pointer(pointer) {
+            let mut bytes=vec![0; width.bytes() as usize];
+            fabric.read_heap_bytes(self.heap_owner().map_err(PointerMachineError::Heap)?,self.agent,pointer,&mut bytes).map_err(PointerMachineError::Heap)?;
+            return Ok(bytes);
+        }
         let address = fabric.scoped_pointers.resolve(pointer, self.domain.0, width.bytes(), false).map_err(PointerMachineError::Pointer)?;
         let (object, offset) = self.checked_pointer_mapping(address, width.bytes())?;
         if fabric.scoped_pointer_backing(pointer, self.domain)? != (object, offset) { return Err(PointerMachineError::Unmapped); }
@@ -613,6 +643,10 @@ impl Anka64Core {
 
     pub(crate) fn pointer_write(&self, fabric: &mut Fabric, start: u8, width: Width, data: Vec<u8>) -> Result<(), PointerMachineError> {
         let pointer = self.authenticated_pointer(fabric, start)?.ok_or(PointerMachineError::MissingKind)?;
+        if fabric.scoped_pointers.is_heap_pointer(pointer) {
+            if data.len() as u64 != width.bytes() { return Err(PointerMachineError::MissingKind); }
+            return fabric.write_heap_bytes(self.heap_owner().map_err(PointerMachineError::Heap)?,self.agent,pointer,&data).map_err(PointerMachineError::Heap);
+        }
         let address = fabric.scoped_pointers.resolve(pointer, self.domain.0, width.bytes(), true).map_err(PointerMachineError::Pointer)?;
         let (object, offset) = self.checked_pointer_mapping(address, width.bytes())?;
         if fabric.scoped_pointer_backing(pointer, self.domain)? != (object, offset) { return Err(PointerMachineError::Unmapped); }
@@ -622,6 +656,8 @@ impl Anka64Core {
 
     pub fn new(agent: AgentId, domain: DomainId) -> Self {
         Self {
+            heap_owner: None,
+            next_event_id: 1,
             r: [0; 16],
             context_id: fresh_context_id(),
             protected_context_enabled: false,
@@ -837,8 +873,8 @@ impl Anka64Core {
                     match insn.desc.semantics {
                         Sem::PointerMove=>self.pointer_move(fabric,insn.rd,insn.rs1),
                         Sem::PointerAdd=>self.pointer_add(fabric,insn.rd,insn.rs1,self.r[insn.rs2 as usize] as i64),
-                        Sem::PointerLoad=> { let address=self.pointer_address(fabric,insn.rs1,insn.imm,false)?;self.pointer_load(fabric,insn.rd,address) },
-                        Sem::PointerStore=> { let address=self.pointer_address(fabric,insn.rs1,insn.imm,true)?;self.pointer_store(fabric,insn.rd,address) },
+                        Sem::PointerLoad=>self.pointer_load_indirect(fabric,insn.rd,insn.rs1,insn.imm),
+                        Sem::PointerStore=>self.pointer_store_indirect(fabric,insn.rd,insn.rs1,insn.imm),
                         Sem::PointerRead=> {
                             let width=match insn.raw&3 {0=>Width::Byte,1=>Width::Half,2=>Width::Word,_=>Width::Double};
                             let bytes=self.pointer_read(fabric,insn.rs1,width)?;

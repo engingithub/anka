@@ -1,0 +1,246 @@
+// Concrete synchronous guest malloc/free integration. Formal-first refinement.
+// Kernel owns process identity and event consumption; Fabric owns publication.
+// Heap accesses use the private row, never numeric address-map fallback.
+// Cleanup has bounded scheduler quanta; no device/cache/SMP progress claim.
+import "anka108_allocation_abi.kleis"
+import "anka108_cleanup_reuse.kleis"
+
+define mf108_event(current : Bool, event : BitVec64, expected : BitVec64,
+    consumed : Bool, scalar_overlay : Bool, owner : Bool, locked : Bool) =
+    current ∧ bvugt(event,bvconst(0,64)) ∧ (event=expected) ∧
+    ¬consumed ∧ ¬scalar_overlay ∧ owner ∧ locked
+
+define mf108_publish(event : Bool, initialized : Bool, actual_custody : Bool,
+    lifecycle_ready : Bool, raw_maps_absent : Bool, current_owner : Bool,
+    current_revision : Bool, quiet : Bool) =
+    event ∧ initialized ∧ actual_custody ∧ lifecycle_ready ∧ raw_maps_absent ∧
+    current_owner ∧ current_revision ∧ quiet
+
+define mf108_access(kind : Bool, current_row : Bool, owner : Bool,
+    cpu : Bool, live : Bool, position : BitVec64, size : BitVec64, length : BitVec64) =
+    kind ∧ current_row ∧ owner ∧ cpu ∧ live ∧ bvule(position,size) ∧
+    bvule(length,bvsub(size,position))
+
+define mf108_reply_free(event : Bool, null : Bool, exact : Bool,
+    closing : Bool, retired : Bool) = event ∧ (null ∨ (exact ∧ closing ∧ retired))
+define mf108_consumed(commit : Bool, old : Bool) = if commit then (bvconst(1,8)=bvconst(1,8)) else old
+// Compiler constant-zero conversion and object-pointer conversions cannot
+// manufacture nonnull provenance. Ordinary scalar expressions are not literals.
+define mf108_conversion(pointer_types : Bool, words_preserved : Bool,
+    kind_preserved : Bool, literal_zero : Bool, scalar : BitVec64,
+    h : BitVec64, p : BitVec64, tag : BitVec8) =
+    (pointer_types ∧ words_preserved ∧ kind_preserved) ∨
+    (literal_zero ∧ (scalar=bvconst(0,64)) ∧ ha108_null(h,p,tag))
+// A pointwise death fence changes every selected record under the same lock;
+// other owners and their pending operations retain their state and charges.
+define mf108_dead_phase(dead : Bool, owner : BitVec64, query : BitVec64, old : BitVec8) =
+    if dead ∧ (owner=query) ∧ ((old=bvconst(0,8)) ∨ (old=bvconst(1,8))) then bvconst(2,8) else old
+
+example "event accepts" {
+    assert(mf108_event(ut108_true(),bvconst(7,64),bvconst(7,64),ut108_false(),ut108_false(),ut108_true(),ut108_true()))
+}
+
+example "event rejects bad image" {
+    assert(¬(mf108_event(ut108_false(),bvconst(7,64),bvconst(7,64),ut108_false(),ut108_false(),ut108_true(),ut108_true())))
+}
+
+example "event rejects zero identity" {
+    assert(¬(mf108_event(ut108_true(),bvconst(0,64),bvconst(7,64),ut108_false(),ut108_false(),ut108_true(),ut108_true())))
+}
+
+example "event rejects old event" {
+    assert(¬(mf108_event(ut108_true(),bvconst(7,64),bvconst(6,64),ut108_false(),ut108_false(),ut108_true(),ut108_true())))
+}
+
+example "event rejects replay" {
+    assert(¬(mf108_event(ut108_true(),bvconst(7,64),bvconst(7,64),ut108_true(),ut108_false(),ut108_true(),ut108_true())))
+}
+
+example "event rejects scalar overlay" {
+    assert(¬(mf108_event(ut108_true(),bvconst(7,64),bvconst(7,64),ut108_false(),ut108_true(),ut108_true(),ut108_true())))
+}
+
+example "event rejects wrong process incarnation" {
+    assert(¬(mf108_event(ut108_true(),bvconst(7,64),bvconst(7,64),ut108_false(),ut108_false(),ut108_false(),ut108_true())))
+}
+
+example "event rejects unserialized" {
+    assert(¬(mf108_event(ut108_true(),bvconst(7,64),bvconst(7,64),ut108_false(),ut108_false(),ut108_true(),ut108_false())))
+}
+
+example "publication accepts" {
+    assert(mf108_publish(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true()))
+}
+
+example "publication rejects unready result" {
+    assert(¬(mf108_publish(ut108_false(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true())))
+}
+
+example "publication rejects partial initialization" {
+    assert(¬(mf108_publish(ut108_true(),ut108_false(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true())))
+}
+
+example "publication rejects lost custody" {
+    assert(¬(mf108_publish(ut108_true(),ut108_true(),ut108_false(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true())))
+}
+
+example "publication rejects missing cleanup service" {
+    assert(¬(mf108_publish(ut108_true(),ut108_true(),ut108_true(),ut108_false(),ut108_true(),ut108_true(),ut108_true(),ut108_true())))
+}
+
+example "publication rejects raw alias" {
+    assert(¬(mf108_publish(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_false(),ut108_true(),ut108_true(),ut108_true())))
+}
+
+example "publication rejects foreign owner" {
+    assert(¬(mf108_publish(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_false(),ut108_true(),ut108_true())))
+}
+
+example "publication rejects stale revision" {
+    assert(¬(mf108_publish(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_false(),ut108_true())))
+}
+
+example "publication rejects pending work" {
+    assert(¬(mf108_publish(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_false())))
+}
+
+example "heap access accepts" {
+    assert(mf108_access(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),bvconst(8,64),bvconst(32,64),bvconst(16,64)))
+}
+
+example "heap access rejects numeric forgery" {
+    assert(¬(mf108_access(ut108_false(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),bvconst(8,64),bvconst(32,64),bvconst(16,64))))
+}
+
+example "heap access rejects stale record" {
+    assert(¬(mf108_access(ut108_true(),ut108_false(),ut108_true(),ut108_true(),ut108_true(),bvconst(8,64),bvconst(32,64),bvconst(16,64))))
+}
+
+example "heap access rejects same domain different context" {
+    assert(¬(mf108_access(ut108_true(),ut108_true(),ut108_false(),ut108_true(),ut108_true(),bvconst(8,64),bvconst(32,64),bvconst(16,64))))
+}
+
+example "heap access rejects device path" {
+    assert(¬(mf108_access(ut108_true(),ut108_true(),ut108_true(),ut108_false(),ut108_true(),bvconst(8,64),bvconst(32,64),bvconst(16,64))))
+}
+
+example "heap access rejects freed lifetime" {
+    assert(¬(mf108_access(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_false(),bvconst(8,64),bvconst(32,64),bvconst(16,64))))
+}
+
+example "heap access rejects one past read" {
+    assert(¬(mf108_access(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),bvconst(32,64),bvconst(32,64),bvconst(16,64))))
+}
+
+example "heap access rejects past end" {
+    assert(¬(mf108_access(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),bvconst(33,64),bvconst(32,64),bvconst(16,64))))
+}
+
+example "heap access rejects overflow span" {
+    assert(¬(mf108_access(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),bvconst(8,64),bvconst(32,64),ptr107_max())))
+}
+
+example "zero-width one-past validates" {
+    assert(mf108_access(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),bvconst(32,64),bvconst(32,64),bvconst(0,64)))
+}
+
+example "free null succeeds" {
+    assert(mf108_reply_free(ut108_true(),ut108_true(),ut108_false(),ut108_false(),ut108_false()))
+}
+
+example "free accepts" {
+    assert(mf108_reply_free(ut108_true(),ut108_false(),ut108_true(),ut108_true(),ut108_true()))
+}
+
+example "free rejects replayed event" {
+    assert(¬(mf108_reply_free(ut108_false(),ut108_false(),ut108_true(),ut108_true(),ut108_true())))
+}
+
+example "free rejects interior or foreign pointer" {
+    assert(¬(mf108_reply_free(ut108_true(),ut108_false(),ut108_false(),ut108_true(),ut108_true())))
+}
+
+example "free rejects not closed" {
+    assert(¬(mf108_reply_free(ut108_true(),ut108_false(),ut108_true(),ut108_false(),ut108_true())))
+}
+
+example "free rejects not drained/retired" {
+    assert(¬(mf108_reply_free(ut108_true(),ut108_false(),ut108_true(),ut108_true(),ut108_false())))
+}
+
+example "zero conversion accepts" {
+    assert(mf108_conversion(ut108_false(),ut108_true(),ut108_true(),ut108_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)))
+}
+
+example "zero conversion rejects numeric expression" {
+    assert(¬(mf108_conversion(ut108_false(),ut108_true(),ut108_true(),ut108_false(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8))))
+}
+
+example "zero conversion rejects nonzero scalar" {
+    assert(¬(mf108_conversion(ut108_false(),ut108_true(),ut108_true(),ut108_true(),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,8))))
+}
+
+example "zero conversion rejects nonnull word" {
+    assert(¬(mf108_conversion(ut108_false(),ut108_true(),ut108_true(),ut108_true(),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,8))))
+}
+
+example "zero conversion rejects nonnull offset" {
+    assert(¬(mf108_conversion(ut108_false(),ut108_true(),ut108_true(),ut108_true(),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,8))))
+}
+
+example "zero conversion rejects forged kind" {
+    assert(¬(mf108_conversion(ut108_false(),ut108_true(),ut108_true(),ut108_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8))))
+}
+
+example "object conversion accepts" {
+    assert(mf108_conversion(ut108_true(),ut108_true(),ut108_true(),ut108_false(),bvconst(1,64),bvconst(42,64),bvconst(8,64),bvconst(1,8)))
+}
+
+example "object conversion rejects changed words" {
+    assert(¬(mf108_conversion(ut108_true(),ut108_false(),ut108_true(),ut108_false(),bvconst(1,64),bvconst(42,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "object conversion rejects changed kind" {
+    assert(¬(mf108_conversion(ut108_true(),ut108_true(),ut108_false(),ut108_false(),bvconst(1,64),bvconst(42,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "object conversion rejects integer cast" {
+    assert(¬(mf108_conversion(ut108_false(),ut108_true(),ut108_true(),ut108_false(),bvconst(1,64),bvconst(42,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "result is one-use" {
+    assert(∀(e : BitVec64). (mf108_event(ut108_true(),e,e,ut108_false(),ut108_false(),ut108_true(),ut108_true()) → ¬mf108_event(ut108_true(),e,e,mf108_consumed(ut108_true(),ut108_false()),ut108_false(),ut108_true(),ut108_true())))
+}
+
+example "failure preserves pending" {
+    assert(∀(v : Bool). (mf108_consumed(ut108_false(),v)=v))
+}
+
+example "other owner survives death" {
+    assert(∀(a : BitVec64). ∀(b : BitVec64). ∀(s : BitVec8). (a≠b → mf108_dead_phase(ut108_true(),a,b,s)=s))
+}
+
+example "death closes live owner" {
+    assert(∀(a : BitVec64). (mf108_dead_phase(ut108_true(),a,a,bvconst(1,8))=bvconst(2,8)))
+}
+
+example "closed aliases cannot access" {
+    assert(∀(p : BitVec64). ∀(n : BitVec64). ∀(w : BitVec64). (¬mf108_access(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_false(),p,n,w)))
+}
+
+example "span cannot overflow" {
+    assert(∀(p : BitVec64). ∀(n : BitVec64). ∀(w : BitVec64). (mf108_access(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),p,n,w) → (bvuge(bvadd(p,w),p) ∧ bvule(bvadd(p,w),n))))
+}
+
+example "positive free reply refines ABI" {
+    assert(ha108_free_reply(ut108_true(),ut108_true(),ut108_false(),ut108_true(),ut108_true(),bvconst(0,64),bvconst(0,64),bvconst(0,8)))
+}
+
+example "malloc preserves nonresult lanes" {
+    assert(∀(r : BitVec64). ∀(v : BitVec64). (bvugt(r,bvconst(3,64)) → (ha108_malloc_word(ut108_true(),r,v,bvconst(42,64),bvconst(0,64),bvconst(0,64))=v)))
+}
+
+example "conversion preserves pointer metadata" {
+    assert(∀(h : BitVec64). ∀(p : BitVec64). (ha108_pointer_conversion(h,p,bvconst(1,8),h,p,bvconst(1,8),bvconst(1,8))))
+}
+

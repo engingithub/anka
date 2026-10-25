@@ -19,6 +19,14 @@ use super::fabric::Fabric;
 use super::isa::*;
 use super::state::*;
 
+mod cleanup_workers;
+mod heap_context;
+mod heap_cleanup;
+mod heap_application;
+use heap_application::{HeapService, HeapFreeWait};
+mod heap_work;
+pub(crate) use heap_context::{CurrentHeapProcess, CurrentHeapRetirement};
+
 // ───────────────────────────────────────────────────────────────────
 // Syscall numbers
 // ───────────────────────────────────────────────────────────────────
@@ -43,6 +51,8 @@ pub const SYS_DEV_WAIT: u64 = 16; // dev_wait(slot, gen) → completion status
 pub const SYS_DEV_EVENT_WAIT: u64 = 17; // dev_event_wait(cap_slot, cap_gen, epoch) → status, epoch
 pub const SYS_NIC_RX: u64 = 18; // nic_rx(dev_slot, dev_gen, buf_slot, buf_gen) → status, len
 pub const SYS_NIC_TX: u64 = 19; // nic_tx(dev_slot, dev_gen, buf_slot, buf_gen, len) → status, len
+pub const SYS_MALLOC: u64 = 21;
+pub const SYS_FREE: u64 = 22;
 pub const SYS_READ_BYTES: u64 = 20; // protected R2/R3 destination, R4 capacity
 pub(crate) const MAX_PROCESS_INPUT: usize = 1024 * 1024;
 
@@ -73,6 +83,7 @@ pub const MAX_MAILBOX_SIZE: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct Process {
+    heap_free_wait: Option<HeapFreeWait>,
     pub pid: u64,
     pub state: ProcessState,
     pub core: Anka64Core,
@@ -134,6 +145,7 @@ impl Process {
             && self.io_wait.is_none()
             && self.recv_wait.is_none()
             && self.event_wait.is_none()
+            && self.heap_free_wait.is_none()
     }
 }
 
@@ -1040,6 +1052,7 @@ impl DeviceRegistry {
 }
 
 pub struct Kernel {
+    heap_service: Option<HeapService>,
     pub fabric: Fabric,
     pub processes: Vec<Process>,
     /// Byte output buffer.  SYS_WRITE appends here on success.
@@ -1087,6 +1100,7 @@ pub struct Kernel {
 impl Kernel {
     pub fn new(fabric: Fabric) -> Self {
         Self {
+            heap_service: None,
             fabric,
             processes: Vec::new(),
             byte_output: Vec::new(),
@@ -1142,7 +1156,8 @@ impl Kernel {
     /// Phase 9.3h.3 uses this to execute an explicitly authorized development
     /// artifact through ordinary SYS_SPAWN, tear down the transient supervisor,
     /// and restore the same Fabric to the host development registry.
-    pub(crate) fn into_fabric(self) -> Fabric {
+    pub(crate) fn into_fabric(mut self) -> Fabric {
+        self.stop_heap_service();
         self.fabric
     }
 
@@ -1359,7 +1374,7 @@ impl Kernel {
         key
     }
 
-    pub fn spawn(&mut self, core: Anka64Core) -> ProcessKey {
+    pub fn spawn(&mut self, mut core: Anka64Core) -> ProcessKey {
         let pid = self.next_pid;
         self.next_pid = self.next_pid.checked_add(1)
             .expect("PID space exhausted");
@@ -1367,7 +1382,9 @@ impl Kernel {
         // Try to reuse a Free slot (Free(g) → Running(g), same generation)
         if let Some(slot) = self.processes.iter().position(|p| p.state == ProcessState::Free) {
             let reuse_gen = self.processes[slot].generation;
+            core.bind_heap_process(ProcessKey {slot, generation:reuse_gen});
             self.processes[slot] = Process {
+                heap_free_wait: None,
                 pid,
                 state: ProcessState::Running,
                 core,
@@ -1390,7 +1407,9 @@ impl Kernel {
 
         // No Free slot — append
         let slot = self.processes.len();
+        core.bind_heap_process(ProcessKey {slot, generation:0});
         self.processes.push(Process {
+            heap_free_wait: None,
             pid,
             state: ProcessState::Running,
             core,
@@ -1825,6 +1844,8 @@ impl Kernel {
     /// all incarnation metadata, and advances the slot to
     /// Free(g+1) or Retired.
     pub(crate) fn reclaim_process(&mut self, slot: usize) {
+        self.close_process_heap(slot);
+        self.processes[slot].core.retire_all_pointer_frames(&mut self.fabric);
         self.input_streams.remove(&slot);
         // --- Destroy owned resources (if any) ---
         if let Some(res) = self.processes[slot].resources.take() {
@@ -1873,6 +1894,7 @@ impl Kernel {
     /// Transition a process to Zombie with a definitive ProcessResult.
     /// Then depth-first terminate any orphaned descendants.
     pub(crate) fn finish_process(&mut self, slot: usize, result: ProcessResult) {
+        self.close_process_heap(slot);
         self.input_streams.remove(&slot);
         self.processes[slot].core.retire_all_pointer_frames(&mut self.fabric);
         let exit_code = match &result {
@@ -1932,6 +1954,7 @@ impl Kernel {
 
             match self.processes[child_slot].state {
                 ProcessState::Running => {
+                    self.close_process_heap(child_slot);
                     // Terminate then reclaim in one step
                     self.processes[child_slot].exit_code = 0xDEAD;
                     self.processes[child_slot].result =
@@ -2139,9 +2162,12 @@ impl Kernel {
             self.reevaluate_event_waits();
             self.wake_waiters();
 
+            let heap_progress = self.advance_heap_cleanup();
+
             // ── Run phase: try every schedulable process ──
             let mut ran = false;
             for i in 0..self.processes.len() {
+                if self.is_heap_service_process(i) { continue; }
                 if self.processes[i].exited() {
                     continue;
                 }
@@ -2154,7 +2180,7 @@ impl Kernel {
                 ran = true;
             }
 
-            if ran {
+            if ran || heap_progress {
                 continue;
             }
 
@@ -2648,6 +2674,8 @@ impl Kernel {
                 }
                 SYS_WRITE => self.handle_protected_buffer_write(idx, words, kinds),
                 SYS_READ_BYTES => self.handle_protected_buffer_read(idx, words, kinds),
+                SYS_MALLOC => self.handle_malloc(idx, words, kinds),
+                SYS_FREE => self.handle_free(idx, words, kinds),
                 _ => self.finish_process(idx, ProcessResult::ProtectionFault),
             }
             return;
@@ -2801,10 +2829,14 @@ impl Kernel {
             // final destination and Fabric checks never rely on a cached grant.
             if core.syscall_write_span(&self.fabric, pointer, capacity).ok()? != backing { return None; }
             if n != 0 {
+                if self.fabric.scoped_pointers.is_heap_pointer(pointer) {
+                    self.fabric.write_heap_bytes(core.heap_owner().ok()?,core.agent,pointer,&staged).ok()?;
+                } else {
                 self.fabric.execute_write(MemoryRequest { context: AccessContext {
                     agent: core.agent, domain: core.domain, privilege: Privilege::Supervisor },
                     object: backing.0, offset: backing.1, width: Width::Byte,
                     length: n as u64, kind: AccessKind::Write }, staged).ok()?;
+                }
             }
             // No fallible operation after memory commit: source ownership is
             // still held and assignment cannot fail. No scheduler/device tick.
@@ -2843,7 +2875,12 @@ impl Kernel {
                     agent: core.agent, domain: core.domain, privilege: Privilege::Supervisor },
                     object, offset: offset.checked_add(i)?, width: Width::Byte,
                     length: 1, kind: AccessKind::Read };
-                bytes.push(*self.fabric.execute_read(request).ok()?.first()?);
+                if self.fabric.scoped_pointers.is_heap_pointer(pointer) {
+                    let owner=core.heap_owner().ok()?;
+                    let p=self.fabric.scoped_pointers.add_heap_pointer(pointer,owner,i as i64).ok()?;
+                    let mut byte=[0];self.fabric.read_heap_bytes(owner,core.agent,p,&mut byte).ok()?;
+                    bytes.push(byte[0]);
+                } else { bytes.push(*self.fabric.execute_read(request).ok()?.first()?); }
             }
             core.syscall_read_span(&self.fabric, pointer, length).ok()?;
             Some(bytes)

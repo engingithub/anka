@@ -1,0 +1,687 @@
+// Each deliberately false assertion MUST be explicitly disproved by Z3.
+// Parser/evaluation errors, unknown and timeout do not count as evidence.
+import "anka108_async_reclamation.kleis"
+
+example "HOSTILE ut108_queue rejects armed over capacity" {
+    assert(ut108_queue(bvconst(4,64),bvconst(5,64),bvconst(2,64)))
+}
+
+example "HOSTILE ut108_queue rejects pending over capacity" {
+    assert(ut108_queue(bvconst(4,64),bvconst(2,64),bvconst(3,64)))
+}
+
+example "HOSTILE ut108_queue rejects zero capacity" {
+    assert(ut108_queue(bvconst(0,64),bvconst(2,64),bvconst(2,64)))
+}
+
+example "HOSTILE ut108_queue rejects wrapped count" {
+    assert(ut108_queue(bvconst(4,64),ptr107_max(),bvconst(1,64)))
+}
+
+example "HOSTILE ut108_queue_bytes rejects uncharged directory" {
+    assert(ut108_queue_bytes(bvconst(4,64),bvconst(256,64),bvconst(0,64)))
+}
+
+example "HOSTILE ut108_queue_bytes rejects zero stride" {
+    assert(ut108_queue_bytes(bvconst(4,64),bvconst(0,64),bvconst(1024,64)))
+}
+
+example "HOSTILE ut108_queue_bytes rejects wrapping multiplication" {
+    assert(ut108_queue_bytes(ptr107_max(),bvconst(2,64),bvsub(ptr107_max(),bvconst(1,64))))
+}
+
+example "HOSTILE ut108_reserve rejects full queue" {
+    assert(ut108_reserve(bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(50,64),bvconst(7,64),bvconst(7,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_reserve rejects wrapped job ID" {
+    assert(ut108_reserve(bvconst(4,64),bvconst(2,64),bvconst(1,64),ptr107_max(),bvconst(7,64),bvconst(7,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_reserve rejects zero job ID" {
+    assert(ut108_reserve(bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(7,64),bvconst(7,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_reserve rejects stale reservation revision" {
+    assert(ut108_reserve(bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(50,64),bvconst(7,64),bvconst(6,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_reserve rejects revision exhaustion" {
+    assert(ut108_reserve(bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(50,64),ptr107_max(),ptr107_max(),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_reserve rejects unserialized publication" {
+    assert(ut108_reserve(bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(50,64),bvconst(7,64),bvconst(7,64),bvconst(0,8)))
+}
+
+example "HOSTILE ut108_key rejects zero job" {
+    assert(ut108_key(bvconst(0,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_key rejects missing owner incarnation" {
+    assert(ut108_key(bvconst(50,64),bvconst(0,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_key rejects integer without generation" {
+    assert(ut108_key(bvconst(50,64),bvconst(101,64),bvconst(3,64),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_key rejects missing reservation" {
+    assert(ut108_key(bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(0,64),bvconst(8192,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_key rejects unaligned backing" {
+    assert(ut108_key(bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(8193,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_key rejects partial page backing" {
+    assert(ut108_key(bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(16,64)))
+}
+
+example "HOSTILE ut108_key rejects wrapped extent" {
+    assert(ut108_key(bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvsub(ptr107_max(),bvconst(4095,64)),bvconst(8192,64)))
+}
+
+example "HOSTILE ut108_binding rejects another cleanup job" {
+    assert(ut108_binding(bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(4096,64),bvconst(51,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_binding rejects reused PID incarnation" {
+    assert(ut108_binding(bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(4096,64),bvconst(50,64),bvconst(102,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_binding rejects new allocation generation" {
+    assert(ut108_binding(bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(4096,64),bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(8,64)),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_binding rejects another slot" {
+    assert(ut108_binding(bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(4096,64),bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(4,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_binding rejects another object" {
+    assert(ut108_binding(bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(4096,64),bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(13,64),bvconst(90,64),bvconst(8192,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_binding rejects reused reservation" {
+    assert(ut108_binding(bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(4096,64),bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(91,64),bvconst(8192,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_binding rejects same length different extent" {
+    assert(ut108_binding(bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(4096,64),bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(12288,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_binding rejects truncated extent" {
+    assert(ut108_binding(bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(4096,64),bvconst(50,64),bvconst(101,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(12,64),bvconst(90,64),bvconst(8192,64),bvconst(2048,64)))
+}
+
+example "HOSTILE ut108_close rejects stale death notification" {
+    assert(ut108_close(bvconst(101,64),bvconst(102,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_close rejects duplicate death transition" {
+    assert(ut108_close(bvconst(101,64),bvconst(101,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_close rejects unreserved owner record" {
+    assert(ut108_close(bvconst(101,64),bvconst(101,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_close rejects untrusted notification" {
+    assert(ut108_close(bvconst(101,64),bvconst(101,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_close rejects invented cleanup obligations" {
+    assert(ut108_close(bvconst(101,64),bvconst(101,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(3,64),bvconst(7,64),bvconst(7,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_close rejects stale death snapshot" {
+    assert(ut108_close(bvconst(101,64),bvconst(101,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(6,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_close rejects split close and registration" {
+    assert(ut108_close(bvconst(101,64),bvconst(101,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(7,64),bvconst(0,8)))
+}
+
+example "HOSTILE ut108_duplicate rejects unbound notification" {
+    assert(ut108_duplicate(ut108_false(),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_duplicate rejects still open owner" {
+    assert(ut108_duplicate(ut108_true(),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_duplicate rejects already released job" {
+    assert(ut108_duplicate(ut108_true(),bvconst(0,8),bvconst(5,8)))
+}
+
+example "HOSTILE ut108_duplicate rejects unknown record" {
+    assert(ut108_duplicate(ut108_true(),bvconst(0,8),bvconst(0,8)))
+}
+
+example "HOSTILE ut108_claim rejects forged job" {
+    assert(ut108_claim(ut108_false(),bvconst(1,8),bvconst(0,8),bvconst(7,64),bvconst(0,8),bvconst(40,64),bvconst(8,64),bvconst(8,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_claim rejects live allocation" {
+    assert(ut108_claim(ut108_true(),bvconst(0,8),bvconst(0,8),bvconst(7,64),bvconst(0,8),bvconst(40,64),bvconst(8,64),bvconst(8,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_claim rejects released record" {
+    assert(ut108_claim(ut108_true(),bvconst(5,8),bvconst(0,8),bvconst(7,64),bvconst(0,8),bvconst(40,64),bvconst(8,64),bvconst(8,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_claim rejects concurrent second worker" {
+    assert(ut108_claim(ut108_true(),bvconst(1,8),bvconst(1,8),bvconst(7,64),bvconst(0,8),bvconst(40,64),bvconst(8,64),bvconst(8,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_claim rejects unfenced failed worker" {
+    assert(ut108_claim(ut108_true(),bvconst(1,8),bvconst(2,8),bvconst(7,64),bvconst(0,8),bvconst(40,64),bvconst(8,64),bvconst(8,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_claim rejects outstanding old scrub" {
+    assert(ut108_claim(ut108_true(),bvconst(1,8),bvconst(0,8),bvconst(7,64),bvconst(1,8),bvconst(40,64),bvconst(8,64),bvconst(8,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_claim rejects lease epoch exhaustion" {
+    assert(ut108_claim(ut108_true(),bvconst(1,8),bvconst(0,8),ptr107_max(),bvconst(0,8),bvconst(40,64),bvconst(8,64),bvconst(8,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_claim rejects anonymous worker" {
+    assert(ut108_claim(ut108_true(),bvconst(1,8),bvconst(0,8),bvconst(7,64),bvconst(0,8),bvconst(0,64),bvconst(8,64),bvconst(8,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_claim rejects stale claim revision" {
+    assert(ut108_claim(ut108_true(),bvconst(1,8),bvconst(0,8),bvconst(7,64),bvconst(0,8),bvconst(40,64),bvconst(8,64),bvconst(7,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_lease rejects unowned job" {
+    assert(ut108_lease(bvconst(0,8),bvconst(8,64),bvconst(40,64),bvconst(8,64),bvconst(40,64)))
+}
+
+example "HOSTILE ut108_lease rejects revoking worker" {
+    assert(ut108_lease(bvconst(2,8),bvconst(8,64),bvconst(40,64),bvconst(8,64),bvconst(40,64)))
+}
+
+example "HOSTILE ut108_lease rejects old worker epoch" {
+    assert(ut108_lease(bvconst(1,8),bvconst(8,64),bvconst(40,64),bvconst(7,64),bvconst(40,64)))
+}
+
+example "HOSTILE ut108_lease rejects different worker" {
+    assert(ut108_lease(bvconst(1,8),bvconst(8,64),bvconst(40,64),bvconst(8,64),bvconst(41,64)))
+}
+
+example "HOSTILE ut108_lease rejects zero epoch" {
+    assert(ut108_lease(bvconst(1,8),bvconst(0,64),bvconst(40,64),bvconst(0,64),bvconst(40,64)))
+}
+
+example "HOSTILE ut108_ticket rejects cancelled operation replayed as retry" {
+    assert(ut108_ticket(ut108_true(),bvconst(8,64),bvconst(40,64),bvconst(1,64),bvconst(10,64),bvconst(0,64),bvconst(2048,64),bvconst(8,64),bvconst(40,64),bvconst(2,64),bvconst(10,64),bvconst(0,64),bvconst(2048,64)))
+}
+
+example "HOSTILE ut108_ticket rejects different job" {
+    assert(ut108_ticket(ut108_false(),bvconst(8,64),bvconst(40,64),bvconst(1,64),bvconst(10,64),bvconst(0,64),bvconst(2048,64),bvconst(8,64),bvconst(40,64),bvconst(1,64),bvconst(10,64),bvconst(0,64),bvconst(2048,64)))
+}
+
+example "HOSTILE ut108_ticket rejects stale epoch" {
+    assert(ut108_ticket(ut108_true(),bvconst(8,64),bvconst(40,64),bvconst(1,64),bvconst(10,64),bvconst(0,64),bvconst(2048,64),bvconst(7,64),bvconst(40,64),bvconst(1,64),bvconst(10,64),bvconst(0,64),bvconst(2048,64)))
+}
+
+example "HOSTILE ut108_ticket rejects different worker" {
+    assert(ut108_ticket(ut108_true(),bvconst(8,64),bvconst(40,64),bvconst(1,64),bvconst(10,64),bvconst(0,64),bvconst(2048,64),bvconst(8,64),bvconst(41,64),bvconst(1,64),bvconst(10,64),bvconst(0,64),bvconst(2048,64)))
+}
+
+example "HOSTILE ut108_ticket rejects stale mutation version" {
+    assert(ut108_ticket(ut108_true(),bvconst(8,64),bvconst(40,64),bvconst(1,64),bvconst(10,64),bvconst(0,64),bvconst(2048,64),bvconst(8,64),bvconst(40,64),bvconst(1,64),bvconst(9,64),bvconst(0,64),bvconst(2048,64)))
+}
+
+example "HOSTILE ut108_ticket rejects skipped prefix" {
+    assert(ut108_ticket(ut108_true(),bvconst(8,64),bvconst(40,64),bvconst(1,64),bvconst(10,64),bvconst(0,64),bvconst(2048,64),bvconst(8,64),bvconst(40,64),bvconst(1,64),bvconst(10,64),bvconst(2048,64),bvconst(2048,64)))
+}
+
+example "HOSTILE ut108_ticket rejects expanded chunk" {
+    assert(ut108_ticket(ut108_true(),bvconst(8,64),bvconst(40,64),bvconst(1,64),bvconst(10,64),bvconst(0,64),bvconst(2048,64),bvconst(8,64),bvconst(40,64),bvconst(1,64),bvconst(10,64),bvconst(0,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_ticket rejects empty chunk" {
+    assert(ut108_ticket(ut108_true(),bvconst(8,64),bvconst(40,64),bvconst(1,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(40,64),bvconst(1,64),bvconst(10,64),bvconst(0,64),bvconst(0,64)))
+}
+
+example "HOSTILE ut108_finish_old rejects wrong job" {
+    assert(ut108_finish_old(ut108_false(),bvconst(1,8),bvconst(3,64),bvconst(7,64),bvconst(3,64),bvconst(7,64),bvconst(400,64),bvconst(400,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_finish_old rejects new incarnation already scrubbed" {
+    assert(ut108_finish_old(ut108_true(),bvconst(3,8),bvconst(3,64),bvconst(7,64),bvconst(3,64),bvconst(7,64),bvconst(400,64),bvconst(400,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_finish_old rejects wrong allocation generation" {
+    assert(ut108_finish_old(ut108_true(),bvconst(1,8),bvconst(3,64),bvconst(7,64),bvconst(3,64),bvconst(8,64),bvconst(400,64),bvconst(400,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_finish_old rejects wrong operation" {
+    assert(ut108_finish_old(ut108_true(),bvconst(1,8),bvconst(3,64),bvconst(7,64),bvconst(3,64),bvconst(7,64),bvconst(400,64),bvconst(401,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_finish_old rejects duplicate terminal completion" {
+    assert(ut108_finish_old(ut108_true(),bvconst(1,8),bvconst(3,64),bvconst(7,64),bvconst(3,64),bvconst(7,64),bvconst(400,64),bvconst(400,64),bvconst(1,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_finish_old rejects cancellation merely requested" {
+    assert(ut108_finish_old(ut108_true(),bvconst(1,8),bvconst(3,64),bvconst(7,64),bvconst(3,64),bvconst(7,64),bvconst(400,64),bvconst(400,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_finish_old rejects counter underflow" {
+    assert(ut108_finish_old(ut108_true(),bvconst(1,8),bvconst(3,64),bvconst(7,64),bvconst(3,64),bvconst(7,64),bvconst(400,64),bvconst(400,64),bvconst(0,64),ptr107_max(),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_retire rejects unbound job" {
+    assert(ut108_retire(ut108_false(),ut108_true(),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_retire rejects no worker lease" {
+    assert(ut108_retire(ut108_true(),ut108_false(),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_retire rejects never closed allocation" {
+    assert(ut108_retire(ut108_true(),ut108_true(),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_retire rejects pending CPU write" {
+    assert(ut108_retire(ut108_true(),ut108_true(),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_retire rejects pending DMA write" {
+    assert(ut108_retire(ut108_true(),ut108_true(),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_retire rejects surviving grant" {
+    assert(ut108_retire(ut108_true(),ut108_true(),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_retire rejects surviving mapping" {
+    assert(ut108_retire(ut108_true(),ut108_true(),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_retire rejects alternate access path" {
+    assert(ut108_retire(ut108_true(),ut108_true(),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_retire rejects released custody" {
+    assert(ut108_retire(ut108_true(),ut108_true(),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_retire rejects invisible terminal writes" {
+    assert(ut108_retire(ut108_true(),ut108_true(),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_begin rejects unretired authority" {
+    assert(ut108_begin(ut108_true(),ut108_true(),bvconst(2,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(4096,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_begin rejects wrong stage" {
+    assert(ut108_begin(ut108_true(),ut108_true(),bvconst(1,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(4096,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_begin rejects old DMA outstanding" {
+    assert(ut108_begin(ut108_true(),ut108_true(),bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(4096,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_begin rejects external reader" {
+    assert(ut108_begin(ut108_true(),ut108_true(),bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(8192,64),bvconst(4096,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_begin rejects external writer" {
+    assert(ut108_begin(ut108_true(),ut108_true(),bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(8192,64),bvconst(4096,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_begin rejects absent custody" {
+    assert(ut108_begin(ut108_true(),ut108_true(),bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(4096,64),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_begin rejects missing cache fence" {
+    assert(ut108_begin(ut108_true(),ut108_true(),bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(4096,64),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_submit rejects operation sequence exhaustion" {
+    assert(ut108_submit(ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,8),bvconst(0,64),bvconst(2048,64),bvconst(4096,64),bvconst(10,64),ptr107_max(),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_submit rejects concurrent scrub ticket" {
+    assert(ut108_submit(ut108_true(),ut108_true(),bvconst(3,8),bvconst(1,8),bvconst(0,64),bvconst(2048,64),bvconst(4096,64),bvconst(10,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_submit rejects unscrubbable stage" {
+    assert(ut108_submit(ut108_true(),ut108_true(),bvconst(2,8),bvconst(0,8),bvconst(0,64),bvconst(2048,64),bvconst(4096,64),bvconst(10,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_submit rejects no lease" {
+    assert(ut108_submit(ut108_true(),ut108_false(),bvconst(3,8),bvconst(0,8),bvconst(0,64),bvconst(2048,64),bvconst(4096,64),bvconst(10,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_submit rejects forged job" {
+    assert(ut108_submit(ut108_false(),ut108_true(),bvconst(3,8),bvconst(0,8),bvconst(0,64),bvconst(2048,64),bvconst(4096,64),bvconst(10,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_submit rejects empty chunk" {
+    assert(ut108_submit(ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(4096,64),bvconst(10,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_submit rejects oversized chunk" {
+    assert(ut108_submit(ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,8),bvconst(0,64),bvconst(8192,64),bvconst(4096,64),bvconst(10,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_submit rejects non-granule chunk" {
+    assert(ut108_submit(ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,8),bvconst(0,64),bvconst(2049,64),bvconst(4096,64),bvconst(10,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_submit rejects mutation version exhaustion" {
+    assert(ut108_submit(ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,8),bvconst(0,64),bvconst(2048,64),bvconst(4096,64),ptr107_max(),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_complete rejects unbound ticket" {
+    assert(ut108_complete(ut108_false(),ut108_true(),bvconst(3,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(2048,64),bvconst(4096,64),bvconst(10,64),bvconst(10,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_complete rejects revoked lease" {
+    assert(ut108_complete(ut108_true(),ut108_false(),bvconst(3,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(2048,64),bvconst(4096,64),bvconst(10,64),bvconst(10,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_complete rejects duplicate completion" {
+    assert(ut108_complete(ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(2048,64),bvconst(4096,64),bvconst(10,64),bvconst(10,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_complete rejects out of order chunk" {
+    assert(ut108_complete(ut108_true(),ut108_true(),bvconst(3,8),bvconst(1,8),bvconst(0,64),bvconst(2048,64),bvconst(2048,64),bvconst(4096,64),bvconst(10,64),bvconst(10,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_complete rejects stale mutation version" {
+    assert(ut108_complete(ut108_true(),ut108_true(),bvconst(3,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(2048,64),bvconst(4096,64),bvconst(10,64),bvconst(9,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_complete rejects only submitted scrub" {
+    assert(ut108_complete(ut108_true(),ut108_true(),bvconst(3,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(2048,64),bvconst(4096,64),bvconst(10,64),bvconst(10,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_complete rejects terminal failed scrub" {
+    assert(ut108_complete(ut108_true(),ut108_true(),bvconst(3,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(2048,64),bvconst(4096,64),bvconst(10,64),bvconst(10,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_complete rejects invisible byte or tag stores" {
+    assert(ut108_complete(ut108_true(),ut108_true(),bvconst(3,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(2048,64),bvconst(4096,64),bvconst(10,64),bvconst(10,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_complete rejects already clean job" {
+    assert(ut108_complete(ut108_true(),ut108_true(),bvconst(4,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(2048,64),bvconst(4096,64),bvconst(10,64),bvconst(10,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_complete rejects overflowing prefix" {
+    assert(ut108_complete(ut108_true(),ut108_true(),bvconst(3,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(2048,64),bvconst(4096,64),bvconst(10,64),bvconst(10,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_cancel_ticket rejects wrong cancellation ticket" {
+    assert(ut108_cancel_ticket(ut108_false(),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_cancel_ticket rejects ticket already consumed" {
+    assert(ut108_cancel_ticket(ut108_true(),bvconst(2,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_cancel_ticket rejects request without terminal acknowledgement" {
+    assert(ut108_cancel_ticket(ut108_true(),bvconst(2,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_cancel_ticket rejects missing write fence" {
+    assert(ut108_cancel_ticket(ut108_true(),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_cancel_ticket rejects unowned lease" {
+    assert(ut108_cancel_ticket(ut108_true(),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_clean rejects partial scrub" {
+    assert(ut108_clean(ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,8),bvconst(2048,64),bvconst(4096,64),bvconst(12,64),bvconst(12,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_clean rejects skipped padding" {
+    assert(ut108_clean(ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,8),bvconst(17,64),bvconst(4096,64),bvconst(12,64),bvconst(12,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_clean rejects pending scrub operation" {
+    assert(ut108_clean(ut108_true(),ut108_true(),bvconst(3,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12,64),bvconst(12,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_clean rejects old receipt version" {
+    assert(ut108_clean(ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(12,64),bvconst(11,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_clean rejects foreign receipt" {
+    assert(ut108_clean(ut108_false(),ut108_true(),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(12,64),bvconst(12,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_clean rejects old worker receipt" {
+    assert(ut108_clean(ut108_true(),ut108_false(),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(12,64),bvconst(12,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_clean rejects unfenced writer" {
+    assert(ut108_clean(ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(12,64),bvconst(12,64),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_clean rejects unfenced reader" {
+    assert(ut108_clean(ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(12,64),bvconst(12,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_clean rejects invisible bytes or tags" {
+    assert(ut108_clean(ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(12,64),bvconst(12,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_fail rejects wrong job" {
+    assert(ut108_fail(ut108_false(),bvconst(3,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_fail rejects already revoking" {
+    assert(ut108_fail(ut108_true(),bvconst(3,8),bvconst(2,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_fail rejects freed job" {
+    assert(ut108_fail(ut108_true(),bvconst(5,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_fail rejects no atomic lease revocation" {
+    assert(ut108_fail(ut108_true(),bvconst(3,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "HOSTILE ut108_recover rejects wrong job or worker" {
+    assert(ut108_recover(ut108_false(),bvconst(3,8),bvconst(2,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(11,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_recover rejects worker not revoked" {
+    assert(ut108_recover(ut108_true(),bvconst(3,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(11,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_recover rejects old scrub still running" {
+    assert(ut108_recover(ut108_true(),bvconst(3,8),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(11,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_recover rejects old worker not fenced" {
+    assert(ut108_recover(ut108_true(),bvconst(3,8),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),bvconst(11,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_recover rejects dirty cache still unaccounted" {
+    assert(ut108_recover(ut108_true(),bvconst(3,8),bvconst(2,8),bvconst(0,8),bvconst(1,8),bvconst(0,8),bvconst(11,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_recover rejects version exhaustion" {
+    assert(ut108_recover(ut108_true(),bvconst(3,8),bvconst(2,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),ptr107_max(),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_recover rejects lost durable record" {
+    assert(ut108_recover(ut108_true(),bvconst(5,8),bvconst(2,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(11,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_mutate rejects mutation races scrub" {
+    assert(ut108_mutate(ut108_true(),bvconst(4,8),bvconst(1,8),bvconst(12,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_mutate rejects released backing" {
+    assert(ut108_mutate(ut108_true(),bvconst(5,8),bvconst(0,8),bvconst(12,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_mutate rejects mutation version wrap" {
+    assert(ut108_mutate(ut108_true(),bvconst(4,8),bvconst(0,8),ptr107_max(),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_mutate rejects missing custody" {
+    assert(ut108_mutate(ut108_true(),bvconst(4,8),bvconst(0,8),bvconst(12,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects refund on death" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(1,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects refund after retirement" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(2,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects refund during scrub" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(3,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects duplicate refund" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(5,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects authority still live" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(4,8),bvconst(1,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects old worker receipt" {
+    assert(ut108_release(ut108_true(),ut108_false(),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects wrong allocation receipt" {
+    assert(ut108_release(ut108_false(),ut108_true(),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects changed storage version" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(15,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects pending scrub write" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(4,8),bvconst(3,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects pending old DMA" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects surviving grant" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects surviving mapping" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects surviving kind" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects still placed backing" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects already surrendered custody" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects no durable pending record" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects refund smaller than reserved span" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(2048,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects refund larger than actual backing" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(8192,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects payload account underflow" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(2048,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects stale release snapshot" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(19,64),bvconst(1,8)))
+}
+
+example "HOSTILE ut108_release rejects split extent-return and refund" {
+    assert(ut108_release(ut108_true(),ut108_true(),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(14,64),bvconst(14,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(3,64),bvconst(0,64),bvconst(3,64),bvconst(12288,64),bvconst(4096,64),bvconst(20,64),bvconst(20,64),bvconst(0,8)))
+}
+
+example "HOSTILE ut108_new_lifetime rejects reuse before return" {
+    assert(ut108_new_lifetime(ut108_false(),ut108_true(),ut108_true(),ut108_true(),bvconst(17,64),bvconst(4096,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_new_lifetime rejects old receipt as new reservation" {
+    assert(ut108_new_lifetime(ut108_true(),ut108_false(),ut108_true(),ut108_true(),bvconst(17,64),bvconst(4096,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_new_lifetime rejects dirty suballocation" {
+    assert(ut108_new_lifetime(ut108_true(),ut108_true(),ut108_false(),ut108_true(),bvconst(17,64),bvconst(4096,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_new_lifetime rejects zeroing creates authority" {
+    assert(ut108_new_lifetime(ut108_true(),ut108_true(),ut108_true(),ut108_false(),bvconst(17,64),bvconst(4096,64),bvconst(4096,64)))
+}
+
+example "HOSTILE ut108_new_lifetime rejects only logical bytes initialized" {
+    assert(ut108_new_lifetime(ut108_true(),ut108_true(),ut108_true(),ut108_true(),bvconst(17,64),bvconst(4096,64),bvconst(17,64)))
+}
+
+example "HOSTILE cancelled range retry needs a distinct operation" {
+    assert(ut108_ticket(ut108_true(),bvconst(8,64),bvconst(40,64),bvconst(2,64),bvconst(10,64),bvconst(0,64),bvconst(2048,64),bvconst(8,64),bvconst(40,64),bvconst(1,64),bvconst(10,64),bvconst(0,64),bvconst(2048,64)))
+}
+
+example "HOSTILE composed trace cannot recover while old scrub remains" {
+    assert(ut108_trace_check(bvconst(23,64)))
+}
+
+example "HOSTILE old worker cannot complete after new lease" {
+    assert(ut108_lease(bvconst(1,8),bvconst(9,64),bvconst(41,64),bvconst(8,64),bvconst(40,64)))
+}
+
+example "HOSTILE clean storage still rejects application access" {
+    assert(ut108_trace_check(bvconst(24,64)))
+}
+
+example "HOSTILE semantic probe idle service always advances" {
+    assert(ut108_less(bvconst(1,8),bvconst(1,8),ut108_o(),ut108_o(),ut108_o(),ut108_o(),bvconst(4096,64),bvconst(4096,64)))
+}
+
+example "HOSTILE recovery does not guarantee monotone progress" {
+    assert(ut108_less(bvconst(3,8),ut108_recovered_stage(ut108_true(),bvconst(3,8)),ut108_z(),ut108_z(),ut108_z(),ut108_z(),bvconst(2048,64),bvconst(4096,64)))
+}
+
+example "HOSTILE semantic probe scrub may preserve old secret" {
+    assert(∀(q : BitVec64). (q=bvconst(4095,64)) → (ut108_trace_byte(bvconst(173,8),q)=bvconst(173,8)))
+}
+
+example "HOSTILE semantic probe scrub may preserve pointer kind" {
+    assert(∀(q : BitVec64). (q=bvconst(12272,64)) → (ut108_trace_tag(bvconst(1,8),q)=bvconst(1,8)))
+}
+
+example "HOSTILE semantic probe another client may lose bytes" {
+    assert(∀(q : BitVec64). (q=bvconst(4096,64)) → (ut108_trace_byte(bvconst(173,8),q)=bvconst(0,8)))
+}
+
+example "HOSTILE semantic probe only logical bytes need clearing" {
+    assert(∀(q : BitVec64). (q=bvconst(17,64)) → (ut108_trace_byte(bvconst(173,8),q)=bvconst(173,8)))
+}
+
+example "HOSTILE semantic probe clean already means uncharged" {
+    assert(ut108_charge_held(bvconst(4,8))=ut108_false())
+}
+
+example "HOSTILE semantic probe process death refunds backing" {
+    assert(ut108_payload(ut108_false(),bvconst(12288,64),bvconst(4096,64))=bvconst(8192,64))
+}

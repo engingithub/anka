@@ -1,0 +1,436 @@
+// Every assertion deliberately contradicts the reclamation contract.
+// Acceptance requires explicit Z3 disproof of EACH example; unknown,
+// timeout, parser errors or unevaluated expressions are never a pass.
+import "anka108_allocation_reclamation.kleis"
+
+example "HOSTILE reclaim108_take rejects empty request" {
+    assert(reclaim108_take(bvconst(4096,64),bvconst(16384,64),bvconst(0,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_take rejects partial page" {
+    assert(reclaim108_take(bvconst(4096,64),bvconst(16384,64),bvconst(4097,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_take rejects unaligned start" {
+    assert(reclaim108_take(bvconst(4097,64),bvconst(16384,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_take rejects larger than hole" {
+    assert(reclaim108_take(bvconst(4096,64),bvconst(16384,64),bvconst(20480,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_take rejects outside pool" {
+    assert(reclaim108_take(bvconst(0,64),bvconst(16384,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_take rejects partial free record" {
+    assert(reclaim108_take(bvconst(4096,64),bvconst(16385,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_take rejects occupied extent" {
+    assert(reclaim108_take(bvconst(4096,64),bvconst(16384,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(0,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_take rejects stale revision" {
+    assert(reclaim108_take(bvconst(4096,64),bvconst(16384,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(4,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_take rejects revision exhaustion" {
+    assert(reclaim108_take(bvconst(4096,64),bvconst(16384,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvsub(ptr107_max(),bvconst(0,64)),bvsub(ptr107_max(),bvconst(0,64)),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_take rejects no serialization" {
+    assert(reclaim108_take(bvconst(4096,64),bvconst(16384,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(0,8)))
+}
+
+example "HOSTILE reclaim108_take rejects wrapped end" {
+    assert(reclaim108_take(bvsub(ptr107_max(),bvconst(4095,64)),bvconst(8192,64),bvconst(4096,64),bvsub(ptr107_max(),bvconst(4095,64)),bvconst(8192,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_join rejects live intervening page" {
+    assert(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_join rejects overlap" {
+    assert(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_join rejects reverse ordering" {
+    assert(reclaim108_join(bvconst(8192,64),bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_join rejects occupied left" {
+    assert(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_join rejects occupied right" {
+    assert(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(0,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_join rejects empty neighbor" {
+    assert(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(0,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_join rejects outside pool" {
+    assert(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_join rejects stale coalescing snapshot" {
+    assert(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(4,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_join rejects no serialization" {
+    assert(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(0,8)))
+}
+
+example "HOSTILE reclaim108_virtual rejects different process incarnation arena" {
+    assert(reclaim108_virtual(bvconst(101,64),bvconst(102,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_virtual rejects missing owner" {
+    assert(reclaim108_virtual(bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_virtual rejects still mapped hole" {
+    assert(reclaim108_virtual(bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(0,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_virtual rejects two disjoint holes are insufficient" {
+    assert(reclaim108_virtual(bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_virtual rejects old reservation snapshot" {
+    assert(reclaim108_virtual(bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(4,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_release rejects stale handle generation" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(6,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_release rejects different slot" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(4,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_release rejects foreign incarnation" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(102,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_release rejects wrong object" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(45,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_release rejects double release" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(0,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_release rejects live lifetime" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_release rejects CPU still outstanding" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_release rejects DMA still outstanding" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_release rejects remaining grant" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_release rejects remaining virtual map" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_release rejects remaining pointer cell" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_release rejects still placed backing" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_release rejects missing terminal visibility" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_release rejects stale teardown snapshot" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(4,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_release rejects unsynchronized release" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(0,8)))
+}
+
+example "HOSTILE second exact release after successful retirement" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),reclaim108_present(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)),bvconst(1,8)),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(6,64),bvconst(6,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_claim rejects zero slot" {
+    assert(reclaim108_claim(bvconst(0,64),bvconst(64,64),bvconst(7,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_claim rejects beyond directory" {
+    assert(reclaim108_claim(bvconst(65,64),bvconst(64,64),bvconst(7,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_claim rejects unencodable capacity" {
+    assert(reclaim108_claim(bvconst(3,64),bvconst(4294967296,64),bvconst(7,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_claim rejects generation exhausted" {
+    assert(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(4294967295,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_claim rejects reserved record" {
+    assert(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_claim rejects live record" {
+    assert(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(2,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_claim rejects closing record" {
+    assert(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(3,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_claim rejects retired tombstone" {
+    assert(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(4,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_claim rejects evicted payload page" {
+    assert(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(0,8),bvconst(0,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_claim rejects stale global revision" {
+    assert(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(4,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_evict rejects live slot" {
+    assert(reclaim108_evict(bvconst(64,64),bvconst(59,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_evict rejects reserved slot" {
+    assert(reclaim108_evict(bvconst(64,64),bvconst(59,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_evict rejects closing slot" {
+    assert(reclaim108_evict(bvconst(64,64),bvconst(59,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_evict rejects incomplete census" {
+    assert(reclaim108_evict(bvconst(64,64),bvconst(59,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_evict rejects duplicated census entry" {
+    assert(reclaim108_evict(bvconst(64,64),bvconst(61,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_evict rejects empty page width" {
+    assert(reclaim108_evict(bvconst(0,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_evict rejects unencodable page width" {
+    assert(reclaim108_evict(bvconst(4294967296,64),bvconst(4294967292,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_evict rejects already evicted page" {
+    assert(reclaim108_evict(bvconst(64,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_evict rejects metadata reader" {
+    assert(reclaim108_evict(bvconst(64,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_evict rejects staged metadata writer" {
+    assert(reclaim108_evict(bvconst(64,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_evict rejects stale page revision" {
+    assert(reclaim108_evict(bvconst(64,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(4,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_evict rejects unserialized page deletion" {
+    assert(reclaim108_evict(bvconst(64,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(0,8)))
+}
+
+example "HOSTILE double page eviction" {
+    assert(reclaim108_evict(bvconst(64,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),reclaim108_resident(reclaim108_evict(bvconst(64,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),bvconst(1,8)),bvconst(0,64),bvconst(0,64),bvconst(6,64),bvconst(6,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_rehydrate rejects forgot generation" {
+    assert(reclaim108_rehydrate(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),(bvconst(1,8)=bvconst(1,8)),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_rehydrate rejects reset generation" {
+    assert(reclaim108_rehydrate(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(1,64),bvconst(0,8),bvconst(0,8),(bvconst(1,8)=bvconst(1,8)),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_rehydrate rejects wrong recorded generation" {
+    assert(reclaim108_rehydrate(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(8,64),bvconst(0,8),bvconst(0,8),(bvconst(1,8)=bvconst(1,8)),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_rehydrate rejects live page entry" {
+    assert(reclaim108_rehydrate(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(7,64),bvconst(2,8),bvconst(0,8),(bvconst(1,8)=bvconst(1,8)),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_rehydrate rejects already resident page" {
+    assert(reclaim108_rehydrate(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_rehydrate rejects unprepared page" {
+    assert(reclaim108_rehydrate(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),bvconst(0,8),(bvconst(0,8)=bvconst(1,8)),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_rehydrate rejects wrong revision" {
+    assert(reclaim108_rehydrate(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),bvconst(0,8),(bvconst(1,8)=bvconst(1,8)),bvconst(5,64),bvconst(4,64),bvconst(1,8)))
+}
+
+example "HOSTILE rehydrated retired slot still cannot mint" {
+    assert(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(4294967295,64),bvconst(4,8),bvconst(1,8),bvconst(6,64),bvconst(6,64),bvconst(1,8)))
+}
+
+example "HOSTILE reclaim108_fresh_object rejects reuse destroyed object identity" {
+    assert(reclaim108_fresh_object(bvconst(44,64),bvconst(43,64),bvconst(45,64)))
+}
+
+example "HOSTILE reclaim108_fresh_object rejects rewind identity counter" {
+    assert(reclaim108_fresh_object(bvconst(44,64),bvconst(44,64),bvconst(44,64)))
+}
+
+example "HOSTILE reclaim108_fresh_object rejects wrap identity counter" {
+    assert(reclaim108_fresh_object(bvsub(ptr107_max(),bvconst(0,64)),bvsub(ptr107_max(),bvconst(0,64)),bvconst(0,64)))
+}
+
+example "HOSTILE reclaim108_extent_capacity rejects no room for boundary hole" {
+    assert(reclaim108_extent_capacity(bvconst(64,64),bvconst(64,64)))
+}
+
+example "HOSTILE reclaim108_extent_capacity rejects overflowed capacity" {
+    assert(reclaim108_extent_capacity(bvsub(ptr107_max(),bvconst(0,64)),bvconst(0,64)))
+}
+
+example "HOSTILE reclaim108_ledger rejects missing infrastructure charge" {
+    assert(reclaim108_ledger(bvconst(0,64),bvconst(8192,64),bvconst(4096,64),bvconst(1024,64),bvconst(17408,64)))
+}
+
+example "HOSTILE reclaim108_ledger rejects infrastructure exceeds budget" {
+    assert(reclaim108_ledger(bvconst(17409,64),bvconst(8192,64),bvconst(4096,64),bvconst(1024,64),bvconst(17408,64)))
+}
+
+example "HOSTILE reclaim108_ledger rejects backing exceeds residual budget" {
+    assert(reclaim108_ledger(bvconst(4096,64),bvconst(13313,64),bvconst(4096,64),bvconst(1024,64),bvconst(17408,64)))
+}
+
+example "HOSTILE reclaim108_ledger rejects metadata exceeds residual budget" {
+    assert(reclaim108_ledger(bvconst(4096,64),bvconst(8192,64),bvconst(5121,64),bvconst(1024,64),bvconst(17408,64)))
+}
+
+example "HOSTILE reclaim108_ledger rejects retained resources unaccounted" {
+    assert(reclaim108_ledger(bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(1025,64),bvconst(17408,64)))
+}
+
+example "HOSTILE reclaim108_ledger rejects wrapped total" {
+    assert(reclaim108_ledger(bvconst(4096,64),bvsub(ptr107_max(),bvconst(0,64)),bvconst(4096,64),bvconst(1024,64),bvconst(17408,64)))
+}
+
+example "HOSTILE reclaim108_grow rejects overcommit by one byte" {
+    assert(reclaim108_grow(bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(1024,64),bvconst(4097,64),bvconst(21504,64)))
+}
+
+example "HOSTILE reclaim108_grow rejects zero pretend allocation" {
+    assert(reclaim108_grow(bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(1024,64),bvconst(0,64),bvconst(21504,64)))
+}
+
+example "HOSTILE reclaim108_grow rejects unbounded wrapping charge" {
+    assert(reclaim108_grow(bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(1024,64),bvsub(ptr107_max(),bvconst(0,64)),bvconst(21504,64)))
+}
+
+example "HOSTILE pending release retains backing cannot produce 4096" {
+    assert(reclaim108_refund((bvconst(0,8)=bvconst(1,8)),bvconst(8192,64),bvconst(4096,64))=bvconst(4096,64))
+}
+
+example "HOSTILE completed release refunds exact backing cannot produce 0" {
+    assert(reclaim108_refund((bvconst(1,8)=bvconst(1,8)),bvconst(8192,64),bvconst(4096,64))=bvconst(0,64))
+}
+
+example "HOSTILE oversized refund stutters cannot produce 18446744073709547520" {
+    assert(reclaim108_refund((bvconst(1,8)=bvconst(1,8)),bvconst(4096,64),bvconst(8192,64))=bvsub(ptr107_max(),bvconst(4095,64)))
+}
+
+example "HOSTILE retained host capacity remains charged cannot produce 4096" {
+    assert(reclaim108_metadata_refund((bvconst(1,8)=bvconst(1,8)),bvconst(8192,64),bvconst(4096,64),bvconst(0,64))=bvconst(4096,64))
+}
+
+example "HOSTILE exactly returned page refunded cannot produce 0" {
+    assert(reclaim108_metadata_refund((bvconst(1,8)=bvconst(1,8)),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64))=bvconst(0,64))
+}
+
+example "HOSTILE failed eviction receives no refund cannot produce 4096" {
+    assert(reclaim108_metadata_refund((bvconst(0,8)=bvconst(1,8)),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64))=bvconst(4096,64))
+}
+
+example "HOSTILE live neighbor object survives table shrink cannot produce 0" {
+    assert(reclaim108_map_present((bvconst(1,8)=bvconst(1,8)),bvconst(44,64),bvconst(45,64),bvconst(1,8))=bvconst(0,8))
+}
+
+example "HOSTILE selected object entry removed cannot produce 1" {
+    assert(reclaim108_map_present((bvconst(1,8)=bvconst(1,8)),bvconst(44,64),bvconst(44,64),bvconst(1,8))=bvconst(1,8))
+}
+
+example "HOSTILE generation exhaustion leaves permanent state cannot produce 0" {
+    assert(reclaim108_closed_state(repr107_mask())=bvconst(0,8))
+}
+
+example "HOSTILE ordinary generation becomes reusable cannot produce 4" {
+    assert(reclaim108_closed_state(bvconst(7,64))=bvconst(4,8))
+}
+
+example "HOSTILE last generation survives metadata shrink cannot produce 0" {
+    assert(reclaim108_directory_after_shrink(bvconst(7,64))=bvconst(0,64))
+}
+
+example "HOSTILE live slot index survives metadata shrink cannot produce 1" {
+    assert(reclaim108_slot_after_shrink(bvconst(3,64))=bvconst(1,64))
+}
+
+example "HOSTILE failed virtual admission restores physical reservation cannot produce 12288" {
+    assert(reclaim108_word(reclaim108_pair((bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))),bvconst(16384,64),bvconst(12288,64))=bvconst(12288,64))
+}
+
+example "HOSTILE failed metadata admission preserves generation cannot produce 8" {
+    assert(reclaim108_generation(reclaim108_pair((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))),bvconst(7,64))=bvconst(8,64))
+}
+
+example "HOSTILE failed budget admission preserves revision cannot produce 6" {
+    assert(reclaim108_revision(reclaim108_pair((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8))),bvconst(5,64))=bvconst(6,64))
+}
+
+example "HOSTILE adjacent free records must coalesce" {
+    assert(reclaim108_append_free(bvconst(1,64),bvconst(0,64),bvconst(1,8)))
+}
+
+example "HOSTILE hole count exceeds bounded directory" {
+    assert(reclaim108_prefix(bvconst(66,64),bvconst(64,64),bvconst(1,8)))
+}
+
+example "HOSTILE live B may be swallowed during free A" {
+    assert(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE saved event alias revives at reused virtual address" {
+    assert(heap108_current(repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(1,8),bvconst(3,64),bvconst(8,64),bvconst(1,8),bvconst(2,8),(bvconst(1,8)=bvconst(1,8))))
+}
+
+example "HOSTILE coalescing grants permission to skip scrub" {
+    assert(init108_heap_gate((bvconst(0,8)=bvconst(1,8)),reclaim108_trace_join_a(),bvconst(17,64),bvconst(4096,64),bvconst(4096,64)))
+}
+
+example "HOSTILE three differently sized cycles preserve payload baseline cannot produce 32768" {
+    assert(reclaim108_cycle_payload(reclaim108_cycle_payload(reclaim108_cycle_payload(bvconst(8192,64),bvconst(4096,64)),bvconst(8192,64)),bvconst(12288,64))=bvconst(32768,64))
+}
+
+example "HOSTILE metadata allocate-evict cycle preserves fixed baseline cannot produce 0" {
+    assert(reclaim108_total(bvconst(4096,64),bvconst(0,64),reclaim108_metadata_refund((bvconst(1,8)=bvconst(1,8)),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64)),bvconst(0,64))=bvconst(0,64))
+}

@@ -1,0 +1,1019 @@
+// DN-71 A2.3 -- bounded Fabric attachment, pointer shadow and initialization.
+// SPECIFICATION ONLY. No new axioms, allocator implementation or malloc claim.
+import "anka108_allocation_placement.kleis"
+
+// Concrete SOFTWARE profile: one preallocated Fabric row per common registry
+// slot, containing object/placement/private-map/RW-grant/initialization state;
+// one dense protected shadow entry per aligned 16 bytes of the DEDICATED heap
+// physical pool. Charge actual retained capacities and sizeof values once.
+// No growing BTreeMap/Vec/String insertion is permitted in an admitted commit
+// or typed heap store. Legacy objects can keep their existing representation.
+// A physical shadow index is storage, NOT authority: authenticate the current
+// allocation and (object, object-generation, offset) before every lookup.
+//
+// All parameters marked checked/ready/binding are results of trusted bounded
+// scans/current records, NOT applicant assertions. Reservation/custody comes
+// from A2.2; owner serial is the nonreused A2.1 account identity. Process IDs,
+// process generation zero and ObjectId zero are valid concrete values.
+// Attach consumes a fresh globally unique ObjectId from the SAME checked
+// counter as all Fabric issuers. It NEVER consumes another allocation epoch.
+// Object IDs do not rewind on failure after attachment and do not wrap.
+//
+// Stages: 0 reserved-never-attached; 1 private initialization; 2 published;
+// 3 closing/quarantined. Stage is the ONE visibility switch for object, map,
+// grant and protected result publication; no separately visible partial grant.
+// Sticky attachment permanently rules out the A2.2 direct cancellation path.
+// Attached failure/death closes admission and queues the already-reserved
+// Undertaker row, keeping extents and charges until its accepted release gate.
+//
+// First profile: process-private CPU access, no exported grants or DMA. All
+// legacy/raw/physical access and placement paths must respect pool exclusion.
+// CPU/context/supervisor control, current owner checks, pending work censuses,
+// terminal visibility and complete exclusion scans are implementation duties.
+// These finite transitions do not prove Rust loops, host allocation success,
+// cache coherence, SMP fences, device drainage, timing secrecy or progress.
+// Publication stays DISABLED in Rust until lifecycle, cleanup, syscall result
+// and owner-death integration exist. This gate is not that implementation.
+
+define a23_z() = bvconst(0,64)
+define a23_o() = bvconst(1,64)
+define a23_yes() = bvconst(1,8)
+define a23_no() = bvconst(0,8)
+define a23_true() = bvconst(1,8)=bvconst(1,8)
+define a23_false() = bvconst(0,8)=bvconst(1,8)
+
+// Row uses the common one-based encoded slot, not a second pointer namespace.
+define a23_row(slot : BitVec64, slots : BitVec64, retained : BitVec64) =
+    bvugt(slot,a23_z()) ∧ bvule(slot,slots) ∧ bvule(slots,repr107_mask()) ∧ bvuge(retained,slots)
+define a23_row_index(slot : BitVec64) = bvsub(slot,a23_o())
+define a23_shadow_count(pool_size : BitVec64) = bvudiv(pool_size,bvconst(16,64))
+define a23_shadow_index(pool : BitVec64, physical : BitVec64) =
+    bvudiv(bvsub(physical,pool),bvconst(16,64))
+define a23_shadow_cell(pool : BitVec64, pool_size : BitVec64, physical : BitVec64) =
+    init108_range(pool,pool_size) ∧ init108_aligned(physical) ∧
+    bvuge(physical,pool) ∧ bvule(bvsub(physical,pool),pool_size) ∧
+    bvule(bvconst(16,64),bvsub(pool_size,bvsub(physical,pool)))
+
+// Allocation of these arrays is fallible construction, before service exposure.
+// Zero slots means a configured non-admitting service, not unlimited growth.
+define a23_storage(slots : BitVec64, rows : BitVec64, row_stride : BitVec64,
+    row_bytes : BitVec64, pool : BitVec64, pool_size : BitVec64,
+    shadows : BitVec64, shadow_stride : BitVec64, shadow_bytes : BitVec64,
+    old_fixed : BitVec64, scratch : BitVec64, total : BitVec64,
+    limit : BitVec64, allocation_succeeded : Bool) =
+    bvule(slots,repr107_mask()) ∧ bvuge(rows,slots) ∧
+    init108_range(pool,pool_size) ∧ bvuge(shadows,a23_shadow_count(pool_size)) ∧
+    a22_storage(rows,row_stride,row_bytes) ∧ a22_storage(shadows,shadow_stride,shadow_bytes) ∧
+    a22_fixed(old_fixed,row_bytes,shadow_bytes,scratch,a23_z(),a23_z(),total) ∧
+    bvule(total,limit) ∧ allocation_succeeded
+
+define a23_owner(account : BitVec64, current_account : BitVec64,
+    pid : BitVec64, current_pid : BitVec64, incarnation : BitVec64, current_incarnation : BitVec64,
+    context : BitVec64, current_context : BitVec64, domain : BitVec64, current_domain : BitVec64,
+    closed : BitVec8, running : BitVec8) =
+    bvugt(account,a23_z()) ∧ (account=current_account) ∧ (pid=current_pid) ∧
+    (incarnation=current_incarnation) ∧ bvugt(context,a23_z()) ∧ (context=current_context) ∧
+    (domain=current_domain) ∧ (closed=a23_no()) ∧ (running=a23_yes())
+
+// Request binding is checked against EVERY current registry/custody/cleanup
+// record. These fields are not accepted merely because the request agrees
+// with itself. The attached row freezes its logical and rounded geometry.
+define a23_key(owner : BitVec64, slot : BitVec64, epoch : BitVec64, job : BitVec64,
+    row_owner : BitVec64, row_slot : BitVec64, row_epoch : BitVec64, row_job : BitVec64,
+    object : BitVec64, row_object : BitVec64, object_gen : BitVec64, row_object_gen : BitVec64,
+    physical : BitVec64, row_physical : BitVec64, virtual : BitVec64, row_virtual : BitVec64,
+    logical : BitVec64, row_logical : BitVec64, rounded : BitVec64, row_rounded : BitVec64) =
+    a22_binding(owner,slot,epoch,job,row_owner,row_slot,row_epoch,row_job) ∧
+    (object=row_object) ∧ (object_gen=row_object_gen) ∧ (physical=row_physical) ∧
+    (virtual=row_virtual) ∧ (logical=row_logical) ∧ (rounded=row_rounded)
+
+define a23_layout(logical : BitVec64, rounded : BitVec64,
+    physical : BitVec64, pool : BitVec64, pool_size : BitVec64, memory_size : BitVec64,
+    virtual : BitVec64, arena : BitVec64, arena_size : BitVec64,
+    exact_custody : Bool, pool_excluded : Bool, arena_excluded : Bool) =
+    heap108_size(logical) ∧ pm93g_rounding_valid(logical,rounded) ∧
+    pm93g_extent_within_pool(physical,rounded,pool,pool_size) ∧
+    bvule(pool,memory_size) ∧ bvule(pool_size,bvsub(memory_size,pool)) ∧
+    vm93g_range_within(virtual,rounded,arena,arena_size) ∧
+    exact_custody ∧ pool_excluded ∧ arena_excluded
+
+define a23_quiet(cpu : BitVec64, dma : BitVec64, readers : BitVec64, writers : BitVec64) =
+    (cpu=a23_z()) ∧ (dma=a23_z()) ∧ (readers=a23_z()) ∧ (writers=a23_z())
+define a23_serial(revision : BitVec64, expected : BitVec64, locked : BitVec8) =
+    (revision=expected) ∧ bvult(revision,ptr107_max()) ∧ (locked=a23_yes())
+define a23_object(next : BitVec64, selected : BitVec64, absent_everywhere : Bool) =
+    bvult(next,ptr107_max()) ∧ (selected=next) ∧ absent_everywhere
+
+define a23_attach(reservation_bound : Bool, owner_current : Bool, layout_checked : Bool,
+    directory_ready : Bool, stage : BitVec8, attached : BitVec8, next_object : BitVec64,
+    selected_object : BitVec64, object_absent : Bool, cpu : BitVec64, dma : BitVec64,
+    readers : BitVec64, writers : BitVec64, revision : BitVec64, expected : BitVec64,
+    locked : BitVec8) =
+    reservation_bound ∧ owner_current ∧ layout_checked ∧ directory_ready ∧
+    (stage=a23_no()) ∧ (attached=a23_no()) ∧ a23_object(next_object,selected_object,object_absent) ∧
+    a23_quiet(cpu,dma,readers,writers) ∧ a23_serial(revision,expected,locked)
+
+// Same commit decision for EVERY field. Each row update is pointwise; another
+// owner's rows/counters are unchanged. No quota charge here: A2.2 charged the
+// rounded payload and construction charged all retained shadow/metadata.
+define a23_stage(commit : Bool, old : BitVec8, next : BitVec8) = heap108_phase_after(commit,old,next)
+define a23_attached(commit : Bool, old : BitVec8) = if commit then a23_yes() else old
+define a23_next(commit : Bool, old : BitVec64) = if commit then bvadd(old,a23_o()) else old
+define a23_field(commit : Bool, selected : BitVec64, query : BitVec64, old : BitVec64, next : BitVec64) =
+    heap108_account(commit,selected,query,old,next)
+define a23_charge(old : BitVec64) = old
+define a23_epoch(old : BitVec64) = old
+
+// Initializer starts at done=0/version=0 on attach. Bounded synchronous software
+// chunks <= one page, zero bytes AND clear overlapping shadow in the same
+// exclusive transition. The runtime reads done/version, never trusts a caller
+// completion count. Old CPU/DMA work must already be terminal before attach.
+define a23_chunk(bound : Bool, owner_current : Bool, stage : BitVec8,
+    done : BitVec64, amount : BitVec64, rounded : BitVec64,
+    version : BitVec64, expected_version : BitVec64,
+    cpu : BitVec64, dma : BitVec64, readers : BitVec64, writers : BitVec64,
+    revision : BitVec64, expected_revision : BitVec64, locked : BitVec8) =
+    bound ∧ owner_current ∧ bvule(amount,bvconst(4096,64)) ∧
+    init108_chunk(stage,done,amount,rounded,version,expected_version,a23_yes(),locked) ∧
+    a23_quiet(cpu,dma,readers,writers) ∧ a23_serial(revision,expected_revision,locked)
+define a23_byte(commit : Bool, base : BitVec64, done : BitVec64, amount : BitVec64,
+    address : BitVec64, old : BitVec8) =
+    if commit ∧ bvuge(address,base) then init108_byte(commit,done,amount,bvsub(address,base),old) else old
+define a23_tag(commit : Bool, base : BitVec64, done : BitVec64, amount : BitVec64,
+    cell : BitVec64, old : BitVec8) = init108_tag(commit,base,done,amount,cell,old)
+
+// Any non-scrub trusted mutation while private must invalidate the prefix and
+// version atomically; raw mutation without this transition is forbidden.
+define a23_dirty(bound : Bool, stage : BitVec8, version : BitVec64,
+    revision : BitVec64, expected : BitVec64, locked : BitVec8) =
+    bound ∧ init108_mutation(stage,version,a23_yes(),locked) ∧ a23_serial(revision,expected,locked)
+
+// Exact preallocated object/map/grant plan exposes LOGICAL bytes only. Rounded
+// padding has custody and gets cleared, but is never user-addressable. Read and
+// write only: no EXEC/ATOMIC/SEAL and no cross-owner export in this profile.
+define a23_plan(logical : BitVec64, rounded : BitVec64, object_size : BitVec64,
+    map_length : BitVec64, grant_length : BitVec64, rights : BitVec64,
+    owner : BitVec64, map_owner : BitVec64, grant_owner : BitVec64) =
+    heap108_size(logical) ∧ pm93g_rounding_valid(logical,rounded) ∧
+    (object_size=logical) ∧ (map_length=logical) ∧ (grant_length=logical) ∧
+    (rights=bvconst(3,64)) ∧ bvugt(owner,a23_z()) ∧ (owner=map_owner) ∧ (owner=grant_owner)
+
+// bound includes exact a23_key plus the current version/receipt check below.
+// result_ready must bind a protected destination in the current syscall/event
+// context. lifecycle_ready means the accepted close/drain/Undertaker path is
+// actually connected, not merely that its theory file exists.
+define a23_publish(bound : Bool, owner_current : Bool, plan_exact : Bool,
+    stage : BitVec8, attached : BitVec8, done : BitVec64, rounded : BitVec64,
+    version : BitVec64, receipt_version : BitVec64,
+    cpu : BitVec64, dma : BitVec64, readers : BitVec64, writers : BitVec64,
+    visible : BitVec8, result_ready : Bool, lifecycle_ready : Bool,
+    revision : BitVec64, expected : BitVec64, locked : BitVec8) =
+    owner_current ∧ plan_exact ∧ (attached=a23_yes()) ∧ result_ready ∧ lifecycle_ready ∧
+    a23_quiet(cpu,dma,readers,writers) ∧
+    init108_publish(bound,stage,done,rounded,version,receipt_version,a23_yes(),readers,writers,visible,locked) ∧
+    a23_serial(revision,expected,locked)
+define a23_visible(stage : BitVec8, current_owner : Bool) = (stage=bvconst(2,8)) ∧ current_owner
+define a23_object_visible(stage : BitVec8, current_owner : Bool) = a23_visible(stage,current_owner)
+define a23_map_visible(stage : BitVec8, current_owner : Bool) = a23_visible(stage,current_owner)
+define a23_grant_visible(stage : BitVec8, current_owner : Bool) = a23_visible(stage,current_owner)
+define a23_result_handle(commit : Bool, slot : BitVec64, epoch : BitVec64, old : BitVec64) =
+    if commit then repr107_handle(slot,epoch) else old
+define a23_result_position(commit : Bool, old : BitVec64) = if commit then a23_z() else old
+define a23_result_tag(commit : Bool, old : BitVec8) = if commit then a23_yes() else old
+
+// Every access authenticates current lifetime and owner again, including a
+// delayed precommit and restored event contexts. Scalar numerically identical
+// words never acquire pointer kind. Legacy grants cannot override this gate.
+define a23_current(handle : BitVec64, tag : BitVec8, slot : BitVec64, epoch : BitVec64,
+    stage : BitVec8, owner_current : Bool) =
+    a23_visible(stage,owner_current) ∧
+    heap108_current(handle,tag,slot,epoch,bvconst(1,8),bvconst(2,8),owner_current)
+define a23_access(current : Bool, key_exact : Bool, pos : BitVec64, logical : BitVec64,
+    width : BitVec64, need : BitVec64, cpu_path : Bool) =
+    key_exact ∧ cpu_path ∧ heap108_access(current,pos,logical,width,bvconst(3,64),need,a23_yes(),a23_yes())
+define a23_cell(current : Bool, key_exact : Bool, offset : BitVec64, logical : BitVec64,
+    physical : BitVec64, pool : BitVec64, pool_size : BitVec64) =
+    a23_access(current,key_exact,offset,logical,bvconst(16,64),bvconst(2,64),a23_true()) ∧
+    init108_aligned(offset) ∧ a22_add(physical,offset) ∧
+    a23_shadow_cell(pool,pool_size,bvadd(physical,offset))
+// Cell validation locates preallocated storage. Source-token authentication,
+// coherent two-word transport and matching bytes remain kind107 requirements;
+// this gate NEVER synthesizes a tag merely from an address or shadow index.
+define a23_store(cell_checked : Bool, source_authenticated_or_null : Bool,
+    coherent : BitVec8, no_fallible_work : Bool, locked : BitVec8) =
+    cell_checked ∧ source_authenticated_or_null ∧ (coherent=a23_yes()) ∧
+    no_fallible_work ∧ (locked=a23_yes())
+
+// Closure is possible even when the revision is exhausted: close invalidates
+// visibility, and a22_cleanup_revision saturates instead of reopening/wrapping.
+// Queue slot was reserved before attach. A duplicate close cannot release or
+// refund anything. Cleanup workers subsequently use the imported Undertaker
+// binding/drain/initialization/release gates, not a direct cancel shortcut.
+define a23_close(bound : Bool, stage : BitVec8, attached : BitVec8,
+    cleanup_reserved : Bool, locked : BitVec8) =
+    bound ∧ ((stage=bvconst(1,8)) ∨ (stage=bvconst(2,8))) ∧
+    (attached=a23_yes()) ∧ cleanup_reserved ∧ (locked=a23_yes())
+define a23_direct_cancel(stage : BitVec8, attached : BitVec8, a22_cancel_checked : Bool) =
+    (stage=a23_no()) ∧ (attached=a23_no()) ∧ a22_cancel_checked
+define a23_held(stage : BitVec8) = bvule(stage,bvconst(3,8))
+
+// Constructive composition witnesses below use a real 4096-byte reservation,
+// logical length 31, and two committed chunks (16 then 4080 bytes). Every old
+// byte and pointer tag is symbolic in the quantified observations. B's backing
+// starts at 12288 and is unchanged. This is not a running-client malloc test.
+define a23_trace_storage() = a23_storage(bvconst(8,64),bvconst(8,64),bvconst(128,64),bvconst(1024,64),bvconst(4096,64),bvconst(16384,64),bvconst(1024,64),bvconst(32,64),bvconst(32768,64),bvconst(4096,64),bvconst(256,64),bvconst(38144,64),bvconst(65536,64),a23_true())
+define a23_trace_owner() = a23_owner(bvconst(7,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(11,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8))
+define a23_trace_key() = a23_key(bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(65536,64),bvconst(65536,64),bvconst(31,64),bvconst(31,64),bvconst(4096,64),bvconst(4096,64))
+define a23_trace_layout() = a23_layout(bvconst(31,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(32768,64),bvconst(65536,64),bvconst(65536,64),bvconst(16384,64),a23_true(),a23_true(),a23_true())
+define a23_trace_plan() = a23_plan(bvconst(31,64),bvconst(4096,64),bvconst(31,64),bvconst(31,64),bvconst(31,64),bvconst(3,64),bvconst(7,64),bvconst(7,64),bvconst(7,64))
+define a23_trace_attach() = a23_attach(a23_trace_key(),a23_trace_owner(),a23_trace_layout(),a23_trace_storage() ∧ a23_row(bvconst(2,64),bvconst(8,64),bvconst(8,64)),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(40,64),bvconst(40,64),bvconst(1,8))
+define a23_trace_private() = a23_stage(a23_trace_attach(),bvconst(0,8),bvconst(1,8))
+define a23_trace_attached() = a23_attached(a23_trace_attach(),bvconst(0,8))
+define a23_trace_revision1() = a23_next(a23_trace_attach(),bvconst(40,64))
+define a23_trace_first() = a23_chunk(a23_trace_key(),a23_trace_owner(),a23_trace_private(),bvconst(0,64),bvconst(16,64),bvconst(4096,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),a23_trace_revision1(),bvconst(41,64),bvconst(1,8))
+define a23_trace_done1() = init108_done(a23_trace_first(),bvconst(0,64),bvconst(16,64))
+define a23_trace_version1() = init108_version(a23_trace_first(),bvconst(0,64))
+define a23_trace_revision2() = a23_next(a23_trace_first(),a23_trace_revision1())
+define a23_trace_second() = a23_chunk(a23_trace_key(),a23_trace_owner(),a23_trace_private(),a23_trace_done1(),bvconst(4080,64),bvconst(4096,64),a23_trace_version1(),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),a23_trace_revision2(),bvconst(42,64),bvconst(1,8))
+define a23_trace_done2() = init108_done(a23_trace_second(),a23_trace_done1(),bvconst(4080,64))
+define a23_trace_version2() = init108_version(a23_trace_second(),a23_trace_version1())
+define a23_trace_revision3() = a23_next(a23_trace_second(),a23_trace_revision2())
+define a23_trace_publish() = a23_publish(a23_trace_key(),a23_trace_owner(),a23_trace_plan(),a23_trace_private(),a23_trace_attached(),a23_trace_done2(),bvconst(4096,64),a23_trace_version2(),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),a23_trace_revision3(),bvconst(43,64),bvconst(1,8))
+define a23_trace_live() = a23_stage(a23_trace_publish(),a23_trace_private(),bvconst(2,8))
+define a23_trace_handle() = a23_result_handle(a23_trace_publish(),bvconst(2,64),a23_epoch(bvconst(9,64)),bvconst(0,64))
+define a23_trace_tag() = a23_result_tag(a23_trace_publish(),bvconst(0,8))
+define a23_trace_current() = a23_current(a23_trace_handle(),a23_trace_tag(),bvconst(2,64),bvconst(9,64),a23_trace_live(),a23_trace_owner())
+define a23_trace_byte(address : BitVec64, secret : BitVec8) = a23_byte(a23_trace_second(),bvconst(8192,64),a23_trace_done1(),bvconst(4080,64),address,a23_byte(a23_trace_first(),bvconst(8192,64),bvconst(0,64),bvconst(16,64),address,secret))
+define a23_trace_shadow(cell : BitVec64, old : BitVec8) = a23_tag(a23_trace_second(),bvconst(8192,64),a23_trace_done1(),bvconst(4080,64),cell,a23_tag(a23_trace_first(),bvconst(8192,64),bvconst(0,64),bvconst(16,64),cell,old))
+define a23_trace_close() = a23_close(a23_trace_key(),a23_trace_live(),a23_trace_attached(),a23_true(),bvconst(1,8))
+define a23_trace_closed() = a23_stage(a23_trace_close(),a23_trace_live(),bvconst(3,8))
+define a23_trace_dirty() = a23_dirty(a23_trace_key(),a23_trace_private(),a23_trace_version2(),a23_trace_revision3(),a23_trace_revision3(),bvconst(1,8))
+
+example "row: valid concrete preparation" {
+    assert(a23_row(bvconst(1,64),bvconst(8,64),bvconst(8,64)))
+}
+
+example "storage: valid concrete preparation" {
+    assert(a23_storage(bvconst(8,64),bvconst(8,64),bvconst(128,64),bvconst(1024,64),bvconst(4096,64),bvconst(16384,64),bvconst(1024,64),bvconst(32,64),bvconst(32768,64),bvconst(4096,64),bvconst(256,64),bvconst(38144,64),bvconst(65536,64),a23_true()))
+}
+
+example "owner: valid concrete preparation" {
+    assert(a23_owner(bvconst(7,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(11,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "key: valid concrete preparation" {
+    assert(a23_key(bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(65536,64),bvconst(65536,64),bvconst(31,64),bvconst(31,64),bvconst(4096,64),bvconst(4096,64)))
+}
+
+example "layout: valid concrete preparation" {
+    assert(a23_layout(bvconst(31,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(32768,64),bvconst(65536,64),bvconst(65536,64),bvconst(16384,64),a23_true(),a23_true(),a23_true()))
+}
+
+example "attach: valid concrete preparation" {
+    assert(a23_attach(a23_true(),a23_true(),a23_true(),a23_true(),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(40,64),bvconst(40,64),bvconst(1,8)))
+}
+
+example "chunk: valid concrete preparation" {
+    assert(a23_chunk(a23_true(),a23_true(),bvconst(1,8),bvconst(16,64),bvconst(4080,64),bvconst(4096,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(42,64),bvconst(42,64),bvconst(1,8)))
+}
+
+example "plan: valid concrete preparation" {
+    assert(a23_plan(bvconst(31,64),bvconst(4096,64),bvconst(31,64),bvconst(31,64),bvconst(31,64),bvconst(3,64),bvconst(7,64),bvconst(7,64),bvconst(7,64)))
+}
+
+example "publish: valid concrete preparation" {
+    assert(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),bvconst(43,64),bvconst(43,64),bvconst(1,8)))
+}
+
+example "current: valid concrete preparation" {
+    assert(a23_current(repr107_handle(bvconst(2,64),bvconst(9,64)),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(2,8),a23_true()))
+}
+
+example "access: valid concrete preparation" {
+    assert(a23_access(a23_true(),a23_true(),bvconst(30,64),bvconst(31,64),bvconst(1,64),bvconst(1,64),a23_true()))
+}
+
+example "cell: valid concrete preparation" {
+    assert(a23_cell(a23_true(),a23_true(),bvconst(0,64),bvconst(31,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64)))
+}
+
+example "store: valid concrete preparation" {
+    assert(a23_store(a23_true(),a23_true(),bvconst(1,8),a23_true(),bvconst(1,8)))
+}
+
+example "close: valid concrete preparation" {
+    assert(a23_close(a23_true(),bvconst(2,8),bvconst(1,8),a23_true(),bvconst(1,8)))
+}
+
+example "row: rejects null slot" {
+    assert(¬(a23_row(bvconst(0,64),bvconst(8,64),bvconst(8,64))))
+}
+
+example "row: rejects slot beyond directory" {
+    assert(¬(a23_row(bvconst(9,64),bvconst(8,64),bvconst(8,64))))
+}
+
+example "row: rejects undersized retained rows" {
+    assert(¬(a23_row(bvconst(1,64),bvconst(8,64),bvconst(7,64))))
+}
+
+example "row: rejects unencodable slot namespace" {
+    assert(¬(a23_row(bvconst(1,64),bvconst(4294967296,64),bvconst(8,64))))
+}
+
+example "storage: rejects charging requested instead of retained row capacity" {
+    assert(¬(a23_storage(bvconst(8,64),bvconst(9,64),bvconst(128,64),bvconst(1024,64),bvconst(4096,64),bvconst(16384,64),bvconst(1024,64),bvconst(32,64),bvconst(32768,64),bvconst(4096,64),bvconst(256,64),bvconst(38144,64),bvconst(65536,64),a23_true())))
+}
+
+example "storage: rejects insufficient dense shadow" {
+    assert(¬(a23_storage(bvconst(8,64),bvconst(8,64),bvconst(128,64),bvconst(1024,64),bvconst(4096,64),bvconst(16384,64),bvconst(1023,64),bvconst(32,64),bvconst(32736,64),bvconst(4096,64),bvconst(256,64),bvconst(38112,64),bvconst(65536,64),a23_true())))
+}
+
+example "storage: rejects zero entry stride" {
+    assert(¬(a23_storage(bvconst(8,64),bvconst(8,64),bvconst(128,64),bvconst(1024,64),bvconst(4096,64),bvconst(16384,64),bvconst(1024,64),bvconst(0,64),bvconst(32768,64),bvconst(4096,64),bvconst(256,64),bvconst(38144,64),bvconst(65536,64),a23_true())))
+}
+
+example "storage: rejects capacity byte multiplication wraps" {
+    assert(¬(a23_storage(bvconst(8,64),ptr107_max(),bvconst(2,64),bvsub(ptr107_max(),bvconst(1,64)),bvconst(4096,64),bvconst(16384,64),bvconst(1024,64),bvconst(32,64),bvconst(32768,64),bvconst(4096,64),bvconst(256,64),bvconst(38144,64),bvconst(65536,64),a23_true())))
+}
+
+example "storage: rejects unchecked fixed sum" {
+    assert(¬(a23_storage(bvconst(8,64),bvconst(8,64),bvconst(128,64),bvconst(1024,64),bvconst(4096,64),bvconst(16384,64),bvconst(1024,64),bvconst(32,64),bvconst(32768,64),ptr107_max(),bvconst(256,64),bvconst(38144,64),bvconst(65536,64),a23_true())))
+}
+
+example "storage: rejects fixed budget shortage" {
+    assert(¬(a23_storage(bvconst(8,64),bvconst(8,64),bvconst(128,64),bvconst(1024,64),bvconst(4096,64),bvconst(16384,64),bvconst(1024,64),bvconst(32,64),bvconst(32768,64),bvconst(4096,64),bvconst(256,64),bvconst(38144,64),bvconst(38143,64),a23_true())))
+}
+
+example "storage: rejects fallible construction failed" {
+    assert(¬(a23_storage(bvconst(8,64),bvconst(8,64),bvconst(128,64),bvconst(1024,64),bvconst(4096,64),bvconst(16384,64),bvconst(1024,64),bvconst(32,64),bvconst(32768,64),bvconst(4096,64),bvconst(256,64),bvconst(38144,64),bvconst(65536,64),a23_false())))
+}
+
+example "storage: rejects empty physical pool" {
+    assert(¬(a23_storage(bvconst(8,64),bvconst(8,64),bvconst(128,64),bvconst(1024,64),bvconst(4096,64),bvconst(0,64),bvconst(1024,64),bvconst(32,64),bvconst(32768,64),bvconst(4096,64),bvconst(256,64),bvconst(38144,64),bvconst(65536,64),a23_true())))
+}
+
+example "storage: rejects wrapped pool end" {
+    assert(¬(a23_storage(bvconst(8,64),bvconst(8,64),bvconst(128,64),bvconst(1024,64),bvsub(ptr107_max(),bvconst(15,64)),bvconst(32,64),bvconst(1024,64),bvconst(32,64),bvconst(32768,64),bvconst(4096,64),bvconst(256,64),bvconst(38144,64),bvconst(65536,64),a23_true())))
+}
+
+example "owner: rejects account reincarnation" {
+    assert(¬(a23_owner(bvconst(7,64),bvconst(8,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(11,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "owner: rejects PID mismatch" {
+    assert(¬(a23_owner(bvconst(7,64),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(11,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "owner: rejects process generation mismatch" {
+    assert(¬(a23_owner(bvconst(7,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(11,64),bvconst(11,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "owner: rejects context mismatch" {
+    assert(¬(a23_owner(bvconst(7,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(12,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "owner: rejects domain mismatch" {
+    assert(¬(a23_owner(bvconst(7,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(11,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "owner: rejects closed account" {
+    assert(¬(a23_owner(bvconst(7,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(11,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "owner: rejects not running" {
+    assert(¬(a23_owner(bvconst(7,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(11,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8))))
+}
+
+example "owner: rejects zero account serial" {
+    assert(¬(a23_owner(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(11,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "key: rejects owner substitution" {
+    assert(¬(a23_key(bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(999,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(65536,64),bvconst(65536,64),bvconst(31,64),bvconst(31,64),bvconst(4096,64),bvconst(4096,64))))
+}
+
+example "key: rejects slot substitution" {
+    assert(¬(a23_key(bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(7,64),bvconst(999,64),bvconst(9,64),bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(65536,64),bvconst(65536,64),bvconst(31,64),bvconst(31,64),bvconst(4096,64),bvconst(4096,64))))
+}
+
+example "key: rejects allocation epoch substitution" {
+    assert(¬(a23_key(bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(7,64),bvconst(2,64),bvconst(999,64),bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(65536,64),bvconst(65536,64),bvconst(31,64),bvconst(31,64),bvconst(4096,64),bvconst(4096,64))))
+}
+
+example "key: rejects cleanup job substitution" {
+    assert(¬(a23_key(bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(999,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(65536,64),bvconst(65536,64),bvconst(31,64),bvconst(31,64),bvconst(4096,64),bvconst(4096,64))))
+}
+
+example "key: rejects object identity substitution" {
+    assert(¬(a23_key(bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(0,64),bvconst(999,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(65536,64),bvconst(65536,64),bvconst(31,64),bvconst(31,64),bvconst(4096,64),bvconst(4096,64))))
+}
+
+example "key: rejects object generation substitution" {
+    assert(¬(a23_key(bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(999,64),bvconst(8192,64),bvconst(8192,64),bvconst(65536,64),bvconst(65536,64),bvconst(31,64),bvconst(31,64),bvconst(4096,64),bvconst(4096,64))))
+}
+
+example "key: rejects physical base substitution" {
+    assert(¬(a23_key(bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(999,64),bvconst(65536,64),bvconst(65536,64),bvconst(31,64),bvconst(31,64),bvconst(4096,64),bvconst(4096,64))))
+}
+
+example "key: rejects virtual base substitution" {
+    assert(¬(a23_key(bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(65536,64),bvconst(999,64),bvconst(31,64),bvconst(31,64),bvconst(4096,64),bvconst(4096,64))))
+}
+
+example "key: rejects logical length substitution" {
+    assert(¬(a23_key(bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(65536,64),bvconst(65536,64),bvconst(31,64),bvconst(999,64),bvconst(4096,64),bvconst(4096,64))))
+}
+
+example "key: rejects rounded length substitution" {
+    assert(¬(a23_key(bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(65536,64),bvconst(65536,64),bvconst(31,64),bvconst(31,64),bvconst(4096,64),bvconst(8192,64))))
+}
+
+example "layout: rejects logical zero" {
+    assert(¬(a23_layout(bvconst(0,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(32768,64),bvconst(65536,64),bvconst(65536,64),bvconst(16384,64),a23_true(),a23_true(),a23_true())))
+}
+
+example "layout: rejects rounding below logical length" {
+    assert(¬(a23_layout(bvconst(4097,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(32768,64),bvconst(65536,64),bvconst(65536,64),bvconst(16384,64),a23_true(),a23_true(),a23_true())))
+}
+
+example "layout: rejects nonminimal padding" {
+    assert(¬(a23_layout(bvconst(31,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(32768,64),bvconst(65536,64),bvconst(65536,64),bvconst(16384,64),a23_true(),a23_true(),a23_true())))
+}
+
+example "layout: rejects unaligned physical extent" {
+    assert(¬(a23_layout(bvconst(31,64),bvconst(4096,64),bvconst(8193,64),bvconst(4096,64),bvconst(16384,64),bvconst(32768,64),bvconst(65536,64),bvconst(65536,64),bvconst(16384,64),a23_true(),a23_true(),a23_true())))
+}
+
+example "layout: rejects backing outside pool" {
+    assert(¬(a23_layout(bvconst(31,64),bvconst(4096,64),bvconst(20480,64),bvconst(4096,64),bvconst(16384,64),bvconst(32768,64),bvconst(65536,64),bvconst(65536,64),bvconst(16384,64),a23_true(),a23_true(),a23_true())))
+}
+
+example "layout: rejects pool beyond Fabric memory" {
+    assert(¬(a23_layout(bvconst(31,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(16384,64),a23_true(),a23_true(),a23_true())))
+}
+
+example "layout: rejects virtual extent outside owner arena" {
+    assert(¬(a23_layout(bvconst(31,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(32768,64),bvconst(81920,64),bvconst(65536,64),bvconst(16384,64),a23_true(),a23_true(),a23_true())))
+}
+
+example "layout: rejects missing exact custody" {
+    assert(¬(a23_layout(bvconst(31,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(32768,64),bvconst(65536,64),bvconst(65536,64),bvconst(16384,64),a23_false(),a23_true(),a23_true())))
+}
+
+example "layout: rejects other placement in dedicated pool" {
+    assert(¬(a23_layout(bvconst(31,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(32768,64),bvconst(65536,64),bvconst(65536,64),bvconst(16384,64),a23_true(),a23_false(),a23_true())))
+}
+
+example "layout: rejects overlapping code or stack mapping" {
+    assert(¬(a23_layout(bvconst(31,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(32768,64),bvconst(65536,64),bvconst(65536,64),bvconst(16384,64),a23_true(),a23_true(),a23_false())))
+}
+
+example "attach: rejects unbound reservation" {
+    assert(¬(a23_attach(a23_false(),a23_true(),a23_true(),a23_true(),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(40,64),bvconst(40,64),bvconst(1,8))))
+}
+
+example "attach: rejects owner death" {
+    assert(¬(a23_attach(a23_true(),a23_false(),a23_true(),a23_true(),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(40,64),bvconst(40,64),bvconst(1,8))))
+}
+
+example "attach: rejects invalid layout" {
+    assert(¬(a23_attach(a23_true(),a23_true(),a23_false(),a23_true(),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(40,64),bvconst(40,64),bvconst(1,8))))
+}
+
+example "attach: rejects unprepared metadata" {
+    assert(¬(a23_attach(a23_true(),a23_true(),a23_true(),a23_false(),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(40,64),bvconst(40,64),bvconst(1,8))))
+}
+
+example "attach: rejects object ID already present" {
+    assert(¬(a23_attach(a23_true(),a23_true(),a23_true(),a23_true(),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),a23_false(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(40,64),bvconst(40,64),bvconst(1,8))))
+}
+
+example "attach: rejects already initializing" {
+    assert(¬(a23_attach(a23_true(),a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(40,64),bvconst(40,64),bvconst(1,8))))
+}
+
+example "attach: rejects sticky prior attachment" {
+    assert(¬(a23_attach(a23_true(),a23_true(),a23_true(),a23_true(),bvconst(0,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(40,64),bvconst(40,64),bvconst(1,8))))
+}
+
+example "attach: rejects object namespace exhausted" {
+    assert(¬(a23_attach(a23_true(),a23_true(),a23_true(),a23_true(),bvconst(0,8),bvconst(0,8),ptr107_max(),ptr107_max(),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(40,64),bvconst(40,64),bvconst(1,8))))
+}
+
+example "attach: rejects caller chosen object ID" {
+    assert(¬(a23_attach(a23_true(),a23_true(),a23_true(),a23_true(),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(1,64),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(40,64),bvconst(40,64),bvconst(1,8))))
+}
+
+example "attach: rejects outstanding CPU work" {
+    assert(¬(a23_attach(a23_true(),a23_true(),a23_true(),a23_true(),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),a23_true(),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(40,64),bvconst(40,64),bvconst(1,8))))
+}
+
+example "attach: rejects outstanding DMA work" {
+    assert(¬(a23_attach(a23_true(),a23_true(),a23_true(),a23_true(),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),a23_true(),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(40,64),bvconst(40,64),bvconst(1,8))))
+}
+
+example "attach: rejects external reader" {
+    assert(¬(a23_attach(a23_true(),a23_true(),a23_true(),a23_true(),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(40,64),bvconst(40,64),bvconst(1,8))))
+}
+
+example "attach: rejects external writer" {
+    assert(¬(a23_attach(a23_true(),a23_true(),a23_true(),a23_true(),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(40,64),bvconst(40,64),bvconst(1,8))))
+}
+
+example "attach: rejects stale plan revision" {
+    assert(¬(a23_attach(a23_true(),a23_true(),a23_true(),a23_true(),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(40,64),bvconst(39,64),bvconst(1,8))))
+}
+
+example "attach: rejects revision exhaustion" {
+    assert(¬(a23_attach(a23_true(),a23_true(),a23_true(),a23_true(),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),ptr107_max(),ptr107_max(),bvconst(1,8))))
+}
+
+example "attach: rejects missing exclusive boundary" {
+    assert(¬(a23_attach(a23_true(),a23_true(),a23_true(),a23_true(),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(40,64),bvconst(40,64),bvconst(0,8))))
+}
+
+example "chunk: rejects wrong reservation" {
+    assert(¬(a23_chunk(a23_false(),a23_true(),bvconst(1,8),bvconst(16,64),bvconst(4080,64),bvconst(4096,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(42,64),bvconst(42,64),bvconst(1,8))))
+}
+
+example "chunk: rejects owner closed during initialization" {
+    assert(¬(a23_chunk(a23_true(),a23_false(),bvconst(1,8),bvconst(16,64),bvconst(4080,64),bvconst(4096,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(42,64),bvconst(42,64),bvconst(1,8))))
+}
+
+example "chunk: rejects published phase" {
+    assert(¬(a23_chunk(a23_true(),a23_true(),bvconst(2,8),bvconst(16,64),bvconst(4080,64),bvconst(4096,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(42,64),bvconst(42,64),bvconst(1,8))))
+}
+
+example "chunk: rejects unaligned prefix" {
+    assert(¬(a23_chunk(a23_true(),a23_true(),bvconst(1,8),bvconst(17,64),bvconst(4080,64),bvconst(4096,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(42,64),bvconst(42,64),bvconst(1,8))))
+}
+
+example "chunk: rejects zero progress" {
+    assert(¬(a23_chunk(a23_true(),a23_true(),bvconst(1,8),bvconst(16,64),bvconst(0,64),bvconst(4096,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(42,64),bvconst(42,64),bvconst(1,8))))
+}
+
+example "chunk: rejects overshot remaining storage" {
+    assert(¬(a23_chunk(a23_true(),a23_true(),bvconst(1,8),bvconst(16,64),bvconst(4096,64),bvconst(4096,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(42,64),bvconst(42,64),bvconst(1,8))))
+}
+
+example "chunk: rejects unbounded work per step" {
+    assert(¬(a23_chunk(a23_true(),a23_true(),bvconst(1,8),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(42,64),bvconst(42,64),bvconst(1,8))))
+}
+
+example "chunk: rejects unaligned clearing" {
+    assert(¬(a23_chunk(a23_true(),a23_true(),bvconst(1,8),bvconst(16,64),bvconst(4079,64),bvconst(4096,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(42,64),bvconst(42,64),bvconst(1,8))))
+}
+
+example "chunk: rejects stale initialization version" {
+    assert(¬(a23_chunk(a23_true(),a23_true(),bvconst(1,8),bvconst(16,64),bvconst(4080,64),bvconst(4096,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(42,64),bvconst(42,64),bvconst(1,8))))
+}
+
+example "chunk: rejects version overflow" {
+    assert(¬(a23_chunk(a23_true(),a23_true(),bvconst(1,8),bvconst(16,64),bvconst(4080,64),bvconst(4096,64),ptr107_max(),ptr107_max(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(42,64),bvconst(42,64),bvconst(1,8))))
+}
+
+example "chunk: rejects stale revision" {
+    assert(¬(a23_chunk(a23_true(),a23_true(),bvconst(1,8),bvconst(16,64),bvconst(4080,64),bvconst(4096,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(42,64),bvconst(41,64),bvconst(1,8))))
+}
+
+example "chunk: rejects pending CPU operation" {
+    assert(¬(a23_chunk(a23_true(),a23_true(),bvconst(1,8),bvconst(16,64),bvconst(4080,64),bvconst(4096,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(42,64),bvconst(42,64),bvconst(1,8))))
+}
+
+example "chunk: rejects DMA operation" {
+    assert(¬(a23_chunk(a23_true(),a23_true(),bvconst(1,8),bvconst(16,64),bvconst(4080,64),bvconst(4096,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(42,64),bvconst(42,64),bvconst(1,8))))
+}
+
+example "chunk: rejects reader during zeroing" {
+    assert(¬(a23_chunk(a23_true(),a23_true(),bvconst(1,8),bvconst(16,64),bvconst(4080,64),bvconst(4096,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(42,64),bvconst(1,8))))
+}
+
+example "chunk: rejects writer during zeroing" {
+    assert(¬(a23_chunk(a23_true(),a23_true(),bvconst(1,8),bvconst(16,64),bvconst(4080,64),bvconst(4096,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(42,64),bvconst(42,64),bvconst(1,8))))
+}
+
+example "plan: rejects object exposes padding" {
+    assert(¬(a23_plan(bvconst(31,64),bvconst(4096,64),bvconst(4096,64),bvconst(31,64),bvconst(31,64),bvconst(3,64),bvconst(7,64),bvconst(7,64),bvconst(7,64))))
+}
+
+example "plan: rejects mapping exposes padding" {
+    assert(¬(a23_plan(bvconst(31,64),bvconst(4096,64),bvconst(31,64),bvconst(4096,64),bvconst(31,64),bvconst(3,64),bvconst(7,64),bvconst(7,64),bvconst(7,64))))
+}
+
+example "plan: rejects grant exposes padding" {
+    assert(¬(a23_plan(bvconst(31,64),bvconst(4096,64),bvconst(31,64),bvconst(31,64),bvconst(4096,64),bvconst(3,64),bvconst(7,64),bvconst(7,64),bvconst(7,64))))
+}
+
+example "plan: rejects execute authority" {
+    assert(¬(a23_plan(bvconst(31,64),bvconst(4096,64),bvconst(31,64),bvconst(31,64),bvconst(31,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(7,64))))
+}
+
+example "plan: rejects atomic authority" {
+    assert(¬(a23_plan(bvconst(31,64),bvconst(4096,64),bvconst(31,64),bvconst(31,64),bvconst(31,64),bvconst(11,64),bvconst(7,64),bvconst(7,64),bvconst(7,64))))
+}
+
+example "plan: rejects seal authority" {
+    assert(¬(a23_plan(bvconst(31,64),bvconst(4096,64),bvconst(31,64),bvconst(31,64),bvconst(31,64),bvconst(19,64),bvconst(7,64),bvconst(7,64),bvconst(7,64))))
+}
+
+example "plan: rejects foreign mapping" {
+    assert(¬(a23_plan(bvconst(31,64),bvconst(4096,64),bvconst(31,64),bvconst(31,64),bvconst(31,64),bvconst(3,64),bvconst(7,64),bvconst(8,64),bvconst(7,64))))
+}
+
+example "plan: rejects foreign grant" {
+    assert(¬(a23_plan(bvconst(31,64),bvconst(4096,64),bvconst(31,64),bvconst(31,64),bvconst(31,64),bvconst(3,64),bvconst(7,64),bvconst(7,64),bvconst(8,64))))
+}
+
+example "publish: rejects wrong receipt binding" {
+    assert(¬(a23_publish(a23_false(),a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),bvconst(43,64),bvconst(43,64),bvconst(1,8))))
+}
+
+example "publish: rejects dead owner" {
+    assert(¬(a23_publish(a23_true(),a23_false(),a23_true(),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),bvconst(43,64),bvconst(43,64),bvconst(1,8))))
+}
+
+example "publish: rejects inexact object map grant" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_false(),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),bvconst(43,64),bvconst(43,64),bvconst(1,8))))
+}
+
+example "publish: rejects missing typed result destination" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_false(),a23_true(),bvconst(43,64),bvconst(43,64),bvconst(1,8))))
+}
+
+example "publish: rejects lifecycle not implemented" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_false(),bvconst(43,64),bvconst(43,64),bvconst(1,8))))
+}
+
+example "publish: rejects logical bytes only initialized" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),bvconst(31,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),bvconst(43,64),bvconst(43,64),bvconst(1,8))))
+}
+
+example "publish: rejects one cell of uncleared padding" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),bvconst(4080,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),bvconst(43,64),bvconst(43,64),bvconst(1,8))))
+}
+
+example "publish: rejects receipt before intervening mutation" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),bvconst(43,64),bvconst(43,64),bvconst(1,8))))
+}
+
+example "publish: rejects initialization not visible" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),a23_true(),a23_true(),bvconst(43,64),bvconst(43,64),bvconst(1,8))))
+}
+
+example "publish: rejects already published" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(2,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),bvconst(43,64),bvconst(43,64),bvconst(1,8))))
+}
+
+example "publish: rejects never attached" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),bvconst(43,64),bvconst(43,64),bvconst(1,8))))
+}
+
+example "publish: rejects pending CPU work" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),bvconst(43,64),bvconst(43,64),bvconst(1,8))))
+}
+
+example "publish: rejects pending DMA work" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),bvconst(43,64),bvconst(43,64),bvconst(1,8))))
+}
+
+example "publish: rejects external read" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),bvconst(43,64),bvconst(43,64),bvconst(1,8))))
+}
+
+example "publish: rejects external write" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,8),a23_true(),a23_true(),bvconst(43,64),bvconst(43,64),bvconst(1,8))))
+}
+
+example "publish: rejects stale revision" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),bvconst(43,64),bvconst(42,64),bvconst(1,8))))
+}
+
+example "publish: rejects missing serialization" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),bvconst(43,64),bvconst(43,64),bvconst(0,8))))
+}
+
+example "current: rejects matching scalar payload without kind" {
+    assert(¬(a23_current(repr107_handle(bvconst(2,64),bvconst(9,64)),bvconst(0,8),bvconst(2,64),bvconst(9,64),bvconst(2,8),a23_true())))
+}
+
+example "current: rejects stale saved-event alias" {
+    assert(¬(a23_current(repr107_handle(bvconst(2,64),bvconst(9,64)),bvconst(1,8),bvconst(2,64),bvconst(10,64),bvconst(2,8),a23_true())))
+}
+
+example "current: rejects initializing object" {
+    assert(¬(a23_current(repr107_handle(bvconst(2,64),bvconst(9,64)),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(1,8),a23_true())))
+}
+
+example "current: rejects closed object" {
+    assert(¬(a23_current(repr107_handle(bvconst(2,64),bvconst(9,64)),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(3,8),a23_true())))
+}
+
+example "current: rejects restarted process" {
+    assert(¬(a23_current(repr107_handle(bvconst(2,64),bvconst(9,64)),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(2,8),a23_false())))
+}
+
+example "access: rejects one past logical end" {
+    assert(¬(a23_access(a23_true(),a23_true(),bvconst(31,64),bvconst(31,64),bvconst(1,64),bvconst(1,64),a23_true())))
+}
+
+example "access: rejects width crossing logical end" {
+    assert(¬(a23_access(a23_true(),a23_true(),bvconst(30,64),bvconst(31,64),bvconst(2,64),bvconst(1,64),a23_true())))
+}
+
+example "access: rejects zero width" {
+    assert(¬(a23_access(a23_true(),a23_true(),bvconst(30,64),bvconst(31,64),bvconst(0,64),bvconst(1,64),a23_true())))
+}
+
+example "access: rejects execute request" {
+    assert(¬(a23_access(a23_true(),a23_true(),bvconst(30,64),bvconst(31,64),bvconst(1,64),bvconst(4,64),a23_true())))
+}
+
+example "access: rejects DMA path" {
+    assert(¬(a23_access(a23_true(),a23_true(),bvconst(30,64),bvconst(31,64),bvconst(1,64),bvconst(1,64),a23_false())))
+}
+
+example "access: rejects legacy mapping cannot override wrong binding" {
+    assert(¬(a23_access(a23_true(),a23_false(),bvconst(30,64),bvconst(31,64),bvconst(1,64),bvconst(1,64),a23_true())))
+}
+
+example "access: rejects retired lifetime" {
+    assert(¬(a23_access(a23_false(),a23_true(),bvconst(30,64),bvconst(31,64),bvconst(1,64),bvconst(1,64),a23_true())))
+}
+
+example "cell: rejects typed cell crossing logical end" {
+    assert(¬(a23_cell(a23_true(),a23_true(),bvconst(16,64),bvconst(31,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64))))
+}
+
+example "cell: rejects unaligned cell" {
+    assert(¬(a23_cell(a23_true(),a23_true(),bvconst(1,64),bvconst(31,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64))))
+}
+
+example "cell: rejects overflowing physical address" {
+    assert(¬(a23_cell(a23_true(),a23_true(),bvconst(16,64),bvconst(64,64),bvsub(ptr107_max(),bvconst(7,64)),bvconst(4096,64),bvconst(16384,64))))
+}
+
+example "cell: rejects address matches but lifetime is stale" {
+    assert(¬(a23_cell(a23_false(),a23_true(),bvconst(0,64),bvconst(31,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64))))
+}
+
+example "cell: rejects wrong object key" {
+    assert(¬(a23_cell(a23_true(),a23_false(),bvconst(0,64),bvconst(31,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64))))
+}
+
+example "store: rejects fabricated source kind" {
+    assert(¬(a23_store(a23_true(),a23_false(),bvconst(1,8),a23_true(),bvconst(1,8))))
+}
+
+example "store: rejects torn payload" {
+    assert(¬(a23_store(a23_true(),a23_true(),bvconst(0,8),a23_true(),bvconst(1,8))))
+}
+
+example "store: rejects host allocation after payload mutation" {
+    assert(¬(a23_store(a23_true(),a23_true(),bvconst(1,8),a23_false(),bvconst(1,8))))
+}
+
+example "store: rejects invalid destination" {
+    assert(¬(a23_store(a23_false(),a23_true(),bvconst(1,8),a23_true(),bvconst(1,8))))
+}
+
+example "close: rejects duplicate close" {
+    assert(¬(a23_close(a23_true(),bvconst(3,8),bvconst(1,8),a23_true(),bvconst(1,8))))
+}
+
+example "close: rejects foreign cleanup record" {
+    assert(¬(a23_close(a23_false(),bvconst(2,8),bvconst(1,8),a23_true(),bvconst(1,8))))
+}
+
+example "close: rejects cleanup capacity not reserved" {
+    assert(¬(a23_close(a23_true(),bvconst(2,8),bvconst(1,8),a23_false(),bvconst(1,8))))
+}
+
+example "close: rejects never attached" {
+    assert(¬(a23_close(a23_true(),bvconst(2,8),bvconst(0,8),a23_true(),bvconst(1,8))))
+}
+
+example "row: highest encoded slot remains bounded" {
+    assert(a23_row(bvconst(4294967295,64),bvconst(4294967295,64),bvconst(4294967295,64)))
+}
+
+example "generation: attachment preserves last usable allocation epoch" {
+    assert(a23_epoch(repr107_mask())=repr107_mask())
+}
+
+example "object: last nonwrapping identity can be attached" {
+    assert(a23_attach(a23_true(),a23_true(),a23_true(),a23_true(),bvconst(0,8),bvconst(0,8),bvsub(ptr107_max(),bvconst(1,64)),bvsub(ptr107_max(),bvconst(1,64)),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(40,64),bvconst(40,64),bvconst(1,8)))
+}
+
+example "shadow: final complete cell" {
+    assert(a23_shadow_cell(bvconst(4096,64),bvconst(16384,64),bvconst(20464,64)))
+}
+
+example "shadow: one past physical pool" {
+    assert(¬(a23_shadow_cell(bvconst(4096,64),bvconst(16384,64),bvconst(20480,64))))
+}
+
+example "shadow: byte address is not a cell" {
+    assert(¬(a23_shadow_cell(bvconst(4096,64),bvconst(16384,64),bvconst(8193,64))))
+}
+
+example "cell: a 32-byte object holds two cells" {
+    assert(a23_cell(a23_true(),a23_true(),bvconst(16,64),bvconst(32,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64)))
+}
+
+example "close: attached private failure can queue cleanup" {
+    assert(a23_close(a23_true(),bvconst(1,8),bvconst(1,8),a23_true(),bvconst(1,8)))
+}
+
+example "cancel: never attached uses exact A2.2 gate" {
+    assert(a23_direct_cancel(bvconst(0,8),bvconst(0,8),a23_true()))
+}
+
+example "cancel: sticky attachment forbids direct refund" {
+    assert(¬(a23_direct_cancel(bvconst(0,8),bvconst(1,8),a23_true())))
+}
+
+example "cancel: live object cannot bypass Undertaker" {
+    assert(¬(a23_direct_cancel(bvconst(2,8),bvconst(1,8),a23_true())))
+}
+
+example "closing: custody and charges remain held" {
+    assert(a23_held(bvconst(3,8)) ∧ (a23_charge(bvconst(4096,64))=bvconst(4096,64)))
+}
+
+example "raw write: overlap clears both touched cells" {
+    assert((kind107_raw_memory(bvconst(8207,64),bvconst(2,64),bvconst(8192,64),bvconst(1,8))=bvconst(0,8)) ∧ (kind107_raw_memory(bvconst(8207,64),bvconst(2,64),bvconst(8208,64),bvconst(1,8))=bvconst(0,8)))
+}
+
+example "raw write: neighbor outside write survives" {
+    assert(kind107_raw_memory(bvconst(8207,64),bvconst(2,64),bvconst(8224,64),bvconst(1,8))=bvconst(1,8))
+}
+
+example "cleanup: revision exhaustion does not block closure" {
+    assert(a23_close(a23_true(),bvconst(2,8),bvconst(1,8),a23_true(),bvconst(1,8)) ∧ (a22_cleanup_revision(ptr107_max())=ptr107_max()))
+}
+
+example "reuse: new lifetime authenticates with new epoch" {
+    assert(a23_current(repr107_handle(bvconst(2,64),bvconst(10,64)),bvconst(1,8),bvconst(2,64),bvconst(10,64),bvconst(2,8),a23_true()))
+}
+
+example "reuse: same address cannot rescue old token" {
+    assert(¬(a23_current(repr107_handle(bvconst(2,64),bvconst(9,64)),bvconst(1,8),bvconst(2,64),bvconst(10,64),bvconst(2,8),a23_true())))
+}
+
+example "trace: attach, two chunks, publication and close all admitted" {
+    assert(a23_trace_attach() ∧ a23_trace_first() ∧ a23_trace_second() ∧ a23_trace_publish() ∧ a23_trace_current() ∧ a23_trace_close())
+}
+
+example "trace: half initialized backing never publishes" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_true(),a23_trace_private(),a23_trace_attached(),a23_trace_done1(),bvconst(4096,64),a23_trace_version1(),a23_trace_version1(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),a23_trace_revision2(),a23_trace_revision2(),bvconst(1,8))))
+}
+
+example "trace: final logical byte has a successful zero read" {
+    assert(a23_access(a23_trace_current(),a23_trace_key(),bvconst(30,64),bvconst(31,64),bvconst(1,64),bvconst(1,64),a23_true()) ∧ (a23_trace_byte(bvconst(8222,64),bvconst(255,8))=bvconst(0,8)))
+}
+
+example "trace: cleared padding is still inaccessible" {
+    assert(¬(a23_access(a23_trace_current(),a23_trace_key(),bvconst(31,64),bvconst(31,64),bvconst(1,64),bvconst(1,64),a23_true())))
+}
+
+example "trace: register spill or event copy fails after closure" {
+    assert(¬(a23_current(a23_trace_handle(),a23_trace_tag(),bvconst(2,64),bvconst(9,64),a23_trace_closed(),a23_trace_owner())))
+}
+
+example "trace: attached failure never takes direct cancel" {
+    assert(¬(a23_direct_cancel(a23_trace_private(),a23_trace_attached(),a23_true())))
+}
+
+example "trace: unrelated owner B remains current" {
+    assert(a23_current(repr107_handle(bvconst(3,64),bvconst(4,64)),bvconst(1,8),bvconst(3,64),bvconst(4,64),heap108_record_phase(a23_trace_close(),bvconst(7,64),bvconst(8,64),bvconst(2,8),bvconst(3,8)),a23_true()))
+}
+
+example "trace: trusted mutation resets initialized prefix" {
+    assert(a23_trace_dirty() ∧ (init108_dirty_done(a23_trace_dirty(),a23_trace_done2())=bvconst(0,64)))
+}
+
+example "trace: old clean receipt cannot follow mutation" {
+    assert(¬(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),init108_dirty_done(a23_trace_dirty(),a23_trace_done2()),bvconst(4096,64),init108_version(a23_trace_dirty(),a23_trace_version2()),a23_trace_version2(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),a23_next(a23_trace_dirty(),a23_trace_revision3()),a23_next(a23_trace_dirty(),a23_trace_revision3()),bvconst(1,8))))
+}
+
+example "law: encoded slot indexes a retained Fabric row" {
+    assert(∀(s : BitVec64). ∀(n : BitVec64). ∀(cap : BitVec64). (a23_row(s,n,cap) → (bvult(a23_row_index(s),cap) ∧ (bvadd(a23_row_index(s),bvconst(1,64))=s))))
+}
+
+example "law: valid physical cell indexes bounded dense shadow" {
+    assert(∀(p : BitVec64). ∀(n : BitVec64). ∀(a : BitVec64). (a23_shadow_cell(p,n,a) → bvult(a23_shadow_index(p,a),a23_shadow_count(n))))
+}
+
+example "law: distinct valid physical cells have distinct shadow entries" {
+    assert(∀(p : BitVec64). ∀(n : BitVec64). ∀(a : BitVec64). ∀(b : BitVec64). ((a23_shadow_cell(p,n,a) ∧ a23_shadow_cell(p,n,b) ∧ ¬(a=b)) → ¬(a23_shadow_index(p,a)=a23_shadow_index(p,b))))
+}
+
+example "law: fresh object counter never wraps" {
+    assert(∀(n : BitVec64). (a23_object(n,n,a23_true()) → bvugt(a23_next(a23_true(),n),n)))
+}
+
+example "law: new publication preserves the reserved allocation epoch" {
+    assert(∀(epoch : BitVec64). (a23_epoch(epoch)=epoch))
+}
+
+example "law: attachment and publication neither recharge nor refund payload" {
+    assert(∀(used : BitVec64). (a23_charge(used)=used))
+}
+
+example "law: successful fixed storage is charged exactly once" {
+    assert(∀(old : BitVec64). ∀(rows : BitVec64). ∀(shadow : BitVec64). ∀(scratch : BitVec64). ∀(total : BitVec64). (a22_fixed(old,rows,shadow,scratch,bvconst(0,64),bvconst(0,64),total) → (total=bvadd(bvadd(bvadd(old,rows),shadow),scratch))))
+}
+
+example "law: each initialized prefix step stays within rounded custody" {
+    assert(∀(d : BitVec64). ∀(a : BitVec64). ∀(r : BitVec64). ∀(ver : BitVec64). (init108_chunk(bvconst(1,8),d,a,r,ver,ver,bvconst(1,8),bvconst(1,8)) → (bvugt(init108_done(a23_true(),d,a),d) ∧ bvule(init108_done(a23_true(),d,a),r))))
+}
+
+example "law: chunk initializes every newly reached byte" {
+    assert(∀(d : BitVec64). ∀(a : BitVec64). ∀(r : BitVec64). ∀(ver : BitVec64). ∀(q : BitVec64). ∀(old : BitVec8). ((init108_chunk(bvconst(1,8),d,a,r,ver,ver,bvconst(1,8),bvconst(1,8)) ∧ bvuge(q,d) ∧ bvult(q,bvadd(d,a))) → (init108_byte(a23_true(),d,a,q,old)=bvconst(0,8))))
+}
+
+example "law: chunk preserves the already zero prefix" {
+    assert(∀(d : BitVec64). ∀(a : BitVec64). ∀(q : BitVec64). ((bvult(q,d)) → (init108_byte(a23_true(),d,a,q,bvconst(0,8))=bvconst(0,8))))
+}
+
+example "law: failed initialization preserves every byte" {
+    assert(∀(b : BitVec64). ∀(d : BitVec64). ∀(a : BitVec64). ∀(q : BitVec64). ∀(old : BitVec8). (a23_byte(a23_false(),b,d,a,q,old)=old))
+}
+
+example "law: failed initialization preserves every protected tag" {
+    assert(∀(b : BitVec64). ∀(d : BitVec64). ∀(a : BitVec64). ∀(q : BitVec64). ∀(old : BitVec8). (a23_tag(a23_false(),b,d,a,q,old)=old))
+}
+
+example "law: rejected commit preserves stage and sticky attachment" {
+    assert(∀(s : BitVec8). ∀(sticky : BitVec8). ((a23_stage(a23_false(),s,bvconst(2,8))=s) ∧ (a23_attached(a23_false(),sticky)=sticky)))
+}
+
+example "law: rejected commit preserves counters and result payload" {
+    assert(∀(counter : BitVec64). ∀(slot : BitVec64). ∀(epoch : BitVec64). ∀(h : BitVec64). ∀(pos : BitVec64). ∀(tag : BitVec8). ((a23_next(a23_false(),counter)=counter) ∧ (a23_result_handle(a23_false(),slot,epoch,h)=h) ∧ (a23_result_position(a23_false(),pos)=pos) ∧ (a23_result_tag(a23_false(),tag)=tag)))
+}
+
+example "law: unselected owner fields are unchanged" {
+    assert(∀(s : BitVec64). ∀(q : BitVec64). ∀(old : BitVec64). ∀(next : BitVec64). ∀(commit : Bool). (¬(s=q) → (a23_field(commit,s,q,old,next)=old)))
+}
+
+example "law: object map and grant become visible together" {
+    assert(∀(s : BitVec8). ∀(owner : Bool). ((a23_object_visible(s,owner)=a23_map_visible(s,owner)) ∧ (a23_map_visible(s,owner)=a23_grant_visible(s,owner))))
+}
+
+example "law: private and closing stages expose no authority" {
+    assert(∀(s : BitVec8). ∀(owner : Bool). (¬(s=bvconst(2,8)) → ¬(a23_visible(s,owner))))
+}
+
+example "law: a closed owner has no visible heap even in live stage" {
+    assert(∀(s : BitVec8). (¬(a23_visible(s,a23_false()))))
+}
+
+example "law: all old aliases fail after close regardless of storage location" {
+    assert(∀(h : BitVec64). ∀(slot : BitVec64). ∀(epoch : BitVec64). ∀(tag : BitVec8). ∀(owner : Bool). (¬(a23_current(h,tag,slot,epoch,bvconst(3,8),owner))))
+}
+
+example "law: scalar words never recreate pointer kind" {
+    assert(∀(h : BitVec64). ∀(slot : BitVec64). ∀(epoch : BitVec64). (¬(a23_current(h,bvconst(0,8),slot,epoch,bvconst(2,8),a23_true()))))
+}
+
+example "law: one past end is not a data access" {
+    assert(∀(n : BitVec64). ∀(width : BitVec64). (¬(a23_access(a23_true(),a23_true(),n,n,width,bvconst(1,64),a23_true()))))
+}
+
+example "law: sticky attachment permanently excludes direct cancellation" {
+    assert(∀(s : BitVec8). (¬(a23_direct_cancel(s,bvconst(1,8),a23_true()))))
+}
+
+example "law: same virtual or physical address cannot authenticate a stale epoch" {
+    assert(∀(slot : BitVec64). ∀(epoch : BitVec64). ((repr107_components(slot,epoch) ∧ bvult(epoch,repr107_mask())) → ¬(a23_current(repr107_handle(slot,epoch),bvconst(1,8),slot,bvadd(epoch,bvconst(1,64)),bvconst(2,8),a23_true()))))
+}
+
+example "law: trace clears every byte including rounded padding" {
+    assert(∀(q : BitVec64). ∀(secret : BitVec8). ((bvuge(q,bvconst(8192,64)) ∧ bvult(q,bvconst(12288,64))) → (a23_trace_byte(q,secret)=bvconst(0,8))))
+}
+
+example "law: trace reveals no prior byte for any newly readable position" {
+    assert(∀(pos : BitVec64). ∀(x : BitVec8). ∀(y : BitVec8). (bvult(pos,bvconst(31,64)) → (a23_access(a23_trace_current(),a23_trace_key(),pos,bvconst(31,64),bvconst(1,64),bvconst(1,64),a23_true()) ∧ (a23_trace_byte(bvadd(bvconst(8192,64),pos),x)=a23_trace_byte(bvadd(bvconst(8192,64),pos),y)))))
+}
+
+example "law: trace preserves every byte outside A backing including B" {
+    assert(∀(q : BitVec64). ∀(old : BitVec8). ((bvult(q,bvconst(8192,64)) ∨ bvuge(q,bvconst(12288,64))) → (a23_trace_byte(q,old)=old)))
+}
+
+example "law: trace clears every aligned tag in A backing" {
+    assert(∀(cell : BitVec64). ∀(old : BitVec8). ((init108_aligned(cell) ∧ bvuge(cell,bvconst(8192,64)) ∧ bvult(cell,bvconst(12288,64))) → (a23_trace_shadow(cell,old)=bvconst(0,8))))
+}
+
+example "law: trace preserves all aligned tags in B backing" {
+    assert(∀(cell : BitVec64). ∀(old : BitVec8). ((init108_aligned(cell) ∧ bvuge(cell,bvconst(12288,64))) → (a23_trace_shadow(cell,old)=old)))
+}
+
+example "law: failed publication result preserves existing pair" {
+    assert(∀(h : BitVec64). ∀(p : BitVec64). ∀(s : BitVec64). ∀(e : BitVec64). ∀(tag : BitVec8). ((a23_result_handle(a23_false(),s,e,h)=h) ∧ (a23_result_position(a23_false(),p)=p) ∧ (a23_result_tag(a23_false(),tag)=tag)))
+}
+
+example "law: typed heap store cannot contain fallible host work" {
+    assert(∀(cell : Bool). ∀(source : Bool). ∀(coherent : BitVec8). ∀(locked : BitVec8). (¬(a23_store(cell,source,coherent,a23_false(),locked))))
+}
+

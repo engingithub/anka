@@ -1,0 +1,973 @@
+// Phase 10.8: reusable extents and bounded allocation metadata.
+// SPECIFICATION ONLY. No new axioms, allocator implementation, moving GC,
+// small-object suballocator, timing guarantee or physical-DMA drainage proof.
+// Refines the existing PM geometry, heap lifetime/accounting and initialization
+// contracts. Physical and per-owner virtual arenas use the SAME extent algebra.
+// Free extents form a sorted, disjoint, maximally coalesced partition alongside
+// reserved/live/closing extents. The quantified local laws preserve coverage and
+// separation; implementation must maintain the global partition and exact
+// selected records, apply the neighbor laws to EVERY remaining entry, and commit
+// physical/virtual/registry/account state under one shared revision boundary.
+// No caller-supplied 'scan passed' flag certifies that representation invariant.
+//
+// Proposed metadata representation: a capacity-bounded, permanently charged
+// stable slot directory retains each last generation and free/reserved/live/
+// closing/retired state. Bulky record pages may be evicted only when every slot
+// in the page is free or permanently retired, with no readers or staged writers.
+// Payload-page eviction NEVER removes, resets or renumbers directory entries.
+// Generation exhaustion consumes a retired directory slot, not unbounded new
+// tombstone storage. Actual byte sizes and pool backing are A2 obligations.
+// Directory state: free=0, reserved=1, live=2, closing=3, exhausted=4.
+// A1 lifetime phases remain available=0, live=1, closing=2, retired=3.
+import "anka108_memory_initialization.kleis"
+
+define reclaim108_zero() = bvconst(0,64)
+define reclaim108_one() = bvconst(1,64)
+define reclaim108_serial(revision : BitVec64, expected : BitVec64, serialized : BitVec8) =
+    (revision=expected) ∧ bvult(revision,ptr107_max()) ∧ heap108_yes(serialized)
+define reclaim108_interval(lo : BitVec64, hi : BitVec64, query : BitVec64) =
+    bvule(lo,query) ∧ bvult(query,hi)
+define reclaim108_inside(base : BitVec64, length : BitVec64, query : BitVec64) =
+    reclaim108_interval(base,bvadd(base,length),query)
+define reclaim108_segment(base : BitVec64, length : BitVec64) =
+    (length=reclaim108_zero()) ∨ pm93g_extent_well_formed(base,length)
+
+// Allocate the prefix of ONE actual free extent, retaining its exact suffix.
+// A zero suffix is absent, not a zero-length free-list record.
+define reclaim108_take(base : BitVec64, length : BitVec64, amount : BitVec64,
+    pool : BitVec64, pool_size : BitVec64, free : BitVec8,
+    revision : BitVec64, expected : BitVec64, serialized : BitVec8) =
+    pm93g_extent_within_pool(base,length,pool,pool_size) ∧
+    pm93g_extent_well_formed(base,amount) ∧ bvule(amount,length) ∧
+    heap108_yes(free) ∧ reclaim108_serial(revision,expected,serialized)
+define reclaim108_suffix_base(base : BitVec64, amount : BitVec64) = bvadd(base,amount)
+define reclaim108_suffix_size(length : BitVec64, amount : BitVec64) = bvsub(length,amount)
+
+// Only adjacent FREE extents may join. A live gap, overlap, reverse ordering,
+// wrapping sum, or a claimed/staged/closing neighbor cannot be swallowed.
+define reclaim108_join(a : BitVec64, an : BitVec64, b : BitVec64, bn : BitVec64,
+    pool : BitVec64, pool_size : BitVec64, afree : BitVec8, bfree : BitVec8,
+    revision : BitVec64, expected : BitVec64, serialized : BitVec8) =
+    pm93g_extent_within_pool(a,an,pool,pool_size) ∧
+    pm93g_extent_within_pool(b,bn,pool,pool_size) ∧
+    (bvadd(a,an)=b) ∧ bvule(bn,bvsub(ptr107_max(),an)) ∧
+    heap108_yes(afree) ∧ heap108_yes(bfree) ∧
+    reclaim108_serial(revision,expected,serialized)
+
+// This page-aligned candidate must be free in the CURRENT partition. An
+// implementation supplies the actual selected record, not an application flag.
+// Two holes are not stitched across a live extent even if total free is enough.
+define reclaim108_virtual(owner : BitVec64, arena_owner : BitVec64,
+    base : BitVec64, length : BitVec64, amount : BitVec64,
+    pool : BitVec64, pool_size : BitVec64, free : BitVec8,
+    revision : BitVec64, expected : BitVec64, serialized : BitVec8) =
+    bvugt(owner,reclaim108_zero()) ∧ (owner=arena_owner) ∧
+    reclaim108_take(base,length,amount,pool,pool_size,free,revision,expected,serialized)
+
+// Exact active allocation identity: owner is a nonreused internal key binding
+// process incarnation/context/domain. Query fields come from the request;
+// record fields and outstanding/reference counts are trusted current state.
+// Prefix/base/view validation remains heap108_free at the C boundary.
+define reclaim108_release(slot : BitVec64, gen : BitVec64, owner : BitVec64,
+    object : BitVec64, request_handle : BitVec64, request_owner : BitVec64,
+    request_object : BitVec64, present : BitVec8, phase : BitVec8,
+    cpu : BitVec64, dma : BitVec64, grants : BitVec64, maps : BitVec64,
+    tags : BitVec64, placed : BitVec8, visibility : BitVec8,
+    revision : BitVec64, expected : BitVec64, serialized : BitVec8) =
+    repr107_components(slot,gen) ∧ (request_handle=repr107_handle(slot,gen)) ∧
+    bvugt(owner,reclaim108_zero()) ∧ (request_owner=owner) ∧
+    (request_object=object) ∧ heap108_yes(present) ∧
+    (grants=reclaim108_zero()) ∧ (maps=reclaim108_zero()) ∧
+    (tags=reclaim108_zero()) ∧ (placed=bvconst(0,8)) ∧
+    heap108_retire(phase,cpu,dma,bvconst(1,8),bvconst(1,8),bvconst(1,8),
+        bvconst(1,8),visibility,serialized) ∧
+    reclaim108_serial(revision,expected,serialized)
+
+// Require physical AND virtual reservations, registry room and ledger room
+// together. A failed compound operation stutters all selected state. There is
+// no public intermediate state after taking just one arena reservation.
+define reclaim108_pair(physical : Bool, virtual : Bool, registry : Bool, budget : Bool) =
+    physical ∧ virtual ∧ registry ∧ budget
+define reclaim108_word(commit : Bool, before : BitVec64, after : BitVec64) =
+    if commit then after else before
+define reclaim108_byte(commit : Bool, before : BitVec8, after : BitVec8) =
+    if commit then after else before
+define reclaim108_revision(commit : Bool, revision : BitVec64) =
+    if commit then bvadd(revision,reclaim108_one()) else revision
+define reclaim108_present(released : Bool, before : BitVec8) =
+    if released then bvconst(0,8) else before
+
+// Pointwise free-set effects preserve every byte outside the selected extent.
+// Release is only instantiated with the exact stored allocation extent.
+define reclaim108_free_after_take(commit : Bool, base : BitVec64, amount : BitVec64,
+    query : BitVec64, was_free : Bool) =
+    if commit ∧ reclaim108_inside(base,amount,query) then (bvconst(0,8)=bvconst(1,8)) else was_free
+define reclaim108_free_after_release(commit : Bool, base : BitVec64, amount : BitVec64,
+    query : BitVec64, was_free : Bool) =
+    if commit ∧ reclaim108_inside(base,amount,query) then (bvconst(1,8)=bvconst(1,8)) else was_free
+
+// Stable directory bounds. Capacity is configuration, never an application-
+// supplied quota; it cannot exceed the concrete 32-bit one-based slot encoding.
+define reclaim108_slot(slot : BitVec64, capacity : BitVec64, gen : BitVec64) =
+    bvugt(capacity,reclaim108_zero()) ∧ bvule(capacity,repr107_mask()) ∧
+    bvugt(slot,reclaim108_zero()) ∧ bvule(slot,capacity) ∧ bvule(gen,repr107_mask())
+define reclaim108_claim(slot : BitVec64, capacity : BitVec64, gen : BitVec64,
+    state : BitVec8, resident : BitVec8, revision : BitVec64,
+    expected : BitVec64, serialized : BitVec8) =
+    reclaim108_slot(slot,capacity,gen) ∧ bvult(gen,repr107_mask()) ∧
+    (state=bvconst(0,8)) ∧ heap108_yes(resident) ∧
+    reclaim108_serial(revision,expected,serialized)
+define reclaim108_generation(claim : Bool, gen : BitVec64) =
+    if claim then bvadd(gen,reclaim108_one()) else gen
+define reclaim108_closed_state(gen : BitVec64) =
+    if gen=repr107_mask() then bvconst(4,8) else bvconst(0,8)
+
+// Shrinking record storage preserves identity directory contents pointwise.
+// Neighboring entries and pages remain unchanged; physical index != slot ID.
+define reclaim108_directory_after_shrink(old_gen : BitVec64) = old_gen
+define reclaim108_directory_state_after_shrink(old_state : BitVec8) = old_state
+define reclaim108_slot_after_shrink(old_slot : BitVec64) = old_slot
+define reclaim108_record(commit : Bool, selected : BitVec64, query : BitVec64,
+    before : BitVec64, after : BitVec64) =
+    if commit ∧ (selected=query) then after else before
+
+// Fabric map entries are removable by exact object key; the identity namespace
+// is separate from map storage. No counter rewind after published destruction.
+// The existing narrow never-published rollback is a different contract.
+define reclaim108_map_present(released : Bool, object : BitVec64, query : BitVec64,
+    before : BitVec8) =
+    if released ∧ (object=query) then bvconst(0,8) else before
+define reclaim108_fresh_object(next_id : BitVec64, chosen : BitVec64, after : BitVec64) =
+    bvult(next_id,ptr107_max()) ∧ (chosen=next_id) ∧
+    (after=bvadd(next_id,reclaim108_one()))
+
+// Rehydration reinstalls bulky storage under the existing directory key and
+// generation; it is NOT allocation publication and mints no pointer authority.
+// Serialized page allocation/initialization/charging must already have passed.
+define reclaim108_rehydrate(slot : BitVec64, capacity : BitVec64,
+    history : BitVec64, restored : BitVec64, state : BitVec8,
+    resident : BitVec8, prepared : Bool, revision : BitVec64,
+    expected : BitVec64, serialized : BitVec8) =
+    reclaim108_slot(slot,capacity,history) ∧ (restored=history) ∧
+    ((state=bvconst(0,8)) ∨ (state=bvconst(4,8))) ∧
+    (resident=bvconst(0,8)) ∧ prepared ∧
+    reclaim108_serial(revision,expected,serialized)
+
+// A bounded record page is evictable iff every slot is quiescent and there is
+// no reader/writer holding the page itself. Counts are exact directory-derived
+// populations; pairwise slot induction establishes that census in A2. Free
+// and exhausted slots need directory history but no bulky allocation record.
+define reclaim108_census(width : BitVec64, free : BitVec64, reserved : BitVec64,
+    live : BitVec64, closing : BitVec64, exhausted : BitVec64) =
+    bvugt(width,reclaim108_zero()) ∧ bvule(width,repr107_mask()) ∧
+    bvule(free,width) ∧ bvule(reserved,bvsub(width,free)) ∧
+    bvule(live,bvsub(bvsub(width,free),reserved)) ∧
+    bvule(closing,bvsub(bvsub(bvsub(width,free),reserved),live)) ∧
+    (exhausted=bvsub(bvsub(bvsub(bvsub(width,free),reserved),live),closing))
+define reclaim108_evict(width : BitVec64, free : BitVec64, reserved : BitVec64,
+    live : BitVec64, closing : BitVec64, exhausted : BitVec64,
+    resident : BitVec8, readers : BitVec64, writers : BitVec64,
+    revision : BitVec64, expected : BitVec64, serialized : BitVec8) =
+    reclaim108_census(width,free,reserved,live,closing,exhausted) ∧
+    (reserved=reclaim108_zero()) ∧ (live=reclaim108_zero()) ∧
+    (closing=reclaim108_zero()) ∧ heap108_yes(resident) ∧
+    (readers=reclaim108_zero()) ∧ (writers=reclaim108_zero()) ∧
+    reclaim108_serial(revision,expected,serialized)
+define reclaim108_resident(evicted : Bool, before : BitVec8) =
+    if evicted then bvconst(0,8) else before
+
+// Count induction over a sorted partition with no adjacent free records.
+// Prefix invariant: free <= claimed + (last_is_free ? 1 : 0). The empty prefix
+// starts at (0,0,0); appending a claimed extent or a nonadjacent free extent
+// preserves it. Therefore a complete pool has at most K+1 free extents for K
+// nonfree extents. Bounded prefix guards avoid wrapping during the scan.
+define reclaim108_prefix(free : BitVec64, claimed : BitVec64, last : BitVec8) =
+    bvult(claimed,ptr107_max()) ∧
+    (((last=bvconst(0,8)) ∧ bvule(free,claimed)) ∨
+     ((last=bvconst(1,8)) ∧ bvule(free,bvadd(claimed,reclaim108_one()))))
+define reclaim108_append_claim(free : BitVec64, claimed : BitVec64, last : BitVec8) =
+    reclaim108_prefix(free,claimed,last) ∧
+    bvult(claimed,bvsub(ptr107_max(),reclaim108_one()))
+define reclaim108_append_free(free : BitVec64, claimed : BitVec64, last : BitVec8) =
+    reclaim108_prefix(free,claimed,last) ∧ (last=bvconst(0,8)) ∧ bvult(free,ptr107_max())
+
+// Admission reserves the proven worst-case free-record capacity. Sorted maximal
+// coalescing, exact partition coverage and the census loop remain obligations.
+// Reserve release bookkeeping at admission so free never needs unbudgeted
+// scratch. Initial physical and virtual pools are separately partitioned.
+define reclaim108_extent_capacity(claim_capacity : BitVec64, free_capacity : BitVec64) =
+    bvule(claim_capacity,bvsub(ptr107_max(),reclaim108_one())) ∧
+    (free_capacity=bvadd(claim_capacity,reclaim108_one()))
+
+// Resource charging separates permanently reserved infrastructure, actual
+// occupied backing, resident metadata, and other retained/staged storage.
+// Fixed includes full directory and both bounded arena-index capacities.
+// Each category is disjoint; backing for metadata is not charged twice.
+define reclaim108_ledger(fixed : BitVec64, payload : BitVec64,
+    metadata : BitVec64, retained : BitVec64, limit : BitVec64) =
+    bvugt(fixed,reclaim108_zero()) ∧
+    bvuge(bvadd(fixed,payload),fixed) ∧
+    bvuge(bvadd(bvadd(fixed,payload),metadata),bvadd(fixed,payload)) ∧
+    bvuge(bvadd(bvadd(bvadd(fixed,payload),metadata),retained),bvadd(bvadd(fixed,payload),metadata)) ∧
+    bvule(bvadd(bvadd(bvadd(fixed,payload),metadata),retained),limit)
+define reclaim108_total(fixed : BitVec64, payload : BitVec64,
+    metadata : BitVec64, retained : BitVec64) =
+    bvadd(bvadd(bvadd(fixed,payload),metadata),retained)
+// Pending retirement keeps its full charge; only exact completed release
+// changes the ledger. The permanent directory is never included in a refund.
+define reclaim108_refund(released : Bool, payload : BitVec64, actual : BitVec64) =
+    if released ∧ bvule(actual,payload) then bvsub(payload,actual) else payload
+define reclaim108_metadata_refund(evicted : Bool, metadata : BitVec64,
+    page_bytes : BitVec64, actual_returned : BitVec64) =
+    if evicted ∧ bvugt(page_bytes,reclaim108_zero()) ∧
+       bvule(page_bytes,metadata) ∧ (actual_returned=page_bytes)
+    then bvsub(metadata,page_bytes) else metadata
+// A resident allocation must pass this charge before publication. Reusable
+// reserved pools already live in fixed and are not counted as a fresh page.
+define reclaim108_grow(fixed : BitVec64, payload : BitVec64, metadata : BitVec64,
+    retained : BitVec64, amount : BitVec64, limit : BitVec64) =
+    reclaim108_ledger(fixed,payload,metadata,retained,limit) ∧
+    bvugt(amount,reclaim108_zero()) ∧
+    bvule(amount,bvsub(ptr107_max(),payload)) ∧
+    bvule(amount,bvsub(limit,reclaim108_total(fixed,payload,metadata,retained)))
+
+// Closed-cycle backing/accounting result. A successful allocate/free pair
+// restores backing and reusable virtual extent; generation/revision history
+// advances and is deliberately NOT rolled back. Finite epochs may ultimately
+// cause explicit admission failure; no infinite-success/liveness theorem.
+define reclaim108_cycle_payload(payload : BitVec64, amount : BitVec64) =
+    reclaim108_refund((bvconst(1,8)=bvconst(1,8)),bvadd(payload,amount),amount)
+define reclaim108_cycle_free(base : BitVec64, amount : BitVec64,
+    query : BitVec64, before : Bool) =
+    reclaim108_free_after_release((bvconst(1,8)=bvconst(1,8)),base,amount,query,
+        reclaim108_free_after_take((bvconst(1,8)=bvconst(1,8)),base,amount,query,before))
+
+// Constructive two-client geometry: A owns [0x1000,0x2000), B owns
+// [0x2000,0x3000), and [0x3000,0x5000) is free. Free A first: no join across B.
+// Free B, join B+tail then A+(B+tail), yielding the entire original four pages.
+// This is a small trace of the defined operations, not an arbitrary-list proof.
+define reclaim108_trace_join_b() =
+    reclaim108_join(bvconst(8192,64),bvconst(4096,64),bvconst(12288,64),bvconst(8192,64),
+        bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(7,64),bvconst(7,64),bvconst(1,8))
+define reclaim108_trace_join_a() =
+    reclaim108_trace_join_b() ∧
+    reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(12288,64),
+        bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(8,64),bvconst(8,64),bvconst(1,8))
+
+// WITNESSES BELOW
+
+example "reclaim108_take accepts" {
+    assert(reclaim108_take(bvconst(4096,64),bvconst(16384,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "reclaim108_take rejects empty request" {
+    assert(¬(reclaim108_take(bvconst(4096,64),bvconst(16384,64),bvconst(0,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_take rejects partial page" {
+    assert(¬(reclaim108_take(bvconst(4096,64),bvconst(16384,64),bvconst(4097,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_take rejects unaligned start" {
+    assert(¬(reclaim108_take(bvconst(4097,64),bvconst(16384,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_take rejects larger than hole" {
+    assert(¬(reclaim108_take(bvconst(4096,64),bvconst(16384,64),bvconst(20480,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_take rejects outside pool" {
+    assert(¬(reclaim108_take(bvconst(0,64),bvconst(16384,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_take rejects partial free record" {
+    assert(¬(reclaim108_take(bvconst(4096,64),bvconst(16385,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_take rejects occupied extent" {
+    assert(¬(reclaim108_take(bvconst(4096,64),bvconst(16384,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(0,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_take rejects stale revision" {
+    assert(¬(reclaim108_take(bvconst(4096,64),bvconst(16384,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(4,64),bvconst(1,8))))
+}
+
+example "reclaim108_take rejects revision exhaustion" {
+    assert(¬(reclaim108_take(bvconst(4096,64),bvconst(16384,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvsub(ptr107_max(),bvconst(0,64)),bvsub(ptr107_max(),bvconst(0,64)),bvconst(1,8))))
+}
+
+example "reclaim108_take rejects no serialization" {
+    assert(¬(reclaim108_take(bvconst(4096,64),bvconst(16384,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(0,8))))
+}
+
+example "reclaim108_take rejects wrapped end" {
+    assert(¬(reclaim108_take(bvsub(ptr107_max(),bvconst(4095,64)),bvconst(8192,64),bvconst(4096,64),bvsub(ptr107_max(),bvconst(4095,64)),bvconst(8192,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "exact-fit removes entire hole" {
+    assert(reclaim108_take(bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "exact-fit leaves no suffix" {
+    assert(reclaim108_suffix_size(bvconst(4096,64),bvconst(4096,64))=bvconst(0,64))
+}
+
+example "reclaim108_join accepts" {
+    assert(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "reclaim108_join rejects live intervening page" {
+    assert(¬(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_join rejects overlap" {
+    assert(¬(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_join rejects reverse ordering" {
+    assert(¬(reclaim108_join(bvconst(8192,64),bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_join rejects occupied left" {
+    assert(¬(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_join rejects occupied right" {
+    assert(¬(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(0,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_join rejects empty neighbor" {
+    assert(¬(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(0,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_join rejects outside pool" {
+    assert(¬(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_join rejects stale coalescing snapshot" {
+    assert(¬(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(4,64),bvconst(1,8))))
+}
+
+example "reclaim108_join rejects no serialization" {
+    assert(¬(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(0,8))))
+}
+
+example "reclaim108_virtual accepts" {
+    assert(reclaim108_virtual(bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "reclaim108_virtual rejects different process incarnation arena" {
+    assert(¬(reclaim108_virtual(bvconst(101,64),bvconst(102,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_virtual rejects missing owner" {
+    assert(¬(reclaim108_virtual(bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_virtual rejects still mapped hole" {
+    assert(¬(reclaim108_virtual(bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(0,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_virtual rejects two disjoint holes are insufficient" {
+    assert(¬(reclaim108_virtual(bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_virtual rejects old reservation snapshot" {
+    assert(¬(reclaim108_virtual(bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(4,64),bvconst(1,8))))
+}
+
+example "reclaim108_release accepts" {
+    assert(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "reclaim108_release rejects stale handle generation" {
+    assert(¬(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(6,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_release rejects different slot" {
+    assert(¬(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(4,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_release rejects foreign incarnation" {
+    assert(¬(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(102,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_release rejects wrong object" {
+    assert(¬(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(45,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_release rejects double release" {
+    assert(¬(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(0,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_release rejects live lifetime" {
+    assert(¬(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_release rejects CPU still outstanding" {
+    assert(¬(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_release rejects DMA still outstanding" {
+    assert(¬(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_release rejects remaining grant" {
+    assert(¬(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_release rejects remaining virtual map" {
+    assert(¬(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_release rejects remaining pointer cell" {
+    assert(¬(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_release rejects still placed backing" {
+    assert(¬(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_release rejects missing terminal visibility" {
+    assert(¬(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_release rejects stale teardown snapshot" {
+    assert(¬(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(4,64),bvconst(1,8))))
+}
+
+example "reclaim108_release rejects unsynchronized release" {
+    assert(¬(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(0,8))))
+}
+
+example "second exact release after successful retirement" {
+    assert(¬(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),reclaim108_present(reclaim108_release(bvconst(3,64),bvconst(7,64),bvconst(101,64),bvconst(44,64),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(101,64),bvconst(44,64),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)),bvconst(1,8)),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(6,64),bvconst(6,64),bvconst(1,8))))
+}
+
+example "reclaim108_claim accepts" {
+    assert(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "reclaim108_claim rejects zero slot" {
+    assert(¬(reclaim108_claim(bvconst(0,64),bvconst(64,64),bvconst(7,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_claim rejects beyond directory" {
+    assert(¬(reclaim108_claim(bvconst(65,64),bvconst(64,64),bvconst(7,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_claim rejects unencodable capacity" {
+    assert(¬(reclaim108_claim(bvconst(3,64),bvconst(4294967296,64),bvconst(7,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_claim rejects generation exhausted" {
+    assert(¬(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(4294967295,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_claim rejects reserved record" {
+    assert(¬(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_claim rejects live record" {
+    assert(¬(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(2,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_claim rejects closing record" {
+    assert(¬(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(3,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_claim rejects retired tombstone" {
+    assert(¬(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(4,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_claim rejects evicted payload page" {
+    assert(¬(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(0,8),bvconst(0,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_claim rejects stale global revision" {
+    assert(¬(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(4,64),bvconst(1,8))))
+}
+
+example "fresh directory entry receives generation one" {
+    assert(reclaim108_generation(reclaim108_claim(bvconst(1,64),bvconst(64,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)),bvconst(0,64))=bvconst(1,64))
+}
+
+example "reclaim108_evict accepts" {
+    assert(reclaim108_evict(bvconst(64,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "reclaim108_evict rejects live slot" {
+    assert(¬(reclaim108_evict(bvconst(64,64),bvconst(59,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_evict rejects reserved slot" {
+    assert(¬(reclaim108_evict(bvconst(64,64),bvconst(59,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_evict rejects closing slot" {
+    assert(¬(reclaim108_evict(bvconst(64,64),bvconst(59,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_evict rejects incomplete census" {
+    assert(¬(reclaim108_evict(bvconst(64,64),bvconst(59,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_evict rejects duplicated census entry" {
+    assert(¬(reclaim108_evict(bvconst(64,64),bvconst(61,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_evict rejects empty page width" {
+    assert(¬(reclaim108_evict(bvconst(0,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_evict rejects unencodable page width" {
+    assert(¬(reclaim108_evict(bvconst(4294967296,64),bvconst(4294967292,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_evict rejects already evicted page" {
+    assert(¬(reclaim108_evict(bvconst(64,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_evict rejects metadata reader" {
+    assert(¬(reclaim108_evict(bvconst(64,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_evict rejects staged metadata writer" {
+    assert(¬(reclaim108_evict(bvconst(64,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_evict rejects stale page revision" {
+    assert(¬(reclaim108_evict(bvconst(64,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(4,64),bvconst(1,8))))
+}
+
+example "reclaim108_evict rejects unserialized page deletion" {
+    assert(¬(reclaim108_evict(bvconst(64,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(0,8))))
+}
+
+example "fully retired page can release bulky records" {
+    assert(reclaim108_evict(bvconst(64,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(64,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "double page eviction" {
+    assert(¬(reclaim108_evict(bvconst(64,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),reclaim108_resident(reclaim108_evict(bvconst(64,64),bvconst(60,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),bvconst(1,8)),bvconst(0,64),bvconst(0,64),bvconst(6,64),bvconst(6,64),bvconst(1,8))))
+}
+
+example "reclaim108_rehydrate accepts" {
+    assert(reclaim108_rehydrate(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),bvconst(0,8),(bvconst(1,8)=bvconst(1,8)),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "reclaim108_rehydrate rejects forgot generation" {
+    assert(¬(reclaim108_rehydrate(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),(bvconst(1,8)=bvconst(1,8)),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_rehydrate rejects reset generation" {
+    assert(¬(reclaim108_rehydrate(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(1,64),bvconst(0,8),bvconst(0,8),(bvconst(1,8)=bvconst(1,8)),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_rehydrate rejects wrong recorded generation" {
+    assert(¬(reclaim108_rehydrate(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(8,64),bvconst(0,8),bvconst(0,8),(bvconst(1,8)=bvconst(1,8)),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_rehydrate rejects live page entry" {
+    assert(¬(reclaim108_rehydrate(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(7,64),bvconst(2,8),bvconst(0,8),(bvconst(1,8)=bvconst(1,8)),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_rehydrate rejects already resident page" {
+    assert(¬(reclaim108_rehydrate(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_rehydrate rejects unprepared page" {
+    assert(¬(reclaim108_rehydrate(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),bvconst(0,8),(bvconst(0,8)=bvconst(1,8)),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "reclaim108_rehydrate rejects wrong revision" {
+    assert(¬(reclaim108_rehydrate(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),bvconst(0,8),(bvconst(1,8)=bvconst(1,8)),bvconst(5,64),bvconst(4,64),bvconst(1,8))))
+}
+
+example "retired generation history survives page rehydration" {
+    assert(reclaim108_rehydrate(bvconst(3,64),bvconst(64,64),bvconst(4294967295,64),bvconst(4294967295,64),bvconst(4,8),bvconst(0,8),(bvconst(1,8)=bvconst(1,8)),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "rehydrated retired slot still cannot mint" {
+    assert(¬(reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(4294967295,64),bvconst(4,8),bvconst(1,8),bvconst(6,64),bvconst(6,64),bvconst(1,8))))
+}
+
+example "reclaim108_fresh_object accepts" {
+    assert(reclaim108_fresh_object(bvconst(44,64),bvconst(44,64),bvconst(45,64)))
+}
+
+example "reclaim108_fresh_object rejects reuse destroyed object identity" {
+    assert(¬(reclaim108_fresh_object(bvconst(44,64),bvconst(43,64),bvconst(45,64))))
+}
+
+example "reclaim108_fresh_object rejects rewind identity counter" {
+    assert(¬(reclaim108_fresh_object(bvconst(44,64),bvconst(44,64),bvconst(44,64))))
+}
+
+example "reclaim108_fresh_object rejects wrap identity counter" {
+    assert(¬(reclaim108_fresh_object(bvsub(ptr107_max(),bvconst(0,64)),bvsub(ptr107_max(),bvconst(0,64)),bvconst(0,64))))
+}
+
+example "reclaim108_extent_capacity accepts" {
+    assert(reclaim108_extent_capacity(bvconst(64,64),bvconst(65,64)))
+}
+
+example "reclaim108_extent_capacity rejects no room for boundary hole" {
+    assert(¬(reclaim108_extent_capacity(bvconst(64,64),bvconst(64,64))))
+}
+
+example "reclaim108_extent_capacity rejects overflowed capacity" {
+    assert(¬(reclaim108_extent_capacity(bvsub(ptr107_max(),bvconst(0,64)),bvconst(0,64))))
+}
+
+example "reclaim108_ledger accepts" {
+    assert(reclaim108_ledger(bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(1024,64),bvconst(17408,64)))
+}
+
+example "reclaim108_ledger rejects missing infrastructure charge" {
+    assert(¬(reclaim108_ledger(bvconst(0,64),bvconst(8192,64),bvconst(4096,64),bvconst(1024,64),bvconst(17408,64))))
+}
+
+example "reclaim108_ledger rejects infrastructure exceeds budget" {
+    assert(¬(reclaim108_ledger(bvconst(17409,64),bvconst(8192,64),bvconst(4096,64),bvconst(1024,64),bvconst(17408,64))))
+}
+
+example "reclaim108_ledger rejects backing exceeds residual budget" {
+    assert(¬(reclaim108_ledger(bvconst(4096,64),bvconst(13313,64),bvconst(4096,64),bvconst(1024,64),bvconst(17408,64))))
+}
+
+example "reclaim108_ledger rejects metadata exceeds residual budget" {
+    assert(¬(reclaim108_ledger(bvconst(4096,64),bvconst(8192,64),bvconst(5121,64),bvconst(1024,64),bvconst(17408,64))))
+}
+
+example "reclaim108_ledger rejects retained resources unaccounted" {
+    assert(¬(reclaim108_ledger(bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(1025,64),bvconst(17408,64))))
+}
+
+example "reclaim108_ledger rejects wrapped total" {
+    assert(¬(reclaim108_ledger(bvconst(4096,64),bvsub(ptr107_max(),bvconst(0,64)),bvconst(4096,64),bvconst(1024,64),bvconst(17408,64))))
+}
+
+example "reclaim108_grow accepts" {
+    assert(reclaim108_grow(bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(1024,64),bvconst(4096,64),bvconst(21504,64)))
+}
+
+example "reclaim108_grow rejects overcommit by one byte" {
+    assert(¬(reclaim108_grow(bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(1024,64),bvconst(4097,64),bvconst(21504,64))))
+}
+
+example "reclaim108_grow rejects zero pretend allocation" {
+    assert(¬(reclaim108_grow(bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(1024,64),bvconst(0,64),bvconst(21504,64))))
+}
+
+example "reclaim108_grow rejects unbounded wrapping charge" {
+    assert(¬(reclaim108_grow(bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(1024,64),bvsub(ptr107_max(),bvconst(0,64)),bvconst(21504,64))))
+}
+
+example "pending release retains backing" {
+    assert(reclaim108_refund((bvconst(0,8)=bvconst(1,8)),bvconst(8192,64),bvconst(4096,64))=bvconst(8192,64))
+}
+
+example "pending release retains backing cannot produce 4096" {
+    assert(¬(reclaim108_refund((bvconst(0,8)=bvconst(1,8)),bvconst(8192,64),bvconst(4096,64))=bvconst(4096,64)))
+}
+
+example "completed release refunds exact backing" {
+    assert(reclaim108_refund((bvconst(1,8)=bvconst(1,8)),bvconst(8192,64),bvconst(4096,64))=bvconst(4096,64))
+}
+
+example "completed release refunds exact backing cannot produce 0" {
+    assert(¬(reclaim108_refund((bvconst(1,8)=bvconst(1,8)),bvconst(8192,64),bvconst(4096,64))=bvconst(0,64)))
+}
+
+example "oversized refund stutters" {
+    assert(reclaim108_refund((bvconst(1,8)=bvconst(1,8)),bvconst(4096,64),bvconst(8192,64))=bvconst(4096,64))
+}
+
+example "oversized refund stutters cannot produce 18446744073709547520" {
+    assert(¬(reclaim108_refund((bvconst(1,8)=bvconst(1,8)),bvconst(4096,64),bvconst(8192,64))=bvsub(ptr107_max(),bvconst(4095,64))))
+}
+
+example "retained host capacity remains charged" {
+    assert(reclaim108_metadata_refund((bvconst(1,8)=bvconst(1,8)),bvconst(8192,64),bvconst(4096,64),bvconst(0,64))=bvconst(8192,64))
+}
+
+example "retained host capacity remains charged cannot produce 4096" {
+    assert(¬(reclaim108_metadata_refund((bvconst(1,8)=bvconst(1,8)),bvconst(8192,64),bvconst(4096,64),bvconst(0,64))=bvconst(4096,64)))
+}
+
+example "exactly returned page refunded" {
+    assert(reclaim108_metadata_refund((bvconst(1,8)=bvconst(1,8)),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64))=bvconst(4096,64))
+}
+
+example "exactly returned page refunded cannot produce 0" {
+    assert(¬(reclaim108_metadata_refund((bvconst(1,8)=bvconst(1,8)),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64))=bvconst(0,64)))
+}
+
+example "failed eviction receives no refund" {
+    assert(reclaim108_metadata_refund((bvconst(0,8)=bvconst(1,8)),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64))=bvconst(8192,64))
+}
+
+example "failed eviction receives no refund cannot produce 4096" {
+    assert(¬(reclaim108_metadata_refund((bvconst(0,8)=bvconst(1,8)),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64))=bvconst(4096,64)))
+}
+
+example "live neighbor object survives table shrink" {
+    assert(reclaim108_map_present((bvconst(1,8)=bvconst(1,8)),bvconst(44,64),bvconst(45,64),bvconst(1,8))=bvconst(1,8))
+}
+
+example "live neighbor object survives table shrink cannot produce 0" {
+    assert(¬(reclaim108_map_present((bvconst(1,8)=bvconst(1,8)),bvconst(44,64),bvconst(45,64),bvconst(1,8))=bvconst(0,8)))
+}
+
+example "selected object entry removed" {
+    assert(reclaim108_map_present((bvconst(1,8)=bvconst(1,8)),bvconst(44,64),bvconst(44,64),bvconst(1,8))=bvconst(0,8))
+}
+
+example "selected object entry removed cannot produce 1" {
+    assert(¬(reclaim108_map_present((bvconst(1,8)=bvconst(1,8)),bvconst(44,64),bvconst(44,64),bvconst(1,8))=bvconst(1,8)))
+}
+
+example "generation exhaustion leaves permanent state" {
+    assert(reclaim108_closed_state(repr107_mask())=bvconst(4,8))
+}
+
+example "generation exhaustion leaves permanent state cannot produce 0" {
+    assert(¬(reclaim108_closed_state(repr107_mask())=bvconst(0,8)))
+}
+
+example "ordinary generation becomes reusable" {
+    assert(reclaim108_closed_state(bvconst(7,64))=bvconst(0,8))
+}
+
+example "ordinary generation becomes reusable cannot produce 4" {
+    assert(¬(reclaim108_closed_state(bvconst(7,64))=bvconst(4,8)))
+}
+
+example "last generation survives metadata shrink" {
+    assert(reclaim108_directory_after_shrink(bvconst(7,64))=bvconst(7,64))
+}
+
+example "last generation survives metadata shrink cannot produce 0" {
+    assert(¬(reclaim108_directory_after_shrink(bvconst(7,64))=bvconst(0,64)))
+}
+
+example "live slot index survives metadata shrink" {
+    assert(reclaim108_slot_after_shrink(bvconst(3,64))=bvconst(3,64))
+}
+
+example "live slot index survives metadata shrink cannot produce 1" {
+    assert(¬(reclaim108_slot_after_shrink(bvconst(3,64))=bvconst(1,64)))
+}
+
+example "failed virtual admission restores physical reservation" {
+    assert(reclaim108_word(reclaim108_pair((bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))),bvconst(16384,64),bvconst(12288,64))=bvconst(16384,64))
+}
+
+example "failed virtual admission restores physical reservation cannot produce 12288" {
+    assert(¬(reclaim108_word(reclaim108_pair((bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))),bvconst(16384,64),bvconst(12288,64))=bvconst(12288,64)))
+}
+
+example "failed metadata admission preserves generation" {
+    assert(reclaim108_generation(reclaim108_pair((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))),bvconst(7,64))=bvconst(7,64))
+}
+
+example "failed metadata admission preserves generation cannot produce 8" {
+    assert(¬(reclaim108_generation(reclaim108_pair((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))),bvconst(7,64))=bvconst(8,64)))
+}
+
+example "failed budget admission preserves revision" {
+    assert(reclaim108_revision(reclaim108_pair((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8))),bvconst(5,64))=bvconst(5,64))
+}
+
+example "failed budget admission preserves revision cannot produce 6" {
+    assert(¬(reclaim108_revision(reclaim108_pair((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8))),bvconst(5,64))=bvconst(6,64)))
+}
+
+example "split preserves exact byte coverage" {
+    assert(∀(lo : BitVec64). ∀(mid : BitVec64). ∀(hi : BitVec64). ∀(q : BitVec64). (bvule(lo,mid) ∧ bvule(mid,hi)) → (reclaim108_interval(lo,hi,q)=(reclaim108_interval(lo,mid,q) ∨ reclaim108_interval(mid,hi,q))))
+}
+
+example "take computes ordered split endpoints" {
+    assert(∀(b : BitVec64). ∀(n : BitVec64). ∀(k : BitVec64). reclaim108_take(b,n,k,b,n,bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)) → (bvule(b,bvadd(b,k)) ∧ bvule(bvadd(b,k),bvadd(b,n))))
+}
+
+example "split never duplicates a byte" {
+    assert(∀(b : BitVec64). ∀(n : BitVec64). ∀(k : BitVec64). ∀(q : BitVec64). reclaim108_take(b,n,k,b,n,bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)) → ¬(reclaim108_inside(b,k,q) ∧ reclaim108_inside(bvadd(b,k),bvsub(n,k),q)))
+}
+
+example "split preserves total length" {
+    assert(∀(b : BitVec64). ∀(n : BitVec64). ∀(k : BitVec64). reclaim108_take(b,n,k,b,n,bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)) → (bvadd(k,bvsub(n,k))=n))
+}
+
+example "split preserves aligned remainder" {
+    assert(∀(b : BitVec64). ∀(n : BitVec64). ∀(k : BitVec64). reclaim108_take(b,n,k,b,n,bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)) → reclaim108_segment(bvadd(b,k),bvsub(n,k)))
+}
+
+example "join computes same final endpoint" {
+    assert(∀(a : BitVec64). ∀(an : BitVec64). ∀(b : BitVec64). ∀(bn : BitVec64). ∀(pool : BitVec64). ∀(size : BitVec64). reclaim108_join(a,an,b,bn,pool,size,bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)) → (bvadd(a,bvadd(an,bn))=bvadd(b,bn)))
+}
+
+example "join preserves exact union" {
+    assert(∀(a : BitVec64). ∀(b : BitVec64). ∀(end : BitVec64). ∀(q : BitVec64). (bvult(a,b) ∧ bvult(b,end)) → (reclaim108_interval(a,end,q)=(reclaim108_interval(a,b,q) ∨ reclaim108_interval(b,end,q))))
+}
+
+example "joined interval remains within pool" {
+    assert(∀(a : BitVec64). ∀(b : BitVec64). ∀(end : BitVec64). ∀(pool : BitVec64). ∀(pool_end : BitVec64). (bvule(pool,a) ∧ bvult(a,b) ∧ bvult(b,end) ∧ bvule(end,pool_end)) → (bvule(pool,a) ∧ bvule(end,pool_end) ∧ bvult(a,end)))
+}
+
+example "join preserves separation from every nonempty other interval" {
+    assert(∀(a : BitVec64). ∀(b : BitVec64). ∀(end : BitVec64). ∀(c : BitVec64). ∀(ce : BitVec64). (bvult(a,b) ∧ bvult(b,end) ∧ bvult(c,ce) ∧ (bvule(b,c) ∨ bvule(ce,a)) ∧ (bvule(end,c) ∨ bvule(ce,b))) → (bvule(end,c) ∨ bvule(ce,a)))
+}
+
+example "failed compound transition preserves arbitrary state" {
+    assert(∀(p : Bool). ∀(v : Bool). ∀(r : Bool). ∀(b : Bool). ∀(old : BitVec64). ∀(next : BitVec64). ¬(reclaim108_pair(p,v,r,b)) → (reclaim108_word(reclaim108_pair(p,v,r,b),old,next)=old))
+}
+
+example "unselected record stays unchanged" {
+    assert(∀(selected : BitVec64). ∀(query : BitVec64). ∀(old : BitVec64). ∀(next : BitVec64). ¬(selected=query) → (reclaim108_record((bvconst(1,8)=bvconst(1,8)),selected,query,old,next)=old))
+}
+
+example "free operation preserves neighboring bytes" {
+    assert(∀(b : BitVec64). ∀(n : BitVec64). ∀(q : BitVec64). ∀(old : Bool). ¬(reclaim108_inside(b,n,q)) → (reclaim108_free_after_release((bvconst(1,8)=bvconst(1,8)),b,n,q,old)=old))
+}
+
+example "allocation/free restores exact prior free set" {
+    assert(∀(b : BitVec64). ∀(n : BitVec64). ∀(k : BitVec64). ∀(q : BitVec64). ∀(old : Bool). (reclaim108_inside(b,k,q) → old) → (reclaim108_cycle_free(b,k,q,old)=old))
+}
+
+example "allocated page cannot remain free" {
+    assert(∀(b : BitVec64). ∀(n : BitVec64). ∀(q : BitVec64). ∀(old : Bool). reclaim108_inside(b,n,q) → ¬(reclaim108_free_after_take((bvconst(1,8)=bvconst(1,8)),b,n,q,old)))
+}
+
+example "slot reuse rejects every previous generation" {
+    assert(∀(s : BitVec64). ∀(g : BitVec64). (repr107_components(s,g) ∧ bvult(g,repr107_mask())) → ¬(heap108_current(repr107_handle(s,g),bvconst(1,8),s,reclaim108_generation((bvconst(1,8)=bvconst(1,8)),g),bvconst(1,8),bvconst(2,8),(bvconst(1,8)=bvconst(1,8)))))
+}
+
+example "fresh generation works after page rehydration" {
+    assert(∀(g : BitVec64). bvult(g,repr107_mask()) → heap108_current(repr107_handle(bvconst(3,64),bvadd(g,bvconst(1,64))),bvconst(1,8),bvconst(3,64),reclaim108_generation((bvconst(1,8)=bvconst(1,8)),reclaim108_directory_after_shrink(g)),bvconst(1,8),bvconst(2,8),(bvconst(1,8)=bvconst(1,8))))
+}
+
+example "page shrink preserves all generation history" {
+    assert(∀(g : BitVec64). reclaim108_directory_after_shrink(g)=g)
+}
+
+example "page shrink preserves all slot identities" {
+    assert(∀(s : BitVec64). reclaim108_slot_after_shrink(s)=s)
+}
+
+example "page shrink preserves all directory states" {
+    assert(∀(s : BitVec8). reclaim108_directory_state_after_shrink(s)=s)
+}
+
+example "no active record on evictable page" {
+    assert(∀(w : BitVec64). ∀(f : BitVec64). ∀(r : BitVec64). ∀(l : BitVec64). ∀(c : BitVec64). ∀(x : BitVec64). reclaim108_evict(w,f,r,l,c,x,bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)) → ((r=bvconst(0,64)) ∧ (l=bvconst(0,64)) ∧ (c=bvconst(0,64)) ∧ (bvadd(f,x)=w)))
+}
+
+example "ledger bounds exact total" {
+    assert(∀(f : BitVec64). ∀(p : BitVec64). ∀(m : BitVec64). ∀(r : BitVec64). ∀(limit : BitVec64). reclaim108_ledger(f,p,m,r,limit) → bvule(reclaim108_total(f,p,m,r),limit))
+}
+
+example "checked category addition cannot wrap" {
+    assert(∀(a : BitVec64). ∀(b : BitVec64). bvuge(bvadd(a,b),a) → bvule(b,bvsub(ptr107_max(),a)))
+}
+
+example "admission residual preserves global bound" {
+    assert(∀(used : BitVec64). ∀(n : BitVec64). ∀(limit : BitVec64). (bvule(used,limit) ∧ bvule(n,bvsub(limit,used))) → (bvule(bvadd(used,n),limit) ∧ bvuge(bvadd(used,n),used)))
+}
+
+example "updated categories equal old total plus admitted charge" {
+    assert(∀(f : BitVec64). ∀(p : BitVec64). ∀(m : BitVec64). ∀(r : BitVec64). ∀(n : BitVec64). reclaim108_total(f,bvadd(p,n),m,r)=bvadd(reclaim108_total(f,p,m,r),n))
+}
+
+example "admission prevents backing charge wrap" {
+    assert(∀(f : BitVec64). ∀(p : BitVec64). ∀(m : BitVec64). ∀(r : BitVec64). ∀(n : BitVec64). ∀(limit : BitVec64). reclaim108_grow(f,p,m,r,n,limit) → bvule(n,bvsub(ptr107_max(),p)))
+}
+
+example "one closed churn cycle restores backing charge" {
+    assert(∀(p : BitVec64). ∀(n : BitVec64). bvule(n,bvsub(ptr107_max(),p)) → (reclaim108_cycle_payload(p,n)=p))
+}
+
+example "released backing cannot increase charge" {
+    assert(∀(p : BitVec64). ∀(n : BitVec64). bvule(reclaim108_refund((bvconst(1,8)=bvconst(1,8)),p,n),p))
+}
+
+example "metadata refund cannot increase charge" {
+    assert(∀(m : BitVec64). ∀(n : BitVec64). ∀(actual : BitVec64). bvule(reclaim108_metadata_refund((bvconst(1,8)=bvconst(1,8)),m,n,actual),m))
+}
+
+example "directory charge remains after complete release" {
+    assert(∀(f : BitVec64). ∀(p : BitVec64). ∀(m : BitVec64). bvugt(m,bvconst(0,64)) → (reclaim108_total(f,reclaim108_refund((bvconst(1,8)=bvconst(1,8)),p,p),reclaim108_metadata_refund((bvconst(1,8)=bvconst(1,8)),m,m,m),bvconst(0,64))=f))
+}
+
+example "partition count induction starts empty" {
+    assert(reclaim108_prefix(bvconst(0,64),bvconst(0,64),bvconst(0,8)))
+}
+
+example "append claimed extent preserves count bound" {
+    assert(∀(f : BitVec64). ∀(c : BitVec64). ∀(last : BitVec8). reclaim108_append_claim(f,c,last) → reclaim108_prefix(f,bvadd(c,bvconst(1,64)),bvconst(0,8)))
+}
+
+example "append separated free extent preserves count bound" {
+    assert(∀(f : BitVec64). ∀(c : BitVec64). ∀(last : BitVec8). reclaim108_append_free(f,c,last) → reclaim108_prefix(bvadd(f,bvconst(1,64)),c,bvconst(1,8)))
+}
+
+example "canonical partition has at most claimed plus one holes" {
+    assert(∀(f : BitVec64). ∀(c : BitVec64). ∀(last : BitVec8). reclaim108_prefix(f,c,last) → bvule(f,bvadd(c,bvconst(1,64))))
+}
+
+example "adjacent free records must coalesce" {
+    assert(¬(reclaim108_append_free(bvconst(1,64),bvconst(0,64),bvconst(1,8))))
+}
+
+example "hole count exceeds bounded directory" {
+    assert(¬(reclaim108_prefix(bvconst(66,64),bvconst(64,64),bvconst(1,8))))
+}
+
+example "free B joins with tail" {
+    assert(reclaim108_trace_join_b())
+}
+
+example "free A after B restores whole arena" {
+    assert(reclaim108_trace_join_a())
+}
+
+example "reclaimed arena accepts whole-pool allocation" {
+    assert(reclaim108_trace_join_a() ∧ reclaim108_take(bvconst(4096,64),bvconst(16384,64),bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(9,64),bvconst(9,64),bvconst(1,8)))
+}
+
+example "live B may be swallowed during free A" {
+    assert(¬(reclaim108_join(bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8))))
+}
+
+example "same virtual address can serve a fresh lifetime" {
+    assert(reclaim108_virtual(bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)) ∧ reclaim108_claim(bvconst(3,64),bvconst(64,64),bvconst(7,64),bvconst(0,8),bvconst(1,8),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "saved event alias revives at reused virtual address" {
+    assert(¬(heap108_current(repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(1,8),bvconst(3,64),bvconst(8,64),bvconst(1,8),bvconst(2,8),(bvconst(1,8)=bvconst(1,8)))))
+}
+
+example "reused virtual range does not replace initialization" {
+    assert(¬(init108_heap_gate((bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(17,64),bvconst(4096,64),bvconst(4096,64))))
+}
+
+example "coalescing grants permission to skip scrub" {
+    assert(¬(init108_heap_gate((bvconst(0,8)=bvconst(1,8)),reclaim108_trace_join_a(),bvconst(17,64),bvconst(4096,64),bvconst(4096,64))))
+}
+
+example "three differently sized cycles preserve payload baseline" {
+    assert(reclaim108_cycle_payload(reclaim108_cycle_payload(reclaim108_cycle_payload(bvconst(8192,64),bvconst(4096,64)),bvconst(8192,64)),bvconst(12288,64))=bvconst(8192,64))
+}
+
+example "three differently sized cycles preserve payload baseline cannot produce 32768" {
+    assert(¬(reclaim108_cycle_payload(reclaim108_cycle_payload(reclaim108_cycle_payload(bvconst(8192,64),bvconst(4096,64)),bvconst(8192,64)),bvconst(12288,64))=bvconst(32768,64)))
+}
+
+example "metadata allocate-evict cycle preserves fixed baseline" {
+    assert(reclaim108_total(bvconst(4096,64),bvconst(0,64),reclaim108_metadata_refund((bvconst(1,8)=bvconst(1,8)),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64)),bvconst(0,64))=bvconst(4096,64))
+}
+
+example "metadata allocate-evict cycle preserves fixed baseline cannot produce 0" {
+    assert(¬(reclaim108_total(bvconst(4096,64),bvconst(0,64),reclaim108_metadata_refund((bvconst(1,8)=bvconst(1,8)),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64)),bvconst(0,64))=bvconst(0,64)))
+}

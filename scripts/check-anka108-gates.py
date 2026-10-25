@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run 10.7 prerequisites and the 10.8 typed-I/O and rebuild proofs/disproofs.
+"""Run 10.7 prerequisites and the 10.8 I/O, rebuild and allocation gates.
 
 Unknown, timeout, parse/evaluation errors and absent witnesses fail closed.
 The hostile Kleis test command intentionally reports failing examples; only
@@ -30,6 +30,24 @@ def main():
                            help='run only the concrete compiler-adapter gate pair')
     selection.add_argument('--only-modules', action='store_true',
                            help='run only the protected-module composition gate pair')
+    selection.add_argument('--only-allocation', action='store_true',
+                           help='run allocation lifecycle, ABI, initialization, reclamation, Undertaker, A2.2 placement, A2.3 Fabric and concrete worker gates')
+    selection.add_argument('--only-initialization', action='store_true',
+                           help='run only the residual-data isolation gate pair')
+    selection.add_argument('--only-reclamation', action='store_true',
+                           help='run only the reusable-extents and bounded-metadata gate pair')
+    selection.add_argument('--only-undertaker', action='store_true',
+                           help='run only the asynchronous-reclamation gate pair')
+    selection.add_argument('--only-a22', action='store_true',
+                           help='run only the bounded placement/reservation gate pair')
+    selection.add_argument('--only-a23', action='store_true',
+                           help='run only the bounded Fabric/shadow/initialization gate pair')
+    selection.add_argument('--only-workers', action='store_true',
+                           help='run only the concrete cleanup-worker and terminal-work gate pair')
+    selection.add_argument('--only-cleanup', action='store_true',
+                           help='run only the software cleanup/reuse refinement pair')
+    selection.add_argument('--only-malloc', action='store_true',
+                           help='run the concrete malloc/free runtime and ABI refinement')
     parser.add_argument('--timeout', type=int, default=120,
                         help='wall-clock seconds per command (default: 120)')
     args = parser.parse_args()
@@ -48,7 +66,10 @@ def main():
     # Some supplied Kleis CLI builds resolve stdlib imports from cwd even when
     # KLEIS_ROOT is set. Keep theory paths absolute and run from the selected
     # root so external stdlib installations work without copying into Anka.
-    if not (args.only_108 or args.only_input or args.only_rebuild or args.only_adapter or args.only_modules):
+    if not (args.only_108 or args.only_input or args.only_rebuild or args.only_adapter
+            or args.only_modules or args.only_allocation or args.only_initialization
+            or args.only_reclamation or args.only_undertaker or args.only_a22 or args.only_a23
+            or args.only_workers or args.only_cleanup or args.only_malloc):
         try:
             previous = subprocess.run(
                 [sys.executable, str(root / 'scripts/check-anka107-gates.py'),
@@ -60,7 +81,28 @@ def main():
         if previous.returncode:
             return 1
     all_ok = True
-    if args.only_modules:
+    if args.only_malloc:
+        stems = ('anka108_malloc_runtime',)
+    elif args.only_cleanup:
+        stems = ('anka108_cleanup_reuse',)
+    elif args.only_workers:
+        stems = ('anka108_cleanup_workers',)
+    elif args.only_a23:
+        stems = ('anka108_allocation_fabric',)
+    elif args.only_a22:
+        stems = ('anka108_allocation_placement',)
+    elif args.only_undertaker:
+        stems = ('anka108_async_reclamation',)
+    elif args.only_reclamation:
+        stems = ('anka108_allocation_reclamation',)
+    elif args.only_initialization:
+        stems = ('anka108_memory_initialization',)
+    elif args.only_allocation:
+        stems = ('anka108_allocation', 'anka108_allocation_abi',
+                 'anka108_memory_initialization', 'anka108_allocation_reclamation',
+                 'anka108_async_reclamation', 'anka108_allocation_placement',
+                 'anka108_allocation_fabric', 'anka108_cleanup_workers', 'anka108_cleanup_reuse', 'anka108_malloc_runtime')
+    elif args.only_modules:
         stems = ('anka108_protected_modules',)
     elif args.only_adapter:
         stems = ('anka108_compiler_adapter',)
@@ -71,7 +113,11 @@ def main():
     else:
         stems = ('anka108_typed_syscall_io', 'anka108_typed_input',
                  'anka108_rebuild_artifact', 'anka108_compiler_adapter',
-                 'anka108_protected_modules')
+                 'anka108_protected_modules', 'anka108_allocation',
+                 'anka108_allocation_abi', 'anka108_memory_initialization',
+                 'anka108_allocation_reclamation', 'anka108_async_reclamation',
+                 'anka108_allocation_placement', 'anka108_allocation_fabric',
+                 'anka108_cleanup_workers', 'anka108_cleanup_reuse', 'anka108_malloc_runtime')
     for stem in stems:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')

@@ -1,0 +1,175 @@
+// Every assertion must be explicitly disproved.
+import "anka108_malloc_runtime.kleis"
+
+example "event accepts" {
+    assert(¬(mf108_event(ut108_true(),bvconst(7,64),bvconst(7,64),ut108_false(),ut108_false(),ut108_true(),ut108_true())))
+}
+
+example "event rejects bad image" {
+    assert(¬(¬(mf108_event(ut108_false(),bvconst(7,64),bvconst(7,64),ut108_false(),ut108_false(),ut108_true(),ut108_true()))))
+}
+
+example "event rejects zero identity" {
+    assert(¬(¬(mf108_event(ut108_true(),bvconst(0,64),bvconst(7,64),ut108_false(),ut108_false(),ut108_true(),ut108_true()))))
+}
+
+example "event rejects old event" {
+    assert(¬(¬(mf108_event(ut108_true(),bvconst(7,64),bvconst(6,64),ut108_false(),ut108_false(),ut108_true(),ut108_true()))))
+}
+
+example "event rejects replay" {
+    assert(¬(¬(mf108_event(ut108_true(),bvconst(7,64),bvconst(7,64),ut108_true(),ut108_false(),ut108_true(),ut108_true()))))
+}
+
+example "event rejects scalar overlay" {
+    assert(¬(¬(mf108_event(ut108_true(),bvconst(7,64),bvconst(7,64),ut108_false(),ut108_true(),ut108_true(),ut108_true()))))
+}
+
+example "event rejects wrong process incarnation" {
+    assert(¬(¬(mf108_event(ut108_true(),bvconst(7,64),bvconst(7,64),ut108_false(),ut108_false(),ut108_false(),ut108_true()))))
+}
+
+example "event rejects unserialized" {
+    assert(¬(¬(mf108_event(ut108_true(),bvconst(7,64),bvconst(7,64),ut108_false(),ut108_false(),ut108_true(),ut108_false()))))
+}
+
+example "publication accepts" {
+    assert(¬(mf108_publish(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true())))
+}
+
+example "publication rejects unready result" {
+    assert(¬(¬(mf108_publish(ut108_false(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true()))))
+}
+
+example "publication rejects partial initialization" {
+    assert(¬(¬(mf108_publish(ut108_true(),ut108_false(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true()))))
+}
+
+example "publication rejects lost custody" {
+    assert(¬(¬(mf108_publish(ut108_true(),ut108_true(),ut108_false(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true()))))
+}
+
+example "publication rejects missing cleanup service" {
+    assert(¬(¬(mf108_publish(ut108_true(),ut108_true(),ut108_true(),ut108_false(),ut108_true(),ut108_true(),ut108_true(),ut108_true()))))
+}
+
+example "publication rejects raw alias" {
+    assert(¬(¬(mf108_publish(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_false(),ut108_true(),ut108_true(),ut108_true()))))
+}
+
+example "publication rejects foreign owner" {
+    assert(¬(¬(mf108_publish(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_false(),ut108_true(),ut108_true()))))
+}
+
+example "publication rejects stale revision" {
+    assert(¬(¬(mf108_publish(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_false(),ut108_true()))))
+}
+
+example "publication rejects pending work" {
+    assert(¬(¬(mf108_publish(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_false()))))
+}
+
+example "heap access accepts" {
+    assert(¬(mf108_access(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),bvconst(8,64),bvconst(32,64),bvconst(16,64))))
+}
+
+example "heap access rejects numeric forgery" {
+    assert(¬(¬(mf108_access(ut108_false(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),bvconst(8,64),bvconst(32,64),bvconst(16,64)))))
+}
+
+example "heap access rejects stale record" {
+    assert(¬(¬(mf108_access(ut108_true(),ut108_false(),ut108_true(),ut108_true(),ut108_true(),bvconst(8,64),bvconst(32,64),bvconst(16,64)))))
+}
+
+example "heap access rejects same domain different context" {
+    assert(¬(¬(mf108_access(ut108_true(),ut108_true(),ut108_false(),ut108_true(),ut108_true(),bvconst(8,64),bvconst(32,64),bvconst(16,64)))))
+}
+
+example "heap access rejects device path" {
+    assert(¬(¬(mf108_access(ut108_true(),ut108_true(),ut108_true(),ut108_false(),ut108_true(),bvconst(8,64),bvconst(32,64),bvconst(16,64)))))
+}
+
+example "heap access rejects freed lifetime" {
+    assert(¬(¬(mf108_access(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_false(),bvconst(8,64),bvconst(32,64),bvconst(16,64)))))
+}
+
+example "heap access rejects one past read" {
+    assert(¬(¬(mf108_access(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),bvconst(32,64),bvconst(32,64),bvconst(16,64)))))
+}
+
+example "heap access rejects past end" {
+    assert(¬(¬(mf108_access(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),bvconst(33,64),bvconst(32,64),bvconst(16,64)))))
+}
+
+example "heap access rejects overflow span" {
+    assert(¬(¬(mf108_access(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),bvconst(8,64),bvconst(32,64),ptr107_max()))))
+}
+
+example "zero-width one-past validates" {
+    assert(¬(mf108_access(ut108_true(),ut108_true(),ut108_true(),ut108_true(),ut108_true(),bvconst(32,64),bvconst(32,64),bvconst(0,64))))
+}
+
+example "free null succeeds" {
+    assert(¬(mf108_reply_free(ut108_true(),ut108_true(),ut108_false(),ut108_false(),ut108_false())))
+}
+
+example "free accepts" {
+    assert(¬(mf108_reply_free(ut108_true(),ut108_false(),ut108_true(),ut108_true(),ut108_true())))
+}
+
+example "free rejects replayed event" {
+    assert(¬(¬(mf108_reply_free(ut108_false(),ut108_false(),ut108_true(),ut108_true(),ut108_true()))))
+}
+
+example "free rejects interior or foreign pointer" {
+    assert(¬(¬(mf108_reply_free(ut108_true(),ut108_false(),ut108_false(),ut108_true(),ut108_true()))))
+}
+
+example "free rejects not closed" {
+    assert(¬(¬(mf108_reply_free(ut108_true(),ut108_false(),ut108_true(),ut108_false(),ut108_true()))))
+}
+
+example "free rejects not drained/retired" {
+    assert(¬(¬(mf108_reply_free(ut108_true(),ut108_false(),ut108_true(),ut108_true(),ut108_false()))))
+}
+
+example "zero conversion accepts" {
+    assert(¬(mf108_conversion(ut108_false(),ut108_true(),ut108_true(),ut108_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8))))
+}
+
+example "zero conversion rejects numeric expression" {
+    assert(¬(¬(mf108_conversion(ut108_false(),ut108_true(),ut108_true(),ut108_false(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)))))
+}
+
+example "zero conversion rejects nonzero scalar" {
+    assert(¬(¬(mf108_conversion(ut108_false(),ut108_true(),ut108_true(),ut108_true(),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)))))
+}
+
+example "zero conversion rejects nonnull word" {
+    assert(¬(¬(mf108_conversion(ut108_false(),ut108_true(),ut108_true(),ut108_true(),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,8)))))
+}
+
+example "zero conversion rejects nonnull offset" {
+    assert(¬(¬(mf108_conversion(ut108_false(),ut108_true(),ut108_true(),ut108_true(),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,8)))))
+}
+
+example "zero conversion rejects forged kind" {
+    assert(¬(¬(mf108_conversion(ut108_false(),ut108_true(),ut108_true(),ut108_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8)))))
+}
+
+example "object conversion accepts" {
+    assert(¬(mf108_conversion(ut108_true(),ut108_true(),ut108_true(),ut108_false(),bvconst(1,64),bvconst(42,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "object conversion rejects changed words" {
+    assert(¬(¬(mf108_conversion(ut108_true(),ut108_false(),ut108_true(),ut108_false(),bvconst(1,64),bvconst(42,64),bvconst(8,64),bvconst(1,8)))))
+}
+
+example "object conversion rejects changed kind" {
+    assert(¬(¬(mf108_conversion(ut108_true(),ut108_true(),ut108_false(),ut108_false(),bvconst(1,64),bvconst(42,64),bvconst(8,64),bvconst(1,8)))))
+}
+
+example "object conversion rejects integer cast" {
+    assert(¬(¬(mf108_conversion(ut108_false(),ut108_true(),ut108_true(),ut108_false(),bvconst(1,64),bvconst(42,64),bvconst(8,64),bvconst(1,8)))))
+}
+

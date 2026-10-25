@@ -111,6 +111,7 @@ pub enum DevelopmentRunError {
     DeveloperInputAuthorityRequired,
     InputTooLarge,
     InputProvisionRejected,
+    HeapServiceUnavailable,
     Artifact(DevelopmentShellError),
     InvalidArtifactGeometry,
     ArtifactPlacementMissing,
@@ -502,6 +503,18 @@ fn execute_prepared_run(
         teardown_sealed_transient(&mut kernel.fabric, placement, supervisor_obj);
         *fabric = kernel.into_fabric();
         return Err(DevelopmentRunError::Boot(err));
+    }
+
+    if kernel.fabric.has_private_heap() {
+        if kernel.enable_heap_service(0x100000).is_err() {
+            kernel.finish_process(0, ProcessResult::ProtectionFault);
+            kernel.reclaim_process(0);
+            scrub_kernel_dynamic_region(&mut kernel,kernel_phys_base);
+            teardown_sealed_transient(&mut kernel.fabric,placement,control_obj);
+            teardown_sealed_transient(&mut kernel.fabric,placement,supervisor_obj);
+            *fabric=kernel.into_fabric();
+            return Err(DevelopmentRunError::HeapServiceUnavailable);
+        }
     }
 
     if let Some(bytes) = input {

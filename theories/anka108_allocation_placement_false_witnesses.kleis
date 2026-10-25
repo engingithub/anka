@@ -1,0 +1,1702 @@
+// DN-71 A2.2 hostile assertions. Each must be explicitly DISPROVED by Z3.
+// Unknown, timeout, parse/evaluation error or a generic failure is not a pass.
+import "anka108_allocation_placement.kleis"
+
+example "hostile: canonical holes plus insertion slot" {
+    assert(¬(a22_capacity(bvconst(4,64),bvconst(6,64))))
+}
+
+example "hostile: retained overcapacity is permitted" {
+    assert(¬(a22_capacity(bvconst(4,64),bvconst(8,64))))
+}
+
+example "hostile: K plus one omits insertion capacity" {
+    assert(a22_capacity(bvconst(4,64),bvconst(5,64)))
+}
+
+example "hostile: zero claim arena retains bounded workspace" {
+    assert(¬(a22_capacity(bvconst(0,64),bvconst(2,64))))
+}
+
+example "hostile: maximum encoded claim capacity is representable" {
+    assert(¬(a22_capacity(bvconst(4294967295,64),bvconst(4294967297,64))))
+}
+
+example "hostile: oversized claim namespace is rejected" {
+    assert(a22_capacity(bvconst(4294967296,64),bvconst(4294967298,64)))
+}
+
+example "hostile: capacity addition cannot wrap" {
+    assert(a22_capacity(ptr107_max(),bvconst(1,64)))
+}
+
+example "hostile: empty arena has one canonical hole" {
+    assert(¬(a22_counts(bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64))))
+}
+
+example "hostile: full alternating partition has K plus one holes" {
+    assert(¬(a22_counts(bvconst(4,64),bvconst(6,64),bvconst(4,64),bvconst(5,64))))
+}
+
+example "hostile: claimed census cannot exceed configured bound" {
+    assert(a22_counts(bvconst(4,64),bvconst(6,64),bvconst(5,64),bvconst(0,64)))
+}
+
+example "hostile: noncanonical extra hole cannot enter admission" {
+    assert(a22_counts(bvconst(4,64),bvconst(6,64),bvconst(2,64),bvconst(4,64)))
+}
+
+example "hostile: prefix take preserves a suffix" {
+    assert(¬(a22_take(
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64))))
+}
+
+example "hostile: exact take removes the only hole" {
+    assert(¬(a22_take(
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(16384,64),bvconst(4096,64),bvconst(16384,64))))
+}
+
+example "hostile: full claim table rejects despite available bytes" {
+    assert(a22_take(
+        bvconst(4,64),bvconst(6,64),bvconst(4,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64)))
+}
+
+example "hostile: inactive free row cannot be selected" {
+    assert(a22_take(
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64)))
+}
+
+example "hostile: fragmented total cannot replace one fitting hole" {
+    assert(a22_take(
+        bvconst(4,64),bvconst(6,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64)))
+}
+
+example "hostile: unaligned selected extent is rejected" {
+    assert(a22_take(
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4097,64),
+        bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64)))
+}
+
+example "hostile: wrapping selected extent is rejected" {
+    assert(a22_take(
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvsub(ptr107_max(),bvconst(4095,64)),
+        bvconst(8192,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64)))
+}
+
+example "hostile: extent outside arena is rejected" {
+    assert(a22_take(
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(20480,64),
+        bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(16384,64)))
+}
+
+example "hostile: exact take compacts free count" {
+    assert(¬((a22_take_holes(bvconst(3,64),bvconst(4096,64),bvconst(4096,64))=bvconst(2,64))))
+}
+
+example "hostile: partial take retains free count" {
+    assert(¬((a22_take_holes(bvconst(3,64),bvconst(8192,64),bvconst(4096,64))=bvconst(3,64))))
+}
+
+example "hostile: erase retains prefix row index" {
+    assert(¬((a22_erase_source(bvconst(0,64),bvconst(1,64))=bvconst(0,64))))
+}
+
+example "hostile: erase shifts suffix from next old row" {
+    assert(¬((a22_erase_source(bvconst(1,64),bvconst(1,64))=bvconst(2,64))))
+}
+
+example "hostile: insert retains prefix row index" {
+    assert(¬((a22_insert_source(bvconst(0,64),bvconst(1,64))=bvconst(0,64))))
+}
+
+example "hostile: insert shifts suffix from previous old row" {
+    assert(¬((a22_insert_source(bvconst(2,64),bvconst(1,64))=bvconst(1,64))))
+}
+
+example "hostile: partial take advances selected base" {
+    assert(¬((a22_partial_base(bvconst(1,64),bvconst(1,64),bvconst(4096,64),bvconst(4096,64))=bvconst(8192,64))))
+}
+
+example "hostile: partial take preserves another base" {
+    assert(¬((a22_partial_base(bvconst(0,64),bvconst(1,64),bvconst(4096,64),bvconst(4096,64))=bvconst(4096,64))))
+}
+
+example "hostile: partial take shrinks selected size" {
+    assert(¬((a22_partial_size(bvconst(1,64),bvconst(1,64),bvconst(8192,64),bvconst(4096,64))=bvconst(4096,64))))
+}
+
+example "hostile: partial take preserves another size" {
+    assert(¬((a22_partial_size(bvconst(0,64),bvconst(1,64),bvconst(8192,64),bvconst(4096,64))=bvconst(8192,64))))
+}
+
+example "hostile: full canonical partition still has insertion room" {
+    assert(¬(a22_insert(bvconst(4,64),bvconst(6,64),bvconst(4,64),bvconst(5,64),bvconst(3,64))))
+}
+
+example "hostile: return may insert at start" {
+    assert(¬(a22_insert(bvconst(4,64),bvconst(6,64),bvconst(2,64),bvconst(2,64),bvconst(0,64))))
+}
+
+example "hostile: return may insert at end" {
+    assert(¬(a22_insert(bvconst(4,64),bvconst(6,64),bvconst(2,64),bvconst(2,64),bvconst(2,64))))
+}
+
+example "hostile: no held claim means no return" {
+    assert(a22_insert(bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64)))
+}
+
+example "hostile: return cannot use an out of range insertion index" {
+    assert(a22_insert(bvconst(4,64),bvconst(6,64),bvconst(2,64),bvconst(2,64),bvconst(3,64)))
+}
+
+example "hostile: return never depends on growing a K plus one buffer" {
+    assert(a22_insert(bvconst(4,64),bvconst(5,64),bvconst(4,64),bvconst(5,64),bvconst(3,64)))
+}
+
+example "hostile: neither neighbor joins" {
+    assert(¬((a22_return_geometry(
+        bvconst(12288,64),bvconst(4096,64),bvconst(4096,64),bvconst(24576,64),a22_true(),bvconst(4096,64),
+        bvconst(4096,64),a22_true(),bvconst(20480,64),bvconst(4096,64)) ∧ (a22_return_base(bvconst(12288,64),bvconst(4096,64),a22_left_join(a22_true(),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64)))=bvconst(12288,64)) ∧ (a22_return_size(
+        bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),a22_left_join(a22_true(),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64)),a22_right_join(a22_true(),bvconst(20480,64),bvconst(12288,64),bvconst(4096,64)))=bvconst(4096,64)) ∧ (a22_coalesced_holes(
+        bvconst(2,64),a22_left_join(a22_true(),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64)),a22_right_join(a22_true(),bvconst(20480,64),bvconst(12288,64),bvconst(4096,64)))=bvconst(3,64)))))
+}
+
+example "hostile: only left neighbor joins" {
+    assert(¬((a22_return_geometry(
+        bvconst(12288,64),bvconst(4096,64),bvconst(4096,64),bvconst(24576,64),a22_true(),bvconst(8192,64),
+        bvconst(4096,64),a22_true(),bvconst(20480,64),bvconst(4096,64)) ∧ (a22_return_base(bvconst(12288,64),bvconst(8192,64),a22_left_join(a22_true(),bvconst(8192,64),bvconst(4096,64),bvconst(12288,64)))=bvconst(8192,64)) ∧ (a22_return_size(
+        bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),a22_left_join(a22_true(),bvconst(8192,64),bvconst(4096,64),bvconst(12288,64)),a22_right_join(a22_true(),bvconst(20480,64),bvconst(12288,64),bvconst(4096,64)))=bvconst(8192,64)) ∧ (a22_coalesced_holes(
+        bvconst(2,64),a22_left_join(a22_true(),bvconst(8192,64),bvconst(4096,64),bvconst(12288,64)),a22_right_join(a22_true(),bvconst(20480,64),bvconst(12288,64),bvconst(4096,64)))=bvconst(2,64)))))
+}
+
+example "hostile: only right neighbor joins" {
+    assert(¬((a22_return_geometry(
+        bvconst(12288,64),bvconst(4096,64),bvconst(4096,64),bvconst(24576,64),a22_true(),bvconst(4096,64),
+        bvconst(4096,64),a22_true(),bvconst(16384,64),bvconst(4096,64)) ∧ (a22_return_base(bvconst(12288,64),bvconst(4096,64),a22_left_join(a22_true(),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64)))=bvconst(12288,64)) ∧ (a22_return_size(
+        bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),a22_left_join(a22_true(),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64)),a22_right_join(a22_true(),bvconst(16384,64),bvconst(12288,64),bvconst(4096,64)))=bvconst(8192,64)) ∧ (a22_coalesced_holes(
+        bvconst(2,64),a22_left_join(a22_true(),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64)),a22_right_join(a22_true(),bvconst(16384,64),bvconst(12288,64),bvconst(4096,64)))=bvconst(2,64)))))
+}
+
+example "hostile: both neighbors join" {
+    assert(¬((a22_return_geometry(
+        bvconst(12288,64),bvconst(4096,64),bvconst(4096,64),bvconst(24576,64),a22_true(),bvconst(8192,64),
+        bvconst(4096,64),a22_true(),bvconst(16384,64),bvconst(4096,64)) ∧ (a22_return_base(bvconst(12288,64),bvconst(8192,64),a22_left_join(a22_true(),bvconst(8192,64),bvconst(4096,64),bvconst(12288,64)))=bvconst(8192,64)) ∧ (a22_return_size(
+        bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),a22_left_join(a22_true(),bvconst(8192,64),bvconst(4096,64),bvconst(12288,64)),a22_right_join(a22_true(),bvconst(16384,64),bvconst(12288,64),bvconst(4096,64)))=bvconst(12288,64)) ∧ (a22_coalesced_holes(
+        bvconst(2,64),a22_left_join(a22_true(),bvconst(8192,64),bvconst(4096,64),bvconst(12288,64)),a22_right_join(a22_true(),bvconst(16384,64),bvconst(12288,64),bvconst(4096,64)))=bvconst(1,64)))))
+}
+
+example "hostile: absent neighbors are not address sentinels" {
+    assert(¬((a22_return_geometry(
+        bvconst(12288,64),bvconst(4096,64),bvconst(4096,64),bvconst(24576,64),a22_false(),bvconst(0,64),
+        bvconst(0,64),a22_false(),bvconst(0,64),bvconst(0,64)) ∧ (a22_return_base(bvconst(12288,64),bvconst(0,64),a22_left_join(a22_false(),bvconst(0,64),bvconst(0,64),bvconst(12288,64)))=bvconst(12288,64)) ∧ (a22_return_size(
+        bvconst(4096,64),bvconst(0,64),bvconst(0,64),a22_left_join(a22_false(),bvconst(0,64),bvconst(0,64),bvconst(12288,64)),a22_right_join(a22_false(),bvconst(0,64),bvconst(12288,64),bvconst(4096,64)))=bvconst(4096,64)) ∧ (a22_coalesced_holes(
+        bvconst(0,64),a22_left_join(a22_false(),bvconst(0,64),bvconst(0,64),bvconst(12288,64)),a22_right_join(a22_false(),bvconst(0,64),bvconst(12288,64),bvconst(4096,64)))=bvconst(1,64)))))
+}
+
+example "hostile: overlapping left free neighbor is rejected" {
+    assert(a22_return_geometry(
+        bvconst(12288,64),bvconst(4096,64),bvconst(4096,64),bvconst(24576,64),a22_true(),bvconst(8192,64),
+        bvconst(8192,64),a22_false(),bvconst(0,64),bvconst(0,64)))
+}
+
+example "hostile: overlapping right free neighbor is rejected" {
+    assert(a22_return_geometry(
+        bvconst(12288,64),bvconst(4096,64),bvconst(4096,64),bvconst(24576,64),a22_false(),bvconst(0,64),
+        bvconst(0,64),a22_true(),bvconst(12288,64),bvconst(8192,64)))
+}
+
+example "hostile: live gap is never absorbed by joining" {
+    assert(a22_left_join(a22_true(),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64)))
+}
+
+example "hostile: actual retained extent array charge" {
+    assert(¬(a22_storage(bvconst(8,64),bvconst(16,64),bvconst(128,64))))
+}
+
+example "hostile: requested capacity is not actual retained capacity" {
+    assert(a22_storage(bvconst(8,64),bvconst(16,64),bvconst(96,64)))
+}
+
+example "hostile: zero optional storage costs zero" {
+    assert(¬(a22_storage(bvconst(0,64),bvconst(48,64),bvconst(0,64))))
+}
+
+example "hostile: zero stride cannot hide retained storage" {
+    assert(a22_storage(bvconst(8,64),bvconst(0,64),bvconst(0,64)))
+}
+
+example "hostile: overflowing capacity times stride is rejected" {
+    assert(a22_storage(ptr107_max(),bvconst(16,64),bvsub(ptr107_max(),bvconst(15,64))))
+}
+
+example "hostile: fixed charge includes both arrays bindings arenas and scratch" {
+    assert(¬(a22_fixed(bvconst(648,64),bvconst(96,64),bvconst(96,64),bvconst(128,64),bvconst(64,64),bvconst(32,64),bvconst(1064,64))))
+}
+
+example "hostile: fixed charge cannot omit insertion slots" {
+    assert(a22_fixed(bvconst(648,64),bvconst(96,64),bvconst(96,64),bvconst(128,64),bvconst(64,64),bvconst(32,64),bvconst(1032,64)))
+}
+
+example "hostile: fixed category addition overflow is rejected" {
+    assert(a22_fixed(bvsub(ptr107_max(),bvconst(31,64)),bvconst(32,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)))
+}
+
+example "hostile: complete admission reserves both arenas and metadata" {
+    assert(¬(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8))))
+}
+
+example "hostile: last generation and job may be consumed once" {
+    assert(¬(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(4294967294,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvsub(ptr107_max(),bvconst(1,64)),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvsub(ptr107_max(),bvconst(1,64)),bvsub(ptr107_max(),bvconst(1,64)),bvsub(ptr107_max(),bvconst(1,64)),bvsub(ptr107_max(),bvconst(1,64)),bvsub(ptr107_max(),bvconst(1,64)),
+        bvconst(1,8))))
+}
+
+example "hostile: exact physical and virtual take is admissible" {
+    assert(¬(a22_admit(
+        bvconst(16384,64),bvconst(16384,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8))))
+}
+
+example "hostile: zero size belongs to NULL ABI path" {
+    assert(a22_admit(
+        bvconst(0,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: negative signed size is rejected" {
+    assert(a22_admit(
+        bvsub(ptr107_max(),bvconst(9223372036854775807,64)),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: incorrect rounding is rejected" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(8192,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: zero owner serial is rejected" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: foreign account cannot fund request" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(8,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: foreign virtual arena cannot satisfy request" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(8,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: closed owner cannot admit" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: invalid owner flag fails closed" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(2,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: physical index capacity is insufficient" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(5,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: virtual index capacity is insufficient" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(5,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: physical claims exhausted" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(4,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: virtual claims exhausted" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(4,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: physical holes exhausted" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: virtual holes exhausted" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(0,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: physical selected index is stale" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: virtual selected index is stale" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: physical hole cannot cover request" {
+    assert(a22_admit(
+        bvconst(8192,64),bvconst(8192,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: virtual hole cannot cover request" {
+    assert(a22_admit(
+        bvconst(8192,64),bvconst(8192,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: physical base must be page aligned" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4097,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: virtual base must be page aligned" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65537,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: physical pool containment is checked" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(20480,64),
+        bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: virtual arena containment is checked" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(81920,64),bvconst(4096,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: registry slot zero is invalid" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(0,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: registry capacity is exhausted" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(5,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: generation exhaustion fences admission" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(4294967295,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: reserved registry row cannot be reused" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: live registry row cannot be reused" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(2,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: closing registry row cannot be reused" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(3,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: cleanup capacity is exhausted" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(4,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: occupied cleanup row cannot be reused" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(1,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: job zero is invalid" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(0,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: job exhaustion fences admission" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),ptr107_max(),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: owner budget includes rounded backing" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(4095,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: global budget includes fixed bookkeeping" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(5159,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: overflowing fixed and used charge is rejected" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),ptr107_max(),bvconst(1,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: owner census cannot exceed global reserved bytes" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(1,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: overdrawn owner is rejected" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(8192,64),bvconst(65536,64),bvconst(8192,64),
+        bvconst(4096,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: stale caller revision is rejected" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(4,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: stale physical plan is rejected" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(4,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: stale virtual plan is rejected" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(4,64),bvconst(5,64),
+        bvconst(1,8)))
+}
+
+example "hostile: stale metadata plan is rejected" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(4,64),
+        bvconst(1,8)))
+}
+
+example "hostile: missing exclusive serialization is rejected" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(0,8)))
+}
+
+example "hostile: invalid serialization flag fails closed" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(2,8)))
+}
+
+example "hostile: terminal revision fences admission" {
+    assert(a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),ptr107_max(),ptr107_max(),ptr107_max(),ptr107_max(),ptr107_max(),
+        bvconst(1,8)))
+}
+
+example "hostile: matching candidate must include index base and length" {
+    assert(¬(a22_candidate(bvconst(0,64),bvconst(4096,64),bvconst(8192,64),bvconst(0,64),bvconst(4096,64),bvconst(8192,64))))
+}
+
+example "hostile: candidate mismatch in index" {
+    assert(a22_candidate(bvconst(0,64),bvconst(4096,64),bvconst(8192,64),bvconst(1,64),bvconst(4096,64),bvconst(8192,64)))
+}
+
+example "hostile: candidate mismatch in base" {
+    assert(a22_candidate(bvconst(0,64),bvconst(4096,64),bvconst(8192,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64)))
+}
+
+example "hostile: candidate mismatch in length" {
+    assert(a22_candidate(bvconst(0,64),bvconst(4096,64),bvconst(8192,64),bvconst(0,64),bvconst(4096,64),bvconst(4096,64)))
+}
+
+example "hostile: all four installed records carry one fresh reservation identity" {
+    assert(¬(a22_installed(
+        bvconst(7,64),bvconst(1,64),bvconst(0,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64))))
+}
+
+example "hostile: installation rejects inconsistent registry owner" {
+    assert(a22_installed(
+        bvconst(7,64),bvconst(1,64),bvconst(0,64),bvconst(1,64),bvconst(8,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: installation rejects inconsistent physical generation" {
+    assert(a22_installed(
+        bvconst(7,64),bvconst(1,64),bvconst(0,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(1,64),
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: installation rejects inconsistent virtual job" {
+    assert(a22_installed(
+        bvconst(7,64),bvconst(1,64),bvconst(0,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: installation rejects inconsistent cleanup slot" {
+    assert(a22_installed(
+        bvconst(7,64),bvconst(1,64),bvconst(0,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),
+        bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: installation rejects inconsistent unadvanced generation" {
+    assert(a22_installed(
+        bvconst(7,64),bvconst(1,64),bvconst(0,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(0,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(0,64),bvconst(1,64),
+        bvconst(7,64),bvconst(1,64),bvconst(0,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(0,64),bvconst(1,64)))
+}
+
+example "hostile: all projections stutter after physical preparation" {
+    assert(¬(let commit = a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(4,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)) in
+        ((a22_charge_after(commit,bvconst(8192,64),bvconst(4096,64))=bvconst(8192,64)) ∧ (a22_charge_after(commit,bvconst(4096,64),bvconst(4096,64))=bvconst(4096,64)) ∧ (a22_count_after(commit,bvconst(2,64))=bvconst(2,64)) ∧ (a22_count_after(commit,bvconst(1,64))=bvconst(1,64)) ∧ (a22_holes_after(commit,bvconst(3,64),bvconst(4096,64),bvconst(4096,64))=bvconst(3,64)) ∧ (a22_holes_after(commit,bvconst(2,64),bvconst(8192,64),bvconst(4096,64))=bvconst(2,64)) ∧ (a22_state_after(commit,bvconst(0,8))=bvconst(0,8)) ∧ (a22_count_after(commit,bvconst(9,64))=bvconst(9,64)) ∧ (a22_count_after(commit,bvconst(5,64))=bvconst(5,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(4096,64),bvconst(8192,64))=bvconst(4096,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(69632,64))=bvconst(65536,64)))))
+}
+
+example "hostile: all projections stutter after virtual preparation" {
+    assert(¬(let commit = a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(4,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)) in
+        ((a22_charge_after(commit,bvconst(8192,64),bvconst(4096,64))=bvconst(8192,64)) ∧ (a22_charge_after(commit,bvconst(4096,64),bvconst(4096,64))=bvconst(4096,64)) ∧ (a22_count_after(commit,bvconst(2,64))=bvconst(2,64)) ∧ (a22_count_after(commit,bvconst(1,64))=bvconst(1,64)) ∧ (a22_holes_after(commit,bvconst(3,64),bvconst(4096,64),bvconst(4096,64))=bvconst(3,64)) ∧ (a22_holes_after(commit,bvconst(2,64),bvconst(8192,64),bvconst(4096,64))=bvconst(2,64)) ∧ (a22_state_after(commit,bvconst(0,8))=bvconst(0,8)) ∧ (a22_count_after(commit,bvconst(9,64))=bvconst(9,64)) ∧ (a22_count_after(commit,bvconst(5,64))=bvconst(5,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(4096,64),bvconst(8192,64))=bvconst(4096,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(69632,64))=bvconst(65536,64)))))
+}
+
+example "hostile: all projections stutter after registry preparation" {
+    assert(¬(let commit = a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(2,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)) in
+        ((a22_charge_after(commit,bvconst(8192,64),bvconst(4096,64))=bvconst(8192,64)) ∧ (a22_charge_after(commit,bvconst(4096,64),bvconst(4096,64))=bvconst(4096,64)) ∧ (a22_count_after(commit,bvconst(2,64))=bvconst(2,64)) ∧ (a22_count_after(commit,bvconst(1,64))=bvconst(1,64)) ∧ (a22_holes_after(commit,bvconst(3,64),bvconst(4096,64),bvconst(4096,64))=bvconst(3,64)) ∧ (a22_holes_after(commit,bvconst(2,64),bvconst(8192,64),bvconst(4096,64))=bvconst(2,64)) ∧ (a22_state_after(commit,bvconst(0,8))=bvconst(0,8)) ∧ (a22_count_after(commit,bvconst(9,64))=bvconst(9,64)) ∧ (a22_count_after(commit,bvconst(5,64))=bvconst(5,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(4096,64),bvconst(8192,64))=bvconst(4096,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(69632,64))=bvconst(65536,64)))))
+}
+
+example "hostile: all projections stutter after cleanup preparation" {
+    assert(¬(let commit = a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(1,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)) in
+        ((a22_charge_after(commit,bvconst(8192,64),bvconst(4096,64))=bvconst(8192,64)) ∧ (a22_charge_after(commit,bvconst(4096,64),bvconst(4096,64))=bvconst(4096,64)) ∧ (a22_count_after(commit,bvconst(2,64))=bvconst(2,64)) ∧ (a22_count_after(commit,bvconst(1,64))=bvconst(1,64)) ∧ (a22_holes_after(commit,bvconst(3,64),bvconst(4096,64),bvconst(4096,64))=bvconst(3,64)) ∧ (a22_holes_after(commit,bvconst(2,64),bvconst(8192,64),bvconst(4096,64))=bvconst(2,64)) ∧ (a22_state_after(commit,bvconst(0,8))=bvconst(0,8)) ∧ (a22_count_after(commit,bvconst(9,64))=bvconst(9,64)) ∧ (a22_count_after(commit,bvconst(5,64))=bvconst(5,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(4096,64),bvconst(8192,64))=bvconst(4096,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(69632,64))=bvconst(65536,64)))))
+}
+
+example "hostile: all projections stutter after owner budget preparation" {
+    assert(¬(let commit = a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(4095,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)) in
+        ((a22_charge_after(commit,bvconst(8192,64),bvconst(4096,64))=bvconst(8192,64)) ∧ (a22_charge_after(commit,bvconst(4096,64),bvconst(4096,64))=bvconst(4096,64)) ∧ (a22_count_after(commit,bvconst(2,64))=bvconst(2,64)) ∧ (a22_count_after(commit,bvconst(1,64))=bvconst(1,64)) ∧ (a22_holes_after(commit,bvconst(3,64),bvconst(4096,64),bvconst(4096,64))=bvconst(3,64)) ∧ (a22_holes_after(commit,bvconst(2,64),bvconst(8192,64),bvconst(4096,64))=bvconst(2,64)) ∧ (a22_state_after(commit,bvconst(0,8))=bvconst(0,8)) ∧ (a22_count_after(commit,bvconst(9,64))=bvconst(9,64)) ∧ (a22_count_after(commit,bvconst(5,64))=bvconst(5,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(4096,64),bvconst(8192,64))=bvconst(4096,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(69632,64))=bvconst(65536,64)))))
+}
+
+example "hostile: all projections stutter after global budget preparation" {
+    assert(¬(let commit = a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(5159,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)) in
+        ((a22_charge_after(commit,bvconst(8192,64),bvconst(4096,64))=bvconst(8192,64)) ∧ (a22_charge_after(commit,bvconst(4096,64),bvconst(4096,64))=bvconst(4096,64)) ∧ (a22_count_after(commit,bvconst(2,64))=bvconst(2,64)) ∧ (a22_count_after(commit,bvconst(1,64))=bvconst(1,64)) ∧ (a22_holes_after(commit,bvconst(3,64),bvconst(4096,64),bvconst(4096,64))=bvconst(3,64)) ∧ (a22_holes_after(commit,bvconst(2,64),bvconst(8192,64),bvconst(4096,64))=bvconst(2,64)) ∧ (a22_state_after(commit,bvconst(0,8))=bvconst(0,8)) ∧ (a22_count_after(commit,bvconst(9,64))=bvconst(9,64)) ∧ (a22_count_after(commit,bvconst(5,64))=bvconst(5,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(4096,64),bvconst(8192,64))=bvconst(4096,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(69632,64))=bvconst(65536,64)))))
+}
+
+example "hostile: all projections stutter after owner closes before commit" {
+    assert(¬(let commit = a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)) in
+        ((a22_charge_after(commit,bvconst(8192,64),bvconst(4096,64))=bvconst(8192,64)) ∧ (a22_charge_after(commit,bvconst(4096,64),bvconst(4096,64))=bvconst(4096,64)) ∧ (a22_count_after(commit,bvconst(2,64))=bvconst(2,64)) ∧ (a22_count_after(commit,bvconst(1,64))=bvconst(1,64)) ∧ (a22_holes_after(commit,bvconst(3,64),bvconst(4096,64),bvconst(4096,64))=bvconst(3,64)) ∧ (a22_holes_after(commit,bvconst(2,64),bvconst(8192,64),bvconst(4096,64))=bvconst(2,64)) ∧ (a22_state_after(commit,bvconst(0,8))=bvconst(0,8)) ∧ (a22_count_after(commit,bvconst(9,64))=bvconst(9,64)) ∧ (a22_count_after(commit,bvconst(5,64))=bvconst(5,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(4096,64),bvconst(8192,64))=bvconst(4096,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(69632,64))=bvconst(65536,64)))))
+}
+
+example "hostile: all projections stutter after another reservation commits first" {
+    assert(¬(let commit = a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(6,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)) in
+        ((a22_charge_after(commit,bvconst(8192,64),bvconst(4096,64))=bvconst(8192,64)) ∧ (a22_charge_after(commit,bvconst(4096,64),bvconst(4096,64))=bvconst(4096,64)) ∧ (a22_count_after(commit,bvconst(2,64))=bvconst(2,64)) ∧ (a22_count_after(commit,bvconst(1,64))=bvconst(1,64)) ∧ (a22_holes_after(commit,bvconst(3,64),bvconst(4096,64),bvconst(4096,64))=bvconst(3,64)) ∧ (a22_holes_after(commit,bvconst(2,64),bvconst(8192,64),bvconst(4096,64))=bvconst(2,64)) ∧ (a22_state_after(commit,bvconst(0,8))=bvconst(0,8)) ∧ (a22_count_after(commit,bvconst(9,64))=bvconst(9,64)) ∧ (a22_count_after(commit,bvconst(5,64))=bvconst(5,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(4096,64),bvconst(8192,64))=bvconst(4096,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(69632,64))=bvconst(65536,64)))))
+}
+
+example "hostile: successful commit installs one consistent reservation" {
+    assert(¬(let commit = a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1064,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)) in
+        ((a22_charge_after(commit,bvconst(0,64),bvconst(4096,64))=bvconst(4096,64)) ∧ (a22_count_after(commit,bvconst(0,64))=bvconst(1,64)) ∧ (a22_holes_after(commit,bvconst(1,64),bvconst(16384,64),bvconst(4096,64))=bvconst(1,64)) ∧ (a22_state_after(commit,bvconst(0,8))=bvconst(1,8)) ∧ (a22_count_after(commit,bvconst(1,64))=bvconst(2,64)) ∧ (a22_count_after(commit,bvconst(5,64))=bvconst(6,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64))=bvconst(4096,64)) ∧ (a22_row(commit,bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(65536,64))=bvconst(65536,64)) ∧ a22_installed(
+        bvconst(7,64),bvconst(1,64),bvconst(0,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64)) ∧ (a22_authority_after_reservation()=bvconst(0,8)))))
+}
+
+example "hostile: exact private reservation cancels" {
+    assert(¬(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64))))
+}
+
+example "hostile: owner closure does not strand private reservation" {
+    assert(¬(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(3,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64))))
+}
+
+example "hostile: terminal revision still permits exact cleanup" {
+    assert(¬(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        ptr107_max(),ptr107_max(),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64))))
+}
+
+example "hostile: last generation cancels to exhausted directory state" {
+    assert(¬(let release = a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(4294967295,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(4294967295,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(4294967295,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(4294967295,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(4294967295,64),bvconst(1,64)) in
+        (a22_cancel_state(release,bvconst(1,8),bvconst(4294967295,64))=bvconst(4,8))))
+}
+
+example "hostile: cancel rejects foreign reservation owner" {
+    assert(a22_cancel(
+        bvconst(8,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects foreign slot" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(2,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects stale generation" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(2,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects stale job" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects zero reservation job" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects never issued job" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),ptr107_max(),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects already free registry row" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects live registry row" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects exhausted registry row" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(4,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects ever attached reservation" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects published reservation" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects missing physical custody" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects missing virtual custody" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(0,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects missing cleanup credit" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects wrong rounded refund amount" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(8192,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects zero refund amount" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects insufficient held owner charge" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4095,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects owner charge absent from global ledger" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(4095,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects stale cancellation revision" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(5,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects unserialized cancellation" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(0,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects wrong physical return base" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects wrong virtual return base" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(69632,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects wrong physical recorded span" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects wrong virtual recorded span" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(8192,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects unaligned physical custody" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4097,64),bvconst(4096,64),bvconst(4097,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects unaligned virtual custody" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65537,64),bvconst(4096,64),bvconst(65537,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects mismatched p o" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(8,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects mismatched p slot" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects mismatched p g" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(2,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects mismatched p j" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(2,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects mismatched v o" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(8,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects mismatched v slot" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(2,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects mismatched v g" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(2,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects mismatched v j" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(2,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects mismatched c o" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(8,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects mismatched c slot" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(2,64),bvconst(1,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects mismatched c g" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(2,64),bvconst(1,64)))
+}
+
+example "hostile: cancel rejects mismatched c j" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(2,64)))
+}
+
+example "hostile: cancellation refunds exactly once and leaves other owner charged" {
+    assert(¬(let release = a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)) in
+        ((a22_refund(release,bvconst(12288,64),bvconst(4096,64))=bvconst(8192,64)) ∧ (a22_refund(release,bvconst(4096,64),bvconst(4096,64))=bvconst(0,64)) ∧ (a22_count_release(release,bvconst(2,64))=bvconst(1,64)) ∧ (a22_cancel_state(release,bvconst(1,8),bvconst(1,64))=bvconst(0,8)))))
+}
+
+example "hostile: duplicate cancellation cannot refund again" {
+    assert(¬(let release = a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,8),
+        bvconst(0,8),bvconst(0,8),bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(0,64),
+        bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)) in
+        (¬(release) ∧ (a22_refund(release,bvconst(8192,64),bvconst(4096,64))=bvconst(8192,64)))))
+}
+
+example "hostile: cleanup revision saturates instead of wrapping" {
+    assert(¬((a22_cleanup_revision(ptr107_max())=ptr107_max())))
+}
+
+example "hostile: ordinary cleanup advances shared revision" {
+    assert(¬((a22_cleanup_revision(bvconst(6,64))=bvconst(7,64))))
+}
+
+example "hostile: cleanup does not make terminal revision admissible" {
+    assert(a22_snapshot(ptr107_max(),ptr107_max(),ptr107_max(),ptr107_max(),ptr107_max(),bvconst(1,8)))
+}
+
+example "hostile: stale reservation does not select reused virtual and physical addresses" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(2,64),bvconst(2,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(2,64),
+        bvconst(2,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(2,64),bvconst(2,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(2,64),bvconst(2,64)))
+}
+
+example "hostile: both returns bind exact recorded bases and one span" {
+    assert(¬(a22_return_pair(
+        bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),
+        bvconst(4,64),bvconst(6,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),bvconst(16384,64),
+        bvconst(4096,64),bvconst(4,64),bvconst(6,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),
+        bvconst(65536,64),bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),
+        bvconst(69632,64),bvconst(12288,64))))
+}
+
+example "hostile: paired return rejects physical base substitution" {
+    assert(a22_return_pair(
+        bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),bvconst(8192,64),bvconst(65536,64),bvconst(4096,64),
+        bvconst(4,64),bvconst(6,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),bvconst(16384,64),
+        bvconst(4096,64),bvconst(4,64),bvconst(6,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),
+        bvconst(65536,64),bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),
+        bvconst(69632,64),bvconst(12288,64)))
+}
+
+example "hostile: paired return rejects virtual base substitution" {
+    assert(a22_return_pair(
+        bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),bvconst(4096,64),bvconst(69632,64),bvconst(4096,64),
+        bvconst(4,64),bvconst(6,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),bvconst(16384,64),
+        bvconst(4096,64),bvconst(4,64),bvconst(6,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),
+        bvconst(65536,64),bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),
+        bvconst(69632,64),bvconst(12288,64)))
+}
+
+example "hostile: paired return rejects span substitution" {
+    assert(a22_return_pair(
+        bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),bvconst(4096,64),bvconst(65536,64),bvconst(8192,64),
+        bvconst(4,64),bvconst(6,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),bvconst(16384,64),
+        bvconst(4096,64),bvconst(4,64),bvconst(6,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),
+        bvconst(65536,64),bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),
+        bvconst(69632,64),bvconst(12288,64)))
+}
+
+example "hostile: paired return rejects hidden existing right neighbor" {
+    assert(a22_return_pair(
+        bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),
+        bvconst(4,64),bvconst(6,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_false(),bvconst(16384,64),
+        bvconst(4096,64),bvconst(4,64),bvconst(6,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),
+        bvconst(65536,64),bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),
+        bvconst(69632,64),bvconst(12288,64)))
+}
+
+example "hostile: paired return rejects invented left neighbor" {
+    assert(a22_return_pair(
+        bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),
+        bvconst(4,64),bvconst(6,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),a22_true(),bvconst(0,64),bvconst(4096,64),a22_true(),bvconst(16384,64),
+        bvconst(4096,64),bvconst(4,64),bvconst(6,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),
+        bvconst(65536,64),bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),
+        bvconst(69632,64),bvconst(12288,64)))
+}
+
+example "hostile: paired return rejects virtual insertion outside active prefix" {
+    assert(a22_return_pair(
+        bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),
+        bvconst(4,64),bvconst(6,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),bvconst(16384,64),
+        bvconst(4096,64),bvconst(4,64),bvconst(6,64),bvconst(1,64),bvconst(1,64),bvconst(2,64),
+        bvconst(65536,64),bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),
+        bvconst(69632,64),bvconst(12288,64)))
+}
+
+example "hostile: paired return rejects virtual neighbor overlaps returned extent" {
+    assert(a22_return_pair(
+        bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),
+        bvconst(4,64),bvconst(6,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),bvconst(16384,64),
+        bvconst(4096,64),bvconst(4,64),bvconst(6,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),
+        bvconst(65536,64),bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),
+        bvconst(65536,64),bvconst(12288,64)))
+}
+
+example "hostile: paired return rejects physical return without a held claim" {
+    assert(a22_return_pair(
+        bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),bvconst(16384,64),
+        bvconst(4096,64),bvconst(4,64),bvconst(6,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),
+        bvconst(65536,64),bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),
+        bvconst(69632,64),bvconst(12288,64)))
+}
+
+example "hostile: paired return rejects virtual return without a held claim" {
+    assert(a22_return_pair(
+        bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),
+        bvconst(4,64),bvconst(6,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),bvconst(16384,64),
+        bvconst(4096,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),
+        bvconst(65536,64),bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),
+        bvconst(69632,64),bvconst(12288,64)))
+}
+
+example "hostile: late virtual return failure preserves both claims and all charges" {
+    assert(¬(let release = (a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)) ∧ a22_return_pair(
+        bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),
+        bvconst(4,64),bvconst(6,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),bvconst(16384,64),
+        bvconst(4096,64),bvconst(4,64),bvconst(6,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),
+        bvconst(65536,64),bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),
+        bvconst(65536,64),bvconst(12288,64))) in
+        (¬(release) ∧ (a22_refund(release,bvconst(12288,64),bvconst(4096,64))=bvconst(12288,64)) ∧ (a22_count_release(release,bvconst(2,64))=bvconst(2,64)) ∧ (a22_count_release(release,bvconst(1,64))=bvconst(1,64)) ∧ (a22_row(release,bvconst(1,64),bvconst(1,64),bvconst(4096,64),bvconst(0,64))=bvconst(4096,64)) ∧ (a22_row(release,bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(0,64))=bvconst(65536,64)))))
+}
+
+example "hostile: two clients reserve then A closes without disturbing B" {
+    assert(¬(let a = a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(7,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(65536,64),bvconst(16384,64),bvconst(65536,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(1,64),bvconst(1224,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),bvconst(5,64),
+        bvconst(1,8)) in
+        let b = a22_admit(
+        bvconst(8192,64),bvconst(8192,64),bvconst(8,64),bvconst(8,64),bvconst(8,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(8192,64),
+        bvconst(12288,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(0,64),
+        bvconst(1,64),bvconst(0,64),bvconst(131072,64),bvconst(16384,64),bvconst(131072,64),bvconst(16384,64),
+        bvconst(2,64),bvconst(4,64),bvconst(0,64),bvconst(0,8),bvconst(1,64),bvconst(4,64),
+        bvconst(0,8),bvconst(2,64),bvconst(1224,64),a22_charge_after(a,bvconst(0,64),bvconst(4096,64)),bvconst(65536,64),bvconst(0,64),
+        bvconst(32768,64),a22_count_after(a,bvconst(5,64)),bvconst(6,64),bvconst(6,64),bvconst(6,64),bvconst(6,64),
+        bvconst(1,8)) in
+        let release = (a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(3,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),a22_charge_after(b,bvconst(4096,64),bvconst(8192,64)),bvconst(4096,64),
+        bvconst(8,64),bvconst(8,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,64),
+        bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(7,64),bvconst(1,64),
+        bvconst(1,64),bvconst(1,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(7,64),
+        bvconst(1,64),bvconst(1,64),bvconst(1,64)) ∧ a22_return_pair(
+        bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),bvconst(4096,64),bvconst(65536,64),bvconst(4096,64),
+        bvconst(4,64),bvconst(6,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),bvconst(16384,64),
+        bvconst(4096,64),bvconst(4,64),bvconst(6,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),
+        bvconst(65536,64),bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),
+        bvconst(69632,64),bvconst(12288,64))) in
+        (a ∧ b ∧ release ∧ (a22_refund(release,bvconst(12288,64),bvconst(4096,64))=bvconst(8192,64)) ∧ (a22_row(release,bvconst(1,64),bvconst(2,64),bvconst(8192,64),bvconst(0,64))=bvconst(8192,64)) ∧ (a22_row(release,bvconst(7,64),bvconst(8,64),bvconst(8192,64),bvconst(0,64))=bvconst(8192,64)) ∧ ¬(a22_right_join(a22_true(),bvconst(16384,64),bvconst(4096,64),bvconst(4096,64))) ∧ (a22_coalesced_holes(bvconst(1,64),a22_false(),a22_false())=bvconst(2,64)) ∧ (a22_return_size(bvconst(4096,64),bvconst(0,64),bvconst(12288,64),a22_false(),a22_true())=bvconst(16384,64)) ∧ (a22_cleanup_revision(bvconst(8,64))=bvconst(9,64)))))
+}
+
+example "hostile: return B after A recovers full physical and B virtual arenas" {
+    assert(¬(let release = (a22_cancel(
+        bvconst(8,64),bvconst(2,64),bvconst(1,64),bvconst(2,64),bvconst(8,64),bvconst(2,64),
+        bvconst(1,64),bvconst(2,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(8192,64),bvconst(8192,64),bvconst(8192,64),bvconst(8192,64),
+        bvconst(9,64),bvconst(9,64),bvconst(1,8),bvconst(8,64),bvconst(2,64),bvconst(1,64),
+        bvconst(2,64),bvconst(8192,64),bvconst(8192,64),bvconst(8192,64),bvconst(8,64),bvconst(2,64),
+        bvconst(1,64),bvconst(2,64),bvconst(131072,64),bvconst(8192,64),bvconst(131072,64),bvconst(8,64),
+        bvconst(2,64),bvconst(1,64),bvconst(2,64)) ∧ a22_return_pair(
+        bvconst(8192,64),bvconst(131072,64),bvconst(8192,64),bvconst(8192,64),bvconst(131072,64),bvconst(8192,64),
+        bvconst(4,64),bvconst(6,64),bvconst(1,64),bvconst(2,64),bvconst(1,64),bvconst(4096,64),
+        bvconst(16384,64),a22_true(),bvconst(4096,64),bvconst(4096,64),a22_true(),bvconst(16384,64),
+        bvconst(4096,64),bvconst(4,64),bvconst(6,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),
+        bvconst(131072,64),bvconst(16384,64),a22_false(),bvconst(0,64),bvconst(0,64),a22_true(),
+        bvconst(139264,64),bvconst(8192,64))) in
+        (release ∧ (a22_refund(release,bvconst(8192,64),bvconst(8192,64))=bvconst(0,64)) ∧ (a22_count_release(release,bvconst(1,64))=bvconst(0,64)) ∧ (a22_return_base(bvconst(8192,64),bvconst(4096,64),a22_true())=bvconst(4096,64)) ∧ (a22_return_size(bvconst(8192,64),bvconst(4096,64),bvconst(4096,64),a22_true(),a22_true())=bvconst(16384,64)) ∧ (a22_coalesced_holes(bvconst(2,64),a22_true(),a22_true())=bvconst(1,64)) ∧ (a22_return_size(bvconst(8192,64),bvconst(0,64),bvconst(8192,64),a22_false(),a22_true())=bvconst(16384,64)) ∧ a22_counts(bvconst(4,64),bvconst(6,64),bvconst(0,64),bvconst(1,64)))))
+}
+
+example "hostile: reusing A physical hole consumes fresh identity and B virtual space" {
+    assert(¬(let commit = a22_admit(
+        bvconst(1,64),bvconst(4096,64),bvconst(8,64),bvconst(8,64),bvconst(8,64),bvconst(0,8),
+        bvconst(4,64),bvconst(6,64),bvconst(1,64),bvconst(2,64),bvconst(0,64),bvconst(4096,64),
+        bvconst(4096,64),bvconst(4096,64),bvconst(16384,64),bvconst(4,64),bvconst(6,64),bvconst(1,64),
+        bvconst(1,64),bvconst(0,64),bvconst(139264,64),bvconst(8192,64),bvconst(131072,64),bvconst(16384,64),
+        bvconst(1,64),bvconst(4,64),bvconst(1,64),bvconst(0,8),bvconst(0,64),bvconst(4,64),
+        bvconst(0,8),bvconst(3,64),bvconst(1224,64),bvconst(8192,64),bvconst(65536,64),bvconst(8192,64),
+        bvconst(32768,64),bvconst(9,64),bvconst(9,64),bvconst(9,64),bvconst(9,64),bvconst(9,64),
+        bvconst(1,8)) in
+        (commit ∧ (a22_count_after(commit,bvconst(1,64))=bvconst(2,64)) ∧ (a22_count_after(commit,bvconst(3,64))=bvconst(4,64)) ∧ (a22_holes_after(commit,bvconst(2,64),bvconst(4096,64),bvconst(4096,64))=bvconst(1,64)) ∧ (a22_charge_after(commit,bvconst(8192,64),bvconst(4096,64))=bvconst(12288,64)) ∧ (a22_authority_after_reservation()=bvconst(0,8)))))
+}
+
+example "hostile: new private reservation does not authorize an old owner token" {
+    assert(a22_cancel(
+        bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(8,64),bvconst(1,64),
+        bvconst(2,64),bvconst(3,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(1,8),
+        bvconst(1,8),bvconst(1,8),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),bvconst(4096,64),
+        bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(8,64),bvconst(1,64),bvconst(2,64),
+        bvconst(3,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(8,64),bvconst(1,64),
+        bvconst(2,64),bvconst(3,64),bvconst(65536,64),bvconst(4096,64),bvconst(65536,64),bvconst(8,64),
+        bvconst(1,64),bvconst(2,64),bvconst(3,64)))
+}

@@ -1,0 +1,609 @@
+// Phase 10.8 A1 refinement: residual-data isolation before new authority.
+// SPECIFICATION ONLY. No new axioms, automatic wipe implementation, whole-
+// machine noninterference proof, cache/timing claim, or physical erasure claim.
+// Applies to fresh PRIVATE heap, frame, process-stack/trap and other storage.
+// Intentional sharing/ownership transfer is a different operation and contract.
+//
+// Old lifetime: available=0, live=1, closing=2, retired=3.
+// Initialization: private-dirty=0, scrubbing=1, published=2.
+// A private reservation covers a 16-byte-aligned storage extent; the logical
+// requested size may be smaller. Heap backing is still page-rounded by PM.
+// done is a TRUSTED completed-prefix cursor, advanced only by chunk commit.
+// Every committed chunk zeros bytes AND removes all overlapping pointer kinds.
+// The inductive prefix laws below establish zero content independently of the
+// previous occupant. Caller-supplied 'zeroed' flags cannot establish the cursor.
+// External writers must be excluded from begin through publication; any trusted
+// intervening mutation invalidates the completion cursor and receipt version.
+// Concrete exclusion, terminal-work accounting, coherent stores and visibility
+// remain implementation obligations. A timer is never terminal-work evidence.
+import "anka108_allocation.kleis"
+import "anka107_pointer_kind_abi.kleis"
+
+define init108_aligned(x : BitVec64) = bvand(x,bvconst(15,64))=bvconst(0,64)
+define init108_range(base : BitVec64, storage : BitVec64) =
+    init108_aligned(base) ∧ init108_aligned(storage) ∧
+    bvugt(storage,bvconst(0,64)) ∧ bvule(storage,bvsub(ptr107_max(),base))
+// Class changes no confidentiality rule: heap=1, frame=2, stack/trap=3, other=4.
+define init108_class(class : BitVec8) =
+    bvuge(class,bvconst(1,8)) ∧ bvule(class,bvconst(4,8))
+define init108_begin(class : BitVec8, old_phase : BitVec8,
+    cpu : BitVec64, dma : BitVec64, old_epoch : BitVec64, new_epoch : BitVec64,
+    base : BitVec64, storage : BitVec64, reserved_private : BitVec8,
+    old_paths_closed : BitVec8, terminal_visibility : BitVec8, serialized : BitVec8) =
+    init108_class(class) ∧
+    (((old_phase=bvconst(0,8)) ∧ (old_epoch=bvconst(0,64))) ∨
+     (old_phase=bvconst(3,8))) ∧
+    (cpu=bvconst(0,64)) ∧ (dma=bvconst(0,64)) ∧
+    bvult(old_epoch,ptr107_max()) ∧ (new_epoch=bvadd(old_epoch,bvconst(1,64))) ∧
+    init108_range(base,storage) ∧ heap108_yes(reserved_private) ∧
+    heap108_yes(old_paths_closed) ∧ heap108_yes(terminal_visibility) ∧ heap108_yes(serialized)
+
+// Partial or failed work never advances done. A completed prefix cannot be
+// assembled out of gaps, skipped padding, stale reservations or guessed counts.
+define init108_chunk(phase : BitVec8, done : BitVec64, amount : BitVec64,
+    storage : BitVec64, version : BitVec64, expected_version : BitVec64,
+    reservation_held : BitVec8, serialized : BitVec8) =
+    (phase=bvconst(1,8)) ∧ init108_aligned(done) ∧ init108_aligned(amount) ∧
+    init108_aligned(storage) ∧ bvugt(amount,bvconst(0,64)) ∧
+    bvule(done,storage) ∧ bvule(amount,bvsub(storage,done)) ∧
+    (version=expected_version) ∧ bvult(version,ptr107_max()) ∧
+    heap108_yes(reservation_held) ∧ heap108_yes(serialized)
+define init108_byte(commit : Bool, done : BitVec64, amount : BitVec64,
+    query : BitVec64, old : BitVec8) =
+    if commit ∧ bvule(done,query) ∧ bvult(bvsub(query,done),amount)
+    then bvconst(0,8) else old
+// cell is a physical aligned 16-byte cell. Chunk bounds are relative to base.
+define init108_tag(commit : Bool, base : BitVec64, done : BitVec64,
+    amount : BitVec64, cell : BitVec64, old : BitVec8) =
+    if commit ∧ kind107_overlap(bvadd(base,done),amount,cell)
+    then bvconst(0,8) else old
+define init108_done(commit : Bool, old : BitVec64, amount : BitVec64) =
+    if commit then bvadd(old,amount) else old
+define init108_version(commit : Bool, old : BitVec64) =
+    if commit then bvadd(old,bvconst(1,64)) else old
+
+// The trusted completion receipt binds the exact reservation, object identity,
+// new lifetime, owner incarnation identity, physical base and storage length.
+// Owner is a nonreused internal identity, NOT an unqualified reusable PID.
+define init108_binding(reservation : BitVec64, receipt_reservation : BitVec64,
+    object : BitVec64, receipt_object : BitVec64,
+    epoch : BitVec64, receipt_epoch : BitVec64,
+    owner : BitVec64, receipt_owner : BitVec64,
+    base : BitVec64, receipt_base : BitVec64,
+    storage : BitVec64, receipt_storage : BitVec64) =
+    bvugt(reservation,bvconst(0,64)) ∧ bvugt(epoch,bvconst(0,64)) ∧
+    bvugt(owner,bvconst(0,64)) ∧
+    (reservation=receipt_reservation) ∧ (object=receipt_object) ∧
+    (epoch=receipt_epoch) ∧ (owner=receipt_owner) ∧
+    (base=receipt_base) ∧ (storage=receipt_storage) ∧ init108_range(base,storage)
+
+// Only the complete initialized prefix can become observable. Binding and
+// current version refer to this exact storage instance, not another clean page.
+// data_tags_visible is an implementation obligation for actual ordered memory.
+define init108_publish(binding : Bool, phase : BitVec8, done : BitVec64,
+    storage : BitVec64, version : BitVec64, receipt_version : BitVec64,
+    reservation_held : BitVec8, external_readers : BitVec64,
+    external_writers : BitVec64, data_tags_visible : BitVec8, serialized : BitVec8) =
+    binding ∧ (phase=bvconst(1,8)) ∧ bvugt(storage,bvconst(0,64)) ∧
+    init108_aligned(storage) ∧ (done=storage) ∧
+    (version=receipt_version) ∧ heap108_yes(reservation_held) ∧
+    (external_readers=bvconst(0,64)) ∧ (external_writers=bvconst(0,64)) ∧
+    heap108_yes(data_tags_visible) ∧ heap108_yes(serialized)
+
+// Apply to ANY intervening trusted write that is not part of the scrub-prefix
+// transition. An implementation must serialize invalidation with that write.
+// At version exhaustion the write is rejected or reservation abandoned; no wrap.
+define init108_mutation(phase : BitVec8, version : BitVec64,
+    trusted_writer : BitVec8, serialized : BitVec8) =
+    (phase=bvconst(1,8)) ∧ bvult(version,ptr107_max()) ∧
+    heap108_yes(trusted_writer) ∧ heap108_yes(serialized)
+define init108_dirty_done(mutation : Bool, done : BitVec64) =
+    if mutation then bvconst(0,64) else done
+
+// After publication a NEW valid pointer may read only its logical span. The
+// security witness uses this positive access path, never a stale-pointer fault
+// or a fabricated zero value standing for a rejected read.
+define init108_new_read(phase : BitVec8, logical : BitVec64, storage : BitVec64,
+    pos : BitVec64, width : BitVec64, current_authority : BitVec8) =
+    (phase=bvconst(2,8)) ∧ bvugt(logical,bvconst(0,64)) ∧
+    bvule(logical,storage) ∧ bvugt(width,bvconst(0,64)) ∧
+    bvule(pos,logical) ∧ bvule(width,bvsub(logical,pos)) ∧ heap108_yes(current_authority)
+
+// Untrusted old writes are never admitted during initialization. Even after
+// publication, a delayed former-lifetime operation cannot mutate the new bytes.
+// A real controller must ALSO establish terminal drainage before begin.
+define init108_write(phase : BitVec8, request_epoch : BitVec64,
+    current_epoch : BitVec64, active_ticket : BitVec8, fabric_current : BitVec8) =
+    (phase=bvconst(2,8)) ∧ bvugt(current_epoch,bvconst(0,64)) ∧
+    (request_epoch=current_epoch) ∧ heap108_yes(active_ticket) ∧ heap108_yes(fabric_current)
+define init108_write_byte(accepted : Bool, value : BitVec8, old : BitVec8) =
+    if accepted then value else old
+
+// Heap A1 integration: initialize the exact rounded backing, then use the same
+// decision to discharge BOTH zero-byte and empty-tag publication obligations.
+// prepared is the rest of heap108_publish, including actual placement/grants,
+// resource accounting, fresh descriptor generation and protected result space.
+define init108_heap_gate(clean : Bool, prepared : Bool, logical : BitVec64,
+    rounded : BitVec64, initialized_storage : BitVec64) =
+    clean ∧ prepared ∧ pm93g_rounding_valid(logical,rounded) ∧
+    (initialized_storage=rounded)
+
+// For an image/local with an explicit initializer, compose zeroing with an
+// approved NEW input, never with previous contents. This pointwise refinement
+// expresses payload independence when the two executions use the same source.
+// It is not an implementation of initializer provenance or a new tag issuer.
+define init108_overlay(approved_new_input : Bool, source_length : BitVec64,
+    query : BitVec64, supplied : BitVec8, clean : BitVec8) =
+    if approved_new_input ∧ bvult(query,source_length) then supplied else clean
+
+// Initialization witnesses and explicit two-chunk execution.
+
+define init108_trace_begin() = init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))
+define init108_trace_phase() = heap108_phase_after(init108_trace_begin(),bvconst(0,8),bvconst(1,8))
+define init108_trace_first() = init108_chunk(init108_trace_phase(),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8))
+define init108_trace_done1() = init108_done(init108_trace_first(),bvconst(0,64),bvconst(16,64))
+define init108_trace_version1() = init108_version(init108_trace_first(),bvconst(5,64))
+define init108_trace_second() = init108_chunk(init108_trace_phase(),init108_trace_done1(),bvconst(16,64),bvconst(32,64),init108_trace_version1(),bvconst(6,64),bvconst(1,8),bvconst(1,8))
+define init108_trace_done2() = init108_done(init108_trace_second(),init108_trace_done1(),bvconst(16,64))
+define init108_trace_version2() = init108_version(init108_trace_second(),init108_trace_version1())
+define init108_trace_binding() = init108_binding(bvconst(50,64),bvconst(50,64),bvconst(12,64),bvconst(12,64),bvconst(9,64),bvconst(9,64),bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(32,64),bvconst(32,64))
+define init108_trace_publish() = init108_publish(init108_trace_binding(),init108_trace_phase(),init108_trace_done2(),bvconst(32,64),init108_trace_version2(),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))
+define init108_trace_live() = heap108_phase_after(init108_trace_publish(),init108_trace_phase(),bvconst(2,8))
+define init108_trace_byte(secret : BitVec8, query : BitVec64) =
+    init108_byte(init108_trace_second(),init108_trace_done1(),bvconst(16,64),query,
+        init108_byte(init108_trace_first(),bvconst(0,64),bvconst(16,64),query,secret))
+define init108_trace_tag(old : BitVec8, cell : BitVec64) =
+    init108_tag(init108_trace_second(),bvconst(8192,64),init108_trace_done1(),bvconst(16,64),cell,
+        init108_tag(init108_trace_first(),bvconst(8192,64),bvconst(0,64),bvconst(16,64),cell,old))
+
+example "init108_begin accepts" {
+    assert(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "init108_begin rejects live old lifetime" {
+    assert(¬(init108_begin(bvconst(2,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_begin rejects closing before retirement" {
+    assert(¬(init108_begin(bvconst(2,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_begin rejects pending CPU write" {
+    assert(¬(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(1,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_begin rejects pending DMA write" {
+    assert(¬(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(1,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_begin rejects same lifetime generation" {
+    assert(¬(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(8,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_begin rejects wrapped generation" {
+    assert(¬(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvsub(ptr107_max(),bvconst(0,64)),bvconst(0,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_begin rejects published reservation" {
+    assert(¬(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_begin rejects old alternate authority" {
+    assert(¬(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_begin rejects timer instead of terminal visibility" {
+    assert(¬(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "init108_begin rejects unserialized scrub admission" {
+    assert(¬(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "init108_begin rejects unknown memory class" {
+    assert(¬(init108_begin(bvconst(0,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_begin rejects unaligned physical span" {
+    assert(¬(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8193,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_begin rejects partial storage granule" {
+    assert(¬(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(17,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_begin rejects wrapped storage end" {
+    assert(¬(init108_begin(bvconst(2,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvsub(ptr107_max(),bvconst(15,64)),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_begin heap follows same initialization rule" {
+    assert(init108_begin(bvconst(1,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "init108_begin process stack follows same rule" {
+    assert(init108_begin(bvconst(3,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "init108_begin other private object follows same rule" {
+    assert(init108_begin(bvconst(4,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(9,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "init108_begin fresh unused backing" {
+    assert(init108_begin(bvconst(2,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(8192,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "init108_chunk accepts" {
+    assert(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "init108_chunk rejects before initialization begins" {
+    assert(¬(init108_chunk(bvconst(0,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_chunk rejects after publication" {
+    assert(¬(init108_chunk(bvconst(2,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_chunk rejects empty pretend progress" {
+    assert(¬(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_chunk rejects skip to interior byte" {
+    assert(¬(init108_chunk(bvconst(1,8),bvconst(1,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_chunk rejects partial storage granule" {
+    assert(¬(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(15,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_chunk rejects overrun rounded backing" {
+    assert(¬(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(48,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_chunk rejects cursor past end" {
+    assert(¬(init108_chunk(bvconst(1,8),bvconst(48,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_chunk rejects counter wrap" {
+    assert(¬(init108_chunk(bvconst(1,8),bvconst(0,64),bvsub(ptr107_max(),bvconst(15,64)),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_chunk rejects stale version" {
+    assert(¬(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(4,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_chunk rejects exhausted version" {
+    assert(¬(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvsub(ptr107_max(),bvconst(0,64)),bvsub(ptr107_max(),bvconst(0,64)),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_chunk rejects lost reservation" {
+    assert(¬(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "init108_chunk rejects unserialized progress" {
+    assert(¬(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "init108_chunk last chunk" {
+    assert(init108_chunk(bvconst(1,8),bvconst(16,64),bvconst(16,64),bvconst(32,64),bvconst(6,64),bvconst(6,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "init108_chunk whole page in one chunk" {
+    assert(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(4096,64),bvconst(4096,64),bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "init108_binding accepts" {
+    assert(init108_binding(bvconst(50,64),bvconst(50,64),bvconst(12,64),bvconst(12,64),bvconst(9,64),bvconst(9,64),bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(32,64),bvconst(32,64)))
+}
+
+example "init108_binding rejects different clean reservation" {
+    assert(¬(init108_binding(bvconst(50,64),bvconst(51,64),bvconst(12,64),bvconst(12,64),bvconst(9,64),bvconst(9,64),bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(32,64),bvconst(32,64))))
+}
+
+example "init108_binding rejects different object at same address" {
+    assert(¬(init108_binding(bvconst(50,64),bvconst(50,64),bvconst(12,64),bvconst(13,64),bvconst(9,64),bvconst(9,64),bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(32,64),bvconst(32,64))))
+}
+
+example "init108_binding rejects previous allocation receipt" {
+    assert(¬(init108_binding(bvconst(50,64),bvconst(50,64),bvconst(12,64),bvconst(12,64),bvconst(9,64),bvconst(8,64),bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(32,64),bvconst(32,64))))
+}
+
+example "init108_binding rejects wrong client incarnation" {
+    assert(¬(init108_binding(bvconst(50,64),bvconst(50,64),bvconst(12,64),bvconst(12,64),bvconst(9,64),bvconst(9,64),bvconst(101,64),bvconst(102,64),bvconst(8192,64),bvconst(8192,64),bvconst(32,64),bvconst(32,64))))
+}
+
+example "init108_binding rejects different physical backing" {
+    assert(¬(init108_binding(bvconst(50,64),bvconst(50,64),bvconst(12,64),bvconst(12,64),bvconst(9,64),bvconst(9,64),bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(12288,64),bvconst(32,64),bvconst(32,64))))
+}
+
+example "init108_binding rejects short scrub receipt" {
+    assert(¬(init108_binding(bvconst(50,64),bvconst(50,64),bvconst(12,64),bvconst(12,64),bvconst(9,64),bvconst(9,64),bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(32,64),bvconst(16,64))))
+}
+
+example "init108_binding rejects reserved identity" {
+    assert(¬(init108_binding(bvconst(0,64),bvconst(0,64),bvconst(12,64),bvconst(12,64),bvconst(9,64),bvconst(9,64),bvconst(101,64),bvconst(101,64),bvconst(8192,64),bvconst(8192,64),bvconst(32,64),bvconst(32,64))))
+}
+
+example "init108_binding another owner requires its own receipt" {
+    assert(init108_binding(bvconst(50,64),bvconst(50,64),bvconst(12,64),bvconst(12,64),bvconst(9,64),bvconst(9,64),bvconst(102,64),bvconst(102,64),bvconst(8192,64),bvconst(8192,64),bvconst(32,64),bvconst(32,64)))
+}
+
+example "init108_publish accepts" {
+    assert(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "init108_publish rejects different receipt binding" {
+    assert(¬(init108_publish((bvconst(0,8)=bvconst(1,8)),bvconst(1,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_publish rejects dirty phase" {
+    assert(¬(init108_publish(init108_trace_binding(),bvconst(0,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_publish rejects already published allocation" {
+    assert(¬(init108_publish(init108_trace_binding(),bvconst(2,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_publish rejects partial prefix" {
+    assert(¬(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(16,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_publish rejects only logical bytes scrubbed" {
+    assert(¬(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(17,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_publish rejects oversized cursor" {
+    assert(¬(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(48,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_publish rejects stale completion stamp" {
+    assert(¬(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(6,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_publish rejects lost reservation" {
+    assert(¬(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_publish rejects early reader already admitted" {
+    assert(¬(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_publish rejects late writer still admitted" {
+    assert(¬(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_publish rejects bytes or pointer tags not visible" {
+    assert(¬(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "init108_publish rejects unserialized grant publication" {
+    assert(¬(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(32,64),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "init108_mutation accepts" {
+    assert(init108_mutation(bvconst(1,8),bvconst(7,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "init108_mutation rejects untrusted writer" {
+    assert(¬(init108_mutation(bvconst(1,8),bvconst(7,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "init108_mutation rejects counter wrap" {
+    assert(¬(init108_mutation(bvconst(1,8),bvsub(ptr107_max(),bvconst(0,64)),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_mutation rejects unserialized invalidation" {
+    assert(¬(init108_mutation(bvconst(1,8),bvconst(7,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "init108_new_read accepts" {
+    assert(init108_new_read(bvconst(2,8),bvconst(17,64),bvconst(32,64),bvconst(0,64),bvconst(1,64),bvconst(1,8)))
+}
+
+example "init108_new_read rejects read during scrub" {
+    assert(¬(init108_new_read(bvconst(1,8),bvconst(17,64),bvconst(32,64),bvconst(0,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "init108_new_read rejects read before scrub" {
+    assert(¬(init108_new_read(bvconst(0,8),bvconst(17,64),bvconst(32,64),bvconst(0,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "init108_new_read rejects read rounded padding" {
+    assert(¬(init108_new_read(bvconst(2,8),bvconst(17,64),bvconst(32,64),bvconst(17,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "init108_new_read rejects straddling logical end" {
+    assert(¬(init108_new_read(bvconst(2,8),bvconst(17,64),bvconst(32,64),bvconst(16,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "init108_new_read rejects invalid authority" {
+    assert(¬(init108_new_read(bvconst(2,8),bvconst(17,64),bvconst(32,64),bvconst(0,64),bvconst(1,64),bvconst(0,8))))
+}
+
+example "init108_new_read rejects oversized logical allocation" {
+    assert(¬(init108_new_read(bvconst(2,8),bvconst(33,64),bvconst(32,64),bvconst(0,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "init108_new_read rejects overflowing width" {
+    assert(¬(init108_new_read(bvconst(2,8),bvconst(17,64),bvconst(32,64),bvconst(0,64),bvsub(ptr107_max(),bvconst(0,64)),bvconst(1,8))))
+}
+
+example "init108_new_read last logical byte" {
+    assert(init108_new_read(bvconst(2,8),bvconst(17,64),bvconst(32,64),bvconst(16,64),bvconst(1,64),bvconst(1,8)))
+}
+
+example "init108_write accepts" {
+    assert(init108_write(bvconst(2,8),bvconst(9,64),bvconst(9,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "init108_write rejects old DMA or CPU epoch" {
+    assert(¬(init108_write(bvconst(2,8),bvconst(8,64),bvconst(9,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_write rejects writer during scrub" {
+    assert(¬(init108_write(bvconst(1,8),bvconst(9,64),bvconst(9,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_write rejects writer before scrub" {
+    assert(¬(init108_write(bvconst(0,8),bvconst(9,64),bvconst(9,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "init108_write rejects duplicate completion" {
+    assert(¬(init108_write(bvconst(2,8),bvconst(9,64),bvconst(9,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "init108_write rejects revoked grant" {
+    assert(¬(init108_write(bvconst(2,8),bvconst(9,64),bvconst(9,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "init108_heap_gate accepts" {
+    assert(init108_heap_gate((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(17,64),bvconst(4096,64),bvconst(4096,64)))
+}
+
+example "init108_heap_gate rejects uninitialized memory" {
+    assert(¬(init108_heap_gate((bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(17,64),bvconst(4096,64),bvconst(4096,64))))
+}
+
+example "init108_heap_gate rejects unprepared allocation" {
+    assert(¬(init108_heap_gate((bvconst(1,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),bvconst(17,64),bvconst(4096,64),bvconst(4096,64))))
+}
+
+example "init108_heap_gate rejects scrub only logical bytes" {
+    assert(¬(init108_heap_gate((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(17,64),bvconst(4096,64),bvconst(17,64))))
+}
+
+example "init108_heap_gate rejects different rounded backing" {
+    assert(¬(init108_heap_gate((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(17,64),bvconst(4096,64),bvconst(8192,64))))
+}
+
+example "two completed chunks permit publication" {
+    assert(init108_trace_publish())
+}
+
+example "new valid allocation can actually read" {
+    assert(init108_new_read(init108_trace_live(),bvconst(17,64),bvconst(32,64),bvconst(16,64),bvconst(1,64),bvconst(1,8)))
+}
+
+example "old payload byte 0 is erased" {
+    assert(init108_trace_byte(bvconst(165,8),bvconst(0,64))=bvconst(0,8))
+}
+
+example "old payload byte 15 is erased" {
+    assert(init108_trace_byte(bvconst(165,8),bvconst(15,64))=bvconst(0,8))
+}
+
+example "old payload byte 16 is erased" {
+    assert(init108_trace_byte(bvconst(165,8),bvconst(16,64))=bvconst(0,8))
+}
+
+example "old payload byte 31 is erased" {
+    assert(init108_trace_byte(bvconst(165,8),bvconst(31,64))=bvconst(0,8))
+}
+
+example "adjacent live storage is unchanged" {
+    assert(init108_trace_byte(bvconst(165,8),bvconst(32,64))=bvconst(165,8))
+}
+
+example "new valid pointer cannot recover old secret" {
+    assert(¬(init108_trace_byte(bvconst(165,8),bvconst(0,64))=bvconst(165,8)))
+}
+
+example "same-owner reuse receives zero rather than prior payload" {
+    assert(init108_trace_byte(bvconst(23,8),bvconst(16,64))=bvconst(0,8))
+}
+
+example "old physical pointer kind at 8192 is cleared" {
+    assert(init108_trace_tag(bvconst(1,8),bvconst(8192,64))=bvconst(0,8))
+}
+
+example "old physical pointer kind at 8208 is cleared" {
+    assert(init108_trace_tag(bvconst(1,8),bvconst(8208,64))=bvconst(0,8))
+}
+
+example "neighbor pointer-cell kind is preserved" {
+    assert(init108_trace_tag(bvconst(1,8),bvconst(8224,64))=bvconst(1,8))
+}
+
+example "new storage cannot inherit old pointer kind" {
+    assert(¬(init108_trace_tag(bvconst(1,8),bvconst(8192,64))=bvconst(1,8)))
+}
+
+example "partial scrub cannot become observable" {
+    assert(¬(init108_publish(init108_trace_binding(),bvconst(1,8),init108_trace_done1(),bvconst(32,64),init108_trace_version1(),bvconst(6,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "failed scrub does not advance progress" {
+    assert(init108_done(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(4,64),bvconst(1,8),bvconst(1,8)),bvconst(0,64),bvconst(16,64))=bvconst(0,64))
+}
+
+example "failed scrub preserves private bytes" {
+    assert(init108_byte(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(4,64),bvconst(1,8),bvconst(1,8)),bvconst(0,64),bvconst(16,64),bvconst(0,64),bvconst(165,8))=bvconst(165,8))
+}
+
+example "failed scrub cannot forge completion" {
+    assert(¬(init108_publish(init108_trace_binding(),bvconst(1,8),init108_done(init108_chunk(bvconst(1,8),bvconst(0,64),bvconst(16,64),bvconst(32,64),bvconst(5,64),bvconst(4,64),bvconst(1,8),bvconst(1,8)),bvconst(0,64),bvconst(32,64)),bvconst(32,64),bvconst(7,64),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "intervening trusted write invalidates completed prefix" {
+    assert(init108_dirty_done(init108_mutation(bvconst(1,8),bvconst(7,64),bvconst(1,8),bvconst(1,8)),bvconst(32,64))=bvconst(0,64))
+}
+
+example "intervening write rejects old receipt" {
+    assert(¬(init108_publish(init108_trace_binding(),bvconst(1,8),init108_dirty_done(init108_mutation(bvconst(1,8),bvconst(7,64),bvconst(1,8),bvconst(1,8)),bvconst(32,64)),bvconst(32,64),init108_version(init108_mutation(bvconst(1,8),bvconst(7,64),bvconst(1,8),bvconst(1,8)),bvconst(7,64)),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "restoring cursor alone cannot restore stale receipt" {
+    assert(¬(init108_publish(init108_trace_binding(),bvconst(1,8),bvconst(32,64),bvconst(32,64),init108_version(init108_mutation(bvconst(1,8),bvconst(7,64),bvconst(1,8),bvconst(1,8)),bvconst(7,64)),bvconst(7,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "delayed old write cannot restore secret after scrub" {
+    assert(init108_write_byte(init108_write(init108_trace_live(),bvconst(8,64),bvconst(9,64),bvconst(1,8),bvconst(1,8)),bvconst(165,8),init108_trace_byte(bvconst(165,8),bvconst(0,64)))=bvconst(0,8))
+}
+
+example "late completion cannot contaminate new allocation" {
+    assert(¬(init108_write_byte(init108_write(init108_trace_live(),bvconst(8,64),bvconst(9,64),bvconst(1,8),bvconst(1,8)),bvconst(165,8),init108_trace_byte(bvconst(165,8),bvconst(0,64)))=bvconst(165,8)))
+}
+
+example "explicit new initializer determines final contents" {
+    assert(init108_overlay((bvconst(1,8)=bvconst(1,8)),bvconst(4,64),bvconst(0,64),bvconst(66,8),init108_trace_byte(bvconst(165,8),bvconst(0,64)))=bvconst(66,8))
+}
+
+example "initializer remainder stays zero" {
+    assert(init108_overlay((bvconst(1,8)=bvconst(1,8)),bvconst(4,64),bvconst(16,64),bvconst(66,8),init108_trace_byte(bvconst(165,8),bvconst(16,64)))=bvconst(0,8))
+}
+
+example "unapproved initializer does not restore old payload" {
+    assert(¬(init108_overlay((bvconst(0,8)=bvconst(1,8)),bvconst(4,64),bvconst(0,64),bvconst(165,8),init108_trace_byte(bvconst(165,8),bvconst(0,64)))=bvconst(165,8)))
+}
+
+example "different prior secrets yield identical new-allocation bytes" {
+    assert(∀(a : BitVec8). ∀(b : BitVec8). ∀(q : BitVec64). bvult(q,bvconst(32,64)) → (init108_trace_byte(a,q)=init108_trace_byte(b,q)))
+}
+
+example "every logical byte of the fresh readable allocation is zero" {
+    assert(∀(s : BitVec8). ∀(q : BitVec64). init108_new_read(init108_trace_live(),bvconst(17,64),bvconst(32,64),q,bvconst(1,64),bvconst(1,8)) → (init108_trace_byte(s,q)=bvconst(0,8)))
+}
+
+example "scrub prefix invariant is inductive for every admitted chunk" {
+    assert(∀(d : BitVec64). ∀(c : BitVec64). ∀(n : BitVec64). ∀(q : BitVec64). ∀(old : BitVec8). (init108_chunk(bvconst(1,8),d,c,n,bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8)) ∧ bvult(q,bvadd(d,c)) ∧ (¬(bvult(q,d)) ∨ (old=bvconst(0,8)))) → (init108_byte((bvconst(1,8)=bvconst(1,8)),d,c,q,old)=bvconst(0,8)))
+}
+
+example "chunk cannot alter any byte outside its exact interval" {
+    assert(∀(d : BitVec64). ∀(c : BitVec64). ∀(q : BitVec64). ∀(old : BitVec8). ¬(bvule(d,q) ∧ bvult(bvsub(q,d),c)) → (init108_byte((bvconst(1,8)=bvconst(1,8)),d,c,q,old)=old))
+}
+
+example "failed chunk preserves all pointer kinds" {
+    assert(∀(b : BitVec64). ∀(d : BitVec64). ∀(c : BitVec64). ∀(cell : BitVec64). ∀(old : BitVec8). init108_tag((bvconst(0,8)=bvconst(1,8)),b,d,c,cell,old)=old)
+}
+
+example "completed storage contains no inherited pointer kind" {
+    assert(∀(old : BitVec8). ∀(cell : BitVec64). (init108_aligned(cell) ∧ bvuge(cell,bvconst(8192,64)) ∧ bvult(cell,bvconst(8224,64))) → (init108_trace_tag(old,cell)=bvconst(0,8)))
+}
+
+example "tag clearing composes with the initialized-prefix invariant" {
+    assert(∀(b : BitVec64). ∀(d : BitVec64). ∀(c : BitVec64). ∀(n : BitVec64). ∀(cell : BitVec64). ∀(old : BitVec8). (init108_range(b,n) ∧ init108_chunk(bvconst(1,8),d,c,n,bvconst(5,64),bvconst(5,64),bvconst(1,8),bvconst(1,8)) ∧ kind107_overlap(b,bvadd(d,c),cell) ∧ (¬(kind107_overlap(b,d,cell)) ∨ (old=bvconst(0,8)))) → (init108_tag((bvconst(1,8)=bvconst(1,8)),b,d,c,cell,old)=bvconst(0,8)))
+}
+
+example "same approved initializer preserves prior-secret independence" {
+    assert(∀(a : BitVec8). ∀(b : BitVec8). ∀(input : BitVec8). ∀(q : BitVec64). bvult(q,bvconst(32,64)) → (init108_overlay((bvconst(1,8)=bvconst(1,8)),bvconst(4,64),q,input,init108_trace_byte(a,q))=init108_overlay((bvconst(1,8)=bvconst(1,8)),bvconst(4,64),q,input,init108_trace_byte(b,q))))
+}

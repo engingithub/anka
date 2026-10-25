@@ -1,0 +1,503 @@
+// Intentionally false assertions. Every example must be explicitly
+// disproved by Z3; unknown, evaluation failure and timeout do not pass.
+import "anka108_allocation.kleis"
+
+example "HOSTILE heap108_charge rejects zero request" {
+    assert(heap108_charge(bvconst(0,64),bvconst(4096,64),bvconst(256,64),bvconst(4352,64)))
+}
+
+example "HOSTILE heap108_charge rejects negative signed request" {
+    assert(heap108_charge(bvsub(ptr107_max(),bvconst(0,64)),bvconst(4096,64),bvconst(256,64),bvconst(4352,64)))
+}
+
+example "HOSTILE heap108_charge rejects under-rounding" {
+    assert(heap108_charge(bvconst(17,64),bvconst(0,64),bvconst(256,64),bvconst(256,64)))
+}
+
+example "HOSTILE heap108_charge rejects nonminimal rounding" {
+    assert(heap108_charge(bvconst(17,64),bvconst(8192,64),bvconst(256,64),bvconst(8448,64)))
+}
+
+example "HOSTILE heap108_charge rejects unaligned backing" {
+    assert(heap108_charge(bvconst(17,64),bvconst(4097,64),bvconst(256,64),bvconst(4353,64)))
+}
+
+example "HOSTILE heap108_charge rejects omitted metadata" {
+    assert(heap108_charge(bvconst(17,64),bvconst(4096,64),bvconst(0,64),bvconst(4096,64)))
+}
+
+example "HOSTILE heap108_charge rejects wrong total charge" {
+    assert(heap108_charge(bvconst(17,64),bvconst(4096,64),bvconst(256,64),bvconst(17,64)))
+}
+
+example "HOSTILE heap108_charge rejects metadata overflow" {
+    assert(heap108_charge(bvconst(17,64),bvconst(4096,64),bvsub(ptr107_max(),bvconst(0,64)),bvconst(4095,64)))
+}
+
+example "HOSTILE heap108_budget rejects local exhaustion" {
+    assert(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(8703,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_budget rejects global exhaustion" {
+    assert(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(13055,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_budget rejects corrupt local ledger" {
+    assert(heap108_budget(bvconst(4352,64),bvconst(14000,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_budget rejects corrupt global ledger" {
+    assert(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(18000,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_budget rejects stale concurrent snapshot" {
+    assert(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(4,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_budget rejects serial revision exhaustion" {
+    assert(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvsub(ptr107_max(),bvconst(0,64)),bvsub(ptr107_max(),bvconst(0,64)),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_budget rejects unaccounted metadata or reservations" {
+    assert(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(0,8)))
+}
+
+example "HOSTILE heap108_budget rejects zero charge" {
+    assert(heap108_budget(bvconst(0,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_budget rejects wrapped charge" {
+    assert(heap108_budget(bvsub(ptr107_max(),bvconst(0,64)),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_budget rejects client charge absent globally" {
+    assert(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(4351,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_layout rejects outside physical pool" {
+    assert(heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(0,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_layout rejects unaligned physical address" {
+    assert(heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8193,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_layout rejects outside virtual pool" {
+    assert(heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(131072,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_layout rejects overlapping physical extent" {
+    assert(heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_layout rejects overlapping virtual extent" {
+    assert(heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(0,8)))
+}
+
+example "HOSTILE heap108_layout rejects wrapped pool end" {
+    assert(heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvsub(ptr107_max(),bvconst(4095,64)),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_layout rejects rounded logical bound substituted" {
+    assert(heap108_layout(bvconst(4097,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_owner rejects foreign process" {
+    assert(heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(2,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_owner rejects reused process slot" {
+    assert(heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(5,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_owner rejects wrong execution context" {
+    assert(heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(102,64),bvconst(7,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_owner rejects foreign domain" {
+    assert(heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(8,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_owner rejects dead client" {
+    assert(heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(0,8)))
+}
+
+example "HOSTILE heap108_owner rejects reserved incarnation" {
+    assert(heap108_owner(bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_owner rejects reserved context" {
+    assert(heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(0,64),bvconst(7,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_publish rejects unadmitted budget" {
+    assert(heap108_publish((bvconst(0,8)=bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_publish rejects unplaced backing" {
+    assert(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_publish rejects wrong owner" {
+    assert(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_publish rejects already live slot" {
+    assert(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_publish rejects closing slot" {
+    assert(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_publish rejects generation unchanged" {
+    assert(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_publish rejects generation wrap" {
+    assert(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(4294967295,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_publish rejects reserved slot" {
+    assert(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_publish rejects object identity collision" {
+    assert(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_publish rejects metadata allocation failure" {
+    assert(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_publish rejects old bytes" {
+    assert(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_publish rejects old pointer tags" {
+    assert(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_publish rejects broader alternate grant" {
+    assert(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_publish rejects raw-address bypass" {
+    assert(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_publish rejects no protected result slot" {
+    assert(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_publish rejects only per-client serialization" {
+    assert(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "HOSTILE heap108_current rejects forged integer pair" {
+    assert(heap108_current(bvconst(4294967303,64),bvconst(0,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))))
+}
+
+example "HOSTILE heap108_current rejects stale epoch" {
+    assert(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(2,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))))
+}
+
+example "HOSTILE heap108_current rejects closing allocation" {
+    assert(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(2,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))))
+}
+
+example "HOSTILE heap108_current rejects retired allocation" {
+    assert(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(3,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))))
+}
+
+example "HOSTILE heap108_current rejects local frame masquerades as heap" {
+    assert(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))))
+}
+
+example "HOSTILE heap108_current rejects foreign owner" {
+    assert(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),(bvconst(0,8)=bvconst(1,8))))
+}
+
+example "HOSTILE heap108_current rejects changed slot" {
+    assert(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(8,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))))
+}
+
+example "HOSTILE heap108_access rejects one-past load" {
+    assert(heap108_access(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(17,64),bvconst(17,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_access rejects rounded padding access" {
+    assert(heap108_access(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(100,64),bvconst(17,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_access rejects straddling bound" {
+    assert(heap108_access(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(16,64),bvconst(17,64),bvconst(2,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_access rejects zero width transaction" {
+    assert(heap108_access(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(16,64),bvconst(17,64),bvconst(0,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_access rejects huge width wrap" {
+    assert(heap108_access(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(16,64),bvconst(17,64),bvsub(ptr107_max(),bvconst(0,64)),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_access rejects stale pointer" {
+    assert(heap108_access((bvconst(0,8)=bvconst(1,8)),bvconst(16,64),bvconst(17,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_access rejects write without right" {
+    assert(heap108_access(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(16,64),bvconst(17,64),bvconst(1,64),bvconst(1,64),bvconst(2,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_access rejects execute right" {
+    assert(heap108_access(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(16,64),bvconst(17,64),bvconst(1,64),bvconst(3,64),bvconst(4,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_access rejects incorrect mapping" {
+    assert(heap108_access(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(16,64),bvconst(17,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_access rejects revoked Fabric authority" {
+    assert(heap108_access(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(16,64),bvconst(17,64),bvconst(1,64),bvconst(3,64),bvconst(1,64),bvconst(1,8),bvconst(0,8)))
+}
+
+example "HOSTILE heap108_cell rejects unaligned pointer cell" {
+    assert(heap108_cell(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(8,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_cell rejects cell straddles logical end" {
+    assert(heap108_cell(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(16,64),bvconst(31,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_cell rejects pointer cell in padding" {
+    assert(heap108_cell(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(32,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_cell rejects foreign storage object" {
+    assert(heap108_cell(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(16,64),bvconst(32,64),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_cell rejects retired containing heap" {
+    assert(heap108_cell((bvconst(0,8)=bvconst(1,8)),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_cell rejects revoked storage grant" {
+    assert(heap108_cell(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(16,64),bvconst(32,64),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "HOSTILE heap108_free rejects interior pointer" {
+    assert(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(1,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)))
+}
+
+example "HOSTILE heap108_free rejects one-past free" {
+    assert(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(17,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)))
+}
+
+example "HOSTILE heap108_free rejects narrowed view" {
+    assert(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(17,64),bvconst(3,64)))
+}
+
+example "HOSTILE heap108_free rejects shifted view" {
+    assert(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(1,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)))
+}
+
+example "HOSTILE heap108_free rejects nonowning read-only view" {
+    assert(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(1,64)))
+}
+
+example "HOSTILE heap108_free rejects local foreign or stale pointer" {
+    assert(heap108_free((bvconst(0,8)=bvconst(1,8)),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)))
+}
+
+example "HOSTILE heap108_close rejects invalid free" {
+    assert(heap108_close((bvconst(0,8)=bvconst(1,8)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_close rejects double close" {
+    assert(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(2,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_close rejects early retirement" {
+    assert(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(3,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_close rejects dropped CPU ticket" {
+    assert(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_close rejects lost DMA count" {
+    assert(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_close rejects changed identity" {
+    assert(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(2,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_close rejects unserialized close" {
+    assert(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(0,8)))
+}
+
+example "HOSTILE heap108_finish rejects different allocation" {
+    assert(heap108_finish(bvconst(7,64),bvconst(1,64),bvconst(8,64),bvconst(1,64),bvconst(99,64),bvconst(99,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_finish rejects previous allocation generation" {
+    assert(heap108_finish(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),bvconst(99,64),bvconst(99,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_finish rejects different operation" {
+    assert(heap108_finish(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(98,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_finish rejects duplicate terminal completion" {
+    assert(heap108_finish(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(99,64),bvconst(1,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_finish rejects cancel request without terminal" {
+    assert(heap108_finish(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(99,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_finish rejects count underflow" {
+    assert(heap108_finish(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(99,64),bvconst(0,64),bvsub(ptr107_max(),bvconst(0,64)),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_finish rejects double decrement" {
+    assert(heap108_finish(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(99,64),bvconst(2,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_finish rejects unserialized finish" {
+    assert(heap108_finish(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(99,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "HOSTILE heap108_retire rejects live allocation" {
+    assert(heap108_retire(bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_retire rejects outstanding CPU work" {
+    assert(heap108_retire(bvconst(2,8),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_retire rejects outstanding DMA work" {
+    assert(heap108_retire(bvconst(2,8),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_retire rejects retained grant" {
+    assert(heap108_retire(bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_retire rejects retained map" {
+    assert(heap108_retire(bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_retire rejects retained cell kinds" {
+    assert(heap108_retire(bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_retire rejects still placed" {
+    assert(heap108_retire(bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_retire rejects missing synchronization" {
+    assert(heap108_retire(bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_retire rejects unserialized retire" {
+    assert(heap108_retire(bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "HOSTILE heap108_refund rejects double refund" {
+    assert(heap108_refund(bvconst(4352,64),bvconst(0,64),bvconst(0,64),bvconst(8704,64),bvconst(0,64),bvconst(4352,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_refund rejects discarded other client charge" {
+    assert(heap108_refund(bvconst(4352,64),bvconst(0,64),bvconst(4352,64),bvconst(8704,64),bvconst(0,64),bvconst(0,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_refund rejects unverified physical release" {
+    assert(heap108_refund(bvconst(4352,64),bvconst(0,64),bvconst(4352,64),bvconst(8704,64),bvconst(0,64),bvconst(4352,64),bvconst(0,8)))
+}
+
+example "HOSTILE heap108_refund rejects retained exceeds charge" {
+    assert(heap108_refund(bvconst(4352,64),bvconst(4353,64),bvconst(4352,64),bvconst(8704,64),bvconst(0,64),bvconst(4352,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_refund rejects returned nonreclaimable metadata" {
+    assert(heap108_refund(bvconst(4352,64),bvconst(256,64),bvconst(4352,64),bvconst(8704,64),bvconst(0,64),bvconst(4352,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_refund rejects partial local refund" {
+    assert(heap108_refund(bvconst(4352,64),bvconst(0,64),bvconst(4352,64),bvconst(8704,64),bvconst(256,64),bvconst(4352,64),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_cleanup rejects other client" {
+    assert(heap108_cleanup(bvconst(1,64),bvconst(4,64),bvconst(7,64),bvconst(2,64),bvconst(4,64),bvconst(7,64),bvconst(1,8),bvconst(2,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_cleanup rejects restarted process" {
+    assert(heap108_cleanup(bvconst(1,64),bvconst(4,64),bvconst(7,64),bvconst(1,64),bvconst(5,64),bvconst(7,64),bvconst(1,8),bvconst(2,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_cleanup rejects wrong domain" {
+    assert(heap108_cleanup(bvconst(1,64),bvconst(4,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(8,64),bvconst(1,8),bvconst(2,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_cleanup rejects already closing entry" {
+    assert(heap108_cleanup(bvconst(1,64),bvconst(4,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(7,64),bvconst(2,8),bvconst(2,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_cleanup rejects local frame entry" {
+    assert(heap108_cleanup(bvconst(1,64),bvconst(4,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(7,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_cleanup rejects untrusted caller" {
+    assert(heap108_cleanup(bvconst(1,64),bvconst(4,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(7,64),bvconst(1,8),bvconst(2,8),bvconst(0,8),bvconst(1,8)))
+}
+
+example "HOSTILE heap108_cleanup rejects still running process" {
+    assert(heap108_cleanup(bvconst(1,64),bvconst(4,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(7,64),bvconst(1,8),bvconst(2,8),bvconst(1,8),bvconst(0,8)))
+}
+
+example "HOSTILE heap108_private rejects cross-domain export" {
+    assert(heap108_private(bvconst(1,8)))
+}
+
+example "HOSTILE heap108_private rejects DMA issuance" {
+    assert(heap108_private(bvconst(2,8)))
+}
+
+example "HOSTILE heap108_private rejects raw address API" {
+    assert(heap108_private(bvconst(3,8)))
+}
+
+example "HOSTILE old saved or spilled alias after actual reuse" {
+    assert(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),heap108_after(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(1,64),bvconst(2,64),heap108_phase_after(heap108_retire(heap108_phase_after(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),bvconst(1,8),bvconst(2,8)),heap108_after(heap108_finish(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(99,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,64),bvconst(0,64)),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),heap108_phase_after(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),bvconst(1,8),bvconst(2,8)),bvconst(3,8)),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,64),bvconst(2,64)),heap108_phase_after(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(1,64),bvconst(2,64),heap108_phase_after(heap108_retire(heap108_phase_after(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),bvconst(1,8),bvconst(2,8)),heap108_after(heap108_finish(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(99,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,64),bvconst(0,64)),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),heap108_phase_after(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),bvconst(1,8),bvconst(2,8)),bvconst(3,8)),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),heap108_phase_after(heap108_retire(heap108_phase_after(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),bvconst(1,8),bvconst(2,8)),heap108_after(heap108_finish(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(99,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,64),bvconst(0,64)),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),heap108_phase_after(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),bvconst(1,8),bvconst(2,8)),bvconst(3,8)),bvconst(1,8)),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))))
+}
+
+example "HOSTILE base alias cannot free twice" {
+    assert(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),heap108_phase_after(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),bvconst(1,8),bvconst(2,8)),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)))
+}
+
+example "HOSTILE metadata failure cannot publish liveness" {
+    assert(heap108_phase_after(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(0,8),bvconst(1,8))=bvconst(1,8))
+}
+
+example "HOSTILE timeout cannot refund busy backing" {
+    assert(heap108_after(heap108_retire(bvconst(2,8),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(4352,64),bvconst(0,64))=bvconst(0,64))
+}
+
+example "HOSTILE second competing client cannot overcommit global bytes" {
+    assert(heap108_budget(bvconst(4352,64),bvconst(0,64),bvconst(8192,64),heap108_after(heap108_budget(bvconst(4352,64),bvconst(0,64),bvconst(8192,64),bvconst(0,64),bvconst(8192,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),bvconst(0,64),bvconst(4352,64)),bvconst(8192,64),heap108_after(heap108_budget(bvconst(4352,64),bvconst(0,64),bvconst(8192,64),bvconst(0,64),bvconst(8192,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),bvconst(5,64),bvconst(6,64)),bvconst(6,64),bvconst(1,8)))
+}
+
+example "HOSTILE second client cannot commit old ledger snapshot" {
+    assert(heap108_budget(bvconst(4352,64),bvconst(0,64),bvconst(13056,64),heap108_after(heap108_budget(bvconst(4352,64),bvconst(0,64),bvconst(8192,64),bvconst(0,64),bvconst(8192,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),bvconst(0,64),bvconst(4352,64)),bvconst(17408,64),heap108_after(heap108_budget(bvconst(4352,64),bvconst(0,64),bvconst(8192,64),bvconst(0,64),bvconst(8192,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),bvconst(5,64),bvconst(6,64)),bvconst(5,64),bvconst(1,8)))
+}
+
+example "HOSTILE A death cannot select B record" {
+    assert(heap108_cleanup(bvconst(2,64),bvconst(4,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(7,64),bvconst(1,8),bvconst(2,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "HOSTILE new owner cannot observe former payload" {
+    assert(heap108_initial_byte((bvconst(1,8)=bvconst(1,8)),bvconst(8192,64),bvconst(8192,64),bvconst(4096,64),bvconst(255,8))=bvconst(255,8))
+}

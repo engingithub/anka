@@ -1,0 +1,426 @@
+// Complete software cleanup/reuse refinement of the accepted Undertaker.
+// Stage 1 queued, 2 retired, 3 scrubbing, 4 clean. Storage remains charged
+// through all four stages. No heap DMA, asynchronous scrub engine or guest ABI.
+// Each scrub call linearizes submit + terminal completion under ONE exclusive
+// Fabric borrow. No callback or effect survives it. If that backend changes,
+// explicit pinned scrub requests, drainage and barriers must be refined first.
+import "anka108_cleanup_workers.kleis"
+
+// Preserve the queued-only cw108_claim theorem. This new profile additionally
+// claims a recovered RETIRED job; recovery resets stages 3/4 to 2 first.
+define cr108_claim(bound : Bool, current_worker : Bool, stage : BitVec8,
+    attached : BitVec8, queued : BitVec8, lease : BitVec8, epoch : BitVec64,
+    worker : BitVec64, revision : BitVec64, expected : BitVec64, locked : BitVec8) =
+    current_worker ∧ (attached=bvconst(1,8)) ∧ (queued=bvconst(1,8)) ∧
+    ((stage=bvconst(1,8)) ∨ (stage=bvconst(2,8))) ∧
+    ut108_claim(bound,stage,lease,epoch,bvconst(0,8),worker,revision,expected,locked)
+
+define cr108_begin(bound : Bool, leased : Bool, stage : BitVec8,
+    cpu : BitVec64, dma : BitVec64, maps : BitVec64, grants : BitVec64,
+    base : BitVec64, span : BitVec64, custody : BitVec8, visible : BitVec8, locked : BitVec8) =
+    (maps=ut108_z()) ∧ (grants=ut108_z()) ∧
+    ut108_begin(bound,leased,stage,bvconst(3,8),cpu,dma,ut108_z(),ut108_z(),base,span,custody,visible,locked)
+
+// current means the exact job/lease/version/sequence/progress AND private row
+// snapshot match. quiet is derived from full actual source and exclusion scans.
+define cr108_chunk(bound : Bool, leased : Bool, current : Bool, stage : BitVec8,
+    done : BitVec64, amount : BitVec64, span : BitVec64, version : BitVec64,
+    sequence : BitVec64, quiet : Bool, locked : BitVec8) =
+    current ∧ quiet ∧ bvule(amount,bvconst(4096,64)) ∧
+    ut108_submit(bound,leased,stage,bvconst(0,8),done,amount,span,version,sequence,bvconst(1,8),locked)
+define cr108_stage(commit : Bool, done : BitVec64, amount : BitVec64,
+    span : BitVec64, old : BitVec8) =
+    if commit then (if bvadd(done,amount)=span then bvconst(4,8) else bvconst(3,8)) else old
+
+// No worker effects exist outside the software call. For retired jobs, quiet
+// additionally requires zero old CPU work; queued recovery may retain it.
+define cr108_recover(bound : Bool, stage : BitVec8, lease : BitVec8,
+    fenced : BitVec8, version : BitVec64, quiet : Bool, visible : BitVec8, locked : BitVec8) =
+    quiet ∧ ut108_recover(bound,stage,lease,bvconst(0,8),fenced,visible,version,locked)
+
+// Project the exact selected durable obligation to a one-row queue. Global
+// directory/charge invariants are inherited, not inferred from caller counts.
+// placed means an externally accessible mapping, not reserved private custody.
+// tags=0 follows the full contiguous byte/tag prefix and exclusion of writers.
+// returns means BOTH exact extent returns prepared before any mutation.
+define cr108_release(bound : Bool, leased : Bool, current : Bool, stage : BitVec8,
+    done : BitVec64, span : BitVec64, version : BitVec64, receipt : BitVec64,
+    quiet : Bool, tags : BitVec64, placed : BitVec8, custody : BitVec8,
+    returns : Bool, held : BitVec64, revision : BitVec64, expected : BitVec64, locked : BitVec8) =
+    bound ∧ leased ∧ current ∧ quiet ∧ returns ∧ (stage=bvconst(4,8)) ∧
+    init108_aligned(span) ∧ bvugt(span,ut108_z()) ∧ (done=span) ∧ (version=receipt) ∧
+    (tags=ut108_z()) ∧ (placed=bvconst(0,8)) ∧ heap108_yes(custody) ∧ bvule(span,held) ∧
+    (revision=expected) ∧ heap108_yes(locked)
+// Cleanup consumes no identity at release. Unlike new admission, it may run at
+// saturated common revision, provided all checks/commit share one exclusive
+// operation and the complete snapshot is current. This extends ut108_release's
+// revision precondition; it does NOT reset revision or accept a cached permit.
+
+example "claim: valid" {
+    assert(cr108_claim(ut108_true(),ut108_true(),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(7,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,8)))
+}
+
+example "claim: queued compatibility" {
+    assert(cr108_claim(ut108_true(),ut108_true(),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(7,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,8)))
+}
+
+example "claim: last epoch" {
+    assert(cr108_claim(ut108_true(),ut108_true(),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvsub(ptr107_max(),bvconst(1,64)),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,8)))
+}
+
+example "claim: rejects unbound" {
+    assert(¬(cr108_claim(ut108_false(),ut108_true(),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(7,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "claim: rejects stale worker" {
+    assert(¬(cr108_claim(ut108_true(),ut108_false(),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(7,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "claim: rejects unattached" {
+    assert(¬(cr108_claim(ut108_true(),ut108_true(),bvconst(2,8),bvconst(0,8),bvconst(1,8),bvconst(0,8),bvconst(7,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "claim: rejects not pending" {
+    assert(¬(cr108_claim(ut108_true(),ut108_true(),bvconst(2,8),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(7,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "claim: rejects armed" {
+    assert(¬(cr108_claim(ut108_true(),ut108_true(),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(7,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "claim: rejects scrub stage without recovery" {
+    assert(¬(cr108_claim(ut108_true(),ut108_true(),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(7,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "claim: rejects clean without recovery" {
+    assert(¬(cr108_claim(ut108_true(),ut108_true(),bvconst(4,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(7,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "claim: rejects held lease" {
+    assert(¬(cr108_claim(ut108_true(),ut108_true(),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(7,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "claim: rejects revoking lease" {
+    assert(¬(cr108_claim(ut108_true(),ut108_true(),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(2,8),bvconst(7,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "claim: rejects epoch wrap" {
+    assert(¬(cr108_claim(ut108_true(),ut108_true(),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),ptr107_max(),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "claim: rejects zero worker" {
+    assert(¬(cr108_claim(ut108_true(),ut108_true(),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(7,64),bvconst(0,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "claim: rejects stale revision" {
+    assert(¬(cr108_claim(ut108_true(),ut108_true(),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(7,64),bvconst(4,64),bvconst(9,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "claim: rejects unlocked" {
+    assert(¬(cr108_claim(ut108_true(),ut108_true(),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(7,64),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(0,8))))
+}
+
+example "begin: valid" {
+    assert(cr108_begin(ut108_true(),ut108_true(),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "begin: rejects unbound" {
+    assert(¬(cr108_begin(ut108_false(),ut108_true(),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "begin: rejects stale lease" {
+    assert(¬(cr108_begin(ut108_true(),ut108_false(),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "begin: rejects queued" {
+    assert(¬(cr108_begin(ut108_true(),ut108_true(),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "begin: rejects already begun" {
+    assert(¬(cr108_begin(ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "begin: rejects pending CPU" {
+    assert(¬(cr108_begin(ut108_true(),ut108_true(),bvconst(2,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "begin: rejects DMA" {
+    assert(¬(cr108_begin(ut108_true(),ut108_true(),bvconst(2,8),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "begin: rejects mapping" {
+    assert(¬(cr108_begin(ut108_true(),ut108_true(),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "begin: rejects grant" {
+    assert(¬(cr108_begin(ut108_true(),ut108_true(),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(8192,64),bvconst(8192,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "begin: rejects overflow" {
+    assert(¬(cr108_begin(ut108_true(),ut108_true(),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),ptr107_max(),bvconst(8192,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "begin: rejects lost custody" {
+    assert(¬(cr108_begin(ut108_true(),ut108_true(),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(0,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "begin: rejects invisible effects" {
+    assert(¬(cr108_begin(ut108_true(),ut108_true(),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(1,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "begin: rejects unlocked" {
+    assert(¬(cr108_begin(ut108_true(),ut108_true(),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(1,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "chunk: valid" {
+    assert(cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,64),bvconst(4096,64),bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_true(),bvconst(1,8)))
+}
+
+example "chunk: last chunk" {
+    assert(cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_true(),bvconst(1,8)))
+}
+
+example "chunk: last identities" {
+    assert(cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,64),bvconst(4096,64),bvconst(8192,64),bvsub(ptr107_max(),bvconst(1,64)),bvsub(ptr107_max(),bvconst(1,64)),ut108_true(),bvconst(1,8)))
+}
+
+example "chunk: small chunk" {
+    assert(cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,64),bvconst(16,64),bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_true(),bvconst(1,8)))
+}
+
+example "chunk: rejects unbound" {
+    assert(¬(cr108_chunk(ut108_false(),ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,64),bvconst(4096,64),bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_true(),bvconst(1,8))))
+}
+
+example "chunk: rejects stale lease" {
+    assert(¬(cr108_chunk(ut108_true(),ut108_false(),ut108_true(),bvconst(3,8),bvconst(0,64),bvconst(4096,64),bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_true(),bvconst(1,8))))
+}
+
+example "chunk: rejects stale receipt" {
+    assert(¬(cr108_chunk(ut108_true(),ut108_true(),ut108_false(),bvconst(3,8),bvconst(0,64),bvconst(4096,64),bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_true(),bvconst(1,8))))
+}
+
+example "chunk: rejects not begun" {
+    assert(¬(cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(2,8),bvconst(0,64),bvconst(4096,64),bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_true(),bvconst(1,8))))
+}
+
+example "chunk: rejects already clean" {
+    assert(¬(cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(0,64),bvconst(4096,64),bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_true(),bvconst(1,8))))
+}
+
+example "chunk: rejects empty" {
+    assert(¬(cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_true(),bvconst(1,8))))
+}
+
+example "chunk: rejects too large" {
+    assert(¬(cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,64),bvconst(4112,64),bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_true(),bvconst(1,8))))
+}
+
+example "chunk: rejects unaligned amount" {
+    assert(¬(cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,64),bvconst(17,64),bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_true(),bvconst(1,8))))
+}
+
+example "chunk: rejects unaligned cursor" {
+    assert(¬(cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),bvconst(1,64),bvconst(4096,64),bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_true(),bvconst(1,8))))
+}
+
+example "chunk: rejects past end" {
+    assert(¬(cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),bvconst(8192,64),bvconst(4096,64),bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_true(),bvconst(1,8))))
+}
+
+example "chunk: rejects overflow" {
+    assert(¬(cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),ptr107_max(),bvconst(4096,64),bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_true(),bvconst(1,8))))
+}
+
+example "chunk: rejects version wrap" {
+    assert(¬(cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,64),bvconst(4096,64),bvconst(8192,64),ptr107_max(),bvconst(3,64),ut108_true(),bvconst(1,8))))
+}
+
+example "chunk: rejects sequence wrap" {
+    assert(¬(cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,64),bvconst(4096,64),bvconst(8192,64),bvconst(7,64),ptr107_max(),ut108_true(),bvconst(1,8))))
+}
+
+example "chunk: rejects new conflicting work" {
+    assert(¬(cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,64),bvconst(4096,64),bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_false(),bvconst(1,8))))
+}
+
+example "chunk: rejects unlocked" {
+    assert(¬(cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,64),bvconst(4096,64),bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_true(),bvconst(0,8))))
+}
+
+example "recover: valid" {
+    assert(cr108_recover(ut108_true(),bvconst(3,8),bvconst(2,8),bvconst(1,8),bvconst(7,64),ut108_true(),bvconst(1,8),bvconst(1,8)))
+}
+
+example "recover: queued" {
+    assert(cr108_recover(ut108_true(),bvconst(1,8),bvconst(2,8),bvconst(1,8),bvconst(7,64),ut108_true(),bvconst(1,8),bvconst(1,8)))
+}
+
+example "recover: retired" {
+    assert(cr108_recover(ut108_true(),bvconst(2,8),bvconst(2,8),bvconst(1,8),bvconst(7,64),ut108_true(),bvconst(1,8),bvconst(1,8)))
+}
+
+example "recover: clean" {
+    assert(cr108_recover(ut108_true(),bvconst(4,8),bvconst(2,8),bvconst(1,8),bvconst(7,64),ut108_true(),bvconst(1,8),bvconst(1,8)))
+}
+
+example "recover: rejects unbound" {
+    assert(¬(cr108_recover(ut108_false(),bvconst(3,8),bvconst(2,8),bvconst(1,8),bvconst(7,64),ut108_true(),bvconst(1,8),bvconst(1,8))))
+}
+
+example "recover: rejects unfenced" {
+    assert(¬(cr108_recover(ut108_true(),bvconst(3,8),bvconst(2,8),bvconst(0,8),bvconst(7,64),ut108_true(),bvconst(1,8),bvconst(1,8))))
+}
+
+example "recover: rejects held" {
+    assert(¬(cr108_recover(ut108_true(),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(7,64),ut108_true(),bvconst(1,8),bvconst(1,8))))
+}
+
+example "recover: rejects unowned" {
+    assert(¬(cr108_recover(ut108_true(),bvconst(3,8),bvconst(0,8),bvconst(1,8),bvconst(7,64),ut108_true(),bvconst(1,8),bvconst(1,8))))
+}
+
+example "recover: rejects released" {
+    assert(¬(cr108_recover(ut108_true(),bvconst(5,8),bvconst(2,8),bvconst(1,8),bvconst(7,64),ut108_true(),bvconst(1,8),bvconst(1,8))))
+}
+
+example "recover: rejects version wrap" {
+    assert(¬(cr108_recover(ut108_true(),bvconst(3,8),bvconst(2,8),bvconst(1,8),ptr107_max(),ut108_true(),bvconst(1,8),bvconst(1,8))))
+}
+
+example "recover: rejects outstanding effects" {
+    assert(¬(cr108_recover(ut108_true(),bvconst(3,8),bvconst(2,8),bvconst(1,8),bvconst(7,64),ut108_false(),bvconst(1,8),bvconst(1,8))))
+}
+
+example "recover: rejects invisible" {
+    assert(¬(cr108_recover(ut108_true(),bvconst(3,8),bvconst(2,8),bvconst(1,8),bvconst(7,64),ut108_true(),bvconst(0,8),bvconst(1,8))))
+}
+
+example "recover: rejects unlocked" {
+    assert(¬(cr108_recover(ut108_true(),bvconst(3,8),bvconst(2,8),bvconst(1,8),bvconst(7,64),ut108_true(),bvconst(1,8),bvconst(0,8))))
+}
+
+example "release: valid" {
+    assert(cr108_release(ut108_true(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),ut108_true(),bvconst(0,64),bvconst(0,8),bvconst(1,8),ut108_true(),bvconst(16384,64),bvconst(9,64),bvconst(9,64),bvconst(1,8)))
+}
+
+example "release: all quota returned" {
+    assert(cr108_release(ut108_true(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),ut108_true(),bvconst(0,64),bvconst(0,8),bvconst(1,8),ut108_true(),bvconst(8192,64),bvconst(9,64),bvconst(9,64),bvconst(1,8)))
+}
+
+example "release: no identity headroom needed" {
+    assert(cr108_release(ut108_true(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(8192,64),bvconst(8192,64),ptr107_max(),ptr107_max(),ut108_true(),bvconst(0,64),bvconst(0,8),bvconst(1,8),ut108_true(),bvconst(16384,64),ptr107_max(),ptr107_max(),bvconst(1,8)))
+}
+
+example "release: rejects unbound" {
+    assert(¬(cr108_release(ut108_false(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),ut108_true(),bvconst(0,64),bvconst(0,8),bvconst(1,8),ut108_true(),bvconst(16384,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "release: rejects stale lease" {
+    assert(¬(cr108_release(ut108_true(),ut108_false(),ut108_true(),bvconst(4,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),ut108_true(),bvconst(0,64),bvconst(0,8),bvconst(1,8),ut108_true(),bvconst(16384,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "release: rejects stale full snapshot" {
+    assert(¬(cr108_release(ut108_true(),ut108_true(),ut108_false(),bvconst(4,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),ut108_true(),bvconst(0,64),bvconst(0,8),bvconst(1,8),ut108_true(),bvconst(16384,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "release: rejects incomplete stage" {
+    assert(¬(cr108_release(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),ut108_true(),bvconst(0,64),bvconst(0,8),bvconst(1,8),ut108_true(),bvconst(16384,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "release: rejects partial prefix" {
+    assert(¬(cr108_release(ut108_true(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(4096,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),ut108_true(),bvconst(0,64),bvconst(0,8),bvconst(1,8),ut108_true(),bvconst(16384,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "release: rejects stale version" {
+    assert(¬(cr108_release(ut108_true(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(8,64),ut108_true(),bvconst(0,64),bvconst(0,8),bvconst(1,8),ut108_true(),bvconst(16384,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "release: rejects conflicting work" {
+    assert(¬(cr108_release(ut108_true(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),ut108_false(),bvconst(0,64),bvconst(0,8),bvconst(1,8),ut108_true(),bvconst(16384,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "release: rejects old tag" {
+    assert(¬(cr108_release(ut108_true(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),ut108_true(),bvconst(1,64),bvconst(0,8),bvconst(1,8),ut108_true(),bvconst(16384,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "release: rejects legacy placement" {
+    assert(¬(cr108_release(ut108_true(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),ut108_true(),bvconst(0,64),bvconst(1,8),bvconst(1,8),ut108_true(),bvconst(16384,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "release: rejects lost custody" {
+    assert(¬(cr108_release(ut108_true(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),ut108_true(),bvconst(0,64),bvconst(0,8),bvconst(0,8),ut108_true(),bvconst(16384,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "release: rejects unprepared return" {
+    assert(¬(cr108_release(ut108_true(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),ut108_true(),bvconst(0,64),bvconst(0,8),bvconst(1,8),ut108_false(),bvconst(16384,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "release: rejects refund underflow" {
+    assert(¬(cr108_release(ut108_true(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),ut108_true(),bvconst(0,64),bvconst(0,8),bvconst(1,8),ut108_true(),bvconst(4096,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "release: rejects wrong revision" {
+    assert(¬(cr108_release(ut108_true(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),ut108_true(),bvconst(0,64),bvconst(0,8),bvconst(1,8),ut108_true(),bvconst(16384,64),bvconst(9,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "release: rejects empty span" {
+    assert(¬(cr108_release(ut108_true(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(0,64),bvconst(0,64),bvconst(9,64),bvconst(9,64),ut108_true(),bvconst(0,64),bvconst(0,8),bvconst(1,8),ut108_true(),bvconst(16384,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "release: rejects unlocked" {
+    assert(¬(cr108_release(ut108_true(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),ut108_true(),bvconst(0,64),bvconst(0,8),bvconst(1,8),ut108_true(),bvconst(16384,64),bvconst(9,64),bvconst(9,64),bvconst(0,8))))
+}
+
+example "law: release below saturation refines Undertaker" {
+    assert(∀(r : BitVec64). (cr108_release(ut108_true(),ut108_true(),ut108_true(),bvconst(4,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),ut108_true(),bvconst(0,64),bvconst(0,8),bvconst(1,8),ut108_true(),bvconst(16384,64),r,r,bvconst(1,8)) ∧ bvult(r,ptr107_max()) → ut108_release(ut108_true(),ut108_true(),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(8192,64),bvconst(8192,64),bvconst(9,64),bvconst(9,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(1,64),bvconst(16384,64),bvconst(8192,64),r,r,bvconst(1,8))))
+}
+
+example "law: claim refines accepted Undertaker" {
+    assert(∀(s : BitVec8). ∀(e : BitVec64). (cr108_claim(ut108_true(),ut108_true(),s,bvconst(1,8),bvconst(1,8),bvconst(0,8),e,bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,8)) → ut108_claim(ut108_true(),s,bvconst(0,8),e,bvconst(0,8),bvconst(4,64),bvconst(9,64),bvconst(9,64),bvconst(1,8))))
+}
+
+example "law: chunk admits real terminal completion" {
+    assert(∀(d : BitVec64). ∀(n : BitVec64). ∀(v : BitVec64). (cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),d,n,bvconst(8192,64),v,bvconst(3,64),ut108_true(),bvconst(1,8)) → ut108_complete(ut108_true(),ut108_true(),bvconst(3,8),bvconst(1,8),d,d,n,bvconst(8192,64),v,v,bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "law: cursor cannot overflow or leave custody" {
+    assert(∀(d : BitVec64). ∀(n : BitVec64). ∀(s : BitVec64). (cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),d,n,s,bvconst(1,64),bvconst(1,64),ut108_true(),bvconst(1,8)) → (bvugt(bvadd(d,n),d) ∧ bvule(bvadd(d,n),s))))
+}
+
+example "law: final chunk establishes clean gate" {
+    assert(∀(d : BitVec64). ∀(n : BitVec64). (cr108_chunk(ut108_true(),ut108_true(),ut108_true(),bvconst(3,8),d,n,bvconst(8192,64),bvconst(7,64),bvconst(3,64),ut108_true(),bvconst(1,8)) ∧ (bvadd(d,n)=bvconst(8192,64)) → ut108_clean(ut108_true(),ut108_true(),bvconst(3,8),bvconst(0,8),bvadd(d,n),bvconst(8192,64),bvconst(8,64),bvconst(8,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "law: committed bytes zero within chunk" {
+    assert(∀(q : BitVec64). ∀(old : BitVec8). ((bvuge(q,bvconst(4096,64)) ∧ bvult(q,bvconst(8192,64))) → (init108_byte(ut108_true(),bvconst(4096,64),bvconst(4096,64),q,old)=bvconst(0,8))))
+}
+
+example "law: other allocation bytes unchanged" {
+    assert(∀(q : BitVec64). ∀(old : BitVec8). (bvuge(q,bvconst(8192,64)) → (init108_byte(ut108_true(),bvconst(4096,64),bvconst(4096,64),q,old)=old)))
+}
+
+example "law: tag cleared by exact overlapping chunk" {
+    assert(∀(old : BitVec8). (init108_tag(ut108_true(),bvconst(8192,64),bvconst(4096,64),bvconst(4096,64),bvconst(12288,64),old)=bvconst(0,8)))
+}
+
+example "law: failure preserves bytes cursor stage" {
+    assert(∀(q : BitVec64). ∀(old : BitVec8). ∀(d : BitVec64). ((init108_byte(ut108_false(),d,bvconst(4096,64),q,old)=old) ∧ (init108_done(ut108_false(),d,bvconst(4096,64))=d) ∧ (cr108_stage(ut108_false(),d,bvconst(4096,64),bvconst(8192,64),bvconst(3,8))=bvconst(3,8))))
+}
+
+example "law: scrub and clean recovery restart retired at zero" {
+    assert(∀(s : BitVec8). ∀(d : BitVec64). (((s=bvconst(3,8)) ∨ (s=bvconst(4,8))) → ((ut108_recovered_stage(ut108_true(),s)=bvconst(2,8)) ∧ (ut108_recovered_done(ut108_true(),d)=bvconst(0,64)))))
+}
+
+example "law: exact refund leaves other charge" {
+    assert(∀(other : BitVec64). (bvule(other,bvsub(ptr107_max(),bvconst(8192,64))) → (ut108_payload(ut108_true(),bvadd(other,bvconst(8192,64)),bvconst(8192,64))=other)))
+}
+
+example "law: failed release refunds nothing" {
+    assert(∀(p : BitVec64). (ut108_payload(ut108_false(),p,bvconst(8192,64))=p))
+}
+
+example "law: returned storage needs fresh lifetime initialization" {
+    assert(¬ut108_new_lifetime(ut108_true(),ut108_false(),ut108_true(),ut108_true(),bvconst(31,64),bvconst(4096,64),bvconst(4096,64)))
+}
+

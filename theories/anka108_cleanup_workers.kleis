@@ -1,0 +1,1030 @@
+// DN-71 A2.3.5: concrete bounded Undertaker worker and old-work accounting.
+// SPECIFICATION ONLY. No Rust worker, heap asynchronous admission, guest malloc,
+// device authority, scheduler liveness or hardware-drainage claim is made.
+import "anka108_allocation_fabric.kleis"
+
+// Selected software representation:
+// * Fixed worker rows, separate from allocation-owner accounts. Opaque worker
+//   handles carry a one-based row and globally nonreused nonzero serial. Rows
+//   bind the trusted process incarnation, context, domain and cleanup role.
+// * Each existing reserved cleanup row retains one lease (state, epoch, worker
+//   handle). A claim never removes it from the directory or pending census.
+// * Fixed old-work rows bind the full allocation key and an exact backend
+//   request. Reserve a row AND backend capacity before asynchronous admission;
+//   commit both together. No unaccounted operation may start. First CPU-only
+//   heap profile keeps DMA/export disabled; modelling a DMA row adds no grant.
+// * Backend keys include engine, source index, generation, request ID and agent;
+//   source slots stay pinned until exact terminal consumption. TransactionId(0),
+//   ObjectId(0), process generation 0 and backend generation 0 are valid.
+//   Heap operation IDs are separate, positive and never reused, even on retry.
+// * Complete locked scans derive counts from active rows. Caller counts,
+//   messages, timeouts, an empty notification queue and worker death do not
+//   establish terminal completion. Backend terminal state, stopped effects and
+//   visibility must be read from the exact pinned source by a trusted adapter.
+// * All preparation/commit happens in the SAME exclusive Fabric operation.
+//   A scan result is not a reusable certificate, even at saturated revision.
+//   Global fencing invalidates worker use but does not finish old CPU/DMA work.
+//
+// Worker states vacant=0, active=1, fenced=2. Work classes CPU=1, DMA=2.
+// Backend states requested=0, authorized=1, prepared=2, committed=3, faulted=4.
+// These are model encodings, not casts of Rust enum discriminants.
+// Job stages/leases retain ut108 encodings. This first claim profile selects
+// only queued/draining jobs (stage 1); scrub/recovery/release are separate work.
+// All bound/current/role/ready booleans below summarize trusted record reads,
+// full scans or backend checks, NEVER supplied application assertions.
+
+define cw108_z() = bvconst(0,64)
+define cw108_o() = bvconst(1,64)
+define cw108_yes() = bvconst(1,8)
+define cw108_no() = bvconst(0,8)
+define cw108_row(slot : BitVec64, cap : BitVec64) =
+    bvule(cap,repr107_mask()) ∧ bvugt(slot,cw108_z()) ∧ bvule(slot,cap)
+define cw108_class(kind : BitVec8) = (kind=bvconst(1,8)) ∨ (kind=bvconst(2,8))
+
+// Actual retained capacities and actual target sizeof values, not requested
+// lengths. The existing cleanup row's extension is charged only once. Witness
+// strides are illustrative; implementation measures the actual Rust layout.
+define cw108_storage(wcap : BitVec64, wretained : BitVec64, wstride : BitVec64, wbytes : BitVec64,
+    tcap : BitVec64, tretained : BitVec64, tstride : BitVec64, tbytes : BitVec64,
+    jcap : BitVec64, jretained : BitVec64, lstride : BitVec64, lbytes : BitVec64,
+    old : BitVec64, scratch : BitVec64, total : BitVec64, limit : BitVec64, allocated : Bool) =
+    bvule(wcap,repr107_mask()) ∧ bvule(tcap,repr107_mask()) ∧ bvule(jcap,repr107_mask()) ∧
+    bvuge(wretained,wcap) ∧ bvuge(tretained,tcap) ∧ bvuge(jretained,jcap) ∧
+    a22_storage(wretained,wstride,wbytes) ∧ a22_storage(tretained,tstride,tbytes) ∧
+    a22_storage(jretained,lstride,lbytes) ∧
+    a22_fixed(old,wbytes,tbytes,lbytes,cw108_z(),scratch,total) ∧ bvule(total,limit) ∧ allocated
+
+define cw108_enroll(slot : BitVec64, cap : BitVec64, empty : Bool,
+    trusted_role : Bool, descriptor_current : Bool, unique_incarnation : Bool,
+    next_worker : BitVec64, storage_ready : Bool,
+    revision : BitVec64, expected : BitVec64, locked : BitVec8) =
+    cw108_row(slot,cap) ∧ empty ∧ trusted_role ∧ descriptor_current ∧ unique_incarnation ∧
+    bvugt(next_worker,cw108_z()) ∧ bvult(next_worker,ptr107_max()) ∧ storage_ready ∧
+    a23_serial(revision,expected,locked)
+
+define cw108_worker(slot : BitVec64, cap : BitVec64, serial : BitVec64,
+    pid : BitVec64, incarnation : BitVec64, context : BitVec64, domain : BitVec64,
+    rserial : BitVec64, rpid : BitVec64, rincarnation : BitVec64, rcontext : BitVec64,
+    rdomain : BitVec64, state : BitVec8, cleanup_role : Bool, descriptor_current : Bool) =
+    cw108_row(slot,cap) ∧ bvugt(serial,cw108_z()) ∧ (serial=rserial) ∧ (pid=rpid) ∧
+    bvule(incarnation,repr107_mask()) ∧ (incarnation=rincarnation) ∧
+    bvugt(context,cw108_z()) ∧ (context=rcontext) ∧ (domain=rdomain) ∧
+    (state=bvconst(1,8)) ∧ cleanup_role ∧ descriptor_current
+
+// Fencing requires an exact retained binding and trusted supervisor. A live
+// process/CPU is NOT needed after death. It consumes no new identity/headroom.
+define cw108_fence(bound_worker : Bool, supervisor : Bool, state : BitVec8, locked : BitVec8) =
+    bound_worker ∧ supervisor ∧ (state=bvconst(1,8)) ∧ (locked=cw108_yes())
+define cw108_drop_worker(bound_worker : Bool, state : BitVec8,
+    actual_job_references : BitVec64, actual_worker_operations : BitVec64, locked : BitVec8) =
+    bound_worker ∧ (state=bvconst(2,8)) ∧ (actual_job_references=cw108_z()) ∧
+    (actual_worker_operations=cw108_z()) ∧ (locked=cw108_yes())
+
+define cw108_claim(job_bound : Bool, worker_current : Bool,
+    heap_stage : BitVec8, attached : BitVec8, queued : BitVec8, job_stage : BitVec8,
+    lease : BitVec8, epoch : BitVec64, inflight_scrub : BitVec8, worker : BitVec64,
+    revision : BitVec64, expected : BitVec64, locked : BitVec8) =
+    worker_current ∧ (heap_stage=bvconst(3,8)) ∧ (attached=cw108_yes()) ∧
+    (queued=cw108_yes()) ∧ (job_stage=bvconst(1,8)) ∧
+    ut108_claim(job_bound,job_stage,lease,epoch,inflight_scrub,worker,revision,expected,locked)
+define cw108_lease(job_bound : Bool, worker_current : Bool,
+    lease : BitVec8, epoch : BitVec64, worker : BitVec64,
+    request_epoch : BitVec64, request_worker : BitVec64) =
+    job_bound ∧ worker_current ∧ ut108_lease(lease,epoch,worker,request_epoch,request_worker)
+define cw108_claim_epoch(commit : Bool, old : BitVec64) = a23_next(commit,old)
+define cw108_lease_state(commit : Bool, old : BitVec8) = a23_stage(commit,old,bvconst(1,8))
+
+// Async admission remains disabled until a concrete backend implements this
+// conjunction. A CPU-kind label is not source authorization. DMA additionally
+// needs its own accepted profile; this model cannot turn profile_allowed on.
+define cw108_submit(job_bound : Bool, owner_current : Bool, heap_stage : BitVec8,
+    job_stage : BitVec8, kind : BitVec8, profile_allowed : Bool, request_checked : Bool,
+    row : BitVec64, capacity : BitVec64, row_empty : Bool, next_operation : BitVec64,
+    backend_prepared : Bool, no_fallible_work : Bool,
+    revision : BitVec64, expected : BitVec64, locked : BitVec8) =
+    job_bound ∧ owner_current ∧ (heap_stage=bvconst(2,8)) ∧ (job_stage=cw108_no()) ∧
+    cw108_class(kind) ∧ profile_allowed ∧ request_checked ∧ cw108_row(row,capacity) ∧ row_empty ∧
+    bvugt(next_operation,cw108_z()) ∧ bvult(next_operation,ptr107_max()) ∧
+    backend_prepared ∧ no_fallible_work ∧ a23_serial(revision,expected,locked)
+
+// Full source binding. Allocation key comparison is a23_key against current
+// registry/cleanup/Fabric/custody rows, not request fields compared to themselves.
+// engine identifies a registered trusted adapter (1 software Fabric, 2 controller);
+// an adapter must also establish current request binding and retained pinning.
+define cw108_work_binding(job_bound : Bool,
+    operation : BitVec64, roperation : BitVec64, kind : BitVec8, rkind : BitVec8,
+    engine : BitVec8, rengine : BitVec8, source : BitVec64, rsource : BitVec64,
+    generation : BitVec64, rgeneration : BitVec64, request : BitVec64, rrequest : BitVec64,
+    agent : BitVec64, ragent : BitVec64, offset : BitVec64, roffset : BitVec64,
+    length : BitVec64, rlength : BitVec64, access : BitVec8, raccess : BitVec8,
+    active : BitVec8) =
+    job_bound ∧ bvugt(operation,cw108_z()) ∧ (operation=roperation) ∧
+    cw108_class(kind) ∧ (kind=rkind) ∧ cw108_class(engine) ∧ (engine=rengine) ∧
+    (source=rsource) ∧ (generation=rgeneration) ∧ (request=rrequest) ∧ (agent=ragent) ∧
+    (offset=roffset) ∧ bvugt(length,cw108_z()) ∧ a22_add(offset,length) ∧ (length=rlength) ∧
+    bvuge(access,bvconst(1,8)) ∧ bvule(access,bvconst(3,8)) ∧ (access=raccess) ∧
+    (active=cw108_yes())
+
+// access encodes READ=1, WRITE=2, ATOMIC=3 for exact matching only. Actual
+// access rights and which operations a heap profile permits are separate gates.
+define cw108_terminal(source_bound : Bool, pinned : Bool, source_state : BitVec8,
+    effects_stopped : Bool, visible : Bool) =
+    source_bound ∧ pinned ∧ ((source_state=bvconst(3,8)) ∨ (source_state=bvconst(4,8))) ∧
+    effects_stopped ∧ visible
+
+// Bounded complete-table fold. Even malformed OTHER active rows fail the scan;
+// they are never silently classified as zero. Free rows need no payload decode.
+define cw108_census(cap : BitVec64, scanned : BitVec64, cpu : BitVec64, dma : BitVec64) =
+    bvule(cap,repr107_mask()) ∧ bvule(scanned,cap) ∧ bvule(cpu,scanned) ∧ bvule(dma,bvsub(scanned,cpu))
+define cw108_selected(active : BitVec8, row_job : BitVec64, selected_job : BitVec64) =
+    (active=cw108_yes()) ∧ (row_job=selected_job)
+define cw108_scan(cap : BitVec64, scanned : BitVec64, cpu : BitVec64, dma : BitVec64,
+    active : BitVec8, row_job : BitVec64, row_valid : Bool, kind : BitVec8) =
+    cw108_census(cap,scanned,cpu,dma) ∧ bvult(scanned,cap) ∧
+    ((active=cw108_no()) ∨ ((active=cw108_yes()) ∧ bvugt(row_job,cw108_z()) ∧ row_valid ∧ cw108_class(kind)))
+define cw108_tally(count : BitVec64, active : BitVec8, row_job : BitVec64,
+    selected_job : BitVec64, kind : BitVec8, selected_kind : BitVec8) =
+    if cw108_selected(active,row_job,selected_job) ∧ (kind=selected_kind)
+    then bvadd(count,cw108_o()) else count
+define cw108_scan_complete(cap : BitVec64, scanned : BitVec64, cpu : BitVec64, dma : BitVec64,
+    revision : BitVec64, expected : BitVec64, same_exclusive_operation : Bool, locked : BitVec8) =
+    cw108_census(cap,scanned,cpu,dma) ∧ (scanned=cap) ∧ (revision=expected) ∧
+    same_exclusive_operation ∧ (locked=cw108_yes())
+
+// Current counts come from the complete fold above. Finish needs no worker:
+// actual old work can become terminal while cleanup is unclaimed or fenced.
+// The ledger row and backend pin are consumed exactly once in one commit.
+// No callback may decrement a caller-selected or cached count.
+define cw108_finish(ticket_bound : Bool, terminal_source : Bool, current_census : Bool,
+    heap_stage : BitVec8, job_stage : BitVec8, slot : BitVec64, generation : BitVec64,
+    operation : BitVec64, kind : BitVec8, cpu : BitVec64, dma : BitVec64,
+    next_cpu : BitVec64, next_dma : BitVec64, active : BitVec8, locked : BitVec8) =
+    ticket_bound ∧ terminal_source ∧ current_census ∧ bvugt(operation,cw108_z()) ∧ cw108_class(kind) ∧
+    (((heap_stage=bvconst(2,8)) ∧ (job_stage=cw108_no())) ∨
+     ((heap_stage=bvconst(3,8)) ∧ (job_stage=bvconst(1,8)))) ∧
+    ((kind=bvconst(1,8)) → (next_dma=dma)) ∧ ((kind=bvconst(2,8)) → (next_cpu=cpu)) ∧
+    heap108_finish(slot,generation,slot,generation,operation,operation,
+        if kind=bvconst(1,8) then cpu else dma,
+        if kind=bvconst(1,8) then next_cpu else next_dma,active,cw108_yes(),locked)
+define cw108_after_finish(commit : Bool, old : BitVec64) =
+    if commit then bvsub(old,cw108_o()) else old
+// kind comes from the authenticated stored ticket, not a completion argument.
+// Only that class changes; total outstanding work is never a substitute.
+define cw108_finish_count(commit : Bool, kind : BitVec8, selected_kind : BitVec8, old : BitVec64) =
+    if commit ∧ (kind=selected_kind) then bvsub(old,cw108_o()) else old
+define cw108_ticket_active(commit : Bool, old : BitVec8) =
+    if commit then cw108_no() else old
+define cw108_cleanup_revision(commit : Bool, old : BitVec64) =
+    if commit then a22_cleanup_revision(old) else old
+
+// This is a current readiness predicate only, never a persistent clean/release
+// receipt. Zero registered tickets is insufficient if any source bypasses the
+// ledger or legacy/controller exclusion cannot be established. Runtime must
+// census every enabled access path before a later retirement operation.
+define cw108_ready(job_bound : Bool, lease_current : Bool,
+    heap_stage : BitVec8, job_stage : BitVec8, census_complete : Bool,
+    cpu : BitVec64, dma : BitVec64, unregistered_conflicts : BitVec64,
+    paths_closed : Bool, terminal_visibility : Bool, custody_held : Bool, locked : BitVec8) =
+    job_bound ∧ lease_current ∧ (heap_stage=bvconst(3,8)) ∧ (job_stage=bvconst(1,8)) ∧
+    census_complete ∧ (cpu=cw108_z()) ∧ (dma=cw108_z()) ∧ (unregistered_conflicts=cw108_z()) ∧
+    paths_closed ∧ terminal_visibility ∧ custody_held ∧ (locked=cw108_yes())
+
+// Claim/fence/finish/ready do not alter payload, tags, extents or quota. They
+// also do not change another directory row or turn readiness into publication.
+define cw108_field(commit : Bool, selected : BitVec64, query : BitVec64,
+    old : BitVec64, next : BitVec64) = a23_field(commit,selected,query,old,next)
+define cw108_held(old : BitVec64) = old
+
+// Constructive conditional backend trace: all admissions precede closure.
+
+define cw108_trace_worker() = cw108_worker(bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true())
+
+define cw108_trace_cpu_submit() = cw108_submit(a23_trace_key(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(1,8),a23_true(),a23_true(),bvconst(1,64),bvconst(3,64),a23_true(),bvconst(41,64),a23_true(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))
+
+define cw108_trace_dma_submit() = cw108_submit(a23_trace_key(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(2,8),a23_true(),a23_true(),bvconst(2,64),bvconst(3,64),a23_true(),bvconst(42,64),a23_true(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))
+
+define cw108_trace_job_b() = a23_key(bvconst(8,64),bvconst(3,64),bvconst(10,64),bvconst(22,64),bvconst(8,64),bvconst(3,64),bvconst(10,64),bvconst(22,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(12288,64),bvconst(12288,64),bvconst(65536,64),bvconst(65536,64),bvconst(31,64),bvconst(31,64),bvconst(4096,64),bvconst(4096,64))
+
+define cw108_trace_b_submit() = cw108_submit(cw108_trace_job_b(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(1,8),a23_true(),a23_true(),bvconst(3,64),bvconst(3,64),a23_true(),bvconst(43,64),a23_true(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))
+
+define cw108_trace_cpu_active() = a23_stage(cw108_trace_cpu_submit(),bvconst(0,8),bvconst(1,8))
+
+define cw108_trace_dma_active() = a23_stage(cw108_trace_dma_submit(),bvconst(0,8),bvconst(1,8))
+
+define cw108_trace_b_active() = a23_stage(cw108_trace_b_submit(),bvconst(0,8),bvconst(1,8))
+
+define cw108_trace_closed() = a23_stage(a23_close(a23_trace_key(),bvconst(2,8),bvconst(1,8),a23_true(),bvconst(1,8)),bvconst(2,8),bvconst(3,8))
+
+define cw108_trace_claim() = cw108_claim(a23_trace_key(),cw108_trace_worker(),cw108_trace_closed(),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,8),bvconst(7,64),bvconst(8,64),bvconst(8,64),bvconst(1,8))
+
+define cw108_trace_lease() = cw108_lease(a23_trace_key(),cw108_trace_worker(),cw108_lease_state(cw108_trace_claim(),bvconst(0,8)),cw108_claim_epoch(cw108_trace_claim(),bvconst(0,64)),bvconst(7,64),bvconst(1,64),bvconst(7,64))
+
+define cw108_trace_cpu_count() = cw108_tally(cw108_tally(cw108_tally(bvconst(0,64),cw108_trace_cpu_active(),bvconst(21,64),bvconst(21,64),bvconst(1,8),bvconst(1,8)),cw108_trace_dma_active(),bvconst(21,64),bvconst(21,64),bvconst(2,8),bvconst(1,8)),cw108_trace_b_active(),bvconst(22,64),bvconst(21,64),bvconst(1,8),bvconst(1,8))
+
+define cw108_trace_dma_count() = cw108_tally(cw108_tally(cw108_tally(bvconst(0,64),cw108_trace_cpu_active(),bvconst(21,64),bvconst(21,64),bvconst(1,8),bvconst(2,8)),cw108_trace_dma_active(),bvconst(21,64),bvconst(21,64),bvconst(2,8),bvconst(2,8)),cw108_trace_b_active(),bvconst(22,64),bvconst(21,64),bvconst(1,8),bvconst(2,8))
+
+define cw108_trace_scan() = cw108_scan(bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),cw108_trace_cpu_active(),bvconst(21,64),a23_trace_key(),bvconst(1,8)) ∧ cw108_scan(bvconst(3,64),bvconst(1,64),cw108_tally(bvconst(0,64),cw108_trace_cpu_active(),bvconst(21,64),bvconst(21,64),bvconst(1,8),bvconst(1,8)),cw108_tally(bvconst(0,64),cw108_trace_cpu_active(),bvconst(21,64),bvconst(21,64),bvconst(1,8),bvconst(2,8)),cw108_trace_dma_active(),bvconst(21,64),a23_trace_key(),bvconst(2,8)) ∧ cw108_scan(bvconst(3,64),bvconst(2,64),cw108_tally(cw108_tally(bvconst(0,64),cw108_trace_cpu_active(),bvconst(21,64),bvconst(21,64),bvconst(1,8),bvconst(1,8)),cw108_trace_dma_active(),bvconst(21,64),bvconst(21,64),bvconst(2,8),bvconst(1,8)),cw108_tally(cw108_tally(bvconst(0,64),cw108_trace_cpu_active(),bvconst(21,64),bvconst(21,64),bvconst(1,8),bvconst(2,8)),cw108_trace_dma_active(),bvconst(21,64),bvconst(21,64),bvconst(2,8),bvconst(2,8)),cw108_trace_b_active(),bvconst(22,64),cw108_trace_job_b(),bvconst(1,8))
+
+define cw108_trace_b_count() = cw108_tally(bvconst(0,64),cw108_trace_b_active(),bvconst(22,64),bvconst(22,64),bvconst(1,8),bvconst(1,8))
+
+define cw108_trace_cpu_terminal() = cw108_terminal(cw108_work_binding(a23_trace_key(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),cw108_trace_cpu_active()),a23_true(),bvconst(3,8),a23_true(),a23_true())
+
+define cw108_trace_dma_terminal() = cw108_terminal(cw108_work_binding(a23_trace_key(),bvconst(42,64),bvconst(42,64),bvconst(2,8),bvconst(2,8),bvconst(2,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(20,64),bvconst(20,64),bvconst(16,64),bvconst(16,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),cw108_trace_dma_active()),a23_true(),bvconst(4,8),a23_true(),a23_true())
+
+define cw108_trace_cpu_finish() = cw108_finish(cw108_work_binding(a23_trace_key(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),cw108_trace_cpu_active()),cw108_trace_cpu_terminal(),(cw108_trace_scan() ∧ cw108_scan_complete(bvconst(3,64),bvconst(3,64),cw108_trace_cpu_count(),cw108_trace_dma_count(),bvconst(8,64),bvconst(8,64),a23_true(),bvconst(1,8))),cw108_trace_closed(),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(1,8),cw108_trace_cpu_count(),cw108_trace_dma_count(),bvconst(0,64),cw108_trace_dma_count(),cw108_trace_cpu_active(),bvconst(1,8))
+
+define cw108_trace_cpu_after() = cw108_finish_count(cw108_trace_cpu_finish(),bvconst(1,8),bvconst(1,8),cw108_trace_cpu_count())
+
+define cw108_trace_dma_finish() = cw108_finish(cw108_work_binding(a23_trace_key(),bvconst(42,64),bvconst(42,64),bvconst(2,8),bvconst(2,8),bvconst(2,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(5,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(20,64),bvconst(20,64),bvconst(16,64),bvconst(16,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),cw108_trace_dma_active()),cw108_trace_dma_terminal(),cw108_scan_complete(bvconst(3,64),bvconst(3,64),cw108_trace_cpu_after(),cw108_trace_dma_count(),bvconst(9,64),bvconst(9,64),a23_true(),bvconst(1,8)),cw108_trace_closed(),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(42,64),bvconst(2,8),cw108_trace_cpu_after(),cw108_trace_dma_count(),bvconst(0,64),bvconst(0,64),cw108_trace_dma_active(),bvconst(1,8))
+
+define cw108_trace_dma_after() = cw108_finish_count(cw108_trace_dma_finish(),bvconst(2,8),bvconst(2,8),cw108_trace_dma_count())
+
+define cw108_trace_ready() = cw108_ready(a23_trace_key(),cw108_trace_lease(),cw108_trace_closed(),bvconst(1,8),cw108_scan_complete(bvconst(3,64),bvconst(3,64),cw108_trace_cpu_after(),cw108_trace_dma_after(),bvconst(10,64),bvconst(10,64),a23_true(),bvconst(1,8)),cw108_trace_cpu_after(),cw108_trace_dma_after(),bvconst(0,64),a23_true(),a23_true(),a23_true(),bvconst(1,8))
+
+example "storage: valid" {
+    assert(cw108_storage(bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(128,64),bvconst(4,64),bvconst(4,64),bvconst(128,64),bvconst(512,64),bvconst(2,64),bvconst(2,64),bvconst(32,64),bvconst(64,64),bvconst(4096,64),bvconst(256,64),bvconst(5056,64),bvconst(8192,64),a23_true()))
+}
+
+example "storage: exact fixed budget" {
+    assert(cw108_storage(bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(128,64),bvconst(4,64),bvconst(4,64),bvconst(128,64),bvconst(512,64),bvconst(2,64),bvconst(2,64),bvconst(32,64),bvconst(64,64),bvconst(4096,64),bvconst(256,64),bvconst(5056,64),bvconst(5056,64),a23_true()))
+}
+
+example "storage: retained extra capacity charged" {
+    assert(cw108_storage(bvconst(2,64),bvconst(3,64),bvconst(64,64),bvconst(192,64),bvconst(4,64),bvconst(4,64),bvconst(128,64),bvconst(512,64),bvconst(2,64),bvconst(2,64),bvconst(32,64),bvconst(64,64),bvconst(4096,64),bvconst(256,64),bvconst(5120,64),bvconst(8192,64),a23_true()))
+}
+
+example "storage: rejects worker capacity shortage" {
+    assert(¬(cw108_storage(bvconst(2,64),bvconst(1,64),bvconst(64,64),bvconst(64,64),bvconst(4,64),bvconst(4,64),bvconst(128,64),bvconst(512,64),bvconst(2,64),bvconst(2,64),bvconst(32,64),bvconst(64,64),bvconst(4096,64),bvconst(256,64),bvconst(4992,64),bvconst(8192,64),a23_true())))
+}
+
+example "storage: rejects work capacity shortage" {
+    assert(¬(cw108_storage(bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(128,64),bvconst(4,64),bvconst(3,64),bvconst(128,64),bvconst(384,64),bvconst(2,64),bvconst(2,64),bvconst(32,64),bvconst(64,64),bvconst(4096,64),bvconst(256,64),bvconst(4928,64),bvconst(8192,64),a23_true())))
+}
+
+example "storage: rejects lease capacity shortage" {
+    assert(¬(cw108_storage(bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(128,64),bvconst(4,64),bvconst(4,64),bvconst(128,64),bvconst(512,64),bvconst(2,64),bvconst(1,64),bvconst(32,64),bvconst(32,64),bvconst(4096,64),bvconst(256,64),bvconst(5024,64),bvconst(8192,64),a23_true())))
+}
+
+example "storage: rejects requested instead of retained bytes" {
+    assert(¬(cw108_storage(bvconst(2,64),bvconst(3,64),bvconst(64,64),bvconst(128,64),bvconst(4,64),bvconst(4,64),bvconst(128,64),bvconst(512,64),bvconst(2,64),bvconst(2,64),bvconst(32,64),bvconst(64,64),bvconst(4096,64),bvconst(256,64),bvconst(5056,64),bvconst(8192,64),a23_true())))
+}
+
+example "storage: rejects zero stride" {
+    assert(¬(cw108_storage(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(4,64),bvconst(4,64),bvconst(128,64),bvconst(512,64),bvconst(2,64),bvconst(2,64),bvconst(32,64),bvconst(64,64),bvconst(4096,64),bvconst(256,64),bvconst(5056,64),bvconst(8192,64),a23_true())))
+}
+
+example "storage: rejects multiplication overflow" {
+    assert(¬(cw108_storage(bvconst(2,64),ptr107_max(),bvconst(64,64),bvsub(bvconst(0,64),bvconst(64,64)),bvconst(4,64),bvconst(4,64),bvconst(128,64),bvconst(512,64),bvconst(2,64),bvconst(2,64),bvconst(32,64),bvconst(64,64),bvconst(4096,64),bvconst(256,64),bvconst(5056,64),bvconst(8192,64),a23_true())))
+}
+
+example "storage: rejects sum overflow" {
+    assert(¬(cw108_storage(bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(128,64),bvconst(4,64),bvconst(4,64),bvconst(128,64),bvconst(512,64),bvconst(2,64),bvconst(2,64),bvconst(32,64),bvconst(64,64),ptr107_max(),bvconst(256,64),bvconst(959,64),ptr107_max(),a23_true())))
+}
+
+example "storage: rejects budget shortage" {
+    assert(¬(cw108_storage(bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(128,64),bvconst(4,64),bvconst(4,64),bvconst(128,64),bvconst(512,64),bvconst(2,64),bvconst(2,64),bvconst(32,64),bvconst(64,64),bvconst(4096,64),bvconst(256,64),bvconst(5056,64),bvconst(5055,64),a23_true())))
+}
+
+example "storage: rejects allocation failure" {
+    assert(¬(cw108_storage(bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(128,64),bvconst(4,64),bvconst(4,64),bvconst(128,64),bvconst(512,64),bvconst(2,64),bvconst(2,64),bvconst(32,64),bvconst(64,64),bvconst(4096,64),bvconst(256,64),bvconst(5056,64),bvconst(8192,64),a23_false())))
+}
+
+example "storage: rejects unencodable capacity" {
+    assert(¬(cw108_storage(bvconst(4294967296,64),bvconst(4294967296,64),bvconst(64,64),bvconst(128,64),bvconst(4,64),bvconst(4,64),bvconst(128,64),bvconst(512,64),bvconst(2,64),bvconst(2,64),bvconst(32,64),bvconst(64,64),bvconst(4096,64),bvconst(256,64),bvconst(5056,64),bvconst(8192,64),a23_true())))
+}
+
+example "enroll: valid" {
+    assert(cw108_enroll(bvconst(1,64),bvconst(2,64),a23_true(),a23_true(),a23_true(),a23_true(),bvconst(7,64),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8)))
+}
+
+example "enroll: rejects null slot" {
+    assert(¬(cw108_enroll(bvconst(0,64),bvconst(2,64),a23_true(),a23_true(),a23_true(),a23_true(),bvconst(7,64),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "enroll: rejects out of range" {
+    assert(¬(cw108_enroll(bvconst(3,64),bvconst(2,64),a23_true(),a23_true(),a23_true(),a23_true(),bvconst(7,64),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "enroll: rejects occupied row" {
+    assert(¬(cw108_enroll(bvconst(1,64),bvconst(2,64),a23_false(),a23_true(),a23_true(),a23_true(),bvconst(7,64),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "enroll: rejects missing cleanup role" {
+    assert(¬(cw108_enroll(bvconst(1,64),bvconst(2,64),a23_true(),a23_false(),a23_true(),a23_true(),bvconst(7,64),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "enroll: rejects stale process descriptor" {
+    assert(¬(cw108_enroll(bvconst(1,64),bvconst(2,64),a23_true(),a23_true(),a23_false(),a23_true(),bvconst(7,64),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "enroll: rejects duplicate incarnation" {
+    assert(¬(cw108_enroll(bvconst(1,64),bvconst(2,64),a23_true(),a23_true(),a23_true(),a23_false(),bvconst(7,64),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "enroll: rejects zero worker serial" {
+    assert(¬(cw108_enroll(bvconst(1,64),bvconst(2,64),a23_true(),a23_true(),a23_true(),a23_true(),bvconst(0,64),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "enroll: rejects serial exhaustion" {
+    assert(¬(cw108_enroll(bvconst(1,64),bvconst(2,64),a23_true(),a23_true(),a23_true(),a23_true(),ptr107_max(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "enroll: rejects unprepared storage" {
+    assert(¬(cw108_enroll(bvconst(1,64),bvconst(2,64),a23_true(),a23_true(),a23_true(),a23_true(),bvconst(7,64),a23_false(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "enroll: rejects stale revision" {
+    assert(¬(cw108_enroll(bvconst(1,64),bvconst(2,64),a23_true(),a23_true(),a23_true(),a23_true(),bvconst(7,64),a23_true(),bvconst(8,64),bvconst(7,64),bvconst(1,8))))
+}
+
+example "enroll: rejects revision exhaustion" {
+    assert(¬(cw108_enroll(bvconst(1,64),bvconst(2,64),a23_true(),a23_true(),a23_true(),a23_true(),bvconst(7,64),a23_true(),ptr107_max(),ptr107_max(),bvconst(1,8))))
+}
+
+example "enroll: rejects unlocked operation" {
+    assert(¬(cw108_enroll(bvconst(1,64),bvconst(2,64),a23_true(),a23_true(),a23_true(),a23_true(),bvconst(7,64),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(0,8))))
+}
+
+example "worker: valid" {
+    assert(cw108_worker(bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true()))
+}
+
+example "worker: rejects null slot" {
+    assert(¬(cw108_worker(bvconst(0,64),bvconst(2,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true())))
+}
+
+example "worker: rejects zero serial" {
+    assert(¬(cw108_worker(bvconst(1,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true())))
+}
+
+example "worker: rejects reused worker row" {
+    assert(¬(cw108_worker(bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(8,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true())))
+}
+
+example "worker: rejects another process" {
+    assert(¬(cw108_worker(bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(7,64),bvconst(1,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true())))
+}
+
+example "worker: rejects restarted process" {
+    assert(¬(cw108_worker(bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(11,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true())))
+}
+
+example "worker: rejects unencodable process generation" {
+    assert(¬(cw108_worker(bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(0,64),bvconst(4294967296,64),bvconst(11,64),bvconst(0,64),bvconst(7,64),bvconst(0,64),bvconst(4294967296,64),bvconst(11,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true())))
+}
+
+example "worker: rejects zero context" {
+    assert(¬(cw108_worker(bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true())))
+}
+
+example "worker: rejects other context" {
+    assert(¬(cw108_worker(bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(12,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true())))
+}
+
+example "worker: rejects other domain" {
+    assert(¬(cw108_worker(bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(1,64),bvconst(1,8),a23_true(),a23_true())))
+}
+
+example "worker: rejects fenced worker" {
+    assert(¬(cw108_worker(bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(2,8),a23_true(),a23_true())))
+}
+
+example "worker: rejects vacant row" {
+    assert(¬(cw108_worker(bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(0,8),a23_true(),a23_true())))
+}
+
+example "worker: rejects missing role" {
+    assert(¬(cw108_worker(bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(1,8),a23_false(),a23_true())))
+}
+
+example "worker: rejects stale descriptor" {
+    assert(¬(cw108_worker(bvconst(1,64),bvconst(2,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),bvconst(11,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_false())))
+}
+
+example "fence: valid" {
+    assert(cw108_fence(a23_true(),a23_true(),bvconst(1,8),bvconst(1,8)))
+}
+
+example "fence: rejects wrong worker" {
+    assert(¬(cw108_fence(a23_false(),a23_true(),bvconst(1,8),bvconst(1,8))))
+}
+
+example "fence: rejects untrusted caller" {
+    assert(¬(cw108_fence(a23_true(),a23_false(),bvconst(1,8),bvconst(1,8))))
+}
+
+example "fence: rejects duplicate transition" {
+    assert(¬(cw108_fence(a23_true(),a23_true(),bvconst(2,8),bvconst(1,8))))
+}
+
+example "fence: rejects unlocked update" {
+    assert(¬(cw108_fence(a23_true(),a23_true(),bvconst(1,8),bvconst(0,8))))
+}
+
+example "worker removal: valid" {
+    assert(cw108_drop_worker(a23_true(),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(1,8)))
+}
+
+example "worker removal: rejects active worker" {
+    assert(¬(cw108_drop_worker(a23_true(),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(1,8))))
+}
+
+example "worker removal: rejects retained job lease" {
+    assert(¬(cw108_drop_worker(a23_true(),bvconst(2,8),bvconst(1,64),bvconst(0,64),bvconst(1,8))))
+}
+
+example "worker removal: rejects outstanding scrub operation" {
+    assert(¬(cw108_drop_worker(a23_true(),bvconst(2,8),bvconst(0,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "worker removal: rejects wrong binding" {
+    assert(¬(cw108_drop_worker(a23_false(),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(1,8))))
+}
+
+example "claim: valid" {
+    assert(cw108_claim(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,8),bvconst(7,64),bvconst(8,64),bvconst(8,64),bvconst(1,8)))
+}
+
+example "claim: last available lease epoch" {
+    assert(cw108_claim(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvsub(bvconst(0,64),bvconst(2,64)),bvconst(0,8),bvconst(7,64),bvconst(8,64),bvconst(8,64),bvconst(1,8)))
+}
+
+example "claim: rejects wrong job binding" {
+    assert(¬(cw108_claim(a23_false(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,8),bvconst(7,64),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "claim: rejects fenced or foreign worker" {
+    assert(¬(cw108_claim(a23_true(),a23_false(),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,8),bvconst(7,64),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "claim: rejects private heap" {
+    assert(¬(cw108_claim(a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,8),bvconst(7,64),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "claim: rejects live heap" {
+    assert(¬(cw108_claim(a23_true(),a23_true(),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,8),bvconst(7,64),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "claim: rejects never attached" {
+    assert(¬(cw108_claim(a23_true(),a23_true(),bvconst(3,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,8),bvconst(7,64),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "claim: rejects unqueued record" {
+    assert(¬(cw108_claim(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,8),bvconst(7,64),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "claim: rejects retired stage in initial profile" {
+    assert(¬(cw108_claim(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(2,8),bvconst(0,8),bvconst(0,64),bvconst(0,8),bvconst(7,64),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "claim: rejects second worker" {
+    assert(¬(cw108_claim(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,8),bvconst(7,64),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "claim: rejects revoking lease" {
+    assert(¬(cw108_claim(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,8),bvconst(7,64),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "claim: rejects epoch wrap" {
+    assert(¬(cw108_claim(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),ptr107_max(),bvconst(0,8),bvconst(7,64),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "claim: rejects active scrub ticket" {
+    assert(¬(cw108_claim(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(1,8),bvconst(7,64),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "claim: rejects zero worker" {
+    assert(¬(cw108_claim(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "claim: rejects stale snapshot" {
+    assert(¬(cw108_claim(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,8),bvconst(7,64),bvconst(8,64),bvconst(7,64),bvconst(1,8))))
+}
+
+example "claim: rejects admission at terminal revision" {
+    assert(¬(cw108_claim(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,8),bvconst(7,64),ptr107_max(),ptr107_max(),bvconst(1,8))))
+}
+
+example "claim: rejects unlocked claim" {
+    assert(¬(cw108_claim(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,8),bvconst(7,64),bvconst(8,64),bvconst(8,64),bvconst(0,8))))
+}
+
+example "lease: valid" {
+    assert(cw108_lease(a23_true(),a23_true(),bvconst(1,8),bvconst(3,64),bvconst(7,64),bvconst(3,64),bvconst(7,64)))
+}
+
+example "lease: rejects wrong job" {
+    assert(¬(cw108_lease(a23_false(),a23_true(),bvconst(1,8),bvconst(3,64),bvconst(7,64),bvconst(3,64),bvconst(7,64))))
+}
+
+example "lease: rejects global worker fence" {
+    assert(¬(cw108_lease(a23_true(),a23_false(),bvconst(1,8),bvconst(3,64),bvconst(7,64),bvconst(3,64),bvconst(7,64))))
+}
+
+example "lease: rejects stale epoch" {
+    assert(¬(cw108_lease(a23_true(),a23_true(),bvconst(1,8),bvconst(3,64),bvconst(7,64),bvconst(2,64),bvconst(7,64))))
+}
+
+example "lease: rejects other worker" {
+    assert(¬(cw108_lease(a23_true(),a23_true(),bvconst(1,8),bvconst(3,64),bvconst(7,64),bvconst(3,64),bvconst(8,64))))
+}
+
+example "lease: rejects revoking lease" {
+    assert(¬(cw108_lease(a23_true(),a23_true(),bvconst(2,8),bvconst(3,64),bvconst(7,64),bvconst(3,64),bvconst(7,64))))
+}
+
+example "lease: rejects unowned lease" {
+    assert(¬(cw108_lease(a23_true(),a23_true(),bvconst(0,8),bvconst(3,64),bvconst(7,64),bvconst(3,64),bvconst(7,64))))
+}
+
+example "work admission: valid" {
+    assert(cw108_submit(a23_true(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(1,8),a23_true(),a23_true(),bvconst(1,64),bvconst(3,64),a23_true(),bvconst(41,64),a23_true(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8)))
+}
+
+example "work admission: rejects wrong allocation" {
+    assert(¬(cw108_submit(a23_false(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(1,8),a23_true(),a23_true(),bvconst(1,64),bvconst(3,64),a23_true(),bvconst(41,64),a23_true(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "work admission: rejects closed owner" {
+    assert(¬(cw108_submit(a23_true(),a23_false(),bvconst(2,8),bvconst(0,8),bvconst(1,8),a23_true(),a23_true(),bvconst(1,64),bvconst(3,64),a23_true(),bvconst(41,64),a23_true(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "work admission: rejects private object" {
+    assert(¬(cw108_submit(a23_true(),a23_true(),bvconst(1,8),bvconst(0,8),bvconst(1,8),a23_true(),a23_true(),bvconst(1,64),bvconst(3,64),a23_true(),bvconst(41,64),a23_true(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "work admission: rejects closed allocation" {
+    assert(¬(cw108_submit(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(1,8),a23_true(),a23_true(),bvconst(1,64),bvconst(3,64),a23_true(),bvconst(41,64),a23_true(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "work admission: rejects unknown work class" {
+    assert(¬(cw108_submit(a23_true(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(3,8),a23_true(),a23_true(),bvconst(1,64),bvconst(3,64),a23_true(),bvconst(41,64),a23_true(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "work admission: rejects DMA in CPU-only profile" {
+    assert(¬(cw108_submit(a23_true(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(2,8),a23_false(),a23_true(),bvconst(1,64),bvconst(3,64),a23_true(),bvconst(41,64),a23_true(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "work admission: rejects unchecked access" {
+    assert(¬(cw108_submit(a23_true(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(1,8),a23_true(),a23_false(),bvconst(1,64),bvconst(3,64),a23_true(),bvconst(41,64),a23_true(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "work admission: rejects no ticket capacity" {
+    assert(¬(cw108_submit(a23_true(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(1,8),a23_true(),a23_true(),bvconst(1,64),bvconst(0,64),a23_true(),bvconst(41,64),a23_true(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "work admission: rejects occupied ticket" {
+    assert(¬(cw108_submit(a23_true(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(1,8),a23_true(),a23_true(),bvconst(1,64),bvconst(3,64),a23_false(),bvconst(41,64),a23_true(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "work admission: rejects zero operation" {
+    assert(¬(cw108_submit(a23_true(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(1,8),a23_true(),a23_true(),bvconst(1,64),bvconst(3,64),a23_true(),bvconst(0,64),a23_true(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "work admission: rejects operation wrap" {
+    assert(¬(cw108_submit(a23_true(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(1,8),a23_true(),a23_true(),bvconst(1,64),bvconst(3,64),a23_true(),ptr107_max(),a23_true(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "work admission: rejects backend capacity failure" {
+    assert(¬(cw108_submit(a23_true(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(1,8),a23_true(),a23_true(),bvconst(1,64),bvconst(3,64),a23_true(),bvconst(41,64),a23_false(),a23_true(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "work admission: rejects remaining fallible commit work" {
+    assert(¬(cw108_submit(a23_true(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(1,8),a23_true(),a23_true(),bvconst(1,64),bvconst(3,64),a23_true(),bvconst(41,64),a23_true(),a23_false(),bvconst(8,64),bvconst(8,64),bvconst(1,8))))
+}
+
+example "work admission: rejects stale revision" {
+    assert(¬(cw108_submit(a23_true(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(1,8),a23_true(),a23_true(),bvconst(1,64),bvconst(3,64),a23_true(),bvconst(41,64),a23_true(),a23_true(),bvconst(8,64),bvconst(7,64),bvconst(1,8))))
+}
+
+example "work admission: rejects revision exhaustion" {
+    assert(¬(cw108_submit(a23_true(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(1,8),a23_true(),a23_true(),bvconst(1,64),bvconst(3,64),a23_true(),bvconst(41,64),a23_true(),a23_true(),ptr107_max(),ptr107_max(),bvconst(1,8))))
+}
+
+example "work binding: valid" {
+    assert(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),bvconst(1,8)))
+}
+
+example "work binding: rejects different allocation custody" {
+    assert(¬(cw108_work_binding(a23_false(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),bvconst(1,8))))
+}
+
+example "work binding: rejects zero operation" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),bvconst(1,8))))
+}
+
+example "work binding: rejects cancelled operation replay" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(42,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),bvconst(1,8))))
+}
+
+example "work binding: rejects different work class" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(2,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),bvconst(1,8))))
+}
+
+example "work binding: rejects unregistered class" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(41,64),bvconst(3,8),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),bvconst(1,8))))
+}
+
+example "work binding: rejects different backend" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),bvconst(1,8))))
+}
+
+example "work binding: rejects unknown backend" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(3,8),bvconst(3,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),bvconst(1,8))))
+}
+
+example "work binding: rejects another source slot" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),bvconst(1,8))))
+}
+
+example "work binding: rejects reused backend slot" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),bvconst(1,8))))
+}
+
+example "work binding: rejects another request" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),bvconst(1,8))))
+}
+
+example "work binding: rejects another agent" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(11,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),bvconst(1,8))))
+}
+
+example "work binding: rejects altered offset" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(1,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),bvconst(1,8))))
+}
+
+example "work binding: rejects altered length" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(15,64),bvconst(2,8),bvconst(2,8),bvconst(1,8))))
+}
+
+example "work binding: rejects zero length" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(2,8),bvconst(2,8),bvconst(1,8))))
+}
+
+example "work binding: rejects wrapping span" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),ptr107_max(),ptr107_max(),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),bvconst(1,8))))
+}
+
+example "work binding: rejects different access" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "work binding: rejects invalid access" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(0,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "work binding: rejects consumed ticket" {
+    assert(¬(cw108_work_binding(a23_true(),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10,64),bvconst(10,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(16,64),bvconst(2,8),bvconst(2,8),bvconst(0,8))))
+}
+
+example "terminal source: valid" {
+    assert(cw108_terminal(a23_true(),a23_true(),bvconst(3,8),a23_true(),a23_true()))
+}
+
+example "terminal source: terminal fault with stopped effects" {
+    assert(cw108_terminal(a23_true(),a23_true(),bvconst(4,8),a23_true(),a23_true()))
+}
+
+example "terminal source: rejects foreign notification" {
+    assert(¬(cw108_terminal(a23_false(),a23_true(),bvconst(3,8),a23_true(),a23_true())))
+}
+
+example "terminal source: rejects recycled source slot" {
+    assert(¬(cw108_terminal(a23_true(),a23_false(),bvconst(3,8),a23_true(),a23_true())))
+}
+
+example "terminal source: rejects requested work" {
+    assert(¬(cw108_terminal(a23_true(),a23_true(),bvconst(0,8),a23_true(),a23_true())))
+}
+
+example "terminal source: rejects authorized work" {
+    assert(¬(cw108_terminal(a23_true(),a23_true(),bvconst(1,8),a23_true(),a23_true())))
+}
+
+example "terminal source: rejects prepared work" {
+    assert(¬(cw108_terminal(a23_true(),a23_true(),bvconst(2,8),a23_true(),a23_true())))
+}
+
+example "terminal source: rejects fault without physical fencing" {
+    assert(¬(cw108_terminal(a23_true(),a23_true(),bvconst(4,8),a23_false(),a23_true())))
+}
+
+example "terminal source: rejects invisible completion" {
+    assert(¬(cw108_terminal(a23_true(),a23_true(),bvconst(3,8),a23_true(),a23_false())))
+}
+
+example "census step: valid" {
+    assert(cw108_scan(bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(21,64),a23_true(),bvconst(2,8)))
+}
+
+example "census step: empty row ignores old payload" {
+    assert(cw108_scan(bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),a23_false(),bvconst(0,8)))
+}
+
+example "census step: rejects inconsistent counts" {
+    assert(¬(cw108_scan(bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(21,64),a23_true(),bvconst(2,8))))
+}
+
+example "census step: rejects past directory end" {
+    assert(¬(cw108_scan(bvconst(3,64),bvconst(3,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(21,64),a23_true(),bvconst(2,8))))
+}
+
+example "census step: rejects noncanonical active marker" {
+    assert(¬(cw108_scan(bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(2,8),bvconst(21,64),a23_true(),bvconst(2,8))))
+}
+
+example "census step: rejects active null job" {
+    assert(¬(cw108_scan(bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),a23_true(),bvconst(2,8))))
+}
+
+example "census step: rejects malformed active binding" {
+    assert(¬(cw108_scan(bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(21,64),a23_false(),bvconst(2,8))))
+}
+
+example "census step: rejects unknown active class" {
+    assert(¬(cw108_scan(bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(21,64),a23_true(),bvconst(3,8))))
+}
+
+example "complete census: valid" {
+    assert(cw108_scan_complete(bvconst(3,64),bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(8,64),bvconst(8,64),a23_true(),bvconst(1,8)))
+}
+
+example "complete census: same-operation scan at terminal revision" {
+    assert(cw108_scan_complete(bvconst(3,64),bvconst(3,64),bvconst(1,64),bvconst(1,64),ptr107_max(),ptr107_max(),a23_true(),bvconst(1,8)))
+}
+
+example "complete census: rejects partial scan" {
+    assert(¬(cw108_scan_complete(bvconst(3,64),bvconst(2,64),bvconst(1,64),bvconst(1,64),bvconst(8,64),bvconst(8,64),a23_true(),bvconst(1,8))))
+}
+
+example "complete census: rejects count overflow" {
+    assert(¬(cw108_scan_complete(bvconst(3,64),bvconst(3,64),ptr107_max(),bvconst(1,64),bvconst(8,64),bvconst(8,64),a23_true(),bvconst(1,8))))
+}
+
+example "complete census: rejects stale revision" {
+    assert(¬(cw108_scan_complete(bvconst(3,64),bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(8,64),bvconst(7,64),a23_true(),bvconst(1,8))))
+}
+
+example "complete census: rejects cached scan across yield" {
+    assert(¬(cw108_scan_complete(bvconst(3,64),bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(8,64),bvconst(8,64),a23_false(),bvconst(1,8))))
+}
+
+example "complete census: rejects unlocked scan" {
+    assert(¬(cw108_scan_complete(bvconst(3,64),bvconst(3,64),bvconst(1,64),bvconst(1,64),bvconst(8,64),bvconst(8,64),a23_true(),bvconst(0,8))))
+}
+
+example "finish old work: valid" {
+    assert(cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "finish old work: completion before closure" {
+    assert(cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(2,8),bvconst(0,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "finish old work: DMA preserves an outstanding CPU operation" {
+    assert(cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "finish old work: rejects forged ticket" {
+    assert(¬(cw108_finish(a23_false(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "finish old work: rejects timeout as completion" {
+    assert(¬(cw108_finish(a23_true(),a23_false(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "finish old work: rejects cached count" {
+    assert(¬(cw108_finish(a23_true(),a23_true(),a23_false(),bvconst(3,8),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "finish old work: rejects private object" {
+    assert(¬(cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(0,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "finish old work: rejects retired job" {
+    assert(¬(cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(2,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "finish old work: rejects zero slot" {
+    assert(¬(cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(0,64),bvconst(9,64),bvconst(41,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "finish old work: rejects zero allocation generation" {
+    assert(¬(cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(2,64),bvconst(0,64),bvconst(41,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "finish old work: rejects zero operation" {
+    assert(¬(cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(0,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "finish old work: rejects counter underflow" {
+    assert(¬(cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),ptr107_max(),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "finish old work: rejects wrong decrement" {
+    assert(¬(cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "finish old work: rejects unknown class" {
+    assert(¬(cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(3,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "finish old work: rejects CPU completion altering DMA" {
+    assert(¬(cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "finish old work: rejects DMA completion consuming CPU" {
+    assert(¬(cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "finish old work: rejects duplicate completion" {
+    assert(¬(cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "finish old work: rejects unlocked completion" {
+    assert(¬(cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "drain readiness: valid" {
+    assert(cw108_ready(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),a23_true(),a23_true(),a23_true(),bvconst(1,8)))
+}
+
+example "drain readiness: rejects foreign job" {
+    assert(¬(cw108_ready(a23_false(),a23_true(),bvconst(3,8),bvconst(1,8),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),a23_true(),a23_true(),a23_true(),bvconst(1,8))))
+}
+
+example "drain readiness: rejects dead worker lease" {
+    assert(¬(cw108_ready(a23_true(),a23_false(),bvconst(3,8),bvconst(1,8),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),a23_true(),a23_true(),a23_true(),bvconst(1,8))))
+}
+
+example "drain readiness: rejects live heap" {
+    assert(¬(cw108_ready(a23_true(),a23_true(),bvconst(2,8),bvconst(1,8),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),a23_true(),a23_true(),a23_true(),bvconst(1,8))))
+}
+
+example "drain readiness: rejects wrong job stage" {
+    assert(¬(cw108_ready(a23_true(),a23_true(),bvconst(3,8),bvconst(2,8),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),a23_true(),a23_true(),a23_true(),bvconst(1,8))))
+}
+
+example "drain readiness: rejects incomplete or stale census" {
+    assert(¬(cw108_ready(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),a23_false(),bvconst(0,64),bvconst(0,64),bvconst(0,64),a23_true(),a23_true(),a23_true(),bvconst(1,8))))
+}
+
+example "drain readiness: rejects CPU work outstanding" {
+    assert(¬(cw108_ready(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),a23_true(),bvconst(1,64),bvconst(0,64),bvconst(0,64),a23_true(),a23_true(),a23_true(),bvconst(1,8))))
+}
+
+example "drain readiness: rejects DMA work outstanding" {
+    assert(¬(cw108_ready(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),a23_true(),bvconst(0,64),bvconst(1,64),bvconst(0,64),a23_true(),a23_true(),a23_true(),bvconst(1,8))))
+}
+
+example "drain readiness: rejects unregistered source conflict" {
+    assert(¬(cw108_ready(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(1,64),a23_true(),a23_true(),a23_true(),bvconst(1,8))))
+}
+
+example "drain readiness: rejects open admission path" {
+    assert(¬(cw108_ready(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),a23_false(),a23_true(),a23_true(),bvconst(1,8))))
+}
+
+example "drain readiness: rejects invisible old effects" {
+    assert(¬(cw108_ready(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),a23_true(),a23_false(),a23_true(),bvconst(1,8))))
+}
+
+example "drain readiness: rejects lost custody" {
+    assert(¬(cw108_ready(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),a23_true(),a23_true(),a23_false(),bvconst(1,8))))
+}
+
+example "drain readiness: rejects unlocked observation" {
+    assert(¬(cw108_ready(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),a23_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),a23_true(),a23_true(),a23_true(),bvconst(0,8))))
+}
+
+example "trace: all three admissions" {
+    assert(cw108_trace_cpu_submit() ∧ cw108_trace_dma_submit() ∧ cw108_trace_b_submit())
+}
+
+example "trace: claim while old work remains" {
+    assert(cw108_trace_claim() ∧ (cw108_trace_cpu_count()=bvconst(1,64)) ∧ (cw108_trace_dma_count()=bvconst(1,64)))
+}
+
+example "trace: exact terminal CPU consumed" {
+    assert(cw108_trace_cpu_finish() ∧ (cw108_trace_cpu_after()=bvconst(0,64)))
+}
+
+example "trace: faulted DMA requires real terminal fencing" {
+    assert(cw108_trace_dma_finish() ∧ (cw108_trace_dma_after()=bvconst(0,64)))
+}
+
+example "trace: current drain readiness" {
+    assert(cw108_trace_ready())
+}
+
+example "trace: B still has its own outstanding operation" {
+    assert(cw108_trace_ready() ∧ (cw108_trace_b_count()=bvconst(1,64)))
+}
+
+example "trace: consumed CPU cannot complete twice" {
+    assert(¬(cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(41,64),bvconst(1,8),cw108_trace_cpu_after(),bvconst(0,64),ptr107_max(),bvconst(0,64),cw108_ticket_active(cw108_trace_cpu_finish(),cw108_trace_cpu_active()),bvconst(1,8))))
+}
+
+example "trace: ready is not publication" {
+    assert(¬(a23_visible(cw108_trace_closed(),a23_true())))
+}
+
+example "law: empty census" {
+    assert(∀(cap : BitVec64). (bvule(cap,repr107_mask()) → cw108_census(cap,bvconst(0,64),bvconst(0,64),bvconst(0,64))))
+}
+
+example "law: scan induction" {
+    assert(∀(cap : BitVec64). ∀(n : BitVec64). ∀(c : BitVec64). ∀(d : BitVec64). ∀(a : BitVec8). ∀(j : BitVec64). ∀(q : BitVec64). ∀(valid : Bool). ∀(kind : BitVec8). (cw108_scan(cap,n,c,d,a,j,valid,kind) → cw108_census(cap,bvadd(n,bvconst(1,64)),cw108_tally(c,a,j,q,kind,bvconst(1,8)),cw108_tally(d,a,j,q,kind,bvconst(2,8)))))
+}
+
+example "law: foreign job does not change either count" {
+    assert(∀(c : BitVec64). ∀(d : BitVec64). ∀(j : BitVec64). ∀(q : BitVec64). ∀(a : BitVec8). ∀(k : BitVec8). (¬(j=q) → ((cw108_tally(c,a,j,q,k,bvconst(1,8))=c) ∧ (cw108_tally(d,a,j,q,k,bvconst(2,8))=d))))
+}
+
+example "law: free rows do not count" {
+    assert(∀(n : BitVec64). ∀(j : BitVec64). ∀(q : BitVec64). ∀(k : BitVec8). (cw108_tally(n,bvconst(0,8),j,q,k,k)=n))
+}
+
+example "law: fenced worker always loses use" {
+    assert(∀(bound : Bool). ∀(e : BitVec64). ∀(w : BitVec64). ∀(re : BitVec64). ∀(rw : BitVec64). (¬cw108_lease(bound,a23_false(),bvconst(1,8),e,w,re,rw)))
+}
+
+example "law: claimed lease cannot be claimed again" {
+    assert(∀(e : BitVec64). ∀(w : BitVec64). ∀(r : BitVec64). (¬cw108_claim(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),e,bvconst(0,8),w,r,r,bvconst(1,8))))
+}
+
+example "law: failed claim preserves epoch" {
+    assert(∀(e : BitVec64). (cw108_claim_epoch(a23_false(),e)=e))
+}
+
+example "law: last claim epoch reaches MAX without wrapping" {
+    assert(cw108_claim_epoch(a23_true(),bvsub(ptr107_max(),bvconst(1,64)))=ptr107_max())
+}
+
+example "law: failed finish preserves count and active state" {
+    assert(∀(n : BitVec64). ∀(a : BitVec8). ((cw108_after_finish(a23_false(),n)=n) ∧ (cw108_ticket_active(a23_false(),a)=a)))
+}
+
+example "law: successful finish consumes one active ticket" {
+    assert(∀(slot : BitVec64). ∀(gen : BitVec64). ∀(op : BitVec64). ∀(n : BitVec64). ∀(next : BitVec64). (cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),slot,gen,op,bvconst(1,8),n,bvconst(0,64),next,bvconst(0,64),bvconst(1,8),bvconst(1,8)) → (bvugt(n,bvconst(0,64)) ∧ (next=cw108_after_finish(a23_true(),n)) ∧ (cw108_ticket_active(a23_true(),bvconst(1,8))=bvconst(0,8)))))
+}
+
+example "law: terminal completion refines Undertaker finish" {
+    assert(∀(slot : BitVec64). ∀(gen : BitVec64). ∀(op : BitVec64). ∀(n : BitVec64). ∀(next : BitVec64). (cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),slot,gen,op,bvconst(1,8),n,bvconst(0,64),next,bvconst(0,64),bvconst(1,8),bvconst(1,8)) → ut108_finish_old(a23_true(),bvconst(1,8),slot,gen,slot,gen,op,op,n,next,bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "law: cleanup revision never decreases" {
+    assert(∀(r : BitVec64). ∀(commit : Bool). (bvuge(cw108_cleanup_revision(commit,r),r)))
+}
+
+example "law: cleanup revision remains saturated" {
+    assert(cw108_cleanup_revision(a23_true(),ptr107_max())=ptr107_max())
+}
+
+example "law: same revision cannot authorize a cached scan" {
+    assert(∀(cap : BitVec64). ∀(c : BitVec64). ∀(d : BitVec64). ∀(r : BitVec64). (¬cw108_scan_complete(cap,cap,c,d,r,r,a23_false(),bvconst(1,8))))
+}
+
+example "law: prepared backend is never terminal" {
+    assert(∀(bound : Bool). ∀(pin : Bool). ∀(stopped : Bool). ∀(visible : Bool). (¬cw108_terminal(bound,pin,bvconst(2,8),stopped,visible)))
+}
+
+example "law: fault without fencing is not terminal" {
+    assert(∀(bound : Bool). ∀(pin : Bool). ∀(visible : Bool). (¬cw108_terminal(bound,pin,bvconst(4,8),a23_false(),visible)))
+}
+
+example "law: readiness requires both counts and unknown sources zero" {
+    assert(∀(c : BitVec64). ∀(d : BitVec64). ∀(u : BitVec64). (cw108_ready(a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),a23_true(),c,d,u,a23_true(),a23_true(),a23_true(),bvconst(1,8)) → ((c=bvconst(0,64)) ∧ (d=bvconst(0,64)) ∧ (u=bvconst(0,64)))))
+}
+
+example "law: other directory entries preserved" {
+    assert(∀(selected : BitVec64). ∀(query : BitVec64). ∀(old : BitVec64). ∀(next : BitVec64). ∀(commit : Bool). (¬(selected=query) → (cw108_field(commit,selected,query,old,next)=old)))
+}
+
+example "law: rejection preserves selected directory entry" {
+    assert(∀(s : BitVec64). ∀(old : BitVec64). ∀(next : BitVec64). (cw108_field(a23_false(),s,s,old,next)=old))
+}
+
+example "law: held payload and fixed storage never refunded" {
+    assert(∀(payload : BitVec64). ∀(fixed : BitVec64). ((cw108_held(payload)=payload) ∧ (cw108_held(fixed)=fixed)))
+}
+
+example "law: closed stage still excludes every old alias" {
+    assert(∀(h : BitVec64). ∀(s : BitVec64). ∀(g : BitVec64). ∀(tag : BitVec8). (¬a23_current(h,tag,s,g,bvconst(3,8),a23_true())))
+}
+
+example "law: finish preserves the other work class" {
+    assert(∀(commit : Bool). ∀(k : BitVec8). ∀(q : BitVec8). ∀(n : BitVec64). (¬(k=q) → (cw108_finish_count(commit,k,q,n)=n)))
+}
+
+example "law: DMA completion cannot decrement CPU" {
+    assert(∀(c : BitVec64). ∀(d : BitVec64). ∀(nc : BitVec64). ∀(nd : BitVec64). (cw108_finish(a23_true(),a23_true(),a23_true(),bvconst(3,8),bvconst(1,8),bvconst(2,64),bvconst(9,64),bvconst(42,64),bvconst(2,8),c,d,nc,nd,bvconst(1,8),bvconst(1,8)) → ((nc=c) ∧ (nd=bvsub(d,bvconst(1,64))))))
+}
+
+example "law: one removed matching row agrees with census decrement" {
+    assert(∀(others : BitVec64). (bvult(others,ptr107_max()) → (cw108_after_finish(a23_true(),cw108_tally(others,bvconst(1,8),bvconst(21,64),bvconst(21,64),bvconst(1,8),bvconst(1,8)))=cw108_tally(others,bvconst(0,8),bvconst(21,64),bvconst(21,64),bvconst(1,8),bvconst(1,8)))))
+}
+
+example "law: successful issuance strictly advances operation identity" {
+    assert(∀(n : BitVec64). ((bvugt(n,bvconst(0,64)) ∧ bvult(n,ptr107_max())) → bvugt(a23_next(a23_true(),n),n)))
+}

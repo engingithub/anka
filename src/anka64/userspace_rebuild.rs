@@ -1,5 +1,7 @@
 //! First Phase 10.7 executable witness: a standalone typed word-pointer application.
 //! Guest preprocessing, compilation and linking precede exact sealed publication.
+#[cfg(test)]
+mod malloc_tests;
 use super::ankald::{publish_linked_image, run_ankald, AnkaldError, AnkaldPublishError, LinkedArtifactKey};
 use super::cc2_fixed_point::{Cc2FixedPointError, Cc2FixedPointWitness};
 use super::dev_compiler::{compile_application_aom_with_linked_compiler, DevelopmentCompileError};
@@ -110,7 +112,7 @@ fn rebuild_application_profile(producer:&Cc2FixedPointWitness,bundle:&SourceBund
     }
     // Ordinary spawn currently enters at zero. Do not silently patch a linked image.
     if image.entry != 0 { return Err(RebuildError::UnsupportedEntry); }
-    let mut fabric = Fabric::new(0x1000000);
+    let mut fabric = if protected { Fabric::with_application_heap(0x1000000).expect("valid protected application heap profile") } else { Fabric::new(0x1000000) };
     let mut placement = PhysicalPlacementManager::new(0x10000, 0x700000).expect("valid application pool");
     let artifact = publish_linked_image(&mut fabric, &mut placement, "rebuilt-application", &image)
         .map_err(RebuildError::Publish)?;
@@ -286,6 +288,7 @@ mod tests {
             include_bytes!("../../userspace/system/compiler/ankapp.c"),
             include_bytes!("../../userspace/system/compiler/ankald.c")).unwrap();
         check_protected_module_emission(&producer, &authority, &publication);
+        super::malloc_tests::check_malloc_free(&producer, &authority, &publication);
         let source = include_bytes!("../../userspace/bin/pointer_probe.c");
         let mut application = rebuild_application(&producer, &bundle(source), Some(&authority)).unwrap();
         assert_eq!(application.effective_source(), source);

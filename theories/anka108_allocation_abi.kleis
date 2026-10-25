@@ -1,0 +1,596 @@
+// Phase 10.8 A1 concrete proposed syscall/C refinement. SPECIFICATION ONLY.
+// Current runtime ends at syscall 20 and exports scalar event results only.
+// Reserve 21=SYS_MALLOC, 22=SYS_FREE. No new instruction or payload format.
+// AC2 surface: void *malloc(int bytes); void free(void *pointer).
+// int is the existing 64-bit scalar; this is not a full ISO C libc claim.
+// malloc trap: R0=21, R1=bytes, R2..R5=0, pairs 0/2/4 scalar.
+// malloc reply: R0/R1 protected pointer or canonical untagged NULL;
+// R2 status (0 success incl. size-zero, 1 capacity, 2 invalid size), R3=0.
+// free trap: R0=22,R1=0; R2/R3 exact typed argument; R4=R5=0.
+// free reply: scalar R0=R1=0 only AFTER retirement, or immediate free(NULL).
+// Invalid free/forged request is ProtectionFault with no allocator mutation.
+// Other saved registers, kinds, controls and return authority are preserved.
+// malloc results require NEW trusted event-result machinery; generic scalar
+// results and handler scratch can never mint pointer kind. One event, one result.
+import "anka108_allocation.kleis"
+import "anka107_pointer_events.kleis"
+
+define ha108_malloc_abi(number : BitVec64, reserved2 : BitVec64,
+    reserved3 : BitVec64, reserved4 : BitVec64, reserved5 : BitVec64,
+    kind01 : BitVec8, kind23 : BitVec8, kind45 : BitVec8) =
+    (number=bvconst(21,64)) ∧ (reserved2=heap108_zero()) ∧
+    (reserved3=heap108_zero()) ∧ (reserved4=heap108_zero()) ∧
+    (reserved5=heap108_zero()) ∧ (kind01=bvconst(0,8)) ∧
+    (kind23=bvconst(0,8)) ∧ (kind45=bvconst(0,8))
+define ha108_free_abi(number : BitVec64, reserved1 : BitVec64,
+    reserved4 : BitVec64, reserved5 : BitVec64,
+    kind01 : BitVec8, kind45 : BitVec8) =
+    (number=bvconst(22,64)) ∧ (reserved1=heap108_zero()) ∧
+    (reserved4=heap108_zero()) ∧ (reserved5=heap108_zero()) ∧
+    (kind01=bvconst(0,8)) ∧ (kind45=bvconst(0,8))
+define ha108_null(h : BitVec64, pos : BitVec64, tag : BitVec8) =
+    (h=heap108_zero()) ∧ (pos=heap108_zero()) ∧ (tag=bvconst(0,8))
+
+// Saved syscall image is owned and intact. pid/incarnation are kernel-selected;
+// event ID is a protected nonreused identity, not public depth or current CPU.
+define ha108_event(saved_context : BitVec64, context : BitVec64,
+    saved_domain : BitVec64, domain : BitVec64,
+    public_depth : BitVec64, private_depth : BitVec64,
+    header_exact : BitVec8, cause_syscall : BitVec8, supervisor : BitVec8,
+    pid : BitVec64, saved_pid : BitVec64, incarnation : BitVec64,
+    saved_incarnation : BitVec64, event : BitVec64, saved_event : BitVec64,
+    pending : BitVec8, handler_frames_empty : BitVec8) =
+    event107_admit(saved_context,context,saved_domain,domain,public_depth,
+        private_depth,header_exact,bvconst(1,8),bvconst(1,8)) ∧
+    bvugt(context,heap108_zero()) ∧ bvugt(incarnation,heap108_zero()) ∧
+    (pid=saved_pid) ∧ (incarnation=saved_incarnation) ∧
+    bvugt(event,heap108_zero()) ∧ (event=saved_event) ∧
+    heap108_yes(cause_syscall) ∧ heap108_yes(supervisor) ∧
+    heap108_yes(pending) ∧ heap108_yes(handler_frames_empty)
+
+// The checked publication and reply are one serialized decision. If result
+// delivery cannot be prepared, no allocation is published. A delayed reply
+// must revalidate record liveness/owner before installing kind into the image.
+define ha108_pointer_reply(event_ok : Bool, abi_ok : Bool, publication : Bool,
+    phase : BitVec8, owner : Bool, number : BitVec64, slot : BitVec64, gen : BitVec64,
+    published_slot : BitVec64, published_gen : BitVec64,
+    h : BitVec64, pos : BitVec64, tag : BitVec8, status : BitVec64,
+    scalar_mask : BitVec64, result_event : BitVec64, active_event : BitVec64,
+    result_pending : BitVec8, serialized : BitVec8) =
+    event_ok ∧ abi_ok ∧ publication ∧
+    heap108_current(h,tag,slot,gen,phase,bvconst(2,8),owner) ∧
+    (slot=published_slot) ∧ (gen=published_gen) ∧
+    (number=bvconst(21,64)) ∧ repr107_components(slot,gen) ∧
+    (h=repr107_handle(slot,gen)) ∧ (pos=heap108_zero()) ∧
+    heap108_yes(tag) ∧ (status=heap108_zero()) ∧
+    (scalar_mask=bvconst(12,64)) ∧ bvugt(active_event,heap108_zero()) ∧
+    (result_event=active_event) ∧ heap108_yes(result_pending) ∧ heap108_yes(serialized)
+
+// Nonallocation results have no grant, registry publication or charge. A1
+// distinguishes zero size, a well-formed but unadmitted positive request, and
+// negative/unrepresentable signed input. Neither word may retain old bits.
+define ha108_null_reply(event_ok : Bool, abi_ok : Bool, n : BitVec64,
+    capacity_failed : BitVec8, h : BitVec64, pos : BitVec64, tag : BitVec8,
+    status : BitVec64, allocation_published : BitVec8) =
+    event_ok ∧ abi_ok ∧ ha108_null(h,pos,tag) ∧
+    (allocation_published=bvconst(0,8)) ∧
+    (((n=heap108_zero()) ∧ (status=heap108_zero()) ∧ (capacity_failed=bvconst(0,8))) ∨
+     (heap108_size(n) ∧ (status=bvconst(1,64)) ∧ heap108_yes(capacity_failed)) ∨
+     (bvugt(n,heap108_signed_max()) ∧ (status=bvconst(2,64)) ∧ (capacity_failed=bvconst(0,8))))
+
+define ha108_free_begin(event_ok : Bool, abi_ok : Bool,
+    h : BitVec64, pos : BitVec64, tag : BitVec8, exact_free : Bool) =
+    event_ok ∧ abi_ok ∧ (ha108_null(h,pos,tag) ∨
+        (bvugt(h,heap108_zero()) ∧ heap108_yes(tag) ∧ exact_free))
+define ha108_free_reply(event_ok : Bool, abi_ok : Bool, null_argument : Bool,
+    close_committed : Bool, retire_committed : Bool, scalar0 : BitVec64,
+    scalar1 : BitVec64, tag01 : BitVec8) =
+    event_ok ∧ abi_ok ∧ (null_argument ∨ (close_committed ∧ retire_committed)) ∧
+    (scalar0=heap108_zero()) ∧ (scalar1=heap108_zero()) ∧ (tag01=bvconst(0,8))
+
+// Apply a validated malloc reply to the SAME saved image atomically; status is
+// outside the pointer pair. No generic scalar overlay may then destroy/mint it.
+// Full frame control/flags/return authority use the existing owned restore rule.
+define ha108_malloc_word(accepted : Bool, lane : BitVec64, saved : BitVec64,
+    h : BitVec64, pos : BitVec64, status : BitVec64) =
+    if accepted then
+        if lane=bvconst(0,64) then h else
+        if lane=bvconst(1,64) then pos else
+        if lane=bvconst(2,64) then status else
+        if lane=bvconst(3,64) then heap108_zero() else saved
+    else saved
+define ha108_malloc_kind(accepted : Bool, pair : BitVec64,
+    saved : BitVec8, result_tag : BitVec8) =
+    if accepted then
+        if pair=bvconst(0,64) then result_tag else
+        if pair=bvconst(2,64) then bvconst(0,8) else saved
+    else saved
+define ha108_pending_after(accepted : Bool, before : BitVec8) =
+    if accepted then bvconst(0,8) else before
+
+// CC2 uses existing ABI v2 lanes: scalar malloc arg R0, free pointer arg R0/R1,
+// malloc pointer return R0/R1. Move free argument to R2/R3 with PMOV BEFORE
+// writing syscall 22 into R0; numeric MOV would destroy authenticity.
+define ha108_lower_malloc(parameter : BitVec64, return_first : BitVec64,
+    return_second : BitVec64, result_checked : BitVec8) =
+    (parameter=bvconst(0,64)) ∧
+    kind107_return(bvconst(1,8),return_first,return_second,result_checked)
+define ha108_lower_free(source : BitVec64, destination : BitVec64,
+    typed_move : BitVec8, before_number : BitVec8) =
+    (source=bvconst(0,64)) ∧ (destination=bvconst(2,64)) ∧
+    heap108_yes(typed_move) ∧ heap108_yes(before_number)
+// A supported void*/T* conversion preserves all words, kind and view. Casts
+// cannot create integer provenance, enlarge bounds or alter the allocator class.
+define ha108_pointer_conversion(h : BitVec64, pos : BitVec64, tag : BitVec8,
+    result_h : BitVec64, result_pos : BitVec64, result_tag : BitVec8,
+    object_pointer_types : BitVec8) =
+    (h=result_h) ∧ (pos=result_pos) ∧ (tag=result_tag) ∧
+    ((tag=bvconst(0,8)) ∨ (tag=bvconst(1,8))) ∧ heap108_yes(object_pointer_types)
+
+
+
+// A1 executable witnesses: ordinary cases, hostile boundaries, and general laws.
+
+example "ha108_malloc_abi accepts" {
+    assert(ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)))
+}
+
+example "ha108_malloc_abi rejects wrong syscall" {
+    assert(¬(ha108_malloc_abi(bvconst(20,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8))))
+}
+
+example "ha108_malloc_abi rejects reserved R2" {
+    assert(¬(ha108_malloc_abi(bvconst(21,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8))))
+}
+
+example "ha108_malloc_abi rejects reserved R3" {
+    assert(¬(ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8))))
+}
+
+example "ha108_malloc_abi rejects reserved R4" {
+    assert(¬(ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8))))
+}
+
+example "ha108_malloc_abi rejects reserved R5" {
+    assert(¬(ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(0,8),bvconst(0,8))))
+}
+
+example "ha108_malloc_abi rejects pointer as size" {
+    assert(¬(ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(0,8),bvconst(0,8))))
+}
+
+example "ha108_malloc_abi rejects unexpected R2 pointer" {
+    assert(¬(ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(0,8))))
+}
+
+example "ha108_malloc_abi rejects unexpected R4 pointer" {
+    assert(¬(ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(1,8))))
+}
+
+example "ha108_free_abi accepts" {
+    assert(ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)))
+}
+
+example "ha108_free_abi rejects wrong syscall" {
+    assert(¬(ha108_free_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8))))
+}
+
+example "ha108_free_abi rejects reserved R1" {
+    assert(¬(ha108_free_abi(bvconst(22,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8))))
+}
+
+example "ha108_free_abi rejects reserved R4" {
+    assert(¬(ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,8),bvconst(0,8))))
+}
+
+example "ha108_free_abi rejects reserved R5" {
+    assert(¬(ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(0,8))))
+}
+
+example "ha108_free_abi rejects tagged call number" {
+    assert(¬(ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "ha108_free_abi rejects tagged flags" {
+    assert(¬(ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "ha108_null accepts" {
+    assert(ha108_null(bvconst(0,64),bvconst(0,64),bvconst(0,8)))
+}
+
+example "ha108_null rejects nonzero handle" {
+    assert(¬(ha108_null(bvconst(1,64),bvconst(0,64),bvconst(0,8))))
+}
+
+example "ha108_null rejects nonzero position" {
+    assert(¬(ha108_null(bvconst(0,64),bvconst(1,64),bvconst(0,8))))
+}
+
+example "ha108_null rejects tagged zeros" {
+    assert(¬(ha108_null(bvconst(0,64),bvconst(0,64),bvconst(1,8))))
+}
+
+example "ha108_event accepts" {
+    assert(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "ha108_event rejects wrong context" {
+    assert(¬(ha108_event(bvconst(101,64),bvconst(102,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_event rejects wrong domain" {
+    assert(¬(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(8,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_event rejects invented public frame" {
+    assert(¬(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_event rejects missing protected frame" {
+    assert(¬(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_event rejects modified header" {
+    assert(¬(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_event rejects IRQ masquerades as syscall" {
+    assert(¬(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_event rejects user result injection" {
+    assert(¬(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_event rejects different process" {
+    assert(¬(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(2,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_event rejects restarted process" {
+    assert(¬(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(5,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_event rejects different pending event" {
+    assert(¬(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(42,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_event rejects reserved event identity" {
+    assert(¬(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_event rejects consumed event" {
+    assert(¬(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "ha108_event rejects live handler-local frame" {
+    assert(¬(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "ha108_pointer_reply accepts" {
+    assert(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "ha108_pointer_reply rejects unowned saved image" {
+    assert(¬(ha108_pointer_reply((bvconst(0,8)=bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_reply rejects malformed saved request" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_reply rejects uncommitted allocation" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),(bvconst(0,8)=bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_reply rejects freed before delayed delivery" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(3,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_reply rejects different allocation receipt" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(8,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_reply rejects different generation receipt" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(2,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_reply rejects foreign pointer result" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),(bvconst(0,8)=bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_reply rejects another syscall mints a pointer" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(20,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_reply rejects different handle" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967304,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_reply rejects interior initial pointer" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(1,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_reply rejects lost protected kind" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_reply rejects pointer with failure status" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(1,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_reply rejects scalar write to pointer half" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(13,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_reply rejects wrong result event" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(40,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_reply rejects duplicate reply" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_reply rejects unserialized publication and reply" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "ha108_null_reply accepts" {
+    assert(ha108_null_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(0,8)))
+}
+
+example "ha108_null_reply rejects zero size consumes allocation" {
+    assert(¬(ha108_null_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(1,8))))
+}
+
+example "ha108_null_reply rejects leftover handle" {
+    assert(¬(ha108_null_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),bvconst(0,64),bvconst(0,8),bvconst(4294967303,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(0,8))))
+}
+
+example "ha108_null_reply rejects leftover position" {
+    assert(¬(ha108_null_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(0,64),bvconst(0,8))))
+}
+
+example "ha108_null_reply rejects leftover pointer kind" {
+    assert(¬(ha108_null_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(0,8))))
+}
+
+example "ha108_null_reply rejects unowned frame" {
+    assert(¬(ha108_null_reply((bvconst(0,8)=bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(0,8))))
+}
+
+example "ha108_null_reply rejects zero size reports capacity failure" {
+    assert(¬(ha108_null_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,64),bvconst(0,8))))
+}
+
+example "ha108_null_reply rejects positive request silently returns success null" {
+    assert(¬(ha108_null_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),bvconst(1,64),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(0,8))))
+}
+
+example "ha108_null_reply rejects invalid input reported success" {
+    assert(¬(ha108_null_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),bvsub(ptr107_max(),bvconst(0,64)),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(0,8))))
+}
+
+example "ha108_null_reply capacity failure" {
+    assert(ha108_null_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),bvconst(17,64),bvconst(1,8),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,64),bvconst(0,8)))
+}
+
+example "ha108_null_reply negative input" {
+    assert(ha108_null_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),bvsub(ptr107_max(),bvconst(0,64)),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(2,64),bvconst(0,8)))
+}
+
+example "ha108_null_reply size above signed maximum" {
+    assert(ha108_null_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),bvsub(ptr107_max(),bvconst(9223372036854775807,64)),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(2,64),bvconst(0,8)))
+}
+
+example "ha108_free_begin accepts" {
+    assert(ha108_free_begin(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64))))
+}
+
+example "ha108_free_begin rejects integer imitation" {
+    assert(¬(ha108_free_begin(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)),bvconst(4294967303,64),bvconst(0,64),bvconst(0,8),heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)))))
+}
+
+example "ha108_free_begin rejects invalid whole-allocation token" {
+    assert(¬(ha108_free_begin(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),(bvconst(0,8)=bvconst(1,8)))))
+}
+
+example "ha108_free_begin rejects wrong event" {
+    assert(¬(ha108_free_begin((bvconst(0,8)=bvconst(1,8)),ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)))))
+}
+
+example "ha108_free_begin rejects wrong ABI" {
+    assert(¬(ha108_free_begin(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)))))
+}
+
+example "ha108_free_begin NULL no-op" {
+    assert(ha108_free_begin(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(0,8)=bvconst(1,8))))
+}
+
+example "ha108_free_reply accepts" {
+    assert(ha108_free_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)),(bvconst(0,8)=bvconst(1,8)),heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),heap108_retire(bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(0,64),bvconst(0,64),bvconst(0,8)))
+}
+
+example "ha108_free_reply rejects return before closing" {
+    assert(¬(ha108_free_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)),(bvconst(0,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),heap108_retire(bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(0,64),bvconst(0,64),bvconst(0,8))))
+}
+
+example "ha108_free_reply rejects return before drainage" {
+    assert(¬(ha108_free_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)),(bvconst(0,8)=bvconst(1,8)),heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),bvconst(0,64),bvconst(0,64),bvconst(0,8))))
+}
+
+example "ha108_free_reply rejects wrong event" {
+    assert(¬(ha108_free_reply((bvconst(0,8)=bvconst(1,8)),ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)),(bvconst(0,8)=bvconst(1,8)),heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),heap108_retire(bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(0,64),bvconst(0,64),bvconst(0,8))))
+}
+
+example "ha108_free_reply rejects tagged scalar result" {
+    assert(¬(ha108_free_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)),(bvconst(0,8)=bvconst(1,8)),heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),heap108_retire(bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(0,64),bvconst(0,64),bvconst(1,8))))
+}
+
+example "ha108_free_reply rejects nonzero reserved result half" {
+    assert(¬(ha108_free_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)),(bvconst(0,8)=bvconst(1,8)),heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),heap108_retire(bvconst(2,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(0,64),bvconst(1,64),bvconst(0,8))))
+}
+
+example "ha108_free_reply NULL immediate success" {
+    assert(ha108_free_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)),ha108_null(bvconst(0,64),bvconst(0,64),bvconst(0,8)),(bvconst(0,8)=bvconst(1,8)),(bvconst(0,8)=bvconst(1,8)),bvconst(0,64),bvconst(0,64),bvconst(0,8)))
+}
+
+example "ha108_lower_malloc accepts" {
+    assert(ha108_lower_malloc(bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,8)))
+}
+
+example "ha108_lower_malloc rejects wrong size lane" {
+    assert(¬(ha108_lower_malloc(bvconst(2,64),bvconst(0,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "ha108_lower_malloc rejects wrong return lane" {
+    assert(¬(ha108_lower_malloc(bvconst(0,64),bvconst(4,64),bvconst(1,64),bvconst(1,8))))
+}
+
+example "ha108_lower_malloc rejects torn return pair" {
+    assert(¬(ha108_lower_malloc(bvconst(0,64),bvconst(0,64),bvconst(2,64),bvconst(1,8))))
+}
+
+example "ha108_lower_malloc rejects unvalidated pointer result" {
+    assert(¬(ha108_lower_malloc(bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,8))))
+}
+
+example "ha108_lower_free accepts" {
+    assert(ha108_lower_free(bvconst(0,64),bvconst(2,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "ha108_lower_free rejects wrong source lane" {
+    assert(¬(ha108_lower_free(bvconst(4,64),bvconst(2,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_lower_free rejects wrong destination lane" {
+    assert(¬(ha108_lower_free(bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_lower_free rejects ordinary MOV substitutes for PMOV" {
+    assert(¬(ha108_lower_free(bvconst(0,64),bvconst(2,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "ha108_lower_free rejects number overwrites argument first" {
+    assert(¬(ha108_lower_free(bvconst(0,64),bvconst(2,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "ha108_pointer_conversion accepts" {
+    assert(ha108_pointer_conversion(bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(1,8)))
+}
+
+example "ha108_pointer_conversion rejects changed identity" {
+    assert(¬(ha108_pointer_conversion(bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(4294967304,64),bvconst(0,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_conversion rejects changed position" {
+    assert(¬(ha108_pointer_conversion(bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(4294967303,64),bvconst(1,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_conversion rejects discarded kind" {
+    assert(¬(ha108_pointer_conversion(bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(4294967303,64),bvconst(0,64),bvconst(0,8),bvconst(1,8))))
+}
+
+example "ha108_pointer_conversion rejects integer to pointer cast" {
+    assert(¬(ha108_pointer_conversion(bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,8))))
+}
+
+example "ha108_pointer_conversion preserves canonical null" {
+    assert(ha108_pointer_conversion(bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(1,8)))
+}
+
+example "malloc result word lane 0" {
+    assert(ha108_malloc_word(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),bvconst(0,64),bvconst(77,64),bvconst(4294967303,64),bvconst(0,64),bvconst(0,64))=bvconst(4294967303,64))
+}
+
+example "malloc result word lane 1" {
+    assert(ha108_malloc_word(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),bvconst(1,64),bvconst(77,64),bvconst(4294967303,64),bvconst(0,64),bvconst(0,64))=bvconst(0,64))
+}
+
+example "malloc result word lane 2" {
+    assert(ha108_malloc_word(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),bvconst(2,64),bvconst(77,64),bvconst(4294967303,64),bvconst(0,64),bvconst(0,64))=bvconst(0,64))
+}
+
+example "malloc result word lane 3" {
+    assert(ha108_malloc_word(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),bvconst(3,64),bvconst(77,64),bvconst(4294967303,64),bvconst(0,64),bvconst(0,64))=bvconst(0,64))
+}
+
+example "malloc result word lane 4" {
+    assert(ha108_malloc_word(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),bvconst(4,64),bvconst(77,64),bvconst(4294967303,64),bvconst(0,64),bvconst(0,64))=bvconst(77,64))
+}
+
+example "malloc result word lane 13" {
+    assert(ha108_malloc_word(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),bvconst(13,64),bvconst(77,64),bvconst(4294967303,64),bvconst(0,64),bvconst(0,64))=bvconst(77,64))
+}
+
+example "malloc result word lane 15" {
+    assert(ha108_malloc_word(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),bvconst(15,64),bvconst(77,64),bvconst(4294967303,64),bvconst(0,64),bvconst(0,64))=bvconst(77,64))
+}
+
+example "malloc result kind pair 0" {
+    assert(ha108_malloc_kind(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),bvconst(0,64),bvconst(1,8),bvconst(1,8))=bvconst(1,8))
+}
+
+example "malloc result kind pair 2" {
+    assert(ha108_malloc_kind(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),bvconst(2,64),bvconst(1,8),bvconst(1,8))=bvconst(0,8))
+}
+
+example "malloc result kind pair 4" {
+    assert(ha108_malloc_kind(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),bvconst(4,64),bvconst(1,8),bvconst(1,8))=bvconst(1,8))
+}
+
+example "malloc result kind pair 10" {
+    assert(ha108_malloc_kind(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),bvconst(10,64),bvconst(1,8),bvconst(1,8))=bvconst(1,8))
+}
+
+example "allocation result consumed once" {
+    assert(ha108_pending_after(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),bvconst(1,8))=bvconst(0,8))
+}
+
+example "consumed result cannot be delivered again" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),ha108_pending_after(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),bvconst(1,8)),bvconst(1,8))))
+}
+
+example "failed return preserves saved words" {
+    assert(ha108_malloc_word((bvconst(0,8)=bvconst(1,8)),bvconst(0,64),bvconst(77,64),bvconst(4294967303,64),bvconst(0,64),bvconst(0,64))=bvconst(77,64))
+}
+
+example "failed return preserves event pending" {
+    assert(ha108_pending_after((bvconst(0,8)=bvconst(1,8)),bvconst(1,8))=bvconst(1,8))
+}
+
+example "capacity failure clears both pointer words" {
+    assert((ha108_malloc_word((bvconst(1,8)=bvconst(1,8)),bvconst(0,64),bvconst(99,64),bvconst(0,64),bvconst(0,64),bvconst(1,64))=bvconst(0,64) ∧ ha108_malloc_word((bvconst(1,8)=bvconst(1,8)),bvconst(1,64),bvconst(99,64),bvconst(0,64),bvconst(0,64),bvconst(1,64))=bvconst(0,64)))
+}
+
+example "capacity failure cannot retain pointer kind" {
+    assert(¬(ha108_malloc_kind((bvconst(1,8)=bvconst(1,8)),bvconst(0,64),bvconst(1,8),bvconst(0,8))=bvconst(1,8)))
+}
+
+example "ordinary scalar event output cannot mint kind" {
+    assert(¬(event107_tag(bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(0,8))=bvconst(1,8)))
+}
+
+example "saved event kind does not revive a retired allocation" {
+    assert(¬(heap108_current(bvconst(4294967303,64),event107_tag(bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(4,64),bvconst(1,8),bvconst(0,8)),bvconst(7,64),heap108_after(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(1,64),bvconst(2,64),heap108_phase_after(heap108_retire(heap108_phase_after(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),bvconst(1,8),bvconst(2,8)),heap108_after(heap108_finish(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(99,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,64),bvconst(0,64)),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),heap108_phase_after(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),bvconst(1,8),bvconst(2,8)),bvconst(3,8)),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,64),bvconst(2,64)),heap108_phase_after(heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(1,64),bvconst(2,64),heap108_phase_after(heap108_retire(heap108_phase_after(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),bvconst(1,8),bvconst(2,8)),heap108_after(heap108_finish(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(99,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,64),bvconst(0,64)),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),heap108_phase_after(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),bvconst(1,8),bvconst(2,8)),bvconst(3,8)),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),heap108_phase_after(heap108_retire(heap108_phase_after(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),bvconst(1,8),bvconst(2,8)),heap108_after(heap108_finish(bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(99,64),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,64),bvconst(0,64)),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),heap108_phase_after(heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),bvconst(1,8),bvconst(2,8)),bvconst(3,8)),bvconst(1,8)),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)))))
+}
+
+example "pending-work free cannot return success" {
+    assert(¬(ha108_free_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_free_abi(bvconst(22,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8)),(bvconst(0,8)=bvconst(1,8)),heap108_close(heap108_free(heap108_current(bvconst(4294967303,64),bvconst(1,8),bvconst(7,64),bvconst(1,64),bvconst(1,8),bvconst(2,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8))),bvconst(0,64),bvconst(0,64),bvconst(17,64),bvconst(17,64),bvconst(3,64)),bvconst(1,8),bvconst(2,8),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),heap108_retire(bvconst(2,8),bvconst(1,64),bvconst(0,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(0,64),bvconst(0,64),bvconst(0,8))))
+}
+
+example "metadata failure cannot return a protected pointer" {
+    assert(¬(ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(4294967303,64),bvconst(0,64),bvconst(1,8),bvconst(0,64),bvconst(12,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8))))
+}
+
+example "all successful pointer replies bind current identity and exact event" {
+    assert(∀(h : BitVec64). ∀(p : BitVec64). ∀(e : BitVec64). ha108_pointer_reply(ha108_event(bvconst(101,64),bvconst(101,64),bvconst(7,64),bvconst(7,64),bvconst(1,64),bvconst(1,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,64),bvconst(1,64),bvconst(4,64),bvconst(4,64),bvconst(41,64),bvconst(41,64),bvconst(1,8),bvconst(1,8)),ha108_malloc_abi(bvconst(21,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(0,8),bvconst(0,8)),heap108_publish(heap108_budget(bvconst(4352,64),bvconst(4352,64),bvconst(13056,64),bvconst(8704,64),bvconst(17408,64),bvconst(5,64),bvconst(5,64),bvconst(1,8)),heap108_layout(bvconst(17,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64),bvconst(65536,64),bvconst(65536,64),bvconst(1,8),bvconst(1,8)),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(0,64),bvconst(1,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)),bvconst(1,8),heap108_owner(bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,64),bvconst(4,64),bvconst(101,64),bvconst(7,64),bvconst(1,8)),bvconst(21,64),bvconst(7,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),h,p,bvconst(1,8),bvconst(0,64),bvconst(12,64),e,bvconst(41,64),bvconst(1,8),bvconst(1,8)) → ((h=bvconst(4294967303,64)) ∧ (p=bvconst(0,64)) ∧ (e=bvconst(41,64))))
+}
+
+example "every untouched saved register survives allocation return" {
+    assert(∀(r : BitVec64). ∀(old : BitVec64). ∀(h : BitVec64). ∀(p : BitVec64). ∀(s : BitVec64). bvuge(r,bvconst(4,64)) → (ha108_malloc_word((bvconst(1,8)=bvconst(1,8)),r,old,h,p,s)=old))
+}
+
+example "all failed returns preserve each saved kind" {
+    assert(∀(pair : BitVec64). ∀(old : BitVec8). ∀(tag : BitVec8). ha108_malloc_kind((bvconst(0,8)=bvconst(1,8)),pair,old,tag)=old)
+}

@@ -12,6 +12,9 @@
 use std::collections::BTreeMap;
 
 use super::state::*;
+mod heap;
+pub(crate) use heap::{HeapInitialization, HeapCleanupSnapshot};
+pub(crate) use heap::{HeapWorkCounts, HeapWorkLimits, HeapWorkOutcome, HeapWorkTicket};
 
 // ───────────────────────────────────────────────────────────────────
 // Authorization result
@@ -80,13 +83,14 @@ impl FabricTimer {
 pub struct Fabric {
     pub(crate) scoped_pointers: super::scoped_pointers::ScopedPointers,
     pointer_stack_objects: BTreeMap<ObjectId,(u64,DomainId)>,
-    pointer_backings: BTreeMap<u64, (ObjectId, Generation, u64)>,
     pointer_cells: BTreeMap<(ObjectId, Generation, u64), super::scoped_pointers::ScopedPointer>,
     pub objects: BTreeMap<ObjectId, Object>,
     pub domains: BTreeMap<DomainId, DomainState>,
     pub agents: BTreeMap<AgentId, AgentState>,
     placement: BTreeMap<ObjectId, u64>,
     memory: Vec<u8>,
+    /// A2.3 private heap storage; absent in existing machine profiles.
+    private_heap: Option<heap::HeapFabric>,
     pub fault_log: Vec<FaultRecord>,
     transactions: Vec<Transaction>,
     next_object_id: u64,
@@ -100,16 +104,22 @@ pub struct Fabric {
 
 impl Fabric {
     pub fn new(mem_size: usize) -> Self {
+        Self::from_parts(vec![0u8; mem_size],
+            super::scoped_pointers::ScopedPointers::new(4096), None)
+    }
+
+    fn from_parts(memory: Vec<u8>, scoped_pointers: super::scoped_pointers::ScopedPointers,
+        private_heap: Option<heap::HeapFabric>) -> Self {
         Self {
-            scoped_pointers: super::scoped_pointers::ScopedPointers::new(4096),
+            scoped_pointers,
             pointer_stack_objects: Default::default(),
             pointer_cells: BTreeMap::new(),
-            pointer_backings: BTreeMap::new(),
             objects: BTreeMap::new(),
             domains: BTreeMap::new(),
             agents: BTreeMap::new(),
             placement: BTreeMap::new(),
-            memory: vec![0u8; mem_size],
+            memory,
+            private_heap,
             fault_log: Vec::new(),
             transactions: Vec::new(),
             next_object_id: 0,
@@ -159,8 +169,15 @@ impl Fabric {
     // ───────────────── Object management ─────────────────────────
 
     pub fn alloc_object(&mut self, name: &str, size: u64, kind: ObjectKind) -> ObjectId {
-        let id = ObjectId(self.next_object_id);
-        self.next_object_id += 1;
+        self.try_alloc_object(name, size, kind)
+            .expect("Fabric ObjectId namespace exhausted or occupied")
+    }
+
+    /// Checked shared namespace for legacy and private heap objects. The
+    /// compatibility wrapper above remains infallible; resource-aware callers
+    /// can handle identity exhaustion without a wrap or replacement.
+    pub fn try_alloc_object(&mut self, name: &str, size: u64, kind: ObjectKind) -> Option<ObjectId> {
+        let id = self.next_fresh_object_id()?;
         self.objects.insert(id, Object {
             id,
             generation: Generation(0),
@@ -169,7 +186,18 @@ impl Fabric {
             kind,
             name: name.to_string(),
         });
-        id
+        self.next_object_id = id.0.checked_add(1).expect("preflighted ObjectId");
+        Some(id)
+    }
+
+    fn next_fresh_object_id(&self) -> Option<ObjectId> {
+        self.next_object_id.checked_add(1)?;
+        let id = ObjectId(self.next_object_id);
+        if self.objects.contains_key(&id) || self.placement.contains_key(&id)
+            || self.private_heap.as_ref().is_some_and(|h|
+                id.0 < h.object_id_floor || h.contains_object(id))
+        { return None; }
+        Some(id)
     }
 
     /// Place an object at a physical address.
@@ -177,6 +205,7 @@ impl Fabric {
     /// Rejects overlapping placements (I9: every physical memory
     /// effect has exactly one logical object provenance).
     pub fn place_object(&mut self, id: ObjectId, physical_base: u64) -> bool {
+        if self.private_heap_object(id) { return false; }
         let obj = match self.objects.get(&id) {
             Some(o) => o,
             None => return false,
@@ -185,6 +214,7 @@ impl Fabric {
             Some(e) => e,
             None => return false, // placement arithmetic overflow
         };
+        if self.heap_pool_overlaps(physical_base, obj.size) { return false; }
 
         for (&existing_id, &existing_base) in &self.placement {
             if existing_id == id { continue; }
@@ -214,6 +244,7 @@ impl Fabric {
     /// This exposes translation state without conferring authority.  Phase
     /// 9.3g uses it to keep allocator/Fabric composition transactional.
     pub fn physical_base(&self, id: ObjectId) -> Option<u64> {
+        if self.private_heap_object(id) { return None; }
         self.placement.get(&id).copied()
     }
 
@@ -221,7 +252,8 @@ impl Fabric {
     ///
     /// Authority is unchanged (I3).
     pub fn move_object(&mut self, id: ObjectId, new_base: u64) -> bool {
-        self.placement.remove(&id);
+        // place_object already skips its own old placement. Keep that old
+        // translation until all checks pass, including dedicated-pool exclusion.
         self.place_object(id, new_base)
     }
 
@@ -230,6 +262,7 @@ impl Fabric {
     /// All capabilities minted at the old generation become stale.
     /// Generation is monotonic (I8).
     pub fn revoke(&mut self, id: ObjectId) {
+        if self.private_heap_object(id) { return; }
         self.pointer_cells.retain(|(object, _, _), _| *object != id);
         if let Some(obj) = self.objects.get_mut(&id) {
             obj.generation = obj.generation.next();
@@ -245,6 +278,7 @@ impl Fabric {
     ///
     /// Returns false if the object is not Active.
     pub fn seal_object(&mut self, id: ObjectId) -> bool {
+        if self.private_heap_object(id) { return false; }
         if let Some(obj) = self.objects.get_mut(&id) {
             if obj.state != ObjectState::Active { return false; }
             obj.generation = obj.generation.next();
@@ -262,10 +296,11 @@ impl Fabric {
 
     /// Page-aligned end of the highest physically placed object.
     ///
-    /// Returns `Some(0)` if no Active/Sealed objects are placed.
+    /// Includes the entire dedicated heap pool when configured. Returns
+    /// `Some(0)` if no pool or Active/Sealed placements exist.
     /// Returns `None` on arithmetic overflow (base + size or alignment).
     pub fn physical_high_watermark(&self) -> Option<u64> {
-        let mut hwm: u64 = 0;
+        let mut hwm: u64 = self.private_heap.as_ref().map_or(0, |h| h.end());
         for (&id, &base) in &self.placement {
             if let Some(obj) = self.objects.get(&id) {
                 if !matches!(obj.state, ObjectState::Active | ObjectState::Sealed) {
@@ -292,6 +327,7 @@ impl Fabric {
     /// the complete [base, base + size) range does not fit in
     /// Fabric memory.
     pub fn zero_object_extent(&mut self, id: ObjectId) -> bool {
+        if self.private_heap_object(id) { return false; }
         let obj = match self.objects.get(&id) {
             Some(o) if o.state == ObjectState::Active => o,
             _ => return false,
@@ -305,6 +341,7 @@ impl Fabric {
             Some(e) if e <= self.memory.len() => e,
             _ => return false,
         };
+        if self.heap_pool_overlaps(phys_base as u64, size as u64) { return false; }
         self.clear_pointer_cells_physical(phys_base as u64, size as u64);
         for i in phys_base..end {
             self.memory[i] = 0;
@@ -337,6 +374,7 @@ impl Fabric {
     /// Destroy an object: remove from objects table and placement map.
     /// Does NOT zero physical memory — caller must scrub separately.
     pub fn destroy_object(&mut self, id: ObjectId) {
+        if self.private_heap_object(id) { return; }
         self.pointer_stack_objects.remove(&id);
         self.objects.remove(&id);
         self.placement.remove(&id);
@@ -356,6 +394,9 @@ impl Fabric {
     /// release that now-unplaced reservation through the manager's checked
     /// teardown path.
     pub(crate) fn rollback_unpublished_object(&mut self, id: ObjectId) -> bool {
+        if self.private_heap.as_ref().is_some_and(|h| id.0 < h.object_id_floor) {
+            return false;
+        }
         if id.0.checked_add(1) != Some(self.next_object_id) {
             return false;
         }
@@ -392,7 +433,8 @@ impl Fabric {
     /// Zero physical memory in the range [base..base+size).
     /// Must be called before recycled extents are granted to new domains.
     pub fn zero_physical(&mut self, base: u64, size: u64) {
-        let start = base as usize;
+        if self.heap_pool_overlaps(base, size) { return; }
+        let Ok(start) = usize::try_from(base) else { return; };
         let Some(end) = base.checked_add(size).and_then(|end| usize::try_from(end).ok()) else { return; };
         if end <= self.memory.len() {
             self.clear_pointer_cells_physical(base, size);
@@ -416,6 +458,7 @@ impl Fabric {
         length: u64,
         perms: Permissions,
     ) -> Option<Capability64> {
+        if self.private_heap_object(object) { return None; }
         if self.pointer_stack_objects.get(&object).is_some_and(|&(_,owner)|owner!=domain) { return None; }
         let obj = self.objects.get(&object)?;
         if obj.kind != ObjectKind::Memory { return None; }
@@ -467,6 +510,7 @@ impl Fabric {
         perms: Permissions,
         authority_id: AuthorityId,
     ) -> Option<Capability64> {
+        if self.private_heap_object(object) { return None; }
         if self.pointer_stack_objects.get(&object).is_some_and(|&(_,owner)|owner!=domain) { return None; }
         let obj = self.objects.get(&object)?;
         if obj.kind != ObjectKind::Memory { return None; }
@@ -769,6 +813,7 @@ impl Fabric {
         rights: DeviceRights,
         authority_id: AuthorityId,
     ) -> Option<()> {
+        if self.private_heap_object(object) { return None; }
         let obj = self.objects.get(&object)?;
         if obj.kind != ObjectKind::Device { return None; }
         if !matches!(obj.state, ObjectState::Active) { return None; }
@@ -803,6 +848,7 @@ impl Fabric {
         exact_slot_rights: DeviceRights,
         required_rights: DeviceRights,
     ) -> bool {
+        if self.private_heap_object(expected_object) { return false; }
         let dom = match self.domains.get(&domain) {
             Some(d) => d,
             None => return false,
@@ -899,6 +945,7 @@ impl Fabric {
     ///
     /// `write_physical()` remains for test bootstrap only.
     pub fn initialize_object(&mut self, id: ObjectId, offset: u64, data: &[u8]) -> bool {
+        if self.private_heap_object(id) { return false; }
         let obj = match self.objects.get(&id) {
             Some(o) if o.state == ObjectState::Active => o,
             _ => return false,
@@ -912,6 +959,7 @@ impl Fabric {
         };
         let Some(base) = phys_base.checked_add(offset).and_then(|p| usize::try_from(p).ok()) else { return false; };
         let Some(end) = base.checked_add(data.len()).filter(|e| *e <= self.memory.len()) else { return false; };
+        if self.heap_pool_overlaps(base as u64, len) { return false; }
         self.clear_pointer_cells_physical(base as u64, len);
         self.memory[base..end].copy_from_slice(data);
         true
@@ -925,6 +973,7 @@ impl Fabric {
     /// range ⊆ object.  A Sealed object is still alive — it accepts
     /// READ/EXECUTE operations but no WRITE (enforced by `grant()`).
     pub fn validate(&self, cap: &Capability64) -> bool {
+        if self.private_heap_object(cap.object()) { return false; }
         if let Some(obj) = self.objects.get(&cap.object()) {
             matches!(obj.state, ObjectState::Active | ObjectState::Sealed)
                 && cap.generation() == obj.generation
@@ -1015,7 +1064,9 @@ impl Fabric {
     /// Uses checked arithmetic: `base + offset` overflow returns `None`
     /// rather than wrapping.
     pub fn translate(&self, object: ObjectId, offset: u64) -> Option<u64> {
-        self.placement.get(&object).and_then(|&base| base.checked_add(offset))
+        if self.private_heap_object(object) { return None; }
+        let physical = self.placement.get(&object)?.checked_add(offset)?;
+        (!self.heap_pool_overlaps(physical, 1)).then_some(physical)
     }
 
     // ───────────────── Transaction lifecycle ─────────────────────
@@ -1141,6 +1192,12 @@ impl Fabric {
                 return Err(());
             }
         };
+        // Cover the complete prepared span, including DMA/atomic and a span
+        // whose first byte lies outside the dedicated heap pool.
+        if self.heap_pool_overlaps(phys, request.length) {
+            self.fault_transaction(idx, FaultReason::TranslationFault);
+            return Err(());
+        }
 
         // For Write/Atomic: payload must be present and length-matched.
         match request.kind {
@@ -1339,30 +1396,36 @@ impl Fabric {
 
     pub(crate) fn issue_pointer_frame(&mut self, owner:u64, registrations:Vec<(MemoryRequest,u64,bool)>)
         -> Result<(super::scoped_pointers::Scope,Vec<super::scoped_pointers::ScopedPointer>),super::core::PointerMachineError> {
-        // No token is exposed before all admissions succeed. Rollback is only
-        // private metadata; no transaction or guest operand has been committed.
-        let prior=self.scoped_pointers.clone();
-        let backings=self.pointer_backings.clone();
-        let result=(|| {
-            let scope=self.scoped_pointers.enter_scope_for(owner).map_err(super::core::PointerMachineError::Pointer)?;
-            let mut pointers=Vec::new();
-            for (request,address,writable) in registrations {
-                pointers.push(self.register_scoped_pointer(scope,request,address,writable)?);
-            }
-            Ok((scope,pointers))
-        })();
-        if result.is_err() { self.scoped_pointers=prior;self.pointer_backings=backings; }
-        else if let Ok((_,locals))=&result {
-            for &pointer in locals {
-                if let Some(&(object,_,offset))=self.pointer_backings.get(&pointer.words()[0]) {
-                    if let (Some(base),Some((_,length)))=(self.translate(object,offset),self.scoped_pointers.storage_span(pointer)) {
-                        self.clear_pointer_cells_physical(base,length);
-                    }
+        use super::core::PointerMachineError as E;
+        use super::scoped_pointers::PointerError;
+        self.scoped_pointers.preflight_frame(registrations.len()).map_err(E::Pointer)?;
+        // Validate EVERY entry and reserve the result vector before mutation.
+        // Exclusive &mut Fabric keeps the checked state stable through commit.
+        for (request, address, writable) in &registrations {
+            address.checked_add(request.length).ok_or(E::Pointer(PointerError::InvalidRange))?;
+            self.checked_local_backing(request, *writable)?;
+        }
+        let mut pointers = Vec::new();
+        pointers.try_reserve_exact(registrations.len()).map_err(|_| E::Pointer(PointerError::Exhausted))?;
+        let scope = self.scoped_pointers.enter_scope_for(owner).expect("frame preflight reserved scope");
+        for (request, address, writable) in registrations {
+            // Only bounded registry rows change in this loop. The validation,
+            // free slots and revision headroom above cannot become stale.
+            let pointer = self.register_scoped_pointer(scope, request, address, writable)
+                .expect("serialized frame preflight reserved every local");
+            pointers.push(pointer);
+        }
+        for &pointer in &pointers {
+            if let Some(backing) = self.scoped_pointers.backing(pointer) {
+                if let (Some(base), Some((_, length))) = (self.translate(backing.object, backing.offset),
+                    self.scoped_pointers.storage_span(pointer)) {
+                    self.clear_pointer_cells_physical(base, length);
                 }
             }
         }
-        result
+        Ok((scope, pointers))
     }
+
     pub(crate) fn retire_pointer_frame(&mut self, scope:super::scoped_pointers::Scope,
         locals:&[super::scoped_pointers::ScopedPointer]) -> Result<(),super::core::PointerMachineError> {
         self.scoped_pointers.leave_scope(scope).map_err(super::core::PointerMachineError::Pointer)?;
@@ -1370,7 +1433,7 @@ impl Fabric {
         // rejects them. Remove kind only in cells belonging to retiring storage.
         for pointer in locals {
             let length=self.scoped_pointers.storage_span(*pointer).map(|(_,n)| n).unwrap_or(0);
-            if let Some((object,generation,offset))=self.pointer_backings.remove(&pointer.words()[0]) {
+            if let Some(super::scoped_pointers::PointerBacking { object, generation, offset }) = self.scoped_pointers.take_backing(*pointer) {
                 self.pointer_cells.retain(|(o,g,at),_| *o!=object||*g!=generation||
                     !(*at>=offset && *at-offset<length));
             }
@@ -1382,6 +1445,15 @@ impl Fabric {
     pub(crate) fn register_scoped_pointer(&mut self, scope: super::scoped_pointers::Scope,
         request: MemoryRequest, address: u64, writable: bool)
         -> Result<super::scoped_pointers::ScopedPointer, super::core::PointerMachineError> {
+        let backing = self.checked_local_backing(&request, writable)?;
+        let pointer = self.scoped_pointers.register(scope, request.context.domain.0, address, request.length, writable)
+            .map_err(super::core::PointerMachineError::Pointer)?;
+        self.scoped_pointers.bind_backing(pointer, backing);
+        Ok(pointer)
+    }
+
+    fn checked_local_backing(&self, request: &MemoryRequest, writable: bool)
+        -> Result<super::scoped_pointers::PointerBacking, super::core::PointerMachineError> {
         use super::core::PointerMachineError as E;
         if request.length == 0 { return Err(E::Pointer(super::scoped_pointers::PointerError::InvalidRange)); }
         let mut checked = request.clone();
@@ -1398,19 +1470,15 @@ impl Fabric {
         }
         let phys = self.translate(request.object, request.offset).ok_or(E::Unmapped)?;
         if phys.checked_add(request.length).is_none_or(|end| end > self.memory.len() as u64) { return Err(E::Unmapped); }
-        let pointer = self.scoped_pointers.register(scope, request.context.domain.0, address, request.length, writable).map_err(E::Pointer)?;
-        // Bounded table: discard old generations of reused descriptor slots.
-        let slot = pointer.words()[0] as u32;
-        self.pointer_backings.retain(|handle, _| *handle as u32 != slot);
-        self.pointer_backings.insert(pointer.words()[0], (request.object, generation, request.offset));
-        Ok(pointer)
+        Ok(super::scoped_pointers::PointerBacking { object: request.object, generation, offset: request.offset })
     }
 
     pub(crate) fn scoped_pointer_backing(&self, pointer: super::scoped_pointers::ScopedPointer, domain: DomainId)
         -> Result<(ObjectId, u64), super::core::PointerMachineError> {
         use super::core::PointerMachineError as E;
         self.scoped_pointers.add(pointer, domain.0, 0).map_err(E::Pointer)?;
-        let (object, generation, offset) = self.pointer_backings.get(&pointer.words()[0]).copied().ok_or(E::MissingKind)?;
+        let super::scoped_pointers::PointerBacking { object, generation, offset } =
+            self.scoped_pointers.backing(pointer).ok_or(E::MissingKind)?;
         if self.objects.get(&object).is_none_or(|o| o.generation != generation || !matches!(o.state, ObjectState::Active | ObjectState::Sealed)) {
             return Err(E::Pointer(super::scoped_pointers::PointerError::Stale));
         }
@@ -1534,20 +1602,28 @@ impl Fabric {
     }
 
     pub fn read_physical(&self, addr: u64, len: u64) -> &[u8] {
-        let a = addr as usize;
-        let l = len as usize;
-        &self.memory[a..a + l]
+        self.try_read_physical(addr, len).expect("physical read outside accessible RAM")
+    }
+
+    /// Trusted diagnostics/bootstrap do not bypass the dedicated heap pool.
+    pub fn try_read_physical(&self, addr: u64, len: u64) -> Option<&[u8]> {
+        if self.heap_pool_overlaps(addr, len) { return None; }
+        let a = usize::try_from(addr).ok()?;
+        let end = usize::try_from(addr.checked_add(len)?).ok()?;
+        self.memory.get(a..end)
     }
 
     pub fn write_physical(&mut self, addr: u64, data: &[u8]) {
-        let a = addr as usize;
-        // Validate the complete trusted bootstrap span before changing tags.
-        let end = a.checked_add(data.len()).expect("physical write span overflow");
-        assert!(end <= self.memory.len(), "physical write outside RAM");
+        assert!(self.try_write_physical(addr, data), "physical write outside accessible RAM");
+    }
+
+    pub fn try_write_physical(&mut self, addr: u64, data: &[u8]) -> bool {
+        if self.heap_pool_overlaps(addr, data.len() as u64) { return false; }
+        let Ok(a) = usize::try_from(addr) else { return false; };
+        let Some(end) = a.checked_add(data.len()).filter(|end| *end <= self.memory.len()) else { return false; };
         self.clear_pointer_cells_physical(addr, data.len() as u64);
-        for (i, &b) in data.iter().enumerate() {
-            self.memory[a + i] = b;
-        }
+        self.memory[a..end].copy_from_slice(data);
+        true
     }
 
     fn mem4(&self, addr: u64) -> [u8; 4] {
@@ -1646,6 +1722,42 @@ mod tests {
     // ═══════════════════════════════════════════════════════════
     // Basic operations
     // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn a21_frame_preflight_rejection_preserves_identity_backing_tags_and_payload() {
+        let (mut f, object, domain) = setup_basic();
+        f.register_agent(CPU0, AgentKind::Cpu(CoreId(0)), domain);
+        f.scoped_pointers = super::super::scoped_pointers::ScopedPointers::new(4);
+        let mut request = read_req(CPU0, domain, object, 0);
+        request.length = 16;
+        let (scope, locals) = f.issue_pointer_frame(7, vec![(request.clone(), 0x8000, true)]).unwrap();
+        let pointer = locals[0];
+        let generation = f.objects[&object].generation;
+        // A real previously issued pointer tag must survive a late bad entry,
+        // including when an earlier candidate overlaps its physical storage.
+        f.pointer_cells.insert((object, generation, 0), pointer);
+        let before = format!("{:?}", f.scoped_pointers);
+        let tags = f.pointer_cells.clone();
+        let bytes = f.read_physical(0x4000, 16).to_vec();
+        let mut denied = request.clone();
+        denied.offset = 0x1000;
+        assert!(f.issue_pointer_frame(7, vec![(request.clone(), 0x8010, true), (denied, 0x8020, true)]).is_err());
+        assert_eq!(format!("{:?}", f.scoped_pointers), before);
+        assert_eq!(f.pointer_cells, tags);
+        assert_eq!(f.read_physical(0x4000, 16), bytes);
+        assert_eq!(f.scoped_pointer_backing(pointer, domain).unwrap(), (object, 0));
+        // Capacity and overflow denial also happen before the first mutation.
+        assert!(f.issue_pointer_frame(7, vec![(request.clone(), 0x8000, true); 4]).is_err());
+        assert!(f.issue_pointer_frame(7, vec![(request.clone(), u64::MAX, true)]).is_err());
+        assert_eq!(format!("{:?}", f.scoped_pointers), before);
+        f.retire_pointer_frame(scope, &locals).unwrap();
+        assert!(f.pointer_cells.is_empty());
+        assert!(f.scoped_pointer_backing(pointer, domain).is_err());
+        let (_, next) = f.issue_pointer_frame(7, vec![(request, 0x8000, true)]).unwrap();
+        assert_eq!(next[0].words()[0] as u32, pointer.words()[0] as u32);
+        assert_ne!(next[0].words()[0], pointer.words()[0]);
+        assert_eq!(f.scoped_pointer_backing(next[0], domain).unwrap(), (object, 0));
+    }
 
     #[test]
     fn protected_stack_refuses_later_sharing_and_device_access() {

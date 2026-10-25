@@ -183,10 +183,10 @@ pub fn run_ankald(
     inputs: &[&[u8]],
     entry_name: &str,
 ) -> Result<AnkaldLinkedImage, AnkaldError> {
-    run_ankald_process(linker_image, inputs, entry_name).map(|output| output.image)
+    run_ankald_process(linker_image, inputs, entry_name, false).map(|output| output.image)
 }
 
-fn run_ankald_process(linker_image: &[u8], inputs: &[&[u8]], entry_name: &str)
+fn run_ankald_process(linker_image: &[u8], inputs: &[&[u8]], entry_name: &str, application_heap: bool)
     -> Result<AnkaldOutput, AnkaldError> {
     if linker_image.is_empty() {
         return Err(AnkaldError::EmptyLinkerImage);
@@ -244,7 +244,12 @@ fn run_ankald_process(linker_image: &[u8], inputs: &[&[u8]], entry_name: &str)
     let stack_map = vlb.reserve(ANKALD_STACK_SIZE).map_err(AnkaldError::VirtualLayout)?;
     let trap_map = vlb.reserve(ANKALD_TRAP_SIZE).map_err(AnkaldError::VirtualLayout)?;
 
-    let mut fabric = Fabric::new(ANKALD_RAM_SIZE);
+    // The protected publication retains this Fabric for later application
+    // execution. Reserve its private heap at construction, outside the link
+    // placement pool; code/dependency identity is never replaced to add a heap.
+    let mut fabric = if application_heap {
+        Fabric::with_application_heap(ANKALD_RAM_SIZE).map_err(|_| AnkaldError::InitializationRejected)?
+    } else { Fabric::new(ANKALD_RAM_SIZE) };
     let mut placement = PhysicalPlacementManager::new(ANKALD_PM_BASE, ANKALD_PM_SIZE)
         .map_err(AnkaldError::Placement)?;
 
@@ -580,7 +585,7 @@ pub(crate) fn run_protected_ankald_for_publication(linker_image: &[u8], inputs: 
     -> Result<AnkaldOutput, AnkaldError> {
     protected_geometry(inputs)?;
     let bytes: Vec<_> = inputs.iter().map(ValidatedPointerModule::bytes).collect();
-    let output = run_ankald_process(linker_image, &bytes, "main")?;
+    let output = run_ankald_process(linker_image, &bytes, "main", true)?;
     validate_protected_link_result(inputs, &output.image)?;
     Ok(output)
 }

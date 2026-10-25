@@ -1,4 +1,4 @@
-//! Anka64 placement management (Phase 9.3g).
+//! Anka64 placement management (Phase 9.3g and A2.2 bounded reservations).
 //!
 //! Placement is deliberately separate from identity and authority:
 //!   - physical placement chooses disjoint physical extents for ObjectId owners;
@@ -14,6 +14,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::fabric::Fabric;
 use super::state::ObjectId;
+mod bounded;
+pub(crate) use bounded::{
+    PhysicalReturn, PhysicalTake, ReservationKey, VirtualReturn, VirtualTake,
+};
 
 /// Architectural page size used by the Phase 9.3g placement contracts.
 pub const PLACEMENT_PAGE_SIZE: u64 = 0x1000;
@@ -76,6 +80,13 @@ pub enum PlacementError {
     FabricRejected,
     /// A virtual layout start/limit is invalid.
     InvalidVirtualLayout,
+    /// Fixed claim capacity is exhausted or unrepresentable.
+    ReservationCapacity,
+    HostAllocation,
+    /// An exact reservation key, extent, or current table invariant mismatched.
+    ReservationMismatch,
+    /// Object/monotonic APIs cannot bypass the bounded reservation profile.
+    WrongMode,
 }
 
 fn is_page_aligned(value: u64) -> bool {
@@ -105,7 +116,7 @@ fn valid_extent(extent: PhysicalExtent) -> bool {
 /// Ownership is keyed by `ObjectId`, not generation.  Object generation is an
 /// authority/lifecycle coordinate and may change while the same object remains
 /// physically placed (e.g. Active -> Sealed).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhysicalPlacementManager {
     pool: PhysicalExtent,
     free: Vec<PhysicalExtent>,
@@ -113,12 +124,16 @@ pub struct PhysicalPlacementManager {
     /// Owners whose reservation has been accepted by Fabric.  These may not
     /// be released through the allocator-only `release_reservation()` primitive.
     committed: BTreeSet<ObjectId>,
+    bounded: Option<bounded::Claims>,
 }
 
 impl PhysicalPlacementManager {
     /// Create a manager over one page-aligned allocatable physical pool.
     pub fn new(pool_base: u64, pool_size: u64) -> Result<Self, PlacementError> {
-        let pool = PhysicalExtent { base: pool_base, size: pool_size };
+        let pool = PhysicalExtent {
+            base: pool_base,
+            size: pool_size,
+        };
         if !valid_extent(pool) {
             return Err(PlacementError::InvalidPool);
         }
@@ -127,6 +142,7 @@ impl PhysicalPlacementManager {
             free: vec![pool],
             allocated: BTreeMap::new(),
             committed: BTreeSet::new(),
+            bounded: None,
         })
     }
 
@@ -158,16 +174,25 @@ impl PhysicalPlacementManager {
         owner: ObjectId,
         requested_size: u64,
     ) -> Result<PhysicalExtent, PlacementError> {
+        if self.bounded.is_some() {
+            return Err(PlacementError::WrongMode);
+        }
         if self.allocated.contains_key(&owner) {
             return Err(PlacementError::OwnerAlreadyAllocated);
         }
         let size = page_ceil(requested_size)?;
 
         // Find first fit before mutating any state.
-        let idx = self.free.iter().position(|e| e.size >= size)
+        let idx = self
+            .free
+            .iter()
+            .position(|e| e.size >= size)
             .ok_or(PlacementError::OutOfMemory)?;
         let slot = self.free[idx];
-        let candidate = PhysicalExtent { base: slot.base, size };
+        let candidate = PhysicalExtent {
+            base: slot.base,
+            size,
+        };
         let candidate_end = candidate.end().ok_or(PlacementError::Overflow)?;
         let slot_end = slot.end().ok_or(PlacementError::Overflow)?;
         if candidate_end > slot_end {
@@ -197,7 +222,9 @@ impl PhysicalPlacementManager {
         if self.committed.contains(&owner) {
             return Err(PlacementError::ComposedReleaseRequiresFabricCheck);
         }
-        let extent = self.allocated.remove(&owner)
+        let extent = self
+            .allocated
+            .remove(&owner)
             .ok_or(PlacementError::UnknownOwner)?;
         self.insert_free_and_coalesce(extent);
         Ok(extent)
@@ -233,7 +260,9 @@ impl PhysicalPlacementManager {
         fabric: &mut Fabric,
         owner: ObjectId,
     ) -> Result<PhysicalExtent, PlacementError> {
-        let object_size = fabric.objects.get(&owner)
+        let object_size = fabric
+            .objects
+            .get(&owner)
             .map(|o| o.size)
             .ok_or(PlacementError::UnknownObject)?;
         if fabric.physical_base(owner).is_some() {
@@ -244,7 +273,8 @@ impl PhysicalPlacementManager {
         if !fabric.place_object(owner, extent.base) {
             // Exact owner was just inserted above and has not been marked
             // committed; allocator-only rollback must succeed.
-            let rolled_back = self.release_reservation(owner)
+            let rolled_back = self
+                .release_reservation(owner)
                 .expect("fresh placement reservation must be releasable");
             debug_assert_eq!(rolled_back, extent);
             return Err(PlacementError::FabricRejected);
@@ -261,51 +291,118 @@ impl PhysicalPlacementManager {
         let mut merged: Vec<PhysicalExtent> = Vec::with_capacity(self.free.len());
         for ext in self.free.drain(..) {
             if let Some(last) = merged.last_mut() {
-                let last_end = last.end()
+                let last_end = last
+                    .end()
                     .expect("manager stores only non-overflowing extents");
                 if last_end == ext.base {
-                    last.size = last.size.checked_add(ext.size)
+                    last.size = last
+                        .size
+                        .checked_add(ext.size)
                         .expect("coalesced extents remain within manager pool");
                     continue;
                 }
-                debug_assert!(last_end < ext.base,
-                    "free extents must never overlap");
+                debug_assert!(last_end < ext.base, "free extents must never overlap");
             }
             merged.push(ext);
         }
         self.free = merged;
     }
+
+    /// Private heap profile; existing ObjectId APIs cannot enter this pool.
+    /// The owner registry retains this manager and never exposes or clones it.
+    pub(crate) fn bounded(pool: PhysicalExtent, claims: usize) -> Result<Self, PlacementError> {
+        let (bounded, free) = bounded::Claims::new(claims, pool)?;
+        Ok(Self {
+            pool,
+            free,
+            allocated: BTreeMap::new(),
+            committed: BTreeSet::new(),
+            bounded: Some(bounded),
+        })
+    }
+
+    pub(crate) fn minimum_reservation_bytes(claims: usize) -> Result<u64, PlacementError> {
+        bounded::Claims::minimum_bytes(claims)
+    }
+    pub(crate) fn reservation_bytes(&self) -> Result<u64, PlacementError> {
+        self.bounded
+            .as_ref()
+            .ok_or(PlacementError::WrongMode)?
+            .retained_bytes(&self.free)
+    }
+    pub(crate) fn reservation_count(&self) -> usize {
+        self.bounded.as_ref().map_or(0, bounded::Claims::count)
+    }
+    pub(crate) fn reservation_extent(&self, key: ReservationKey) -> Option<PhysicalExtent> {
+        self.bounded.as_ref()?.extent(key)
+    }
+    pub(crate) fn prepare_heap_take(
+        &self,
+        key: ReservationKey,
+        logical: u64,
+        revision: u64,
+    ) -> Result<PhysicalTake, PlacementError> {
+        self.bounded
+            .as_ref()
+            .ok_or(PlacementError::WrongMode)?
+            .prepare_take(&self.free, key, logical, revision)
+            .map(PhysicalTake)
+    }
+    pub(crate) fn commit_heap_take(&mut self, plan: PhysicalTake, revision: u64) {
+        self.bounded
+            .as_mut()
+            .unwrap()
+            .take(&mut self.free, plan.0, revision);
+    }
+    pub(crate) fn prepare_heap_return(
+        &self,
+        key: ReservationKey,
+        extent: PhysicalExtent,
+        revision: u64,
+    ) -> Result<PhysicalReturn, PlacementError> {
+        self.bounded
+            .as_ref()
+            .ok_or(PlacementError::WrongMode)?
+            .prepare_return(&self.free, self.pool, key, extent, revision)
+            .map(PhysicalReturn)
+    }
+    pub(crate) fn commit_heap_return(&mut self, plan: PhysicalReturn, revision: u64) {
+        self.bounded
+            .as_mut()
+            .unwrap()
+            .give_back(&mut self.free, plan.0, revision);
+    }
+    #[cfg(test)]
+    pub(crate) fn audit_reservations(&self) {
+        self.bounded.as_ref().unwrap().audit(&self.free, self.pool);
+    }
 }
 
-/// Monotonic per-process virtual layout builder.
+/// Per-process virtual placement: monotonic image layout or a bounded reusable
+/// heap window. The constructor selects the profile; their mutation APIs cannot mix.
 ///
 /// The builder starts at the first page boundary at or above the executable
 /// image end.  Code itself is not relocated by this phase; callers may keep
 /// `code_vaddr == 0` (or any other base) and reserve subsequent regions here.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VirtualLayoutBuilder {
     layout_start: u64,
     next: u64,
     limit: u64,
     regions: Vec<VirtualExtent>,
+    reusable: Option<bounded::VirtualArena>,
 }
 
 impl VirtualLayoutBuilder {
-    pub fn after_image(
-        code_base: u64,
-        code_size: u64,
-        limit: u64,
-    ) -> Result<Self, PlacementError> {
+    pub fn after_image(code_base: u64, code_size: u64, limit: u64) -> Result<Self, PlacementError> {
         if code_size == 0 {
             return Err(PlacementError::ZeroSize);
         }
-        let image_end = code_base.checked_add(code_size)
+        let image_end = code_base
+            .checked_add(code_size)
             .ok_or(PlacementError::Overflow)?;
         let layout_start = page_ceil(image_end)?;
-        if !is_page_aligned(layout_start)
-            || layout_start < image_end
-            || layout_start > limit
-        {
+        if !is_page_aligned(layout_start) || layout_start < image_end || layout_start > limit {
             return Err(PlacementError::InvalidVirtualLayout);
         }
         Ok(Self {
@@ -313,6 +410,7 @@ impl VirtualLayoutBuilder {
             next: layout_start,
             limit,
             regions: Vec::new(),
+            reusable: None,
         })
     }
 
@@ -335,27 +433,160 @@ impl VirtualLayoutBuilder {
     /// Reserve the next page-rounded virtual extent.
     /// Failure leaves cursor and region set unchanged.
     pub fn reserve(&mut self, requested_size: u64) -> Result<VirtualExtent, PlacementError> {
+        if self.reusable.is_some() {
+            return Err(PlacementError::WrongMode);
+        }
         let size = page_ceil(requested_size)?;
-        let end = self.next.checked_add(size)
+        let end = self
+            .next
+            .checked_add(size)
             .ok_or(PlacementError::Overflow)?;
         if end > self.limit {
             return Err(PlacementError::OutOfMemory);
         }
 
-        let extent = VirtualExtent { base: self.next, size };
+        let extent = VirtualExtent {
+            base: self.next,
+            size,
+        };
         self.next = end;
         self.regions.push(extent);
         Ok(extent)
+    }
+
+    /// Reusable per-owner heap window, supplied by trusted process layout.
+    /// The address algebra stays here; the registry never computes addresses.
+    pub(crate) fn reusable(pool: VirtualExtent, claims: usize) -> Result<Self, PlacementError> {
+        Self::minimum_reservation_bytes(pool, claims)?;
+        let physical_shape = PhysicalExtent {
+            base: pool.base,
+            size: pool.size,
+        };
+        let (claims, free) = bounded::Claims::new(claims, physical_shape)?;
+        Ok(Self {
+            layout_start: pool.base,
+            next: pool.base,
+            limit: pool.end().unwrap(),
+            regions: Vec::new(),
+            reusable: Some(bounded::VirtualArena {
+                free,
+                claims,
+                owner: None,
+            }),
+        })
+    }
+    pub(crate) fn minimum_reservation_bytes(
+        pool: VirtualExtent,
+        claims: usize,
+    ) -> Result<u64, PlacementError> {
+        if !valid_extent(PhysicalExtent {
+            base: pool.base,
+            size: pool.size,
+        }) {
+            return Err(PlacementError::InvalidPool);
+        }
+        bounded::Claims::minimum_bytes(claims)
+    }
+    pub(crate) fn reservation_bytes(&self) -> Result<u64, PlacementError> {
+        let arena = self.reusable.as_ref().ok_or(PlacementError::WrongMode)?;
+        arena.claims.retained_bytes(&arena.free)
+    }
+    pub(crate) fn reservation_count(&self) -> usize {
+        self.reusable.as_ref().map_or(0, |a| a.claims.count())
+    }
+    pub(crate) fn check_binding(&self, owner: Option<u64>) -> Result<(), PlacementError> {
+        let a = self.reusable.as_ref().ok_or(PlacementError::WrongMode)?;
+        if a.owner != owner
+            || a.claims.count() != 0
+            || a.free.as_slice()
+                != [PhysicalExtent {
+                    base: self.layout_start,
+                    size: self.limit - self.layout_start,
+                }]
+        {
+            return Err(PlacementError::ReservationMismatch);
+        }
+        Ok(())
+    }
+    pub(crate) fn bind_owner(&mut self, owner: Option<u64>) {
+        self.reusable.as_mut().unwrap().owner = owner;
+    }
+    pub(crate) fn reservation_extent(&self, key: ReservationKey) -> Option<VirtualExtent> {
+        let a = self.reusable.as_ref()?;
+        if a.owner != Some(key.owner) {
+            return None;
+        }
+        a.claims.extent(key).map(|e| VirtualExtent {
+            base: e.base,
+            size: e.size,
+        })
+    }
+    pub(crate) fn prepare_heap_take(
+        &self,
+        key: ReservationKey,
+        logical: u64,
+        revision: u64,
+    ) -> Result<VirtualTake, PlacementError> {
+        let a = self.reusable.as_ref().ok_or(PlacementError::WrongMode)?;
+        if a.owner != Some(key.owner) {
+            return Err(PlacementError::ReservationMismatch);
+        }
+        a.claims
+            .prepare_take(&a.free, key, logical, revision)
+            .map(VirtualTake)
+    }
+    pub(crate) fn commit_heap_take(&mut self, plan: VirtualTake, revision: u64) {
+        let a = self.reusable.as_mut().unwrap();
+        a.claims.take(&mut a.free, plan.0, revision);
+    }
+    pub(crate) fn prepare_heap_return(
+        &self,
+        key: ReservationKey,
+        extent: VirtualExtent,
+        revision: u64,
+    ) -> Result<VirtualReturn, PlacementError> {
+        let a = self.reusable.as_ref().ok_or(PlacementError::WrongMode)?;
+        if a.owner != Some(key.owner) {
+            return Err(PlacementError::ReservationMismatch);
+        }
+        a.claims
+            .prepare_return(
+                &a.free,
+                PhysicalExtent {
+                    base: self.layout_start,
+                    size: self.limit - self.layout_start,
+                },
+                key,
+                PhysicalExtent {
+                    base: extent.base,
+                    size: extent.size,
+                },
+                revision,
+            )
+            .map(VirtualReturn)
+    }
+    pub(crate) fn commit_heap_return(&mut self, plan: VirtualReturn, revision: u64) {
+        let a = self.reusable.as_mut().unwrap();
+        a.claims.give_back(&mut a.free, plan.0, revision);
+    }
+    #[cfg(test)]
+    pub(crate) fn audit_reservations(&self) {
+        let a = self.reusable.as_ref().unwrap();
+        a.claims.audit(
+            &a.free,
+            PhysicalExtent {
+                base: self.layout_start,
+                size: self.limit - self.layout_start,
+            },
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::anka64::fabric::{request, AuthResult};
-    use crate::anka64::state::{
-        AccessKind, AgentId, FaultReason, ObjectKind, Permissions, Width,
-    };
+    use crate::anka64::fabric::{AuthResult, request};
+    use crate::anka64::state::{AccessKind, AgentId, FaultReason, ObjectKind, Permissions, Width};
 
     #[test]
     fn p93g1_page_rounding_is_minimal() {
@@ -375,8 +606,20 @@ mod tests {
         let mut pm = PhysicalPlacementManager::new(0x10000, 0x10000).unwrap();
         let a = pm.allocate(ObjectId(1), 1).unwrap();
         let b = pm.allocate(ObjectId(2), 0x1800).unwrap();
-        assert_eq!(a, PhysicalExtent { base: 0x10000, size: 0x1000 });
-        assert_eq!(b, PhysicalExtent { base: 0x11000, size: 0x2000 });
+        assert_eq!(
+            a,
+            PhysicalExtent {
+                base: 0x10000,
+                size: 0x1000
+            }
+        );
+        assert_eq!(
+            b,
+            PhysicalExtent {
+                base: 0x11000,
+                size: 0x2000
+            }
+        );
         assert!(a.end().unwrap() <= b.base);
     }
 
@@ -412,10 +655,19 @@ mod tests {
         let mut pm = PhysicalPlacementManager::new(0x30000, 0x4000).unwrap();
         let a = pm.allocate(ObjectId(1), 0x1000).unwrap();
         let _b = pm.allocate(ObjectId(2), 0x1000).unwrap();
-        assert_eq!(pm.release_reservation(ObjectId(99)), Err(PlacementError::UnknownOwner));
+        assert_eq!(
+            pm.release_reservation(ObjectId(99)),
+            Err(PlacementError::UnknownOwner)
+        );
         assert_eq!(pm.release_reservation(ObjectId(1)), Ok(a));
         pm.release_reservation(ObjectId(2)).unwrap();
-        assert_eq!(pm.free_extents(), &[PhysicalExtent { base: 0x30000, size: 0x4000 }]);
+        assert_eq!(
+            pm.free_extents(),
+            &[PhysicalExtent {
+                base: 0x30000,
+                size: 0x4000
+            }]
+        );
     }
 
     #[test]
@@ -435,8 +687,11 @@ mod tests {
         let mut pm = PhysicalPlacementManager::new(0x10000, 0x10000).unwrap();
         let ext = pm.allocate_and_place_object(&mut fabric, obj).unwrap();
         assert!(fabric.seal_object(obj));
-        assert_eq!(pm.allocated_extent(obj), Some(ext),
-            "generation transition must not orphan placement ownership");
+        assert_eq!(
+            pm.allocated_extent(obj),
+            Some(ext),
+            "generation transition must not orphan placement ownership"
+        );
         fabric.destroy_object(obj);
         assert_eq!(
             pm.release_reservation(obj),
@@ -508,9 +763,7 @@ mod tests {
 
         let dom = fabric.create_domain();
         assert!(fabric.domains.get(&dom).unwrap().capabilities.is_empty());
-        let req = request(
-            AgentId(0), dom, obj, 0, Width::Word, AccessKind::Read,
-        );
+        let req = request(AgentId(0), dom, obj, 0, Width::Word, AccessKind::Read);
         assert!(matches!(
             fabric.authorize(&req),
             AuthResult::Denied(FaultReason::NoCapability)
@@ -525,34 +778,57 @@ mod tests {
         let old_obj = fabric.alloc_object("old-owner", 0x1000, ObjectKind::Memory);
         let old_ext = pm.allocate_and_place_object(&mut fabric, old_obj).unwrap();
         let old_dom = fabric.create_domain();
-        assert!(fabric.grant(
-            old_dom, old_obj, 0, 0x1000, Permissions::READ,
-        ).is_some());
-        let old_req = request(
-            AgentId(0), old_dom, old_obj, 0, Width::Word, AccessKind::Read,
+        assert!(
+            fabric
+                .grant(old_dom, old_obj, 0, 0x1000, Permissions::READ,)
+                .is_some()
         );
-        assert!(matches!(fabric.authorize(&old_req), AuthResult::Authorized(_)));
+        let old_req = request(
+            AgentId(0),
+            old_dom,
+            old_obj,
+            0,
+            Width::Word,
+            AccessKind::Read,
+        );
+        assert!(matches!(
+            fabric.authorize(&old_req),
+            AuthResult::Authorized(_)
+        ));
 
         fabric.destroy_object(old_obj);
         assert_eq!(pm.release_unplaced(&fabric, old_obj), Ok(old_ext));
 
         let new_obj = fabric.alloc_object("new-owner", 0x1000, ObjectKind::Memory);
         let new_ext = pm.allocate_and_place_object(&mut fabric, new_obj).unwrap();
-        assert_eq!(new_ext.base, old_ext.base,
-            "first-fit should reuse the released physical bytes");
+        assert_eq!(
+            new_ext.base, old_ext.base,
+            "first-fit should reuse the released physical bytes"
+        );
 
-        assert!(matches!(
-            fabric.authorize(&old_req),
-            AuthResult::Denied(FaultReason::StaleGeneration)
-        ), "reused bytes must not revive old ObjectId/generation authority");
+        assert!(
+            matches!(
+                fabric.authorize(&old_req),
+                AuthResult::Denied(FaultReason::StaleGeneration)
+            ),
+            "reused bytes must not revive old ObjectId/generation authority"
+        );
 
         let new_req = request(
-            AgentId(0), old_dom, new_obj, 0, Width::Word, AccessKind::Read,
+            AgentId(0),
+            old_dom,
+            new_obj,
+            0,
+            Width::Word,
+            AccessKind::Read,
         );
-        assert!(matches!(
-            fabric.authorize(&new_req),
-            AuthResult::Denied(FaultReason::NoCapability)
-        ), "authority over the old owner must not transfer to the new owner");
+        assert!(
+            matches!(
+                fabric.authorize(&new_req),
+                AuthResult::Denied(FaultReason::NoCapability)
+            ),
+            "authority over the old owner must not transfer to the new owner"
+        );
     }
 
     #[test]
@@ -617,6 +893,7 @@ mod tests {
             next: u64::MAX & !PLACEMENT_PAGE_MASK,
             limit: u64::MAX,
             regions: Vec::new(),
+            reusable: None,
         };
         assert_eq!(layout.reserve(0x1000), Err(PlacementError::Overflow));
         assert!(layout.regions().is_empty());

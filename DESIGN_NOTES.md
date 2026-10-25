@@ -7649,13 +7649,82 @@ is stated briefly in ARCHITECTURE.md. Neither consolidation starts implementatio
 
 <a id="dn-71"></a>
 
-## DN-71 — Compiler resource growth without per-program capacity tuning (Phase 10.8)
+## DN-71 — Shared allocation, whole-stack review, and compiler resource growth (Phase 10.8)
 
-**Status: planned, 2026-10-17.** This is the next development slice after the
-protected-module checkpoint merged to `main`. No new Kleis gate, resource ABI
-or compiler implementation is claimed by this plan. Keep the plan here and
-the current status in ARCHITECTURE.md; do not create another standalone note.
-Suggested implementation branch: `feat/anka108-compiler-resources`.
+**Status: all four A1 pairs accepted on the developer machine, 2026-10-19;
+Undertaker asynchronous-reclamation refinement developer-accepted, 2026-10-20;
+A2.1 registry/reservation foundation developer-accepted, recorded 2026-10-22;
+A2.2 bounded placement/reservation Kleis refinement developer-accepted,
+recorded 2026-10-23; A2.2 Rust developer-accepted with the full single-threaded
+library suite: 1134 passed, 0 failed, 0 filtered out in 1149.73s, recorded
+2026-10-23. A2.3 Fabric/shadow/initialization refinement developer-accepted on
+2026-10-24: 192 positive witnesses (30 quantified laws) and 162 explicitly
+disproved hostile witnesses. A2.3.1 fixed Fabric/shadow storage and private
+attachment are developer-accepted: 17 new tests passed in 0.01s and the
+144-test focused shared-component regression passed in 0.09s (including those
+17), recorded 2026-10-24. A2.3.2 private byte/tag initialization is also
+developer-accepted: 18 new tests passed in 0.02s and the 162-test focused
+regression passed in 0.10s (including those 18). A2.3.3 conditional protected
+heap-cell operations are developer-accepted: 22 new tests passed in 0.01s and
+the 184-test focused regression passed in 0.13s (including those 22).
+A2.3.4 attached-failure closure is developer-accepted: 17 new tests passed in
+0.02s and the 201-test focused regression passed in 0.13s (including those 17).
+A2.3.5 concrete worker/terminal-work Kleis refinement is developer-accepted at
+197 positive witnesses (23 quantified laws) / 172 explicitly disproved hostile
+witnesses, recorded 2026-10-24. A2.3.5a fixed worker roles and per-job leases are
+developer-accepted: 21 new tests passed in 0.02s and the 222-test focused
+regression passed in 0.13s (including those 21). A2.3.5b bounded CPU backend
+registration/pinning is developer-accepted: 21 new tests passed in 0.03s and
+the 243-test focused regression passed in 0.16s (including those 21), recorded
+2026-10-24. A2.3.5c bounded execution/cancellation, terminal consumption and
+current drain census are developer-accepted, recorded 2026-10-25: 22 new tests
+passed in 0.02s and 265 focused tests passed in 0.17s (including those 22).
+A2.3.6 queued-job worker recovery is developer-accepted, recorded 2026-10-25:
+21 new tests passed in 0.01s and 286 focused tests passed in 0.16s (including
+those 21). A2.3.7 authority retirement is developer-accepted: 21 new tests
+passed in 0.02s and 307 focused tests passed in 0.19s (including those 21),
+recorded 2026-10-25. Complete trusted cleanup/reuse is now developer-accepted:
+92 positive / 79 explicitly disproved hostile witnesses; 19 new tests passed
+in 0.01s and 326 focused tests passed in 0.19s, including those 19. No full
+1333-test run was reported. A3 C malloc/free is implemented below: its new
+runtime-refinement Kleis pair passed locally at 52 positive / 43 hostile before
+implementation. The developer full run now reports 1344 passed / 1 failed
+in 1967.45s: all twelve A3 unit tests passed and the CC2 fixed point closed,
+but the first malloc C probe faulted at its direct-entry return. The fixture
+correction below awaits the targeted integration rerun. Production publication, owned typed replies and
+process cleanup are connected in the protected application runtime.** The original compiler-resource plan
+merged to `main` after the protected-module checkpoint. The revised order is
+general protected allocation, its C `malloc`/`free` interface, a required
+whole-stack review, then compiler resource growth using that shared foundation.
+The compiler is an ordinary allocation client; multiple agents must be able to
+compile concurrently. The allocation lifecycle, concrete ABI, residual-data
+isolation and storage/reclamation pairs have developer-confirmed evidence:
+579 positive witnesses and 386 explicitly disproved hostile assertions. The
+Undertaker pair below adds 257 positive witnesses and 171 explicitly disproved
+hostile assertions, developer-confirmed on 2026-10-20. All five pairs now have
+developer acceptance across the reported focused runs. A2.1 below adds executable
+bounded metadata and quota reservations. The sixth pair below refines bounded
+placement and the compound reservation; the developer confirmed its 215 positive /
+180 hostile gate run, recorded 2026-10-23. All six allocation pairs now have
+developer acceptance across focused runs. A2.2 Rust below adds private physical
+and virtual extent custody and exact cancellation. The seventh pair (A2.3)
+is now developer-accepted, bringing the accepted focused-run totals to 1243
+positive / 899 hostile. The eighth pair (A2.3.5) brings accepted evidence across
+focused runs to 1440 positive / 1071 hostile; no new combined run is claimed.
+A2.3.1 connects private Fabric metadata without authority publication, and
+A2.3.5a adds worker/lease metadata, A2.3.5b adds pinned CPU request records,
+and A2.3.5c connects their synchronous software effects and terminal consumption.
+A2.3.6 adds recovery/reassignment of queued jobs after exact worker fencing.
+A2.3.7 adds developer-accepted authority retirement after current drainage and
+exclusion checks. Developer-accepted cleanup/reuse connects retired-stage
+recovery, bounded byte/tag scrub, extent release and payload refunds. This brings
+developer-accepted evidence across focused formal runs to 1532 positive / 1150
+hostile; no combined run is claimed. A3 now connects C malloc/free, production
+publication, owned guest results and process-exit cleanup. Its independent-client
+and toolchain acceptance must pass before the required whole-stack review.
+Keep the plan here and the current
+status in ARCHITECTURE.md; do not create another standalone note.
+Current development branch: `feat/anka108-protected-allocation` (developer-confirmed).
 
 ### Goal and completion boundary
 
@@ -7667,10 +7736,2342 @@ representable instruction/format ranges still determine what can run. Resource
 failure must identify the exhausted resource and budget without publishing a
 partial artifact or disturbing an earlier successful publication.
 
-This extends the toolchain's storage policy. It does not require general-purpose
-C `malloc`, a new pointer representation, a new optimizer or an IR/register
-allocator. It also does not reopen the completed Phase 10.6/10.7 milestones.
-The eventual closure client remains the source rebuild of the real service stack.
+The architectural foundation is a reusable allocation and lifetime service for
+ordinary programs, including compilers, services and other agents. Expose the
+supported C allocation interface before making compiler-specific growth policy
+the next executable milestone. Arena growth can technically be implemented
+without C `malloc`; the chosen order provides the common programming environment
+that the complete computation stack needs. It does not require a new optimizer
+or IR/register allocator, nor reopen completed Phase 10.6/10.7 scope. The eventual
+closure client remains the source rebuild of the real service stack.
+
+### Shared allocation foundation: formal contract first
+
+The first allocation profile may be process-private, but its resource service
+must support independent concurrent clients from the outset. The contract must
+specify:
+
+- checked sizes, alignment, size-zero behavior, allocation-failure results and
+  the supported `malloc`/`free` ABI, including `free(NULL)` and invalid, interior,
+  foreign or duplicate frees; do not silently claim full libc compatibility;
+- protected allocation identity and owner process/domain incarnation, current
+  generation, bounds and permissions; heap allocations have individual lifetimes
+  and may be freed in arbitrary order rather than inheriting local-frame LIFO;
+- per-client budgets and atomic global reservations, including allocator
+  metadata, rounding, retained objects and temporary copies; failure must not
+  overcommit backing or leave partial grants/reservations;
+- trusted issuance of protected pointers, byte access and pointer-cell behavior,
+  invalidation of every stale alias on release, and safe backing reuse after
+  admitted work is accounted for; saved event contexts cannot restore validity;
+- failure, cancellation and process-death cleanup without disturbing another
+  client's allocations; include generation exhaustion and partial-admission
+  rollback, and separate safety from any scheduler/fairness assumptions;
+- composition with PhysicalPlacementManager, VirtualLayoutBuilder, Fabric
+  authorization and commit checks. An ordinary process must be able to use the
+  service; a host-only compiler wrapper is not the completed allocation API.
+
+No handoff should introduce an unrelated allocator to work around placement
+constraints. If the initial heap profile forbids exporting allocations to other
+domains or DMA, enforce that boundary. Cross-domain ownership transfer and DMA
+borrows require their own refined contracts before they are enabled.
+
+### A1 accepted model and proposed concrete ABI
+
+This handoff supplies `anka108_allocation.kleis`,
+`anka108_allocation_abi.kleis`, and the memory-initialization refinement described
+below, each with a hostile counterpart. It specifies
+the initial process-private profile for multiple independent concurrent clients.
+It adds no Rust or C implementation. The current 10.7 local-frame machinery
+continues to operate as before; heap lifetimes must not be implemented by
+pretending every allocation is a LIFO local frame.
+
+**Allocation identity and storage.** Keep the existing protected two-word
+payload: `(generation << 32) | one_based_slot`, followed by byte position.
+The protected kind is separate trusted state. Heap and local pointers must use
+one collision-free registry namespace, with a trusted record class distinguishing
+them. Heap records bind process slot/incarnation, execution context, domain,
+logical length, backing identity, rights, current generation and lifetime phase.
+The 32-bit generation never wraps; exhausted slots remain retired. Numeric
+payloads, including a copied address, cannot reconstruct a protected pointer.
+
+The first physical policy uses one page-rounded backing object per allocation,
+placed through PhysicalPlacementManager and a reusable virtual arena integrated
+with the placement module and VirtualLayoutBuilder. The exposed
+logical length is the requested length. A one-byte allocation does not grant
+access to the rest of its page. Alignment is at least 16 bytes, sufficient for
+the present AC2 scalar, struct and protected-pointer types. Small-object
+suballocation remains a later refinement. The current VirtualLayoutBuilder is
+monotonic and does not provide reusable heap holes; the reclamation refinement
+below makes reusable virtual ranges an A2 acceptance requirement. Keep the
+existing image/stack/trap layout reservations disjoint from the heap arena.
+Finite virtual capacity and fragmentation remain explicit admission outcomes.
+
+Before publication, initialize the whole reserved backing extent to zero and
+clear every overlapping physical pointer-cell tag. This prevents a new owner
+from observing old payload or importing old pointer authority. Reserve metadata
+and pointer shadow storage as well as payload. Heap pointer storage admits an
+aligned, fully contained 16-byte cell under its live heap owner, rather than a
+local-frame manifest. Preserve existing source-token authentication, coherent
+typed transport, raw-write tag clearing and object/generation/offset cell keys.
+
+**Admission and charging.** Use one shared serialized decision for global and
+per-client reservations; per-process locking alone is insufficient. A client
+account is bound to its exact incarnation, not just a reusable PID. Charge actual
+rounded backing, metadata, shadow storage, staged copies and retained resources;
+preallocated pools are charged once, and reusable metadata must not be charged
+twice. Byte availability does not imply a metadata slot, an encodable pointer,
+or a virtual extent is available. Any such admission failure returns capacity
+failure without publishing a pointer or leaving visible reservations/grants.
+The witness's 256-byte metadata cost is illustrative, not a prescribed Rust
+layout. A2 must derive charges from its bounded resource representation.
+
+Allocation publication rechecks the current owner and ledger, then commits
+records, exact RW-only mapping/grants, counters and the pending pointer result
+together. Broader grants or raw-address paths must not bypass heap lifetime
+checks. Staged resources remain private until commit and are unwound on failure.
+This requires extending current runtime paths; flags in the theory are not a
+substitute for performing these checks.
+
+**Release and reclamation.** A whole-allocation base alias may free its heap in
+any order. Null is a no-op. Interior, narrowed, foreign, local-frame, forged,
+stale and duplicate frees fault before that operation mutates the allocator.
+Subsequent process-fault cleanup is a separate transition and may retire that
+process's remaining allocations. Closing invalidates
+admission through every surviving alias, including saved events and spills.
+Already admitted operations remain accounted for until their exact terminal
+completion or completed cancellation. Their commits still require current Fabric
+authority. Closing retains charges and backing; timeout alone cannot reclaim it.
+`free` returns only after retirement, grant/map/tag removal, unplacement and
+accounting commit. Nonreclaimable metadata remains charged globally even when
+its former client exits. The initial profile permits no heap export to other
+processes, shared threads, DMA or raw-address interfaces. These are enforced
+admission restrictions, not assumptions about cooperative callers.
+
+Process death closes only that exact incarnation's heap records and follows the
+same drain/reclaim rules. A failed or terminated client must not release another
+client's records, corrupt its bytes, reset its budget or revoke its authority.
+The model proves safety conditions; progress still depends on terminal work and
+scheduling assumptions. It does not prove SMP memory ordering or device drainage.
+
+**Concrete interface proposed for implementation:**
+
+| Operation | Application/trap inputs | Trusted result |
+|---|---|---|
+| `void *malloc(int bytes)` | AC2 64-bit scalar byte count; trap R0=21 (`SYS_MALLOC`), R1=bytes, R2..R5=0, pairs 0/2/4 scalar | R0/R1 protected pointer at position zero, or canonical untagged zero/zero; R2=status, R3=0 |
+| `void free(void *pointer)` | C argument in R0/R1; typed PMOV into R2/R3 before overwriting R0; trap R0=22 (`SYS_FREE`), R1=R4=R5=0, pairs 0/4 scalar | Scalar R0=R1=0 after valid retirement, or immediately for canonical null; invalid free is ProtectionFault |
+| Allocation status | Status remains outside the returned pointer pair | 0=success (including size zero); 1=capacity/admission failure; 2=negative or unrepresentable signed size |
+
+`malloc(0)` returns NULL without consuming allocation resources. Positive
+requests are bounded by the representable nonnegative AC2 `int` and admitted
+resources. The initial C surface is the supported subset, not a full libc claim:
+`size_t`, errno, realloc/calloc, over-aligned allocation, shared heaps and
+asynchronous borrows are not silently supplied. Typed `void *`/object-pointer
+conversion must preserve identity, position, bounds and kind. No integer-to-
+pointer conversion is introduced. The ordinary ABI v2 pointer return stays
+R0/R1, with normal typed expression moves/spills in the compiler.
+
+The runtime currently exports **scalar syscall results only**. A2 must introduce
+a distinct trusted pointer result tied to the intact saved syscall image, exact
+process incarnation/context/domain, nonreused event identity, and the newly
+published allocation slot/generation. A result is consumed once. Reject IRQ
+injection, handler scratch, wrong/consumed frames, another allocation's result,
+stale lifetimes and scalar overlays on either pointer word. Return must install
+both words and kind atomically. Other saved registers/kinds, flags and return
+authority retain the established event rules. Generic `write_syscall_result`
+does not gain permission to manufacture pointers.
+
+**Evidence and scope.** On 2026-10-19 the supplied Linux Kleis binary and stdlib
+passed 171 allocation witnesses and 116 ABI witnesses; all 125 and 81 hostile
+assertions respectively were explicitly disproved by Z3. The developer confirmed
+these same counts on 2026-10-19. This is model acceptance, not verification of new Rust/C.
+The witnesses include global admission races, arbitrary free order, retained
+charges during drainage, exact completion identity, close → finish → retire →
+reuse with stale-alias rejection, process-incarnation isolation, storage-cell
+bounds and protected result delivery. Quantified laws cover budget bounds,
+logical access bounds, unchanged fields/accounts and nonresurrection on reuse.
+
+The model uses explicit transitions and pointwise frame rules, with conditional
+implementation obligations for full extent scans, exact ledgers, preparation,
+Fabric grant/map coverage, no bypass, and physical synchronization. These checks
+must refer to the same current request and resources. They are trusted-side
+obligations, never application-supplied certificates. This handoff does not prove
+the future allocator algorithm, a complete C semantics, a whole-machine
+refinement, hardware behavior or the future cross-domain ownership protocol.
+Further structural refinements discovered while choosing concrete storage or
+teardown mechanisms must pass their gates before those mechanisms are enabled.
+
+Run all three A1 gate pairs, including the residual-data isolation refinement:
+
+```sh
+python3 scripts/check-anka108-gates.py \
+  --kleis /Users/enginatik/.cargo/bin/kleis \
+  --kleis-root ~/git/cee/kleis \
+  --only-allocation
+```
+
+Imports load the needed existing definitions; this option does not rerun every
+unchanged independent example suite. No Rust regression or CC2 bootstrap rerun
+is required for this formal-only handoff.
+
+### A1 refinement: residual-data isolation at every new private lifetime
+
+**Required invariant:** a new private allocation must expose no payload or
+pointer authority inherited from a previous lifetime. A malicious program can
+obtain a perfectly valid new pointer and read its allocation; stale-pointer
+rejection alone does not address that attack. The requirement applies even when
+the new owner is the same process, and includes local-frame reuse. It is a
+zero-before-new-authority policy, not an immediate zero-on-free policy.
+
+`anka108_memory_initialization.kleis` and
+`anka108_memory_initialization_false_witnesses.kleis` formalize this rule. The
+initialization state is separate from the allocation lifetime state. For a
+reused extent, old lifetime retirement, terminal CPU/DMA accounting and effective
+exclusion of every former access path precede scrubbing. Reserve the storage
+privately, initialize its complete reserved extent and clear physical pointer
+tags, then publish new authority. The same rule applies to fresh backing; boot
+or host memory being incidentally zero is not the contract.
+
+The model uses a trusted completed-prefix cursor advanced only by exact scrub
+chunks. Each committed chunk zeroes its bytes and clears overlapping pointer
+tags together. Positive quantified laws establish the byte and tag prefix
+invariants inductively. A completion receipt binds reservation, backing object,
+physical base/extent, new lifetime, owner incarnation identity and current
+mutation version. Partial work, skipped padding, another clean allocation's
+receipt, an intervening write, or early readers/writers cannot authorize
+publication. Failure or cancellation keeps incomplete storage private. Never
+place a partially initialized extent on a pool advertised as ready for exposure.
+
+The principal witness starts with an arbitrary old secret and old pointer tag,
+performs two actual scrub transitions, publishes the new lifetime, and permits a
+fresh valid read. Every logical byte reads zero and no old kind survives. A
+two-execution quantified witness holds allocation controls fixed, varies all
+possible prior byte values, and proves identical resulting bytes. Neighboring
+storage is unchanged. A delayed old-epoch write cannot contaminate the published
+allocation; pending old CPU/DMA work prevents initialization from beginning in
+the first place. Hardware must separately refine the terminal-drainage and
+visibility assumptions; incrementing an epoch cannot physically stop a device.
+
+For code/data images, parameter spills or explicit local initializers, initialize
+clean storage with the authorized **new** source values before exposure. The
+model includes a pointwise overlay law preserving independence from prior
+contents. It does not zero intended program contents after they have been
+installed, and ordinary byte initialization never creates pointer kind.
+Intentional sharing or ownership transfer of existing contents is a different
+operation requiring its own authority/lifetime contract.
+
+Observed current paths and implementation obligations:
+
+| Path | Current behavior | Required follow-through |
+|---|---|---|
+| New heap API | Trusted cleanup/reuse is developer-accepted (92 / 79 Kleis; 19 new / 326 focused Rust tests). A3 connects owned typed results, production publication, CC2 malloc/free and lifecycle cleanup; its runtime acceptance is pending | Run A3 focused and shared-producer C acceptance below; then perform the required A4 review. |
+| Protected local frames | `retire_pointer_frame()` invalidates lifetimes and removes storage kinds; frame entry does not scrub payload | Add a bounded formal-first frame-initialization refinement and implementation; order scrubbing before new-call argument spills/local initializers, preserve live parent/control storage, and validate same-address reuse with a fresh valid local pointer |
+| Recycled process stacks/trap pages | Reuse helpers zero returned extents before new grants; reclamation itself does not wipe | Check complete extent, tag clearing, ordering and error propagation against this contract in the stack review |
+| Generic object/placement release | `destroy_object()` explicitly does not scrub; placement release does not wipe | Require initialization at every later private publication; object destruction alone is not a clean-memory certificate |
+| Loaders and explicit initializers | Several paths zero object contents before writing the new image | Audit exact coverage, padding that may later become visible, publication ordering and current-input provenance |
+
+The known local-frame gap is an explicit pending implementation obligation;
+neither these witnesses nor completed Phase 10.7 lifetime checks establish that
+the current runtime already enforces the new uniform confidentiality rule. Fix
+the affected frame path in a bounded piece before claiming this guarantee for
+ordinary protected C applications. Carry the remaining path inventory into A4;
+the required post-malloc whole-stack review remains in place.
+
+**Local evidence, 2026-10-19:** 113 positive witnesses passed and all 72 hostile
+assertions were explicitly disproved by Z3. Combined with the unchanged two A1
+pairs, recorded A1 evidence is 400 positive / 278 hostile witnesses. The new
+pair was run independently; no Rust or long CC2/regression run was required.
+These are conditional byte/pointer-state model results, not verification of the
+runtime, cache/timing noninterference, copies elsewhere, or physical erasure.
+The developer subsequently confirmed all three A1 pairs with the same counts
+on 2026-10-19; the earlier developer-acceptance step is complete.
+
+To check only this added refinement:
+
+```sh
+python3 scripts/check-anka108-gates.py \
+  --kleis /Users/enginatik/.cargo/bin/kleis \
+  --kleis-root ~/git/cee/kleis \
+  --only-initialization
+```
+
+### Reusable extents and bounded metadata: reclamation refinement
+
+`anka108_allocation_reclamation.kleis` and its false-witness counterpart refine
+storage reuse before A2 implementation. The existing lifetime/initialization
+gates remain prerequisites. This pair adds no Rust/C allocator and no live-object
+compactor. Its acceptance scope is exact extent transformations, stable identity
+across metadata eviction, bounded accounting and allocation/free cycle laws.
+
+**Physical and virtual arenas.** Maintain a sorted, disjoint partition of each
+arena into free, reserved, live and closing extents. Allocate a prefix of one
+free extent and retain its exact suffix; remove an empty suffix. On completed
+release, return the exact recorded span and merge only immediately adjacent free
+neighbors. Quantified coverage and separation laws establish that splitting or
+joining neither duplicates nor loses bytes and does not swallow another live
+extent. A two-client trace frees A before B, rejects joining across live B,
+then frees B and recovers the whole original arena. Sufficient total free bytes
+alone do not establish that a contiguous request fits.
+
+Apply the same algebra to each exact owner's virtual arena. A new allocation
+can reuse an old virtual address only after its former mappings and authority
+have retired; its protected generation changes and initialization remains
+mandatory. The current physical manager already coalesces adjacent free extents;
+extend its composition and the existing placement module for reusable virtual
+ranges rather than introducing per-client raw-address arithmetic. A2 must couple
+physical/virtual reservations, registry capacity and ledger admission under one
+shared nonwrapping revision, preserving all selected state on compound failure.
+Physical address, virtual address and object/handle identity remain distinct.
+
+**Metadata storage policy.** Use a bounded stable directory for the common
+heap/local pointer namespace. Each one-based slot retains its last 32-bit
+generation and free/reserved/live/closing/permanently-retired state. Generations
+never reset or wrap. The complete directory and arena-index capacity are charged
+once as infrastructure. Retiring a generation-exhausted slot consumes an entry
+already in this directory; it must not create an unbounded separate tombstone
+list. Capacity exhaustion is explicit and cannot be bypassed by a new page.
+
+Bulky allocation records can occupy reclaimable pages. Evict a page only when
+the exact census of *all* its slots contains no reserved, live or closing record,
+including local records, and no metadata reader or staged writer holds it.
+Empty or permanently retired slots still retain their identity history in the
+directory. Rehydration restores that same history and confers no authority;
+subsequent publication uses the next generation and the existing initialization,
+Fabric and pointer-result gates. Never compact live slot numbers. The model
+prescribes these storage invariants, not Rust struct sizes or a page width.
+
+Fabric object/placement map entries may be removed by exact key after teardown;
+unselected entries are unchanged. Published ObjectId destruction does not rewind
+the identity counter. Fresh ID issuance must reject exhaustion. An object's
+numeric ID is not an array index requiring all preceding IDs to remain stored.
+Removing a map entry or clearing a vector is not evidence that all of its backing
+capacity has been returned: retained capacity remains charged until actually
+released or accounted for once as a reusable pool. The current low-level
+`destroy_object` helper alone is not the complete coordinated reclamation path.
+
+**Bounds and release resources.** For a maximally coalesced partition with K
+nonfree extents there are at most K+1 free extents. Prefix-induction witnesses
+establish the count bound; reserve index storage for the configured maximum
+claims and the additional boundary hole. Reserve required release bookkeeping
+at allocation admission, so freeing does not depend on an unbudgeted allocation
+for temporary free-list storage. A2 must derive actual directory, record, shadow,
+index and scratch costs from the selected bounded representation. Do not reuse
+the earlier illustrative metadata charge as a measured Rust footprint.
+
+Charge fixed infrastructure, occupied backing, resident metadata and other
+retained/staged storage exactly once. Closing or outstanding work retains the
+charge. A completed exact release refunds backing; successful metadata eviction
+refunds only bytes actually returned. The cycle law restores reusable backing
+and virtual geometry while preserving advanced generations/revisions. These
+step invariants support bounded repeated churn under the model assumptions;
+they do not promise infinite successful allocations with finite generations,
+successful allocation despite fragmentation, scheduler progress, or a bound on
+unmodeled logs/caches. Those resources remain in the required A4 inventory.
+
+**Implementation obligations and proof boundary.** Derive the census and ledger
+from actual current records under serialization, not caller assertions. Maintain
+the global sorted partition and apply the local frame/separation laws to every
+remaining entry. The model's fixed-width, pointwise and local transition proofs
+do not verify a complete arbitrary-length Rust free-list algorithm. Actual CPU
+and DMA terminal completion, mapping/grant/tag removal, initialization visibility,
+same-request reservation binding and coherent pointer publication retain their
+existing refinement obligations. A2 needs forced-capacity and interleaved-client
+runtime witnesses in addition to these model gates.
+
+**Churn acceptance for A2/A3:** repeatedly allocate/free varied page-rounded sizes
+and free out of order; recover the original free intervals, reuse virtual holes,
+evict/rehydrate record storage, and reject old register/spill/event aliases. Track
+free bytes, largest free extent, active/reserved/closing records, reusable/retired
+slots, resident metadata and all charges. With fixed demand and terminal work,
+storage must return to a declared bounded baseline; configured capacity or epoch
+exhaustion must fail explicitly. Include failure between preparation steps and
+process death while another client continues. Retained infrastructure need not
+shrink to zero, but its bound and charge must be explicit.
+
+Moving live objects and small-object suballocation are later separate gates.
+`Fabric::move_object` currently changes translation without copying payload,
+clears pointer-cell metadata through placement changes, and can lose the old
+mapping if the new placement is rejected. It is not a compactor. A future
+relocation protocol needs quiescence/pinning, payload and protected-kind
+preservation, transactional placement publication, rollback and safe old-backing
+release before it can replace that helper for live compaction.
+
+**Focused validation, 2026-10-19:** the supplied Linux Kleis binary and stdlib
+passed **179 positive witnesses**, including 32 quantified laws, and explicitly
+disproved **108/108 hostile assertions**. No unknown/evaluation failures count
+as passing evidence. The developer subsequently accepted this pair on
+2026-10-19, bringing all four A1 pairs to **579 positive / 386 hostile** witnesses.
+The previous three pairs were not rerun for that formal-only extension; all four
+are rerun with the Undertaker gate in the 2026-10-20 checkpoint below. No Rust, C,
+CC2 fixed-point or full regression tests were needed because no runtime or
+compiler source changed.
+
+```sh
+python3 scripts/check-anka108-gates.py \
+  --kleis /Users/enginatik/.cargo/bin/kleis \
+  --kleis-root ~/git/cee/kleis \
+  --only-reclamation
+```
+
+`--only-allocation` now includes lifecycle, ABI, initialization, reclamation and
+Undertaker asynchronous-reclamation pairs.
+
+### Undertaker: asynchronous reclamation after process death
+
+`anka108_async_reclamation.kleis` and
+`anka108_async_reclamation_false_witnesses.kleis` refine the asynchronous work
+lifecycle before A2 runtime changes. The first profile returns whole page-backed
+reservations. It does not introduce a small-object allocator or resolve the
+separate protected-local-frame initialization gap.
+
+The death transition can finish while cleanup remains pending. It must first
+close admission and record every cleanup obligation atomically. The required
+order remains **close admission/register work → drain old operations → retire
+old authority → scrub bytes and pointer tags → establish clean storage → return
+backing → authorize a separately admitted new lifetime**.
+
+**Reserved records and atomic closure.** Reserve one durable cleanup-directory
+slot before publishing each allocation, and an owner record before admitting a
+process. The bounded directory itself is the queue: no allocating enqueue or
+fresh job ID is needed at process death. Under one serialization boundary, close
+the exact owner incarnation and change all its armed records to queued. An exact
+current directory census moves that owner's credits from armed to pending;
+already-pending records are not counted twice. Pointwise laws preserve other
+owners, and prefix-count induction preserves the bounded census. A full queue
+can still process death using its pre-reserved credits; it rejects new allocation
+admission. A process with no allocations can also terminate when all slots are
+occupied. The process fence denies admission before a worker visits any row.
+
+The implementation must derive the census from all current records, preserve
+unique keys and disjoint custody, and make the owner fence, row changes and count
+updates one trusted transaction. The local model laws do not verify a Rust
+arbitrary-length directory scan or durable-store algorithm. Required record and
+release capacity must be reserved during admission, including worker scratch and
+retained owner/account metadata, rather than discovered missing at death.
+
+**Identity and asynchronous stages.** A job binds its nonreused job ID, owner
+incarnation/context/domain key, protected slot/generation handle, object,
+exclusive backing reservation, physical base and complete reserved span.
+Notifications confer no authority. Repeated notifications acknowledge the
+existing obligation without adding work or resetting it. A stale notification or
+completion cannot select a new owner, generation, object or same-address
+reservation. Numeric job/handle fields are trusted lookup data, not a way for a
+guest to construct protected pointer kind.
+
+| Stage | Required state and permitted transition |
+|---|---|
+| Armed | Allocation is live; its cleanup record and queue credit already exist. |
+| Queued/draining | Owner admission is closed; exact old CPU/DMA tickets can become terminal. |
+| Authority retired | Old grants/maps and access paths are gone; terminal writes are visible; backing remains exclusively reserved and charged. |
+| Scrubbing | One authenticated scrub ticket per job; only terminal successful chunks advance the clean byte/tag prefix. |
+| Clean/quarantined | The entire reserved extent is clean and visible; custody and charges remain until exact return. |
+| Released | One atomic commit returns the recorded extent, consumes the pending record and refunds only actual returned backing. |
+
+The lifetime projection refines A1 closing without changing old counts or
+generation. Authority retirement uses `conc107_retire` while storage stays held.
+This deliberately separates retirement from the earlier synchronous
+retire/unplace/refund path. Do not call retirement twice or refund at its first
+step. No change to those earlier theory definitions or runtime helpers is made.
+
+**Worker leases and exact scrub tickets.** Claiming work leaves its record in the
+pending census. The nonwrapping lease epoch and worker identity exclude a second
+worker. Each scrub submission also consumes a fresh nonwrapping **operation
+number**, even if it is later cancelled. A completion binds the job, lease,
+worker, operation, mutation version, start and amount. Version and range alone
+are insufficient: a cancelled attempt could otherwise masquerade as a retry of
+the same range within the same worker lease. A successful completion consumes
+its active ticket, zeros bytes and overlapping pointer tags together, and
+advances the prefix and mutation version with the same decision.
+
+Submission, partial execution, failed completion and requested cancellation do
+not establish a clean prefix. A terminal failed chunk may be retried with a new
+operation number after its exact ticket is consumed. Partial device effects must
+stay within the submitted uncompleted range. The former lifetime's accepted CPU
+and DMA tickets use the existing exact terminal-completion contract. Epoch
+increments and timeouts do not physically drain a controller.
+
+**Failure and recovery.** Failure changes the lease to revoking, keeping its job,
+stage, identities, counters, reservation and charges. Further scrub admission is
+closed immediately. Reassignment requires all old scrub operations to be
+terminal or terminally cancelled, the old worker fenced, and its memory effects
+visible. Recovery invalidates the old receipt version and resets the clean
+prefix. Scrubbing or clean records return to authority-retired state; queued
+records still need old-work drainage. A new claim advances the lease epoch. The
+operation sequence is retained across cancellation and worker recovery. Delayed
+old completions cannot authorize bytes, clean receipts or release.
+
+Here **durable means retained by the trusted owner/cleanup directory across
+worker failure and restart**. The worker must not be the sole owner of the record
+or account. This is not a filesystem persistence protocol or a proof of recovery
+from host/kernel reset or power loss; those need separate refinement. If trusted
+maintenance writes are permitted, they must atomically invalidate the prefix and
+version before any receipt can be consumed. The first implementation can instead
+exclude those writes entirely.
+
+**Accounting and new authority.** Pending includes queued, leased, retired,
+scrubbing and clean jobs. None refunds storage. Fixed queue/directory capacity is
+charged once as infrastructure; payload, resident metadata and retained capacity
+remain separate ledger categories. Exact release refunds only the backing
+actually returned. Clean pools remain occupied and charged. No record or owner
+account may disappear while its obligation survives. Epoch, operation, version
+or capacity exhaustion fails closed; it does not justify dropping work.
+
+An Undertaker completion grants no pointer or execution authority. A new private
+lifetime must still satisfy its own exact reservation/owner/generation binding,
+initialization and ordinary allocation-publication gates. This first refinement
+does not authorize replaying an old cleanup receipt as a new initialization
+receipt. Avoiding a redundant scrub through a clean-pool transfer requires an
+explicit binding/visibility refinement. Later suballocations and local-frame
+reuse still require their own initialization; clearing a page once is insufficient.
+
+**Progress and proof boundary.** Quantified laws give a finite lexicographic
+measure over phase, outstanding CPU/DMA counts and remaining bytes. Terminal old
+operations, phase changes and committed scrub chunks decrease it. Claim,
+submission and idle steps may stutter; recovery can increase it. Eventual release
+requires eventual fault-free service, terminal devices, successful scrub work,
+fair scheduling and completion delivery, and sufficient nonwrapping counter
+headroom. Permanent device errors retain quarantine. These requirements are
+explicit implementation/environment obligations, not axioms or a proved temporal
+scheduler theorem. Idle-only service and a permanently stocked clean pool under
+arbitrary demand are not guaranteed.
+
+The constructive trace closes an owner at full reserved queue capacity, drains a
+CPU and a DMA operation, retires authority, scrubs half a page, submits another
+chunk, and loses its worker. Recovery is rejected while that scrub is outstanding.
+After exact terminal cancellation and fencing, a new worker rescrubs the entire
+4 KiB page in two chunks, establishes clean storage and returns it. The other two
+pending obligations and their 8 KiB of backing remain charged. Quantified byte
+and pointer-cell laws vary arbitrary prior contents, establish zero throughout
+the reserved page including padding, and preserve neighboring storage. All
+transitions are evaluated in linear `let` bindings; no trace checkpoint is
+assumed as an axiom. Four hostile content assertions use equivalent single-point
+universal statements to avoid the supplied CLI's costly ground-false trace
+expansion; each still requires explicit Z3 disproof.
+
+**Validation, 2026-10-20:** the supplied `kleis-linux-x86_64(10)` (reporting
+`kleis 1.0.0`) and `stdlib(8).zip`, with its required Z3 shared library supplied
+locally as Z3 4.12.2, pass **257 positive Undertaker witnesses, including 42
+quantified laws**, and explicitly disprove **171/171 hostile assertions**. The
+complete allocation selection passes **836 positive / 557 hostile witnesses**
+across all five pairs. Unknown, errors, missing examples and timeouts do not
+count. The developer subsequently ran `--only-undertaker` on 2026-10-20 and
+confirmed **257 positive / 171 explicitly disproved hostile assertions**. This
+completes developer acceptance of all five pairs across the reported focused
+runs; the complete five-pair local run above is separate evidence. No Rust or C source
+changed, so no runtime regression or CC2 fixed-point run is claimed or needed
+for this formal-only handoff.
+
+Run the new pair only from the repository root:
+
+```sh
+python3 scripts/check-anka108-gates.py \
+  --kleis /Users/enginatik/.cargo/bin/kleis \
+  --kleis-root ~/git/cee/kleis \
+  --only-undertaker
+```
+
+Use `--only-allocation` for all five allocation pairs. `--only-108` and the default
+10.8 selection also include the new pair. The next implementation remains bounded
+A2 work against the **software Fabric**. An FPGA zeroing engine must later refine
+the same custody, drainage, byte/tag effects, cache visibility and receipt
+contract; the current model establishes no hardware erasure or timing guarantee.
+
+### A2.1: bounded registry, accounts and reserved cleanup records
+
+**Local runtime checkpoint, 2026-10-20; developer acceptance recorded 2026-10-22.**
+`scoped_pointers.rs` now owns the single fixed-capacity directory for local and
+heap identities. The new `scoped_pointers/heap.rs` supplies the metadata/quota
+service. This is the first bounded A2 piece, not the completed allocation API.
+The existing `Fabric::new` profile still enables only local pointers; configuring
+heap account/cleanup capacity and connecting it to process admission comes with
+the subsequent service integration.
+
+**Stable directory and existing locals.** All slot, scope, account and cleanup
+arrays are allocated at construction with fallible capacity reservation and
+never grow. A slot retains its generation even after cancellation or local scope
+exit. Local and heap rows consume the same slots and advance the same 32-bit
+generation; an exhausted slot stays permanently unavailable in the original
+array. No slot compaction, reset, tombstone list or metadata-page eviction is
+introduced. The initial representation retains its complete record pool and
+charges it once, which satisfies the accepted fixed-pool storage policy.
+
+Local Fabric backing identity now resides in its fixed directory row instead
+of the separate `pointer_backings` BTreeMap. Scope ownership also uses the fixed
+scope table instead of dynamically allocated maps and per-owner stacks. Local
+LIFO rules remain per context; closing a heap neither depends on nor changes
+that order. Occupied-prefix bounds keep ordinary frame scans short while the
+complete generation directory remains retained.
+
+Frame admission now preflights scope/slot/revision capacity, every backing check,
+address arithmetic and the result vector before mutating the registry. It no
+longer clones the registry or a backing map for rollback. Under the exclusive
+Fabric borrow, commit cannot encounter a different authority or ledger state.
+A late rejected local leaves all generations, scope state, backing bindings,
+pointer-cell tags and payload unchanged. Existing pointer-cell tag clearing and
+Fabric revalidation remain in effect. This change does not scrub local payload;
+the separately recorded frame-initialization gap remains open.
+
+**Accounts and reservations.** `AllocationOwner` binds the existing `ProcessKey`,
+execution context and domain. An opaque `OwnerAccount` also carries a fresh,
+nonwrapping admission serial so a recycled row cannot select an old account.
+The kernel's existing process generations start at zero; the account serial
+starts at one. Duplicate admission of an exact process incarnation is rejected
+even if a mistaken caller changes its context/domain. A closed account remains
+resident while it has obligations, and another incarnation has independent
+usage and state.
+
+One exclusive registry borrow serializes both local and heap changes. Heap
+admission checks the current shared revision, requested signed-size range,
+page rounding through the existing placement helper, owner/global byte budgets,
+a reusable slot/generation and a cleanup row before its first write. A successful
+reservation charges the exact rounded backing **quota**, reserves a cleanup
+credit and issues an opaque staging identity. It creates no physical object,
+virtual range, grant, mapping, pointer tag or protected heap pointer. Rejection
+leaves every selected table, counter, identity and other account unchanged.
+
+An unpublished reservation may be cancelled in arbitrary order, including after
+its owner closes. Cancellation consumes that exact slot/generation/job/account
+identity, restores its backing quota and preserves advanced generation/job
+history. Duplicate, stale and mismatched cancellation fails without mutation.
+This is cancellation of metadata-only staging, not evidence of physical storage
+reclamation. Once later code attaches backing, it must extend cancellation into
+one coordinated rollback before enabling publication.
+
+**Cleanup reservation and closure.** The fixed cleanup directory is the queue.
+Every staged allocation already owns a row and job ID. `close_owner` fences the
+exact account and scans all its current reserved/live records, moving them to
+closing and queuing only previously unqueued obligations. It allocates no queue
+node, scratch vector or new identity and retains the complete quota. Full queue
+capacity does not prevent death; duplicate death is idempotent; an empty owner
+can close while all cleanup rows belong to others. Another incarnation's rows
+and account remain unchanged. The account row cannot be released while work or
+reserved quota remains.
+
+The independent whole-heap close transition rejects local, foreign, interior,
+stale and duplicate inputs and preserves every other lifetime. Its live-row
+witnesses use an explicitly test-only publication fixture. **There is no
+production heap-publication method**, and even those fixture pointers are
+rejected by the existing local-only access/backing paths. Published/closing
+records cannot use staging cancellation to refund resources. Worker claim,
+CPU/DMA drain, authority retirement, scrubbing, completion, recovery and backing
+release are not implemented in this piece.
+
+Revision and identity exhaustion reject new admissions. Cleanup uses the
+terminal revision value as a permanent admission fence: revision never wraps or
+resets, and mandatory closure/cancellation can still finish without needing a
+fresh revision or ID. No admission can accept a snapshot at that terminal value.
+
+**Concrete storage charge.** Construction computes `size_of::<ScopedPointers>()`
+plus the actual retained capacity of each of the four vectors multiplied by its
+concrete element size, using checked arithmetic. This includes vector headers,
+local backing fields, empty/reserved/closing/exhausted rows and retained account
+and cleanup capacity. It does not substitute the theory's illustrative 256-byte
+charge. At the A2.1 checkpoint, the x86-64 Rust 1.90.0 witness measured the
+following layout; the A2.2 layout measurements below supersede these sizes:
+
+| Representation | Bytes per element |
+|---|---:|
+| Registry value, including all vector headers/counters | 168 |
+| Common identity/record slot | 80 |
+| Optional local scope row | 24 |
+| Optional owner account row | 72 |
+| Optional cleanup row | 48 |
+
+For the 3-slot, 3-scope, 1-owner, 2-cleanup fixture, fixed storage is 648 bytes;
+its one-byte request reserves another 4096 bytes of backing quota. Cancelling
+and releasing the owner leaves the full 648-byte infrastructure charge. Sizes
+are derived on the target, not assumed from this measurement. This accounting
+covers the Rust value/buffer representation, not host allocator headers or RSS.
+It is not yet a complete machine-memory budget: physical/virtual indexes,
+heap pointer-shadow storage, worker scratch, existing Fabric/process maps,
+logs and staged copies must be included in their subsequent A2/A4 composition.
+They cannot be omitted when heap publication is enabled.
+
+**Focused evidence.** `cargo check --locked --lib` succeeds with Rust 1.90.0.
+The 19 new `a21_` witnesses pass. The combined focused run passes **120 tests**:
+new metadata tests, existing scoped-pointer tests, Fabric tests, Phase 10.7 core
+and OS event tests, and Phase 10.8 typed I/O tests. The metadata churn witness
+runs 2,048 cycles with two clients, interleaved locals, varied rounded requests,
+out-of-order cancellation and stale replay, checking every ledger and fixed
+capacity after each cycle. It makes no claim about backing churn or live heap
+reuse. The frame-preflight witness also checks tags and bytes across late
+failure and stale identity rejection after successful slot reuse.
+
+**Developer acceptance, recorded 2026-10-22.** The developer confirmed the
+focused run using `--test-threads=1`, including all 19 new A2.1 witnesses:
+
+```text
+test result: ok. 120 passed; 0 failed; 0 ignored; 0 measured; 993 filtered out; finished in 0.03s
+```
+
+This confirms the A2.1 focused runtime checkpoint on the developer machine.
+The 993 filtered tests were not part of this run. The `cargo check` success
+above remains separately recorded local evidence. The subsequent A2.2
+implementation and its current acceptance boundary are recorded below.
+
+Run the same focused acceptance from the repository root:
+
+```sh
+cargo check --locked --lib
+cargo test --locked --lib a21_ -- --nocapture --test-threads=1
+cargo test --locked --lib -- \
+  scoped_pointers:: anka64::fabric::tests:: \
+  anka64::core::tests::p107_ anka64::os::tests::p107_ \
+  anka64::os::tests::p108_ \
+  --test-threads=1
+```
+
+No theories changed in A2.1; the five accepted Kleis pairs remain its formal
+prerequisites. The long Rust/CC2 fixed-point suite was not rerun for this handoff.
+A2.2 below composes these reservations with bounded physical/reusable-virtual
+placement using the existing placement managers, derives the added index and
+scratch charges, and preserves atomic failure across the complete reservation.
+Publication remains closed until the later Fabric, pointer-shadow,
+initialization and typed-result checks are connected.
+
+### A2.2 formal gate: bounded placement and compound reservations
+
+**Local formal checkpoint, 2026-10-22; developer acceptance recorded
+2026-10-23 at 215 positive / 180 explicitly disproved hostile witnesses.**
+`anka108_allocation_placement.kleis` and its
+`_false_witnesses.kleis` counterpart refine the concrete bounded representation
+and transaction implemented by A2.2 below. They import the accepted Undertaker
+pair and add no axioms. The five earlier allocation pairs remain unchanged.
+
+Extend the existing `PhysicalPlacementManager` and virtual placement module;
+do not introduce a compiler allocator or calculate application addresses outside
+the placement managers. The physical manager owns one shared arena. Each owner
+has a reusable virtual arena, identified by its exact nonreused account serial.
+Physical addresses, virtual addresses, reservation identities and eventual
+Fabric object identities remain distinct. The new gates allocate no Fabric
+objects and issue no protected pointer authority.
+
+**Bounded representation.** For an arena permitting at most K simultaneous
+claims, count reserved, live and closing extents as occupied. The accepted
+partition induction bounds canonical free extents by K+1. This refinement
+reserves **K+2 free-array entries**, including one additional insertion slot.
+Release can insert at its sorted position, merge adjacent free neighbors, and
+compact the array in place without allocating a temporary merge vector. The
+extra slot is transient workspace inside permanently charged capacity; it does
+not permit another admitted claim or an extra canonical hole. K must fit the
+stable directory namespace. Actual retained host capacity may exceed K+2 and
+must be charged in full. An arena with K=0 cannot admit.
+
+The new laws specify active-prefix indices, exact-take removal, partial-take
+suffix updates, insertion shifts and compaction. Quantified source-index and
+inverse/injectivity laws prevent reading an inactive row, duplicating a
+surviving row or dropping one during a shift. Return checks immediate neighbors
+and derives their presence from the insertion index and active length; an
+application cannot hide a conflicting neighbor by supplying an absence flag.
+The four left/right adjacency cases merge only adjoining free spans. A live
+gap remains a gap. The existing exact coverage/separation laws still apply to
+every other entry in the global partition.
+
+**One admission commit.** Read-only physical, virtual and metadata plans must
+refer to the same current shared revision. Under one exclusive boundary,
+preflight signed size and page rounding, exact owner/account/arena binding,
+owner closure, both selected free extents, both claim/index capacities, the
+stable slot and generation, cleanup credit, job identity and both budgets.
+Both extents use the same rounded span. Obtain current rows from trusted
+tables; cached proposals must match their current index, base and length.
+All checks precede the first write. The commit itself must be nonfallible and
+install physical custody, virtual custody, registry and cleanup records, owner
+and global charges, and generation/job/revision advancement together. Every
+projection uses the same decision; no intermediate one-arena reservation is
+externally observable. A rejected admission changes none of these fields.
+The `a22_installed` postcondition explicitly requires the same freshly advanced
+generation and owner/slot/job identity in all four installed records.
+
+Fixed charging separates existing A2.1 storage, physical free indices, all
+retained virtual free indices, additional claim bindings, owner-arena
+descriptors and fixed scratch. Shared storage belongs to exactly one category.
+Check capacity-times-stride and every category addition for overflow, using
+actual target element sizes and retained capacities. The concrete numbers in
+the examples are illustrative, not a new Rust layout prescription. Accounting
+laws compose checked additions and residual-budget bounds; backing quota is
+charged once per admitted rounded span. These charges do not measure host
+allocator headers/RSS or silently include later Fabric/shadow metadata.
+
+**Cancellation after acceptance is a separate transition.** It requires the
+exact owner, slot, generation and job in the current registry, both placement
+claims and cleanup record, plus both recorded bases and the common span.
+The direct path applies only to private reservations that have **never** been
+attached or published; attachment is a sticky fact. Previously attached work
+must pass the later retirement/reclamation gates even after grants disappear.
+An owner may close before a private reservation cancels. Preflight both bounded
+geometric returns before removing either claim or refunding anything. Return
+both extents, remove the selected records and refund the rounded charge once,
+preserving all other owners and all fixed infrastructure charges.
+
+Cancellation preserves consumed generation/job history; it does not turn a
+failed lifetime into a never-issued identity. The last generation leaves an
+exhausted stable slot. Cleanup may advance the shared revision to its terminal
+value or leave that value saturated, as in A2.1. New admissions reject the
+terminal revision. This private cancellation rule does not relax the published
+Undertaker release contract or allow an old writer to survive reuse.
+
+**Evidence and boundary.** The new pair passes **215 positive witnesses,
+including 34 quantified laws, and 180/180 explicitly disproved hostile
+assertions**. Unknown, timeout, parse/evaluation failure and generic assertion
+failure do not count as success. Concrete traces include two owners sharing
+physical storage with separate virtual arenas; A closes and returns first while
+B retains its extents and quota; B then returns to recover the full arenas.
+Another trace reuses A's physical hole with a fresh generation/job and a valid
+virtual reservation, while rejecting A's old token. Late virtual-return failure
+preserves both claims and all charges. These are bounded symbolic traces, not
+executed guest concurrency or a sustained Rust allocator churn run.
+
+The implementation still has to establish exact table census and provenance,
+maintain the complete sorted/disjoint partition, apply the pointwise operations
+to every affected row, derive actual storage charges, and hold one serialization
+boundary through all nonfallible writes. The gates do not verify an arbitrary
+Rust loop, host allocation success, SMP ordering, CPU/DMA completion, scrubbing,
+publication, C malloc/free or hardware behavior. A2.2 Rust acceptance requires
+forced-capacity failure snapshots, interleaved clients, varied-size/out-of-order
+cancellation, full physical/virtual recovery, stale-token rejection and stable
+retained capacities. Later publication and process/worker integration stay gated.
+
+Run the new pair from the repository root:
+
+```sh
+python3 scripts/check-anka108-gates.py \
+  --kleis /Users/enginatik/.cargo/bin/kleis \
+  --kleis-root ~/git/cee/kleis \
+  --only-a22
+```
+
+At the A2.2 checkpoint, `--only-allocation` included the six allocation pairs;
+the later A2.3 section adds a seventh pair. `--only-108` and the
+default full selection also include A2.2. The runner executes gate files
+sequentially. `--test-threads=1` belongs to the later Rust test command, not Kleis.
+The A2.2 combined local run passed all six pairs: **1051 positive / 737
+explicitly disproved hostile assertions**, including the unchanged original
+five pairs at 836 / 557. That combined run is local formal evidence; developer
+acceptance covers all six pairs through the reported focused runs. Formal
+evidence does not substitute for Rust/CC2 acceptance.
+Local proof environment: the supplied Linux Kleis reports 1.0.0, with binary
+SHA-256 `a93c8d2d958a7823f2b9bfaa220903f9ef624c61f9bde5b329783da34030cc9c`,
+Z3 4.12.2, and supplied stdlib prelude SHA-256
+`86014730d7bf2cc048632208d21c20aec6390f2c7ceaa8230cb2291976158432`.
+No Rust source changed in that formal handoff. The Rust implementation follows;
+none of the six accepted theories or the gate runner changes in this slice.
+
+### A2.2 Rust: bounded extent custody and exact cancellation
+
+**Developer runtime acceptance recorded 2026-10-23: all 1134 library tests
+passed single-threaded, with no failures or filtered tests.**
+`ScopedPointers::with_heap_placement` composes the existing common
+registry with a bounded profile of `PhysicalPlacementManager` and one reusable
+profile of `VirtualLayoutBuilder` per retained owner row. Shared extent
+operations live inside the existing placement module; the registry never
+calculates application addresses. Legacy ObjectId and monotonic APIs cannot
+allocate through these bounded profiles. Their existing public profiles retain
+their previous behavior, including the Fabric-checked ObjectId release path.
+
+The trusted constructor supplies a dedicated physical pool and a virtual
+window template. Each owner gets that window in its own address space; equal
+numeric virtual addresses across processes are intentional. Later loader/Fabric
+integration must establish that these pools do not overlap other placements.
+All claim arrays, K+2 free-array capacity and owner-arena descriptors are
+allocated and charged at construction. An owner binds an already retained
+virtual arena to its nonreused serial; releasing a quiescent owner unbinds it
+without dropping its buffers or infrastructure charge. There is no heap
+manager accessor or clone of the owning registry.
+
+Admission preflights metadata, quotas, identity, both arenas and their claim
+capacities while holding the same exclusive registry borrow. Opaque physical
+and virtual plans stay inside that synchronous operation and carry its current
+revision. Only after all checks succeed does an allocation-free commit install
+both claims, the common slot and cleanup record, charge the rounded span once,
+and advance generation/job/revision. A late virtual failure leaves the physical
+arena and all metadata unchanged. This is serialized interleaving through one
+`&mut ScopedPointers`, not a new lock-free or SMP protocol.
+
+`abort_heap` checks the current owner/slot/generation/job and exact recorded
+bases/spans, requires an unpublished, never-attached reserved or closing
+lifetime, and preflights both geometric returns before changing either arena.
+Return inserts into the precharged slot, merges immediate free neighbors, and
+compacts in place; no temporary merge vector or host allocation is needed.
+The commit clears both claims and selected metadata and refunds only the
+rounded backing charge. Identity history and fixed storage stay consumed.
+Owner closure and terminal revision still allow this cancellation. The sticky
+attachment guard must be set before future Fabric/work attachment; previously
+attached or published work requires the later Undertaker path.
+
+**Measured storage.** The constructor first checks minimum retained storage,
+then charges actual vector capacities using checked target-size arithmetic.
+Inline manager headers already belong to the registry value and are not
+charged twice. Empty legacy ObjectId maps and the unused monotonic region
+vector never grow in the bounded profile. On x86-64 with Rust 1.90.0:
+
+| Representation | Bytes |
+|---|---:|
+| Registry value, including inline physical manager and vector headers | 312 |
+| Common identity/record slot, now including optional extent pair | 96 |
+| Optional owner account row | 72 |
+| Optional cleanup row | 48 |
+| Retained virtual manager descriptor | 120 |
+| Fixed operation-plan allowance | 208 |
+
+The four-slot/four-scope/two-owner/four-cleanup fixture with four physical
+claims and three virtual claims per owner charges **2312 bytes** before any
+payload reservation: 1128 bytes for the common registry/tables and 1184 for
+placement buffers, virtual descriptors and operation plans. The latter includes
+the maximum size of `Option<AdmissionPlacement>` or `Option<ReturnPlacement>`;
+it is a fixed value-storage allowance, not a host-stack/RSS measurement or a
+separate heap scratch allocation. Cancellation retains the entire fixed charge.
+Fabric objects, mappings, pointer shadow and worker storage remain subsequent
+budget obligations, and heap publication cannot use this partial footprint.
+
+**Focused runtime evidence.** `cargo check --locked --lib` passes. A clean,
+nonincremental Rust 1.90.0 Linux build passes **160 tests, 0 failed, 974 filtered
+out**, using one test thread: the earlier 120 focused tests, all 19 existing
+placement tests, and **21 new A2.2 tests**. New witnesses cover full and zero
+claim capacity, metadata/quota exhaustion, stale revision and identity,
+fragmentation despite sufficient aggregate free bytes, every permutation of
+four frees, exact cross-record substitution, attachment/publication denial,
+terminal revision, exhausted generation and owner-account reuse. Independent
+test censuses reconstruct each complete physical/virtual partition and sum all
+current claims and charges. A test-only allocator counter observes zero host
+allocations around admission, cancellation, closure and owner-row reuse.
+
+The 2,048-cycle witness interleaves two owners and a live local allocation,
+varies request sizes and cancellation order, checks stale replay after reuse,
+preserves the other owner's extents, and verifies complete recovery and
+unchanged retained capacities. This exercises private extent custody, not
+initialized guest payloads or live-authority reclamation. Heap publication,
+Fabric attachment/mappings/grants, pointer shadow, initialization, Undertaker
+execution, typed heap results and C malloc/free remain disabled/pending.
+
+Reproduce the focused checks from the repository root:
+
+```sh
+cargo check --locked --lib
+cargo test --locked --lib a22_ -- --nocapture --test-threads=1
+cargo test --locked --lib -- \
+  scoped_pointers:: anka64::placement::tests:: anka64::fabric::tests:: \
+  anka64::core::tests::p107_ anka64::os::tests::p107_ \
+  anka64::os::tests::p108_ \
+  --test-threads=1
+```
+
+**Full developer regression acceptance, recorded 2026-10-23.** After restoring
+the existing `src/anka64/scoped_pointers/heap/tests.rs` alongside the new
+`src/anka64/scoped_pointers/heap/placement/tests.rs`, the developer reported the
+successful full-library run:
+
+```sh
+cargo test --locked --lib -- --test-threads=1
+```
+
+```text
+test result: ok. 1134 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1149.73s
+```
+
+This supersedes the pending developer runtime checkpoint and covers all tests
+registered in the library test binary, including the 21 A2.2 witnesses. The
+earlier 160-test run remains separate local focused evidence. Both required
+test files are present in the accompanying source archive. The A2.2 acceptance
+correction itself changed only the two planning documents; Rust sources and accepted
+Kleis gates were unchanged. A2.2 extent custody/cancellation is accepted; the
+remaining Fabric, initialization, publication and Undertaker work stays gated.
+
+### A2.3 Kleis: bounded Fabric attachment, shadow and initialization
+
+**Formal checkpoint developer-accepted, 2026-10-24.** The accepted A2.2 implementation owns
+exact private physical/virtual reservations and can cancel a never-attached
+reservation. It does not yet create heap Fabric objects, initialize backing,
+publish heap pointers or implement C `malloc`/`free`. The next refinement is
+`theories/anka108_allocation_fabric.kleis` with its paired hostile witnesses.
+It imports A2.2 and composes its custody/accounting obligations with the
+accepted lifetime, initialization, protected-cell and Undertaker contracts.
+
+The immediate implementation issue is bounded metadata. `Fabric` currently
+keeps objects, placements and protected pointer cells in growing `BTreeMap`s;
+domain grants use growing vectors. The current typed-store path builds a byte
+vector, performs the payload write and then inserts its protected pointer cell.
+An allocation service cannot promise preflighted resource use while leaving
+those heap paths able to allocate host storage during commit. This refinement
+selects the following initial software representation:
+
+| Resource | Concrete A2.3 contract |
+|---|---|
+| Heap Fabric metadata | Preallocate one composite row per common registry slot. The row holds the object identity, placement, private map/grant plan, exact owner/reservation binding and initialization state. No second pointer namespace and no growing map/vector/string insertion during an admitted heap commit. |
+| Protected heap cells | Preallocate a dense shadow table covering the dedicated physical heap pool, one entry per aligned 16-byte cell. Authenticate the current lifetime and `(object, object generation, offset)` before indexing it; a physical index never confers authority. |
+| Fixed accounting | Charge actual retained row/shadow capacities times their actual target element sizes, plus fixed scratch, once at service construction. All additions and multiplications are checked. A2.2 already charges rounded payload per owner and globally; attachment and publication do not charge it again. |
+| Physical and virtual exclusion | Reserve the complete physical heap pool against loader/legacy placement and raw access. Each owner's heap arena excludes its code, stack and other mappings. Different owners may use equal numeric virtual addresses. Every rounded extent, including padding, remains in the exact A2.2 custody record. |
+| Object identity | Use a checked machine-global counter shared with every Fabric object issuer; zero is a valid object ID, exhaustion fails closed and attached identities never rewind. Preserve the allocation epoch already consumed by A2.2. |
+| Visibility | One trusted row stage controls whether heap object, map and RW grant are usable. Private attachment is invisible; initialized publication and the typed result commit together. Logical size is exposed; page-rounded padding is not. |
+
+The dense shadow is a bounded initial software choice, with predictable
+indexing and no store-time capacity failure. Its cost is proportional to the
+configured heap pool even when few cells contain pointers. The formula is
+`retained_shadow_entries * size_of::<ShadowEntry>()`, with at least
+`pool_bytes / 16` entries. Witness strides are illustrative, not a claim about
+the future Rust struct size. This is not a claim of optimal memory overhead,
+complete host RSS accounting or a future FPGA tag format. A later packed or
+sparse representation needs its own capacity/failure/refinement gate. Reject
+construction if the actual retained storage does not fit its fixed budget.
+
+**Transitions and failure behavior.** All checks read current trusted state
+under the same exclusive boundary used by owner closure and shared reservation
+revision. Caller-supplied booleans or guessed completion counts are insufficient.
+
+1. **Attach privately.** Recheck the exact account serial, process incarnation,
+   context/domain, slot, allocation epoch, job, physical/virtual custody and
+   prepared capacity. Require terminal old work and no alternate readers or
+   writers. Install the preallocated row, consume one fresh ObjectId, set the
+   sticky attached marker and start the initialized prefix/version at zero.
+   No user authority or pointer is published. Process generation zero is valid;
+   the nonreused account serial supplies the owner identity used by the model.
+2. **Initialize full backing.** Synchronous software-Fabric steps clear at most
+   one page each, in contiguous aligned chunks. Each committed chunk clears
+   bytes and overlapping protected tags together and advances the trusted
+   prefix/version/revision. The rounded backing, including padding, must be
+   covered. Any other trusted private write resets the initialized prefix and
+   advances the mutation version; an older clean receipt can no longer publish.
+   Such writes must also use the ordinary overlapping-tag invalidation barrier.
+3. **Publish only when the complete lifecycle is connected.** Bind the exact
+   row and current initialization version, complete prefix, owner, logical-only
+   object/map/RW-grant plan, visible byte/tag completion and protected result
+   destination. A single nonfallible commit changes visibility and returns the
+   same reserved slot/epoch at position zero. No EXEC, ATOMIC, SEAL, cross-owner
+   export or device authority is introduced. A failed publish preserves the
+   existing result pair and prior private state.
+4. **Close without premature refund.** Failure or owner death after attachment
+   closes access and queues the already-reserved Undertaker record. All aliases,
+   including spills and saved events, must reauthenticate the current lifetime.
+   Removing one register copy is not revocation. Extents, charges, identity
+   bindings and pending-work accounting remain held until the accepted
+   retirement/scrub/release path completes. Direct A2.2 cancellation is allowed
+   only before the sticky attachment marker has ever been set. Closure remains
+   possible at revision exhaustion, using the existing saturating cleanup rule.
+
+Every generic lookup and physical writer that could reach the dedicated pool
+must honor this contract. A valid legacy capability, matching address, old
+object-generation pair or restored pointer-kind bit cannot override a closed
+heap lifetime. Typed heap stores additionally require current source authority
+or canonical null, coherent payload/kind transport and no remaining fallible
+host allocation. Dense shadow does not by itself establish any of those checks.
+
+**Evidence and limits.** Local validation using the supplied Kleis executable
+passes **192 positive witnesses**, including **30 universally quantified laws**,
+and **162/162 explicitly disproved hostile witnesses**. The constructive trace
+attaches a 31-byte logical object in 4096 bytes of backing, clears it in 16-byte
+and 4080-byte steps, publishes a usable pointer and then closes it. Quantified
+observations range over arbitrary old bytes and tags: the complete backing
+becomes initialized, logical reads succeed with no old-byte dependence, padding
+remains inaccessible, and another owner's bytes/tags remain unchanged. Further
+laws cover bounded/injective shadow indexing, failed-transition preservation,
+single visibility, nonwrapping identity issuance and rejection of stale aliases.
+Hostile cases include stale receipts, live DMA/CPU work, owner restart, wrong
+geometry, exhausted identities, metadata shortage and store-time host allocation.
+
+This is a conditional finite-transition model, not proof that the current Rust
+code implements it. Trusted complete scans, actual exclusion, serialized
+updates, typed-result context binding, real terminal drainage and visibility
+remain implementation obligations. It proves no unconditional cleanup progress,
+cache/timing secrecy, device behavior or hardware realization. It also does not
+close the existing local-frame payload-initialization gap. The original formal
+handoff changed no Rust sources or earlier accepted theories and ran no long
+Rust/CC2 tests; the subsequent A2.3.1 Rust piece is recorded below.
+The earlier six allocation pairs remain developer-accepted at **1051 positive /
+737 hostile** across their recorded runs; they were not rerun for this handoff.
+The developer has now confirmed the new pair at 192 / 162. These counts are not
+a claim of a newly executed combined seven-pair run.
+
+Run only the new pair:
+
+```sh
+python3 scripts/check-anka108-gates.py \
+  --kleis /Users/enginatik/.cargo/bin/kleis \
+  --kleis-root ~/git/cee/kleis \
+  --only-a23
+```
+
+`--only-allocation` and the complete 10.8 selection now include A2.3. Unchanged
+imported examples do not execute under `--only-a23`; imported definitions still
+participate in the new proofs. Unknown, timeout and evaluation/parse errors
+continue to fail closed. Python syntax and the new selector were checked.
+
+**Bounded implementation order (the formal gate is accepted):**
+
+1. A2.3.1 below implements fallible setup and fully charged bounded heap Fabric rows/shadow, a
+   shared checked ObjectId issuer and private attachment with exact reservation
+   checks. Keep guest publication disabled. Test metadata-budget/late-failure
+   behavior, unchanged unrelated owners and no host allocations inside admitted
+   mutation/store commits. This does not yet bound unrelated emulator logs or
+   all legacy process/object metadata.
+2. A2.3.2 bounded backing initialization/trusted-write invalidation and A2.3.3
+   conditional protected heap-cell transport/scalar tag invalidation are
+   developer-accepted. A2.3.4 per-allocation attached-failure closure is also
+   developer-accepted. Keep publication disabled
+   until cleanup and result delivery are connected.
+3. A2.3.5's concrete worker/terminal-work refinement is developer-accepted.
+   A2.3.5a worker records/claims and A2.3.5b backend registration/pinning are
+   developer-accepted. A2.3.5c bounded software effects, terminal consumption
+   and current drain checks are developer-accepted. A2.3.6 queued-job recovery
+   and A2.3.7 authority retirement are also developer-accepted. Complete trusted
+   cleanup/reuse below adds the required later-stage worker refinement and the
+   whole scrub/release/refund path in one delivery. Its runtime acceptance is
+   pending. The next delivery is working C malloc/free, including owner
+   exit/fault integration and atomic typed publication/syscall results. Assess
+   any missing machine/ABI invariants before implementation, within that
+   functional scope; do not create another open-ended chain of micro-handoffs.
+
+Working independent C clients and safe reuse must still pass before the required
+post-malloc whole-stack review. The full A/B/C acceptance scenario remains:
+clients A and B compile concurrently; A exhausts or exits; C reuses A's backing;
+B stays correct and all A's stale aliases fail. The formal observations above
+are not execution evidence for that scenario. Compiler growth follows the
+review and uses this shared service; it does not get a separate allocator.
+
+### A2.3.1 Rust: fixed Fabric storage and private attachment
+
+**Implementation and developer acceptance, 2026-10-24.** The developer
+confirmed both A2.3 gates at 192 positive / 162 explicitly disproved hostile.
+This piece implements only their fixed-storage/private-attachment foundation.
+It does not initialize an allocated lifetime or enable guest heap pointers.
+
+`Fabric::with_private_heap` constructs a fresh optional machine profile using
+the existing A2.2 placement managers and common registry. Setup uses fallible
+allocation for the Fabric memory buffer, fixed composite rows and dense shadow.
+The physical pool must fit actual Fabric memory. The metadata budget is checked
+before table allocation and again against actual retained capacities. Additional
+fixed charges include the inline heap descriptor, row/shadow arrays and a
+value-storage allowance for the attachment plan/row. Existing registry/placement
+charges are not counted again. Memory-buffer capacity is the emulator's physical
+RAM model, not an additional per-allocation payload charge or host RSS claim.
+
+`attach_private_heap` verifies the current trusted owner descriptor against
+the nonreused account, existing domain, exact reservation/cleanup record,
+shared revision and both current placement claims. The registry must still
+hold a reserved, unpublished, never-attached lifetime. A bounded row census
+checks slot availability, physical custody and same-owner virtual separation;
+different owners may retain equal numeric virtual addresses. The Fabric also
+rechecks legacy placements, pointer-cell placements and nonterminal transaction
+spans for conflicts with its dedicated pool. No caller-provided quiet flag is
+accepted. New object identity and every potentially failing check are prepared
+before the first mutation.
+
+The commit sets the registry's sticky attachment marker, advances its shared
+revision once, installs the exact private composite row and consumes one fresh
+ObjectId. It changes neither the allocation epoch/job nor payload quota. The
+row includes logical bounds, rounded physical/virtual custody, an RW-only map/
+grant plan and zero initialized-prefix/version counters. It is **absent from
+the legacy public object/placement maps** and creates no grant, mapping,
+initialization receipt or `ScopedPointer`. Existing bytes and tags remain
+untouched. The returned ObjectId is diagnostic identity only.
+
+The common ObjectId issuer now checks increment overflow and existing identity
+collisions. The heap path returns `Capacity(Identity)` on exhaustion;
+`try_alloc_object` gives legacy callers a fallible identity API. Existing
+`alloc_object` callers retain their compatibility wrapper, which panics rather
+than wraps on exhausted/occupied identity; migrating all legacy failure handling
+is outside this piece. The old unpublished-staging rollback remains available,
+but a retained high-water fence prevents it from ever rewinding across an
+attached heap identity, even after future row reclamation.
+
+Dedicated-pool exclusion applies before the first reservation: legacy object
+placement, translation, full precommit spans, object initialization/zeroing and
+raw bootstrap reads/writes/zeroing cannot access the pool. Complete overlapping
+spans are rejected before a byte or tag changes. Fallible raw helpers return
+`None`/`false`; existing infallible bootstrap wrappers report misuse by panic.
+Legacy relocation now validates the destination before replacing its old
+placement, so a rejected move into the heap pool preserves translation.
+The physical high-watermark includes the whole configured pool. Heap identities
+cannot be granted, sealed, revoked, destroyed or rolled back through legacy APIs.
+
+After attachment, direct `abort_heap` remains forbidden. Existing owner closure
+fences the registry and queues its preallocated cleanup records while retaining
+charges, extents and private Fabric rows. This piece supplies no release worker
+or per-allocation attached cleanup: those resources intentionally remain held
+until the later Undertaker integration. Rejected attachment leaves the original
+never-attached reservation available for ordinary A2.2 cancellation.
+
+**Validation:** `cargo check --locked --lib` and `cargo check --locked --tests`
+completed successfully. The latter compiles the tests without executing them.
+**No Rust tests were run by the agent**, at the developer's request. Seventeen
+new `a231_` tests are included for exact charging, invalid configuration,
+identity exhaustion/collision/rollback, preserved bytes/tags/charges/epochs,
+late failure, stale keys/revisions/owners, duplicate attachment, independent
+owner closure, pool exclusion, complete-span rejection, CPU/DMA pipeline
+conflicts, shadow indexing and legacy-profile compatibility. Relevant steady
+state operations are measured with the existing thread-local allocation counter.
+The developer subsequently confirmed both focused runs on 2026-10-24:
+
+- New A2.3.1 tests: **17 passed, 0 failed, 1134 filtered out, 0.01s**.
+- Shared-component regression: **144 passed, 0 failed, 1007 filtered out,
+  0.09s**, including those 17 tests; the two counts are not additive.
+
+This establishes focused runtime acceptance for A2.3.1. The last accepted
+full-library result remains **1134 passed in 1149.73s** from A2.2; no full
+1151-test run was reported.
+
+Run the new tests locally:
+
+```sh
+cargo test --locked --lib a231_ -- --test-threads=1
+```
+
+The shared ObjectId, relocation and physical-access changes also warrant this
+focused integration selection; it includes the new tests and the existing
+registry/placement/Fabric/developer-ingress checks:
+
+```sh
+cargo test --locked --lib -- --test-threads=1 \
+  anka64::fabric:: anka64::scoped_pointers:: \
+  anka64::placement:: anka64::dev_shell::
+```
+
+No accepted Kleis files changed, so this implementation handoff does not require
+rerunning unchanged formal examples. The full Rust/CC2 suite remains a local
+integration checkpoint, not an agent-side cost in this handoff.
+
+**Remaining boundaries:** this profile is not installed by the OS or compiler
+runner yet. Trusted process-descriptor freshness, code/stack exclusion from the
+virtual heap window, process exit/fault delivery and real controller drainage
+must be connected before guest publication. The fresh constructor has no old
+device state; rejecting overlapping Fabric transactions is not proof of a
+physical device's drainage. Heap metadata is bounded, but the census of legacy
+machine maps/traces still depends on that existing inventory; this piece claims
+neither constant execution time nor a bound on all emulator logs/legacy metadata.
+Existing machine profiles continue to use `Fabric::new` with no heap pool.
+A2.3.1 itself supplies no malloc/free, heap-cell load/store, initialization,
+worker, syscall, compiler or hardware implementation. The subsequent A2.3.2
+piece below supplies private byte/tag initialization only.
+
+### A2.3.2 Rust: complete private backing initialization
+
+**Implementation and developer acceptance, 2026-10-24.**
+This piece follows the accepted A2.3 `a23_chunk`/`a23_dirty` transitions and
+`init108_*` byte, tag, prefix, version and exact-binding laws. It adds no new
+architectural contract or Kleis axiom. The accepted theories and gate scripts
+are unchanged; no unchanged formal examples were rerun for this handoff.
+
+`Fabric::private_heap_initialization` derives an opaque `HeapInitialization`
+snapshot from the current trusted row. It binds the complete reservation
+(slot/epoch/account/job), owner process incarnation/context/domain, object and
+object generation, logical/rounded geometry, RW plan, completed prefix and
+mutation version. Every observation, scrub, trusted write and completion check
+revalidates the current owner account, domain, unpublished attached registry
+state, unqueued cleanup record, shared revision and both current manager claims.
+It checks actual backing/shadow bounds and repeats the existing legacy placement,
+pointer-cell and nonterminal transaction census. A caller cannot supply a
+completion count or an `already_zero` flag. ObjectId zero remains valid.
+
+`initialize_private_heap_chunk` accepts a nonzero multiple of 16 bytes, at most
+4096 bytes, starting exactly at the trusted completed-prefix cursor. Checked
+bounds cover the complete rounded allocation, including padding. All identity,
+version, range and capacity checks finish before mutation. Under the same
+exclusive Fabric borrow, the commit zeros the byte slice, clears every affected
+dense-shadow cell, updates the prefix and increments both initialization version
+and common revision once. There is no chunk buffer, growing table or host
+allocation in that commit. No second quota, allocation epoch or ObjectId is
+consumed. Other allocations retain their bytes, tags, progress and charges.
+The fixed construction budget now also reserves value-storage allowances for
+the initialization plan, ranges and snapshot; this is not a host RSS bound.
+
+`write_private_heap` is the trusted non-scrub mutation path for private backing.
+It accepts 1..4096 bytes inside rounded custody, including unaligned spans;
+it clears all overlapping 16-byte tags and atomically resets the **entire**
+initialized prefix to zero while incrementing version/revision. Even writing
+zero values invalidates older completion records. Rejected writes leave prior
+progress intact. This API is not an initialized-image overlay: the next scrub
+must overwrite those bytes before a fresh zero-filled heap may be published.
+Legacy/raw writers remain excluded from the dedicated pool. No write creates
+protected pointer kind from numeric payloads.
+
+`validate_private_heap_initialization` accepts only the exact current complete
+snapshot. A copied snapshot's `is_complete()` is a historical observation and
+cannot substitute for revalidation. Re-scrubbing identical bytes after a trusted
+write never revives an older version. Version/revision exhaustion fails closed;
+existing owner closure still works and retains all attached custody/charges.
+An unrelated client's mutation requires a fresh shared revision but does not
+invalidate this allocation's own unchanged version. These are serialized
+software-Fabric interleavings, not evidence of running parallel C clients.
+
+**Visibility remains disabled.** A complete snapshot is neither a memory grant
+nor a protected pointer. There is no public object/map insertion, guest read,
+per-allocation attached release, cleanup worker, C malloc/free, syscall-result
+publication or OS/runner integration in this piece. Future publication must
+repeat the completion check inside its exclusive commit along with the remaining
+lifecycle, typed-result and current-process gates. This synchronous initializer
+does not establish device drainage, FPGA/cache visibility or the separate
+local-frame payload-initialization guarantee.
+
+**Validation:** `cargo check --locked --tests` passes, compiling the library,
+binary and test code without running tests. **No Rust tests were executed by
+the agent.** Eighteen new `a232_` tests cover full backing/padding/tag coverage,
+multiple chunks/pages, rejected gaps and counts, exact snapshot bindings, stale
+versions/revisions, mutation invalidation, exhaustion, owner closure,
+independent owners, pending CPU/DMA/atomic work, legacy tag/placement conflicts,
+late storage failure and current cleanup/physical/virtual claim checks. The
+existing thread-local allocation counter guards admitted and rejected paths.
+The developer subsequently confirmed both focused runs on 2026-10-24:
+
+- New A2.3.2 tests: **18 passed, 0 failed, 1151 filtered out, 0.02s**.
+- Shared-component regression: **162 passed, 0 failed, 1007 filtered out,
+  0.10s**, including those 18 tests; the two counts are not additive.
+
+This completes focused runtime acceptance of A2.3.2. No full 1169-test library
+run was reported; the last accepted full baseline remains A2.2's 1134 tests.
+
+Run the new tests locally, then the affected shared-component regression:
+
+```sh
+cargo test --locked --lib a232_ -- --test-threads=1
+
+cargo test --locked --lib -- --test-threads=1 \
+  anka64::fabric:: anka64::scoped_pointers:: \
+  anka64::placement:: anka64::dev_shell::
+```
+
+The following A2.3.3 piece supplies conditional protected heap-cell operations;
+A2.3.4 supplies attached-failure closure. Undertaker worker/process integration
+and typed-result publication remain downstream. C malloc/free and independent-client
+acceptance still precede the required whole-stack review and compiler growth.
+
+### A2.3.3 Rust: protected heap-cell transport and scalar invalidation
+
+**Implementation and developer acceptance, 2026-10-24.** The developer
+confirmed **22 new tests passed in 0.01s** (1169 filtered out), followed by
+**184 focused shared-component tests passed in 0.13s** (1007 filtered out).
+The 184 include the 22; these are not additive counts. No full 1191-test run
+was reported. A2.2's 1134-test run remains the last accepted full-library baseline.
+This piece implements the already accepted `a23_current`, `a23_access`,
+`a23_cell` and `a23_store` conditions together with `kind107_typed_storage`,
+coherent payload/kind transport, canonical null and overlapping-write rules.
+No new Kleis theory or architectural primitive is introduced. Accepted theory
+files and gate scripts are unchanged; unchanged formal examples were not rerun.
+
+**Publication stays disabled.** The new access paths require a genuinely live,
+published heap lifetime; neither reservation, attachment nor a complete A2.3.2
+initialization snapshot admits access. No production code in this piece sets
+that published state or issues a heap pointer. Positive component tests run real
+reserve/attach/initialization, then synthesize the pending publication checkpoint
+through `cell_test_support`, compiled only under `#[cfg(test)]`. Those fixtures
+are explicit test assumptions, not an implementation of publication, malloc,
+process activation or cleanup. Production builds do not contain those helpers.
+
+`ScopedPointers::prepare_heap_pointer` reads the opaque token's current slot and
+generation, live/published/attached state, exact open owner account, process
+incarnation/context/domain, unqueued cleanup identity and both current placement
+claims. It returns a checked plan, not a new pointer or authority. The complete
+logical point may include one-past for transport; every memory operation checks
+its own nonempty logical span before touching bytes or shadow. A local/heap
+class lookup selects validation only; it never authenticates a token.
+
+Fabric requires a registered CPU agent in the current owner's existing domain,
+the exact reserved row and geometry, expected object generation, RW-only rights,
+complete prior initialization, actual byte/shadow bounds and exclusion of
+legacy placement or outstanding work. The row remains outside legacy public
+object/placement maps; its stage is derived from the common registry instead
+of a second Fabric visibility flag. All entry points finish under one exclusive
+Fabric borrow and consume current state. No caller can supply a prevalidated
+cell index or bypass ownership with a raw ObjectId/physical address.
+
+The new internal runtime operations are:
+
+| Operation | Concrete behavior |
+|---|---|
+| `store_heap_pointer_cell` | Validate a live aligned 16-byte destination and an authenticated source or canonical null; serialize both payload words into a fixed stack array and install payload/tag together |
+| `load_heap_pointer_cell` | Validate the destination cell, compare both stored words with its opaque shadow token, and reauthenticate that token before returning it; untagged nonzero or mismatched payload fails |
+| `write_heap_bytes` | Validate a nonempty logical span of at most 4096 bytes, write it and clear **all** overlapping 16-byte tags, even when the supplied bytes are unchanged |
+
+Heap pointers and same-context local pointers may be transported. Local sources
+also require a current frame lifetime, backing object generation and READ
+permission at the transported point. One-past can be copied but never used as a
+cell or byte destination. Canonical null is exactly untagged zero/zero; a tag
+with zeroed or altered payload fails rather than falling back to null. Raw
+copies of valid handle words never recreate a tag.
+
+Both sides authenticate on every operation. Closing a source heap invalidates
+all copies still held in registers, cells or other trusted snapshots without
+requiring erasure. A local source similarly fails after scope retirement or
+slot reuse. Destination closure rejects reads, typed stores and scalar writes.
+Another owner's equal numeric virtual address selects different custody and
+cannot authorize cross-owner transport. Tests exercise serialized independent
+owner interleavings; this is not running concurrent C-client acceptance.
+
+Data operations leave allocation epochs, ObjectIds, owner/global charges and
+ledger revision unchanged. They do not grow the legacy pointer-cell BTreeMap,
+transaction history or fault log. The dense shadow is already reserved, and
+construction now charges value-storage allowance for access plans, span and
+16-byte transport scratch. Full shadow use or exhausted owner quota does not
+require new metadata. Admission/revision exhaustion does not disable existing
+live data operations; owner closure still fences them. Errors preserve bytes,
+tags and accounting because every fallible check precedes the first mutation.
+
+These internal APIs are **not yet routed from CPU instructions or syscalls**.
+Existing core pointer arithmetic/spills and generic transaction paths remain
+unchanged; legacy, raw, DMA and atomic access cannot reach the heap pool. The
+future caller must bind the current process descriptor and protected destination
+register/context before integrating the API. Existing legacy exclusion scans
+still depend on that inventory; this is not a whole-emulator memory/time bound,
+hardware coherence proof or completed saved-event/heap ABI integration.
+
+**Validation:** `cargo check --locked --tests` passes for production and test
+code. The agent executed **no Rust tests**. Twenty-two new `a233_` tests cover
+conditional live/null/heap/local roundtrips, private-state rejection, exact
+logical bounds, one-past transport, scalar forgery and cross-cell invalidation,
+source/destination closure, local scope/permission changes, owner/CPU/DMA
+isolation, malformed metadata, incomplete publication, pending-work conflicts,
+full-shadow capacity and exhausted-ledger behavior. Mutation paths are wrapped
+with the existing thread-local allocation counter. Their developer-confirmed
+focused acceptance is recorded above; A2.3.2's 162-test acceptance is prior evidence.
+
+Run locally:
+
+```sh
+cargo test --locked --lib a233_ -- --test-threads=1
+
+cargo test --locked --lib -- --test-threads=1 \
+  anka64::fabric:: anka64::scoped_pointers:: \
+  anka64::placement:: anka64::dev_shell::
+```
+
+The next bounded piece, A2.3.4 below, implements per-allocation
+**attached-failure closure** into its already-reserved cleanup record. Undertaker
+worker/process integration follows. Publication remains closed until
+terminal cleanup, current process/context checks and typed-result delivery are
+connected. C malloc/free and the A/B/C safe-reuse scenario remain prerequisites
+for the required whole-stack review; this conditional cell milestone does not
+trigger that checkpoint.
+
+### A2.3.4 Rust: attached-failure closure without premature reclamation
+
+**Implementation and developer acceptance, 2026-10-24.** The developer confirmed
+**17 new tests passed in 0.02s** (1191 filtered out), followed by **201 focused
+shared-component tests passed in 0.13s** (1007 filtered out). The 201 include the
+17. No full 1208-test run was reported; A2.2's 1134-test run remains the last
+accepted full-library baseline. The latest uploaded archive matches the A2.3.4
+handoff's source and documentation.
+This piece implements the accepted `a23_close`, `a23_stage`, `a23_held` and
+saturating `a22_cleanup_revision` rules. The existing current-lifetime checks
+reject subsequent access. No new architectural contract is introduced; Kleis
+theories and gate scripts are unchanged and were not rerun.
+
+`Fabric::close_attached_heap` is a trusted internal failure/cleanup operation
+for one exact attached reservation. It takes the opaque reservation, retained
+owner descriptor and exact ObjectId. Registry preflight rechecks the account
+serial, process incarnation/context/domain, slot/generation/job, sticky attached
+marker, stage/publication consistency, reserved cleanup row, rounded accounting
+and both actual placement claims. Fabric then rechecks its exact row, object
+generation, identity high-water mark, logical size, RW plan, geometry and
+retained byte/shadow bounds. Every fallible check precedes mutation under one
+exclusive Fabric borrow. Cleanup-index lookup is now bounds-checked as well;
+an invalid binding fails without indexing outside the directory.
+
+A successful commit changes only the allocation's common stage to `Closing`,
+queues its already-reserved cleanup record and advances the shared revision
+with saturation. It allocates no host storage, inserts no map/log entry and
+consumes no ID, queue slot, allocation epoch or quota. Construction charges the
+additional closure-plan value allowance once. The owner remains open for its
+other allocations. Both placement claims, owner/global charges, account/slot/job
+bindings, ObjectId, bytes, pointer tags and initialization progress remain held.
+Direct `abort_heap` still rejects every ever-attached lifetime.
+
+An exact repeat returns `AlreadyClosing` without changing any state or revision.
+That result observes an existing closure; it is **not** a second successful
+`a23_close` transition. It works in either order with existing `close_owner`;
+already-queued work is not counted twice. A different owner, incarnation,
+reservation or ObjectId still fails even on the duplicate path. The retained
+identity suffices after the domain has been removed; cleanup does not depend
+on a live CPU or caller-supplied PID. This API is not a guest free syscall.
+
+**Close admission before draining.** Closure does not require a quiet pool,
+complete initialization, a new admission revision or counter headroom. Full
+reserved cleanup capacity and revision/identity exhaustion do not block it.
+Outstanding CPU/DMA/atomic transaction state is neither cleared nor declared
+terminal. Backing remains unavailable for reuse, even after a legacy conflicting
+transaction is subsequently rejected by its existing precommit gate. Terminal
+work accounting, worker leases, retirement and cleanup were outside this
+closure handoff. Their subsequent implementation and current acceptance are
+recorded in the complete trusted cleanup/reuse section below.
+
+The A2.3.2 initialization paths reject a closed private allocation, including
+previously complete snapshots. Conditional live A2.3.3 operations reject closed
+destinations and every surviving source alias they reauthenticate. Payload and
+shadow copies remain intact, demonstrating lifetime invalidation rather than
+erasure. Positive live cases still use the explicit test-only publication
+fixture; real heap CPU calls, spills and saved event results remain unwired.
+Independent-owner/sibling tests exercise serialized interleavings, not concurrent
+C programs or the complete A/B/C backing-reuse acceptance scenario.
+
+**Validation:** `cargo check --locked --tests` passes; the agent executed **no
+Rust tests**. Seventeen new `a234_` tests cover dirty/partial/complete private
+closure, live source/destination alias rejection, exact duplicate and owner-death
+ordering, lost-domain cleanup, stale/substituted custody, malformed cleanup
+bindings, unrelated owners/siblings, full directory/exhausted counters, pending
+CPU/DMA/atomic work, retained charges/extents and legacy bypass rejection.
+Mutation/rejection paths use the existing thread-local allocation counter.
+Their developer-confirmed focused acceptance is recorded above.
+
+Run locally on `feat/anka108-protected-allocation`:
+
+```sh
+cargo test --locked --lib a234_ -- --test-threads=1
+
+cargo test --locked --lib -- --test-threads=1 \
+  anka64::fabric:: anka64::scoped_pointers:: \
+  anka64::placement:: anka64::dev_shell::
+```
+
+The concrete review identified a required refinement: the abstract Undertaker
+model does not select a worker registry or bind old-work completion to actual
+backend request records. A2.3.5 below specifies those representations and gates
+before their Rust implementation.
+Keep production publication disabled until the cleanup lifecycle and owned
+typed-result delivery are connected. C malloc/free, independent clients and the
+required whole-stack review retain their DN-71 order.
+
+### A2.3.5 Kleis: bounded worker identity and exact terminal-work accounting
+
+**Formal gate developer-accepted, 2026-10-24.**
+`anka108_cleanup_workers.kleis` and its hostile companion refine the accepted
+Undertaker claim/lease/old-ticket rules through the A2.3 Fabric contract. Local
+validation passes **197 positive witnesses**, including **23 quantified laws**,
+and **172/172 explicitly disproved hostile witnesses**. The developer confirmed
+both counts using `--only-workers`. The seven previously accepted allocation
+pairs remain 1243 positive / 899 hostile across their reported focused runs;
+with this pair the accepted total is 1440 / 1071. This is not a new combined run.
+
+**Why this gate precedes implementation.** Current protected heap-cell
+operations are synchronous under an exclusive Fabric borrow. At the formal
+handoff there was no concrete worker registry; A2.3.5a below supplies its metadata
+foundation; A2.3.5b supplies bounded prepared CPU requests and their pinned
+ledger records. A2.3.5c below connects synchronous software execution, stopped
+cancellation and exact terminal-ticket consumption. Legacy `Transaction::is_terminal()` distinguishes committed or
+faulted records, but a future device adapter must additionally establish that
+no delayed effects remain and that completed effects are visible. A notification,
+timeout, worker death or caller-supplied counter is not that evidence. Existing
+legacy transactions and controller slots do not automatically become safe heap
+work records merely because their identifiers can be copied.
+
+The selected software representation is:
+
+| Record | Binding and storage rule |
+|---|---|
+| Worker directory | Fixed rows separate from allocation-owner accounts. An opaque one-based row/serial handle binds the trusted process incarnation, context, domain, cleanup role and current descriptor. Serial issuance is positive, global to this registry and nonwrapping; process generation zero remains valid. |
+| Per-job lease | An extension of the already-reserved cleanup row holds unowned/held/revoking state, lease epoch and worker handle. Claiming leaves the job in the pending census and preserves every allocation charge and extent. The first concrete claim profile selects only queued/draining jobs. |
+| Old-work directory | Fixed rows bind the full allocation/custody key, a separate nonreused operation ID, CPU/DMA class, registered backend, source index/generation/request ID, agent and exact offset/length/access. Slot zero and ID zero remain valid for backend records; they are distinct from nonzero heap operation identities. |
+| Backend reservation | A source record and its capacity must be prepared before work starts, pinned to the exact operation until terminal consumption, and committed with its ledger row. A generic growing legacy history is not assumed to satisfy this bounded interface. |
+| Fixed accounting | Charge actual retained worker/work capacities and the cleanup-row extension using actual target element sizes, plus scratch, once at construction. Checked products/sums and allocation success precede service exposure. Model witness strides are illustrative. |
+
+Worker enrollment requires trusted cleanup authority, a current descriptor, a
+free preallocated row and a unique incarnation. Normal applications cannot
+claim cleanup merely by presenting a PID or being allocation owners. Every
+lease use rechecks the worker row and process/context/domain/role binding.
+Global fencing makes those checks fail immediately without declaring the
+worker's effects terminal. A fenced worker row cannot be removed while job
+leases or worker operations still refer to it. Fencing and terminal consumption
+use saturating cleanup revision; enrollment, new work and new claims require
+identity/revision headroom. Exhaustion retains obligations rather than wrapping.
+
+**Admission and terminal consumption.** A new asynchronous operation needs a
+current live allocation, permitted profile, checked access, free ticket row,
+fresh operation ID, prepared backend and no remaining fallible commit work.
+These requirements must be established in the same exclusive operation before
+either the backend or ledger is exposed. No post-admission best-effort ticket
+insertion is allowed. The first heap profile remains CPU-only; DMA rows in
+conditional model witnesses do not grant DMA access or enable an adapter.
+
+Completion authenticates the stored allocation and backend tuple against current
+trusted records, including source-slot generation and operation identity. The
+source remains pinned. A terminal committed or faulted state must also have
+stopped effects and visible results. Requested, authorized and prepared work,
+timeout-only notifications, reused slots and duplicate completion all reject.
+An exact terminal operation consumes its ledger row and backend pin once, under
+one lock, while preserving payload and fixed storage charges. Its authenticated
+stored class selects the count: a DMA completion cannot decrement CPU work,
+or vice versa, even when both counts are nonzero. It can complete
+while its allocation is live or closing, and while a cleanup worker is absent
+or fenced. Completing an operation does not free its allocation.
+
+**Exact census and readiness.** A bounded complete-table scan derives CPU/DMA
+counts from active rows for the selected job. The quantified base/induction
+laws bound the counts by scanned capacity; foreign jobs do not contribute.
+Malformed active rows or unknown classes fail the scan instead of disappearing
+from the count. Erasing one authenticated matching row agrees with decrementing
+the corresponding census by one. Other directory rows remain unchanged.
+
+A readiness decision requires a complete current scan under the same exclusive
+operation, zero registered CPU/DMA work, zero unregistered source conflicts,
+closed admission paths, visible effects, retained custody and a current worker
+lease. An unchanged revision number is insufficient to reuse a cached scan;
+that matters particularly at revision saturation. Every enabled legacy/controller
+path must be included in the exclusion/accounting inventory. Readiness is a
+current predicate, not a persistent clean, retired or reusable-memory receipt.
+
+The constructive conditional-backend trace admits two A operations and an
+independent B operation before A closes, claims A's queued job while work
+remains, consumes an exact CPU completion and fenced terminal DMA failure, and
+establishes A's drain readiness while B's operation remains outstanding. It
+also rejects duplicate consumption and verifies that the closed heap has no
+application authority. This is model evidence, not running concurrent C clients
+or the full A/B/C compiler/backing-reuse scenario.
+
+**Proof boundary.** These are finite transition and pointwise/fold laws with no
+new axioms. They do not prove the Rust scan, opaque-handle representation,
+backend capacity/pinning, adapter fidelity, scheduler fairness, actual device
+fencing, cache coherence or progress under permanent faults. Implementation
+must derive the trusted predicates from current records and real terminal
+events. None may be supplied by an application. Scrub submission, worker
+recovery, retirement, release and typed result delivery remain separate pieces;
+this handoff neither implements them nor closes the local-frame initialization
+gap or post-malloc review checkpoint.
+
+Run only the new gate:
+
+```sh
+python3 scripts/check-anka108-gates.py \
+  --kleis /Users/enginatik/.cargo/bin/kleis \
+  --kleis-root ~/git/cee/kleis \
+  --only-workers
+```
+
+`--only-workers` selects only this pair. `--only-allocation` and the complete
+10.8 selection include it. Unknown, timeout and parse/evaluation failure still
+fail closed; every hostile assertion requires explicit Z3 disproof. Python
+syntax and selector help were checked. Rust sources are unchanged, so no Rust
+build or tests were run for this formal/documentation handoff.
+
+Following developer gate acceptance, the bounded implementation handoffs are:
+
+1. **A2.3.5a (developer-accepted):** precharged worker
+   rows and per-job leases, enrollment, exact queued-job claim, current-worker
+   authentication and fencing. Keep publication and scrub off.
+2. **A2.3.5b (developer-accepted):** precharged work
+   rows and a bounded software CPU backend, atomic registration/pinning, fresh
+   operation IDs and admission rejection. Effects were deferred to A2.3.5c; DMA stays disabled.
+3. **A2.3.5c (developer-accepted):** bounded CPU execution/cancellation, exact terminal
+   consumption and complete current census, with hostile stale,
+   duplicate, wrong-incarnation and unregistered-source cases. A2.3.6 and
+   A2.3.7 below record accepted recovery and retirement. The complete trusted
+   cleanup/reuse delivery finishes the remaining worker/scrub/release path.
+
+### A2.3.5a Rust: fixed worker roles and retained per-job leases
+
+**Developer-accepted, 2026-10-24:** 21 new tests passed in 0.02s (1208 filtered
+out); 222 focused tests passed in 0.13s (1007 filtered out), including those 21.
+The accepted `cw108_storage`, `cw108_enroll`, `cw108_worker`, `cw108_claim`,
+`cw108_lease`, `cw108_fence` and `cw108_drop_worker` contracts cover this bounded
+piece. Kleis theories and the checker are unchanged; no repeat formal run was
+needed. `cargo check --locked --tests` passes. The agent ran no Rust tests.
+
+The common `ScopedPointers` registry now owns fixed worker rows, separate from
+allocation-owner accounts. `with_private_heap_and_workers` preallocates and
+charges their actual retained capacity before exposure. Existing
+`with_private_heap` callers retain zero worker capacity. The inline directory
+and nonwrapping serial are charged by `size_of::<ScopedPointers>()`; the extended
+cleanup row, including its lease, is charged once through its actual retained
+table capacity. Fabric charges the fixed operation-value scratch allowance.
+All size arithmetic and budget checks precede successful construction. This is
+service metadata accounting, not a claim to bound the entire emulator's RSS.
+
+Worker handles contain a one-based row and positive, globally nonreused serial.
+Each row binds process incarnation, context and domain. Presence of an active
+row is the explicit cleanup-role grant; neither an allocation-owner account
+nor a process ID confers that role. The Kernel's trusted
+`enroll_cleanup_worker` entry point reads the actual Running process descriptor.
+A private-constructor, non-cloneable borrowed descriptor prevents mutation
+between that check and the Fabric operation. Fabric also checks the current
+domain and registered CPU. Claim and lease authentication repeat these checks;
+process-slot reuse, a changed context/domain, death, missing CPU registration or
+fencing rejects old copies. Migration to another current CPU in the same domain
+preserves the context-bound role. No guest syscall or IPC message grants it.
+
+A claim authenticates the full reservation, retained owner, physical/virtual
+claims, exact private Fabric row, ObjectId/generation, logical size and rights.
+Only attached, Closing, queued jobs with an unowned lease and epoch/revision
+headroom can be claimed. A successful claim increments the lease epoch and
+shared revision, records its worker, and leaves the job in the pending directory.
+It does not change payload, pointer tags, extents, object identity, quotas or
+other clients. Enrollment and claim reject stale revisions and exhaustion;
+the last lease epoch is valid at MAX, but cannot wrap.
+
+The first profile has only queued/draining cleanup jobs: scrub submission and
+its in-flight state have no implementation path yet. Claim deliberately does
+not require zero pending legacy work. Its opaque lease is metadata, not byte
+authority or evidence that an allocation has drained. Even successful current
+lease authentication must not be reused as permission for a later operation.
+
+Supervisor fencing requires the exact active worker handle, works after process
+or domain death and at revision MAX, and invalidates every use through the
+central worker row. It retains all job leases and unresolved obligations. A
+fenced row can be removed only after an actual complete cleanup-directory scan
+finds no reference to it; removal never refunds fixed storage or resets serials.
+Held and reserved-for-future `Revoking` leases both block removal. No worker
+operation can currently exist. A2.3.5b's ordinary CPU requests bind application
+accounts, not cleanup-role handles, even when one process holds both roles.
+Before enabling worker/scrub operations, removal must also scan those actual
+worker references. Removing a cleanup role never consumes application work. Fencing
+does not unclaim a job, establish terminal completion or enable reassignment.
+
+All admitted metadata operations finish under the same exclusive Fabric/registry
+borrow and allocate no host storage. The new **21 `a235a_` tests** cover the
+Kernel boundary, fixed accounting, exhaustion, exact custody, stale identities
+and leases, global fencing, unrelated workers, dirty backing/tag retention,
+pending work and failure atomicity, with allocation-counter checks. Existing
+A2.3.4 tests also cover the shared custody preflight extracted for claim/use.
+
+Run locally on `feat/anka108-protected-allocation`:
+
+```sh
+cargo test --locked --lib a235a_ -- --test-threads=1
+
+cargo test --locked --lib -- --test-threads=1 \
+  anka64::fabric:: anka64::scoped_pointers:: \
+  anka64::placement:: anka64::dev_shell::
+```
+
+The second command includes the new tests; it is not an additional acceptance
+count. No full suite or CC2 bootstrap is requested for this metadata-only slice.
+The accepted full baseline remains A2.2's 1134 tests. A2.3.5a's 222-test focused
+run was the accepted focused result at that handoff; A2.3.5b below supersedes
+it with 243. No full 1229-test run was reported.
+
+**Following piece: A2.3.5b below**, exact preallocated backend-ticket registration
+and pinning, followed by A2.3.5c execution/terminal consumption/current census. Worker
+scheduling, automatic exit/fault hooks, recovery, scrub, retirement, backing
+release, publication and guest allocation results remain separate work. There
+is no working C malloc/free or concurrent-client acceptance claim, so the
+required A4 whole-stack review stays pending.
+
+### A2.3.5b Rust: bounded CPU backend registration and pinned work records
+
+**Developer-accepted, 2026-10-24:** 21 new tests passed in 0.03s (1229 filtered
+out); 243 focused tests passed in 0.16s (1007 filtered out), including those 21.
+The A2.3.5c source archive matches this accepted implementation. This piece
+implements the accepted `cw108_storage`, `cw108_submit` and
+`cw108_work_binding` obligations for a narrow software CPU profile, composed
+with existing live heap/span/closure checks. It adds no architecture or guest
+ABI rule requiring a new Kleis theory. The theories and checker are unchanged;
+no repeat formal run was needed. `cargo check --locked --tests` passes.
+The agent ran no Rust tests.
+
+**Selected concrete backend.** `with_private_heap_cpu_work` is an explicit
+fresh-machine configuration. Earlier constructors have no work backend. Its
+two independent fixed arrays hold the work ledger and actual prepared CPU
+request records. Request storage includes a 4096-byte owned scalar payload;
+the current profile accepts only nonempty read/write spans of at most 4096
+bytes within the allocation's logical bounds. It introduces no controller,
+DMA, atomic access, integer request decoder or growing legacy transaction log.
+CPU class and software-backend identity are fixed by the private record types;
+application arguments cannot select another class or backend.
+
+Each opaque work ticket binds a one-based ledger row and a positive,
+nonwrapping operation ID. Its source key binds a separate zero-based backend
+index, generation and request ID; zero is valid in that source namespace.
+The work and source records both retain the exact reservation/owner, object
+and generation, logical and physical/virtual extents, rights, submitting CPU,
+offset, length and access. The source also pins the exact work ticket. A
+successful admission consumes fresh operation/request identities and advances
+the source slot's next generation without releasing the occupied slot. Checked
+exhaustion retires issuance instead of wrapping; the final source/request value
+at MAX is representable and cannot be reused.
+
+`CurrentHeapProcess` is the shared private-constructor borrowed Kernel
+descriptor, extracted from A2.3.5a without changing cleanup-role semantics.
+Every admission checks the actual Running process incarnation, context, domain
+and registered CPU, then current live published heap authority, complete
+initialization, exact custody, logical span and existing legacy-pool exclusion.
+Cleanup-role enrollment is not required for ordinary application CPU work.
+Publication remains unavailable in production; positive tests initialize real
+private backing and use the existing explicit test-only publication fixture.
+
+**Atomic registration.** Preflight checks both free capacities, all existing
+pin pairs, identity/revision headroom and the complete request before mutation.
+Write input is copied into the source's preallocated owned payload; later caller
+changes cannot alter it. Read payload starts zeroed and is not a completed result.
+The backend source and ledger row then commit in the same exclusive Fabric
+operation, with one common revision advance. There is no post-admission
+fallible allocation or best-effort ticket insertion. Any rejection leaves
+existing requests, IDs, revision, backing, tags and charges unchanged.
+
+Actual retained capacities and target element sizes, including inline request
+payloads and fixed operation-value scratch, are charged at construction before
+exposure. Inline directory descriptors are already included in HeapFabric's
+base charge. Application heap charges and extents do not change on work
+registration. This bounds this service's storage; it does not bound all emulator
+logs or prove host RSS. Work slots are globally bounded in this first profile;
+per-owner work-slot quotas and admission fairness are not claimed. Exhaustion
+can reject a new request while preserving another client's already registered
+request and allocation.
+
+**Pinning and retention.** Complete bidirectional structural checks reject a
+missing ledger/source row, wrong source generation/request ID, substituted
+binding or mismatched pin. The trusted `validate_heap_work_ticket` observation
+also rechecks current retained allocation and Fabric custody, including after
+closure or owner death. This is an exact-binding observation, not a completion,
+drain or reusable readiness result. Cleanup claims and worker fencing do not
+consume application requests, reset their IDs or refund their charges.
+
+At the A2.3.5b handoff, the backend represented **Prepared requests only**:
+execution, terminal transition, row removal, unpin, source-slot reuse and
+completion were deferred. A2.3.5c below now connects actual bounded execution
+or stopped cancellation to terminal state, visible effects, exact once-only
+consumption of both records and a complete current census. Before adding worker/scrub
+requests, extend worker-removal checks to their exact worker references.
+
+The **21 new `a235b_` tests** exercise setup charging, independent capacity
+failure, no-allocation atomic admission, exact source/pin identity, owned write
+payloads, typed/logical bounds, process and CPU checks, private/unpublished
+rejection, malformed/orphan records, counter exhaustion, retained custody,
+closure with another active client, cleanup-role independence and raw bypass
+rejection. A2.3.5a's accepted worker tests remain in the focused regression.
+
+Run locally on `feat/anka108-protected-allocation`:
+
+```sh
+cargo test --locked --lib a235b_ -- --test-threads=1
+
+cargo test --locked --lib -- --test-threads=1 \
+  anka64::fabric:: anka64::scoped_pointers:: \
+  anka64::placement:: anka64::dev_shell::
+```
+
+The second command includes the new tests. Both commands are developer-accepted
+at the counts above; A2.3.5b's 243 tests were the accepted focused result at that handoff.
+The accepted full baseline remains A2.2's 1134 tests; no full 1250-test run was
+reported. A2.3.5c below supersedes that focused result. Heap publication, typed
+result delivery, working C malloc/free and independent concurrent guest
+clients remain later acceptance steps; the required A4 whole-stack review
+remains pending.
+
+### A2.3.5c Rust: bounded CPU effects, terminal consumption and current drainage
+
+**Developer-accepted, recorded 2026-10-25:** 22 new tests passed in 0.02s
+(1250 filtered out); 265 focused tests passed in 0.17s (1007 filtered out),
+including those 22. The latest archive matches the delivered A2.3.5c source.
+The accepted `cw108_terminal`, `cw108_finish`, `cw108_census`, `cw108_scan`,
+`cw108_scan_complete` and `cw108_ready` predicates were assessed before enabling
+this piece, together with A2.3.3's scalar byte/tag rules and retained-custody
+checks. This implements their narrow synchronous software CPU case. It adds
+no ISA, C ABI, DMA or asynchronous completion rule; the Kleis theories and
+checker are unchanged. No repeat formal run is required for unchanged gates.
+These are an implementation mapping and runtime witnesses, not a mechanically
+verified Rust refinement or a hardware memory-ordering proof.
+
+**Concrete terminal evidence.** Each actual source record now has a private
+`Prepared`, `Committed` or `Cancelled` state. `execute_heap_cpu_work` rechecks
+the exact pin, logical span, retained registry/placement/Fabric custody and
+legacy-pool exclusion, then performs one bounded read or write under the same
+exclusive Fabric borrow. Reads copy precisely the admitted prefix into owned
+backend storage. Scalar writes copy the admitted bytes and clear every
+intersected protected shadow cell, including partial-cell writes. `Committed`
+is set only after those effects finish. No callback, scheduler yield or
+partially executing source exists in this profile; stopping and visibility
+follow from that synchronous implementation, not supplied booleans.
+
+`cancel_heap_cpu_work` accepts only an exact `Prepared` source. It establishes
+that execution never started, zeros its private payload and marks it
+`Cancelled` (the stopped/faulted terminal case). A notification, timeout,
+owner death or worker fence alone does not complete or consume work. Duplicate
+execution/cancellation and attempts to cancel committed work reject unchanged.
+New access still needs a live published allocation and current process/CPU.
+Previously admitted work may finish after owner closure or death using its
+retained exact custody; it does not depend on a still-running submitter.
+
+**Consumption is separate from completion.** `finish_heap_cpu_work` reads
+terminal status from the authenticated source, validates a fresh complete
+ledger/source census, then clears precisely that source and ledger row once.
+Prepared, committed and cancelled records all count until consumed. Source
+payload is zeroed before removal; read results are currently trusted backend
+data and are discarded by consumption. No guest read-result delivery is
+claimed. Backend slot reuse requires fresh operation/request IDs and the next
+source generation. Exhausted counters stay exhausted. This is request-slot
+reuse, not allocation-backing reuse.
+
+The complete scan checks every fixed ledger position and both directions of
+every pin. Empty rows contribute zero. Valid foreign jobs are excluded from
+the selected job's count, but malformed foreign rows or orphan sources reject
+the scan. Actual retained allocation custody is checked for every active row.
+`HeapWorkCounts` is diagnostic data: no mutator accepts it as authorization.
+The fixed CPU/software profile has no private-heap DMA sources, so its DMA
+count is zero by construction, not an unchecked device-completion assertion.
+
+**Current readiness.** The Kernel bridge reconstructs the current Running
+worker descriptor; Fabric rechecks its enrolled role, exact lease, Closing
+queued job, custody, complete current census and legacy-pool exclusion. Even
+with zero registered work, an unregistered conflicting transaction prevents
+readiness. The result is an observation only. A future retirement operation
+must repeat these checks within its own exclusive operation; neither a cached
+`true` nor unchanged numerical revision is a reusable permit. Completion and
+consumption use the existing saturating cleanup revision and remain possible
+at MAX; new work admission stays closed there. All checks are still repeated.
+
+Effect/finish/count value scratch and the actual source-state storage are
+included in setup charges. Admitted operations allocate no host storage.
+Consumption, census and readiness leave allocation bytes/tags, extents,
+cleanup leases and all allocation/fixed metadata charges intact. Rejected
+operations preserve existing work and unrelated clients. Execution modifies
+only the selected write span/tags or the selected read payload plus terminal
+state/revision. Per-owner work-slot fairness remains a later policy question.
+
+The **22 new `a235c_` tests** cover exact byte and partial-cell effects,
+4096-byte boundaries, read capture, cancellation versus completion, once-only
+consumption, owner death and worker fencing, complete scans with holes/foreign
+rows/orphans, legacy conflicts, current worker/lease checks, saturated revision,
+slot reuse and nonwrapping exhausted identities. They use real private
+reserve/attach/initialize operations and the existing explicit test-only
+publication fixture. They are not guest malloc/free or full A/B/C acceptance.
+
+`cargo check --locked --tests` passes. The agent ran no Rust tests. Run locally:
+
+```sh
+cargo test --locked --lib a235c_ -- --test-threads=1
+
+cargo test --locked --lib -- --test-threads=1 \
+  anka64::fabric:: anka64::scoped_pointers:: \
+  anka64::placement:: anka64::dev_shell::
+```
+
+The focused regression includes the new tests; it is not a second independent
+acceptance count. Both commands are now developer-accepted at the counts above;
+265 tests are the accepted focused baseline. No full 1272-test run was reported;
+A2.2's 1134 tests remain the accepted full baseline.
+Subsequent sections record accepted queued-job recovery and authority
+retirement, followed by the complete trusted cleanup/reuse handoff. Automatic
+process lifecycle dispatch, owned guest allocation results and C malloc/free
+remain for the next functional delivery. Device work remains disabled. The
+required A4 review follows working independent C clients; compiler growth
+follows A4.
+
+### A2.3.6 Rust: fenced worker recovery for queued cleanup jobs
+
+**Developer-accepted 2026-10-25:** 21 new tests passed in 0.01s; 286 focused
+tests passed in 0.16s (including those 21). No full 1293-test run was reported.
+This bounded piece reassigns responsibility for a queued/draining job without
+retiring its allocation or releasing storage. The accepted Undertaker
+`ut108_fail`, `ut108_recover`, `ut108_recovered_stage` and
+`ut108_recovered_done` contracts, version advance, concrete worker fence/claim
+rules and current census were assessed before implementation. The first
+profile has no scrub progress or scrub backend: its cleanup prefix is zero,
+and recovery keeps the job queued. No new architecture/ABI rule or changed
+Kleis gate is introduced. The accepted theories and checker are unchanged;
+the Rust mapping is supported by runtime witnesses, not a machine-checked
+proof of the Rust implementation.
+
+**Two explicit supervisor transitions.** `revoke_heap_cleanup` authenticates
+the exact retained worker handle, lease epoch, reservation/owner and actual
+Fabric/placement custody. It changes only that held job's lease to `Revoking`
+and advances the common cleanup revision. Existing worker-lease authentication
+and new claims reject this state. Revoking one job does not fence the worker's
+other jobs; the existing global `fence_cleanup_worker` role operation remains
+separate. Revocation is allowed before or after that global fence, including
+after process/domain death, with pending work or at counter exhaustion. It
+never asserts that outstanding effects stopped.
+
+`recover_heap_cleanup` requires that same exact job still be `Revoking` and
+the retained worker role be globally `Fenced`. A dead process, reused process
+slot, timeout or notification alone is insufficient. Fabric revalidates actual
+custody, the complete current CPU source/ledger census and legacy-pool
+exclusion before returning the lease to `Unowned`. Malformed foreign rows,
+orphan sources and conflicting legacy transactions reject without mutation.
+No cached count/readiness flag is accepted; all checks and the commit occur
+within one exclusive Fabric borrow, including at saturated common revision.
+
+**Application work is distinct from worker effects.** The enabled source type
+contains ordinary software CPU requests, never a cleanup-role reference or
+scrub/device request. Software effects execute synchronously under the same
+exclusive borrow. Those facts, the complete pin/custody scan and legacy
+exclusion establish the current profile's absence of outstanding worker
+effects. Already-admitted application requests, including requests submitted
+by a process that also held the cleanup role, remain pinned and counted.
+They need not be zero for lease reassignment. The replacement worker still
+cannot observe drain readiness until they are consumed through A2.3.5c.
+Worker/scrub/device admission must extend this reference census and terminal
+proof before enabling such effects; ordinary CPU completion is not a DMA fence.
+
+Each reserved cleanup row now stores a nonwrapping mutation `version`,
+initialized to zero. This is distinct from the lease epoch and private backing
+initialization version. Recovery advances it once; revocation preserves it.
+Recovery preserves the old lease epoch in `Unowned`; the next accepted claim
+advances that epoch. Stale leases therefore cannot revoke, recover or
+authenticate a replacement. Recovery/version exhaustion retains the revoking
+job; exhausted lease/worker identities are never reset. Cleanup may advance at
+saturated common revision, while new claims/enrollment remain fenced there.
+Worker-role removal still requires every held or revoking reference to be gone.
+
+The added field is charged through actual cleanup-row element size and retained
+capacity at setup; fixed recovery-plan scratch is also charged. No admitted
+revoke/recover operation allocates host storage. Both transitions preserve
+allocation state, queued status, memory bytes, pointer tags, initialization
+history, physical/virtual extents, ordinary work, owner accounts and all
+payload/fixed charges. Successful recovery is neither a clean-memory receipt
+nor authorization to reuse backing. Automatic death hooks and worker
+scheduling are not connected by these explicit supervisor methods.
+
+The **21 new `a236_` tests** cover per-job versus global fencing, exact
+owner/object/worker/epoch binding, process and worker-row reuse, worker/domain
+death, retained pending and terminal CPU work, unrelated-client preservation,
+current replacement-worker checks, foreign orphan records, legacy conflicts,
+version/epoch/worker-ID exhaustion, revision saturation, all-job role references
+and repeated bounded worker-row reuse. Cases with application requests use the
+existing test-only publication fixture. This is not C malloc/free or the full
+A/B/C compiler/backing-reuse witness.
+
+`cargo check --locked --tests` passes. The agent ran no Rust tests. Run locally:
+
+```sh
+cargo test --locked --lib a236_ -- --test-threads=1
+
+cargo test --locked --lib -- --test-threads=1 \
+  anka64::fabric:: anka64::scoped_pointers:: \
+  anka64::placement:: anka64::dev_shell::
+```
+
+Both commands are now developer-accepted; the second includes the new tests.
+The accepted focused baseline is 286 tests. A2.2's 1134-test run remains the
+accepted full baseline. A2.3.7 below records accepted authority retirement.
+The complete cleanup/reuse delivery follows it; working C malloc/free and A4
+remain pending.
+
+### A2.3.7 Rust: authority retirement after current drainage
+
+**Developer-accepted 2026-10-25:** 21 new tests passed in 0.02s; 307 focused
+tests passed in 0.19s, including those 21. No full 1314-test run was reported.
+This piece implements the accepted `ut108_retire` and `conc107_retire`
+transition. `Closing` already fences new application access while admitted
+requests drain. `Retired` records that current drainage and authority exclusion
+have also passed. Retirement does not zero, unplace, refund or recycle storage.
+
+The contracts were assessed before implementation:
+
+| Formal requirement | Concrete enforcement |
+|---|---|
+| Exact bound job and current lease | Current Running process incarnation/context/domain/CPU; separately enrolled active worker role; exact held lease epoch and reservation/owner/ObjectId |
+| Closing → Retired; zero CPU/DMA work | Fresh complete ledger/source pin and custody census; prepared, committed and cancelled sources all count until consumed |
+| No grants/maps or alternate access path | Borrowed census of every retained Kernel process descriptor; Fabric domain grants/device authorities, public object/placement entries, pointer-stack registrations, local backing records and legacy pool/transaction exclusion |
+| Retained custody and visible terminal effects | Both placement-manager claims and exact private Fabric row; synchronous software effects completed under the same exclusive Fabric borrow |
+| Atomic commit and preserved obligations | Fixed-row state change plus saturating common revision; retained generation, cleanup job/lease/version, owner account, extents, bytes, tags and all charges |
+
+The registry's `Retired` state projects to Undertaker job stage 2 and concurrency
+lifetime phase 3. In A2.3's coarser attachment model it remains quarantined, not
+released. The existing `queued` flag means a durable pending cleanup obligation;
+it remains set in both Closing and Retired. Duplicate attached closure returns
+`AlreadyRetired` without changing state or queueing again. Owner closure also
+preserves retirement. Neither abort, slot reuse nor owner-account release can
+consume an attached retired obligation.
+
+`Kernel::retire_heap_authority` is explicit trusted dispatch, with no new guest
+syscall or automatic death hook. Its opaque `CurrentHeapRetirement` holds an
+immutable borrow of the entire process slice and binds the selected object.
+The census checks all retained descriptors, including exited processes, every
+address-map entry (even zero-length or overflowing ranges), every occupied
+memory/device capability slot and owned stack/trap object references. It does
+not resolve just one virtual address or filter out stale generations. Fabric
+then checks current worker identity, exact custody and the complete work census,
+plus actual domain authority and alternate legacy paths, before committing in
+one exclusive borrow. A caller cannot provide a count, quiet flag or previously
+observed readiness value instead. This remains true at saturated revision.
+
+Surviving register, saved-event and storage-cell pointer copies are retained.
+Application access still requires the central lifetime to be Live, so restoring
+an old event image cannot restore authority. Pointer-kind erasure is not used
+as revocation. Physical pointer tags and dirty payload remain for later scrub.
+Retirement consumes no generation, lease epoch or cleanup-version headroom;
+those identities are retained, never wrapped or reset. All validation failures
+precede mutation. Added plan/context scratch is charged at setup; admitted
+retirement performs no host allocation.
+
+**Profile boundary at this checkpoint.** The CPU backend admits synchronous
+software requests; private-heap DMA, asynchronous worker effects and hardware
+caches are absent. CPU drainage is not a hardware/device fence. A2.3.7 used the
+queued-only `cw108_claim` and A2.3.6 recovery profile, so a worker failure after
+retirement retained custody in quarantine. The complete cleanup/reuse delivery
+below explicitly refines that boundary before extending the runtime. No new
+Kleis file was needed for retirement itself. Neither gate results nor this
+mapping are a machine-checked proof of the Rust source.
+
+The **21 new `a237_` tests** cover dirty/unpublished custody; pending and
+terminal-but-unconsumed work; foreign orphan/malformed sources; current worker
+identity and lease failure; surviving register/saved-event/cell aliases;
+retained dead-process mappings/capabilities/resources; legacy grants, placement,
+stack and inactive local backing records; exact owner/object binding;
+revision/generation/epoch/version boundaries; duplicate closure; unavailable
+retired slot/extents; and unaffected client B work while A retires. Positive
+live-access cases use the existing test-only publication fixture. These are
+not C malloc/free or the full A/B/C compile-and-reuse acceptance scenario.
+
+The agent compile-checked this handoff; the developer subsequently accepted the
+new tests and focused regression at the counts above. The last full run remains
+A2.2's 1134 tests. The complete cleanup/reuse delivery below finishes the trusted
+cleanup path before the next functional delivery exposes working C malloc/free.
+
+### Complete trusted cleanup and reuse
+
+**Developer-accepted, 2026-10-25:** Kleis 92 positive / 79 hostile; 19 new Rust
+tests passed in 0.01s and 326 focused tests passed in 0.19s (including those 19).
+No full 1333-test run was reported.
+This completes retired-worker recovery, bounded scrub, exact extent release and
+payload refunds together. It deliberately replaces the proposed sequence of
+separate later-stage recovery/scrub/release handoffs with one functional result.
+
+**Formal-first evidence.** `anka108_cleanup_reuse.kleis` and its hostile pair
+passed locally before runtime implementation: **92 positive witnesses, including
+13 quantified or structural laws; 79/79 hostile assertions explicitly
+disproved**. `scripts/check-anka108-gates.py --only-cleanup` selects only this
+pair, and the complete/`--only-allocation` modes include it. Unchanged gates
+were not rerun. Developer acceptance of this pair brings evidence across focused
+runs to 1532 positive / 1150 hostile. This is a sum of separately reported runs,
+not a newly executed combined gate.
+
+The new profile imports the accepted worker/Undertaker contracts rather than
+rewriting their restrictions. `cr108_claim` adds recovered retired jobs while
+preserving `cw108_claim` as queued-only. Recovery resets Scrubbing/Clean jobs to
+Retired with zero completed prefix and a changed version; the next claim uses
+a fresh lease epoch. `cr108_chunk` composes submission and terminal completion
+under one exclusive software operation. `cr108_release` explicitly permits a
+saturated common revision when the exact current snapshot and both prepared
+returns are checked within that same exclusive operation. Below saturation it
+refines `ut108_release`; saturation is an intentional extension, not a wrapped
+revision or cached readiness exception.
+
+| Contract obligation | Concrete implementation |
+|---|---|
+| Retired lifetime remains inaccessible | `SlotState::Retired` persists while the charged cleanup job moves through Pending, Scrubbing and Clean; application paths continue to require Live |
+| Current authority for every cleanup effect | Trusted Kernel calls borrow all retained process descriptors; Fabric checks the running worker incarnation, role, lease, exact reservation/job/version/sequence/progress, private row, complete backend census and legacy authority exclusions |
+| Bounded complete zeroing | Aligned chunks of 16–4096 bytes (multiples of 16) cover the entire rounded backing, including padding; byte zeroing, pointer-tag clearing and progress advancement commit together |
+| Worker failure and retry | Exact lease revocation and worker fencing precede recovery; no enabled scrub effect survives the synchronous call; replacement starts at zero, retains sequence history and rejects old snapshots |
+| Atomic release and exact refunds | Prepare both physical and virtual manager returns before any mutation; commit both, remove private custody/job, refund rounded owner/global payload charge once, and release the slot |
+| Reuse preserves identity and accounting | Fixed metadata remains charged; generations and the checked ObjectId floor never rewind; generation exhaustion permanently retires that slot from reuse |
+| Clean backing does not authorize a new allocation | New lifetime attachment still requires its own current initialization evidence; cleanup snapshots cannot publish heap pointers |
+
+`HeapCleanupSnapshot` has no external integer constructor. Copying one is safe:
+each call rechecks the complete current state, so stale, partial, duplicate,
+wrong-worker and recovered snapshots cannot advance or release custody.
+`Kernel::begin_heap_scrub`, `scrub_heap_chunk` and `release_clean_heap` provide
+explicit trusted dispatch. There is no new guest syscall in this delivery.
+
+Release does not rescan the entire payload. The monotonic contiguous prefix
+establishes zero bytes and absent pointer tags; all enabled writers reject
+retired storage, and every step/release freshly checks exclusions. Bounded
+source arrays and precharged scratch preserve the no-host-allocation property
+inside admitted cleanup. Counter exhaustion retains obligations unless a
+completed clean job can release without issuing a new identity. Fixed table
+capacity remains available and charged across reuse; this is not physical
+compaction or host-vector shrinking. Existing placement managers coalesce
+returned holes.
+
+The implementation adds **19 `a238_` tests** across registry and Fabric/Kernel
+layers. They cover exact single refunds, failed two-manager return preparation,
+full rounded byte/tag clearing, stale/duplicate requests, versions/sequences
+and generation exhaustion, recovery from retired/partial/clean stages, changed
+worker incarnations, newly retained process maps and legacy grants, orphan
+backend work, rejected old writers, repeated bounded reuse and coalescing after
+arbitrary release order. The A2.3.7 retired-worker failure witness is updated to
+require revocation and fencing before recovery instead of permanent quarantine.
+
+One new service-level witness runs A and B with independent allocations and
+pending work: A exhausts its quota and exits; cleanup returns A's backing; C
+reuses it with a fresh identity; B's pending work remains intact and completes
+correctly; A's stale aliases fail. Positive live access still uses the existing
+explicit test-only publication fixture. **This is not evidence of concurrent C
+compiler jobs or supported C malloc/free. The developer has now passed this
+service-level test as part of the 19 new tests.**
+
+Cleanup verification: `cargo check --locked --tests` passed, and the developer
+subsequently passed the focused commands below. The agent ran no Rust tests,
+long suites or CC2 bootstrap. These are historical commands, not a request to
+repeat unchanged gates:
+
+```sh
+python3 scripts/check-anka108-gates.py \
+  --kleis /Users/enginatik/.cargo/bin/kleis \
+  --kleis-root ~/git/cee/kleis --only-cleanup
+
+cargo test --locked --lib a238_ -- --test-threads=1
+
+cargo test --locked --lib -- --test-threads=1 \
+  anka64::fabric:: anka64::scoped_pointers:: \
+  anka64::placement:: anka64::dev_shell::
+```
+
+The accepted focused baseline is now **326 tests**, including the 19 new tests;
+the last accepted full library baseline remains **1134 tests**. Filtered runs
+do not establish a new full-suite result.
+
+### A3 — Supported C malloc/free and the protected application runtime
+
+**Implementation delivered, 2026-10-25; A3 unit tests passed, C integration
+blocked by an entry-fixture error corrected below.**
+This connects the accepted allocator/reclamation components to ordinary compiled
+C code. It is a functional allocation/use/free delivery, including exit cleanup,
+not another prerequisite-only handoff. No Rust tests or CC2 bootstraps were run
+by the agent; `cargo check --locked --tests` passes.
+
+**Formal-first refinement.** `anka108_malloc_runtime.kleis` imports the accepted
+allocation ABI and cleanup/reuse models. Before implementation its **52 positive
+witnesses (including 9 quantified or structural laws) and 43 hostile assertions**
+passed locally. `--only-malloc` runs just this pair; full/`--only-allocation`
+selections include it. Developer execution of the new gate is pending. The model
+covers exact one-use saved events, publication after current initialization and
+custody checks, owner-qualified access, null/object-pointer conversion, free
+retirement, and pointwise death fencing. Current Kernel/Fabric checks discharge
+its abstract readiness predicates; passing models are not a proof of the Rust
+or generated C implementation.
+
+| Boundary | Implemented behavior |
+|---|---|
+| C interface | Protected profile 2 recognizes `malloc(int)` and `free(void *)`; `/include/stdlib.h` supplies optional matching prototypes. A `void *` can convert to/from object pointers without changing either word or kind. Literal `0` (also parenthesized) converts to canonical null; arbitrary integers do not. Pointer equality/inequality, null conditions, typed pointer-to-pointer dereferences and stores are supported. `void *` dereference remains rejected. |
+| Trap/result ABI | Syscalls 21/22 follow A1's registers. Allocation returns the pair in R0/R1 and scalar status in R2; the compiler uses PMOV to preserve kind. Free stages its argument in R2/R3 before setting scalar controls. An owned saved syscall image has a nonwrapping event identity and one-use result state; publication and pair/status replacement commit together. Scalar overlays, changed events, foreign incarnations and duplicate result use are rejected. |
+| Allocation publication | The Kernel derives owner process/incarnation/context/domain, reserves quota and custody, initializes the full rounded backing in chunks of at most 4096 bytes, then checks current worker, all retained process maps/capabilities/resources, Fabric exclusions, source/ledger census and exact initialization. Failure exposes no pointer; attached failed staging is closed and remains charged until cleanup. |
+| Heap access and storage | Core PMOV/PADD/PREAD/PWRITE and pointer cells select the private heap row and exact owner. Local stack spills preserve opaque heap tokens; reload reauthenticates the current lifetime. Heap cells authenticate both destination and source. Ordinary writes clear overlapping kinds. Numeric address-map paths cannot access private backing. Typed byte input/output accepts validated heap spans. |
+| Free | Null is an immediate no-op. Only an authenticated whole-allocation base from the same owner can free. Closing fences all aliases immediately. The service waits for current retirement, full scrub, exact extent return and payload refund before acknowledging nonnull free; this is stronger than the ABI's minimum retirement condition. Invalid free faults, after which ordinary process-fault cleanup is a separate transition. |
+| Process lifecycle and cleanup | Exit, fault, orphan termination and reclamation close the exact incarnation's allocations. A kernel-owned cleanup worker uses existing roles/leases; each scheduler visit scans a bounded directory and performs at most one 4096-byte scrub chunk. Failed checks retain custody/charges. Normal runner teardown drains eligible jobs and removes its worker role. Blocked or inconsistent work remains quarantined, not declared reclaimed. |
+| Independent clients | One service accounts for separate process owners. A client's exhaustion or exit cannot free another owner's backing. Fresh allocation after reuse gets a new lifetime and fully zeroed backing, with no inherited pointer kinds. This software scheduler interleaves clients; it does not claim host-thread or SMP execution. |
+
+`malloc(0)` returns null/status 0. Negative/unrepresentable signed sizes return
+null/status 2; positive allocation/admission failure returns null/status 1.
+The initial software profile uses page-rounded physical storage per allocation
+and exposes only the requested logical span. The protected application runner
+reserves a 2 MiB physical pool at `0x800000`, outside its existing placement
+pool, with a 1 MiB per-process payload quota. Its stable directory has 4096
+slots/scopes, 64 owner rows, 512 cleanup/physical claims, 128 virtual claims per
+owner, one cleanup role and 16 CPU work/source rows. A 64 MiB accounting ceiling
+includes the fixed metadata allowance; it is not 64 MiB of physical heap RAM.
+These are explicit initial runtime policies. This delivery does not remove the
+compiler's source/output/table capacities or implement `realloc`, small-block
+suballocation, heap sharing, private-heap DMA or FPGA/cache coherence.
+
+Protected standalone rebuilds and receipt-bound protected-module executions use
+this profile. The module linker constructs its retained Fabric with a disjoint
+heap pool; later execution preserves the original artifact/dependency identity.
+The linker itself still uses its existing fixed workspaces. Generic `Fabric::new`
+and legacy applications are not silently converted; other trusted runtimes opt
+into a heap profile and enable the service explicitly.
+
+**Developer evidence, 2026-10-25:** the full run reported **1344 passed, 1
+failed in 1967.45s**. The only failure was the long rebuilt-application test;
+all twelve `a3_` unit tests passed. These cover actual
+publication, canonical failure/null results, owned Core access, cancellation and
+free waiting, refund timing, old-event aliases, cross-client denial/reuse,
+heap-cell invalidation, saved-event replay/substitution, and partial/dirty or
+raw-mapped publication rejection. The CC2 fixed point closed at 186920 bytes
+for both CC2_1 and CC2_2, entry 184232; the existing protected-module positive
+and hostile cases also passed. The run then stopped at the first malloc probe,
+so the later A3 C cases below are not yet accepted. The existing expensive
+CC2 rebuild witness shares its one fixed-point producer with:
+
+- `/bin/malloc_probe.c`: null conversions, calls/returns, char/word/pointer-cell
+  allocation, typed output `[65,0,255,66]`, repeated free/reuse and exit with a
+  live allocation; the same sealed application runs twice.
+- Typed heap input/output, compile rejection of scalar forgery and void
+  dereference, and runtime rejection of stale, duplicate, interior, local-frame
+  and heap-cell aliases.
+- Actual independent compiled C clients: A allocates 8192 bytes, exhausts its
+  8192-byte quota and exits; B retains and verifies 4096 bytes; C obtains A's
+  observed physical extent, verifies all 8192 bytes are zero, and frees it.
+  The fast runtime witness separately retains and rejects A's old saved-event
+  alias. These are allocator clients, not yet concurrent compiler jobs.
+- Two independently compiled modules: a callee returns allocated heap storage
+  across its frame exit; the caller writes and frees it. The exact receipt-bound
+  linked image executes twice with unchanged publication identity.
+
+CC2's expression parser remains within its existing 32 parameter/local slots
+by reusing temporaries; no compiler capacity constant was raised. The changed
+source must still close the concrete CC2 fixed point on the developer machine.
+
+Run the new gate and focused runtime tests first:
+
+```sh
+python3 scripts/check-anka108-gates.py \
+  --kleis /Users/enginatik/.cargo/bin/kleis \
+  --kleis-root ~/git/cee/kleis --only-malloc
+
+cargo test --locked --lib a3_ -- --test-threads=1
+
+cargo test --locked --lib \
+  p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address \
+  -- --test-threads=1 --nocapture
+```
+
+After these pass, this is a coherent cross-cutting integration checkpoint for
+`cargo test --locked -- --test-threads=1` before merge. Keep diagnostic output
+focused on the first failure. Unchanged independent Kleis suites need not be
+rerun merely because they remain in the complete checker.
+
+**A3 direct-entry fixture correction, 2026-10-25.** The first malloc probe
+reported `ProtectionFault` at PC `0x12e8`, object/offset zero. Its new `main`
+used plain `return`, despite the existing direct-entry ABI documented in DN-69:
+no startup caller has minted return authority. Protected CC2 emits PUNFRAME/RET
+for a return, and the Core rejects RET without that authority. This repeats a
+fixture error already corrected for the protected-module witness; the machine
+must not accept an unauthenticated return to make a test pass.
+
+The correction changes all 11 exit paths in `malloc_probe.c` and 22 exit paths
+across the 13 inline C entry functions to `return syscall(0, status, 0, 0);`.
+Called helpers (`identity`, `empty`, `buffer`) keep ordinary return semantics.
+The hostile fixtures also exit normally if their forbidden operation is wrongly
+accepted, so the final entry RET cannot produce a false-positive ProtectionFault.
+Guard failures now report their explicit exit status. The positive assertion
+also reports output bytes on failure. Compiler, allocator, Core and Kleis
+contracts are unchanged; no new formal gate or unchanged-gate rerun is required.
+
+The agent checked every changed C main exit path, preserved helper returns, and
+ran `cargo check --locked --tests`; it ran no Rust tests or bootstrap. Apply the
+fixture patch and rerun **only the existing long rebuilt-application test** first.
+The earlier 1344 passing tests are not a green full-suite result; the repaired C
+integration, remaining A3 clients and the required A4 review remain pending.
+
+**Next checkpoint:** A4 starts after developer evidence establishes these
+independent C clients and malloc/free. The known local-frame residual-data gap
+remains explicitly open: heap zeroing does not initialize every local frame.
+The review must record that and other uncovered paths before compiler growth;
+it is not performed or claimed complete by this implementation delivery.
+
+### Required checkpoint after malloc: review the complete stack
+
+**Entry condition:** the protected allocation service and supported C
+`malloc`/`free` interface have corresponding Kleis gates and implementation
+acceptance evidence, including independent concurrent clients. Begin this review
+then; do not wait for all compiler limits or the service port to be finished.
+The review is a required architectural checkpoint, not a claim that the stack
+has already been converted to the new allocation model.
+
+Review each implemented layer as a client of the same allocation, lifetime,
+authority and resource-accounting model:
+
+| Layer | Questions the review must resolve |
+|---|---|
+| Memory, placement and Fabric | Are object identity, authority and physical backing distinct? Are reservation, grant, release, scrubbing and reuse ordered correctly? Can any raw-memory or alternate-grant path bypass the intended lifetime? |
+| CPU, pointers, calls and events | Do heap aliases, spills, saved contexts and call/return paths validate current lifetimes? Can a restored context resurrect freed or transferred authority? Which pointer/ISA/admission refinements are required? |
+| Processes, domains and scheduling | Do multiple clients have isolated writable state and bounded admission? Does exit, fault, cancellation or process-slot reuse reclaim only the correct resources? Which progress guarantees need explicit scheduling assumptions? |
+| IPC and shared buffers | What does a notification actually authorize? Where are access rights retained across handoff? Define ownership epochs, receiver incarnation and failure behavior before adding protected buffer transfer; ordinary integer messages or register clearing do not revoke aliases. |
+| Drivers, controllers and DMA | Are exact spans, rights and request identities bound to current allocation lifetimes? Does accepted work remain accounted for until terminal completion or completed cancellation? Can a delayed completion affect reused backing or a new job? |
+| Compiler and preprocessing | Can ordinary users run multiple CC2 jobs using the shared service? Audit mutable tables, arenas, source buffers, caches and host helpers; identify fixed capacities and implicit single-job assumptions. Share immutable images only under explicit authority. |
+| Linking, publication, loading and execution | Are exact source/tool/dependency identities preserved across allocation changes and retries? Are staging and retained publications charged correctly? Can one failed job damage another job's artifact, receipt or executable image? |
+| Network and other system services | Trace Ethernet through sockets and HTTP, and inventory existing storage/filesystem and memory-management clients. Check buffer ownership, length, reuse, exhaustion and recovery at every boundary. Mark missing services as future obligations, not implemented or verified components. |
+| Trust boundary and future hardware | Identify emulator/bootstrap privileges and assumptions that ordinary programs do not receive. Record later FPGA/cache/drainage refinement needs without claiming hardware enforcement or expanding this checkpoint into hardware implementation. |
+
+The primary concurrent-client witness is A and B compiling with independent
+allocations: A exhausts its budget or terminates, B continues, C receives A's
+reclaimed backing, and every surviving A reference is rejected. Also cover
+interleaved reservations near global exhaustion, foreign/duplicate free,
+allocator metadata failure, and harmless sharing of sealed code. Concurrent
+client semantics must be exercised even while the host test suite runs serially.
+Simple guest C clients establish allocator concurrency in A2/A3. At the review,
+identify which parts of the compiler scenario still require CC2 migration and
+carry those obligations into C5; the review does not wait for that migration.
+
+For the proposed buffer-ownership extension, retain the hostile ownership round
+trip scenario: A holds epoch 12, hands to B at 13, then receives a fresh token at
+14; A's saved/spilled epoch-12 aliases remain invalid even though owner, object
+and address match again. Pending DMA must prevent premature transfer/reuse and
+old completion messages must not alter a new lease. These are required future
+witnesses, not existing passing results; the protected-module gate does not prove
+these ownership properties.
+
+**Review deliverable:** update this document and ARCHITECTURE.md with a
+layer-by-layer evidence and gap matrix. Distinguish observed implementation,
+accepted formal assumptions, uncovered paths and proposed work. Map findings to
+required new or affected Kleis gates, then order the fixes into bounded pieces.
+Record blocking invariants and explicit deferrals before extending the compiler
+or porting services across affected boundaries. No new standalone review note.
+This is an inspection and focused-proof checkpoint; it is not an instruction to
+rerun every unchanged theory or the entire runtime suite.
 
 ### Inventory: output size is only one limit
 
@@ -7692,7 +10093,12 @@ preprocessor members/include depth and cycles, fixup storage, string/literal
 packing, compiler stacks and protected runtime tables. Increasing the output
 constant alone would simply move the first failure to another fixed table.
 
-### Selected first design: explicit resource plan and fresh-attempt retry
+### Compiler client design after the allocation checkpoint
+
+Use an explicit resource plan and fresh-attempt retry on top of the shared
+allocation service. Ordinary users invoking the compiler through Anka must get
+this behavior, and each job must own its mutable regions and attempt identities.
+Charge its reservations against both its budget and the global allocation state.
 
 1. **Freeze the job.** Bind the exact immutable source bundle, root member,
    preprocessing/compiler/linker lineage, target profile and ordered module
@@ -7736,8 +10142,8 @@ constant alone would simply move the first failure to another fixed table.
 
 Fresh-attempt retry is the first implementation strategy because it avoids
 relocating live compiler pointers. Accurate guest sizing passes or resumable
-growth can be considered later if measured retry cost warrants them. General
-application heap allocation is not a prerequisite.
+growth can be considered later if measured retry cost warrants them. Retry is
+the compiler's policy on top of the common service, not a separate allocator.
 
 ### Determinism and bootstrap obligations
 
@@ -7760,7 +10166,20 @@ ordinary same-capacity fixed-point check.
 
 ### Kleis gates before implementation
 
-Start with a resource/lifecycle theory and its hostile counterpart, provisionally
+The A1 handoff now provides `anka108_allocation.kleis` and
+`anka108_allocation_false_witnesses.kleis`, plus the concrete runtime/C interface
+pair `anka108_allocation_abi.kleis` and
+`anka108_allocation_abi_false_witnesses.kleis`, and the residual-data pair
+`anka108_memory_initialization.kleis` and
+`anka108_memory_initialization_false_witnesses.kleis`, and the storage pair
+`anka108_allocation_reclamation.kleis` and
+`anka108_allocation_reclamation_false_witnesses.kleis`, and now
+`anka108_async_reclamation.kleis` and its false-witness counterpart. Focused gates and exact
+scope are recorded above. Preserve these contracts and establish the stated trusted
+implementation obligations before enabling the corresponding runtime behavior.
+
+After the allocation interface and required stack review, add the compiler-client
+resource/lifecycle theory and its hostile counterpart, provisionally
 `anka108_compiler_resources.kleis` and
 `anka108_compiler_resources_false_witnesses.kleis`. These are proposed filenames,
 not files or passing results delivered with this plan. Then refine the concrete
@@ -7790,7 +10209,9 @@ The formal work must establish:
   with explicit compiler/serializer assumptions identified rather than treated
   as a proof of complete C semantics.
 
-Imported contracts needing review include
+Imported or composed contracts needing review include placement/allocation,
+protected-pointer metadata/representation/machine/frame/event/concurrency,
+process reclamation, IPC and DMA contracts, as well as
 `anka106_compiler_virtual_layout.kleis`, `anka108_compiler_adapter.kleis`,
 `anka108_rebuild_artifact.kleis`, `anka108_protected_modules.kleis`, and the
 source-bundle/preprocessing and protected-pointer frame/artifact theories.
@@ -7801,18 +10222,39 @@ assumption and requires rechecking the affected proof environment.
 ### Bounded implementation handoffs
 
 Each row is a separately reviewable handoff with its relevant formal gate
-accepted before executable changes. Preserve a working legacy path throughout.
+accepted before executable changes. Keep the established bootstrap reproducible;
+version or replace affected ABIs deliberately. Small handoffs do not imply a
+compiler-only architecture or permanent compatibility with temporary service ABIs.
 
 | Piece | Concrete deliverable | Acceptance evidence |
 |---|---|---|
-| 1 — contract and ABI | Finish the limit inventory; prove budget, outcome, region-layout and retry lifecycle laws; specify the adapter ABI revision and diagnostics | Positive and hostile Kleis gates; every current hard limit classified, with no claim of executable growth yet |
-| 2 — output growth | Implement validated resource plans, typed output-exhaustion status and fresh-attempt retries for the CC2 adapter; update validators/receipts and producer-image admission consistently | The same valid C input fails a deliberately small initial arena, retries automatically and emits an AOM larger than 256 KiB; two adequate capacities yield identical bytes; budget denial preserves prior publications |
-| 3 — source and workspace | Add preprocessing/source growth and replace fixed compiler tables with described regions; eliminate hard-coded table-address assumptions | Meaningful source beyond 65528 bytes, more than 64 function entries, more than 128 deferred calls and more than 32 local names compile where permitted by the target profile; boundary failures remain explicit |
-| 4 — link and admission | Extend the budget contract through guest ankald, publication, closed-image validation and ordinary loading; parameterize policy-only frame/metadata bounds | Modules link and execute beyond the old 1 MiB cap within encoding and memory bounds; rebased frames/calls, metadata, stale authority and denial/retry are checked; widened frame limits have witnesses beyond their old bounds |
-| 5 — self-hosted closure | Connect the resource-aware path to the rebuild driver/development entry point and use it on real service code | Exact CC2 generation fixed point, automatic growth, matching direct-vs-retried artifacts, protected-module execution, and the affected regression suite; document the remaining genuine language/encoding limits |
+| A1 — allocation contract and ABI | Shared service, individual heap lifetimes, concurrent reservations, runtime/C interface, residual-data isolation and storage reclamation | Developer accepted all four pairs: 579 positive / 386 hostile; no runtime implementation claim |
+| A1-U — Undertaker refinement | Atomic death/registration, bounded durable directory, retained charges, exact worker/ticket identities, scrubbing and restart | 257 positive / 171 hostile developer-accepted on 2026-10-20; all five pairs accepted across focused runs and pass locally together at 836 / 557 |
+| A2.1 — registry and reservation foundation | Fixed common directory, retained owner accounts, atomic rounded-quota/slot/cleanup reservation, independent closure and clone-free local-frame admission | Developer confirmed all 120 focused tests, including 19 new witnesses, with one test thread; acceptance recorded 2026-10-22; no production heap publication |
+| A2.2 — bounded placement/reservation refinement | K+2 insertion capacity, reusable virtual holes, exact charging, shared-revision admission and identity-preserving cancellation through existing managers | Kleis 215 positive (34 quantified) / 180 hostile and Rust developer-accepted, recorded 2026-10-23; full single-threaded library run: 1134 passed, 0 failed, 0 filtered out in 1149.73s, including 21 new A2.2 witnesses; earlier local focused run: 160 passed |
+| A2.3 — Fabric/shadow/initialization refinement | Fixed heap Fabric rows, precharged dense shadow, private attachment, full backing byte/tag initialization, atomic visibility and attached-failure routing | Developer-accepted 2026-10-24: 192 positive (30 quantified) / 162 explicitly disproved hostile; complete runtime composition remains pending |
+| A2.3.1 — fixed Fabric storage/private attachment | Fallible setup and exact retained-capacity charging, shared checked ObjectIds, sticky private attachment, pool exclusion and unchanged-owner/failure preservation | Developer-accepted 2026-10-24: 17 new tests passed in 0.01s; 144-test shared-component regression passed in 0.09s, including those 17 |
+| A2.3.2 — private byte/tag initialization | Bounded full-backing scrub, opaque exact progress snapshots, current completion checks, trusted-write prefix invalidation and preserved other-owner state | Developer-accepted 2026-10-24: 18 new tests passed in 0.02s; 162-test shared-component regression passed in 0.10s, including those 18; publication disabled |
+| A2.3.3 — protected heap cells | Conditional live pointer-cell load/store, exact current source/destination checks, scalar tag invalidation and bounded dense-shadow use | Developer-accepted 2026-10-24: 22 new tests passed in 0.01s; 184-test focused regression passed in 0.13s, including those 22; positive tests use explicit test-only publication fixtures |
+| A2.3.4 — attached-failure closure | Exact per-allocation fencing, reserved-job queueing, idempotent repeats, retained backing/charges and closure before drainage | Developer-accepted 2026-10-24: 17 new tests passed in 0.02s; 201-test focused regression passed in 0.13s, including those 17; no worker reclamation or production publication |
+| A2.3.5 — concrete workers and terminal accounting | Fixed worker/lease/work records, incarnation-bound cleanup role, pinned exact backend tickets, complete census and current readiness | Developer-accepted Kleis: 197 positive (23 quantified laws) / 172 explicitly disproved hostile, 2026-10-24; complete runtime composition pending |
+| A2.3.5a — worker records and job leases | Fixed charged rows, borrowed current Kernel descriptor, explicit cleanup role, exact queued claim/authentication and supervisor fencing | Developer-accepted 2026-10-24: 21 new tests passed in 0.02s; 222 focused tests passed in 0.13s, including those 21 |
+| A2.3.5b — backend registration and pinning | Independently bounded CPU source/ledger arrays, exact incarnation/span binding, atomic registration and retained pins | Developer-accepted 2026-10-24: 21 new tests passed in 0.03s; 243 focused tests passed in 0.16s, including those 21 |
+| A2.3.5c — execution and terminal accounting | Bounded CPU execution/cancellation, exact terminal consumption, complete current census and worker-authenticated drain observation | Developer-accepted 2026-10-25: 22 new tests passed in 0.02s; 265 focused tests passed in 0.17s, including those 22; no full 1272-test run reported |
+| A2.3.6 — queued-job worker recovery | Exact per-job revocation, global worker fence, current backend checks and versioned return to unowned state; retained custody/work/charges | Developer-accepted 2026-10-25: 21 new tests passed in 0.01s; 286 focused tests passed in 0.16s, including those 21; no full 1293-test run reported |
+| A2.3.7 — authority retirement | Current worker/lease, complete fresh drain census and actual process/Fabric exclusion; Closing → Retired while retaining all custody and charges | Developer-accepted 2026-10-25: 21 new tests passed in 0.02s; 307 focused tests passed in 0.19s, including those 21; no full 1314-test run reported |
+| Complete trusted cleanup/reuse | Retired/scrub/clean worker recovery, bounded full byte/tag scrub, exact physical/virtual returns, payload refunds and safe reuse | Developer-accepted: 92 / 79 Kleis; 19 new Rust tests in 0.01s and 326 focused tests in 0.19s, including those 19 |
+| A2 — trusted allocation service | Implement the accepted contract through placement, reusable virtual arenas, bounded metadata, Fabric and process lifecycle machinery | Isolation, rollback, stale-alias rejection, arbitrary free order, concurrent-client exhaustion/reuse and sustained-churn storage/accounting witnesses |
+| A3 — C malloc/free | CC2 builtins, owned replies, private heap publication/access, synchronous free completion and lifecycle cleanup implemented | New Kleis 52 / 43 passed locally; all 12 A3 unit tests passed in the 1344-pass / 1-fail run. CC2 fixed point closed; C integration awaits the direct-entry fixture correction rerun |
+| A4 — whole-stack review | Perform the required post-malloc checkpoint above | Evidence/gap matrix in existing docs, required formal refinements, explicit deferrals and ordered implementation pieces |
+| C1 — compiler contract and ABI | Finish the limit inventory; prove job budgets, outcome, region-layout and retry lifecycle laws using the shared service; specify adapter ABI revision and diagnostics | Positive and hostile Kleis gates; every current hard limit classified, with no claim of executable growth yet |
+| C2 — output growth | Implement validated resource plans, typed output-exhaustion status and fresh-attempt retries for the CC2 adapter; update validators/receipts and producer-image admission consistently | The same valid C input fails a deliberately small initial arena, retries automatically and emits an AOM larger than 256 KiB; two adequate capacities yield identical bytes; budget denial preserves prior publications |
+| C3 — source and workspace | Add preprocessing/source growth and replace fixed compiler tables with described regions; eliminate hard-coded table-address assumptions | Meaningful source beyond 65528 bytes, more than 64 function entries, more than 128 deferred calls and more than 32 local names compile where permitted by the target profile; boundary failures remain explicit |
+| C4 — link and admission | Extend the budget contract through guest ankald, publication, closed-image validation and ordinary loading; parameterize policy-only frame/metadata bounds | Modules link and execute beyond the old 1 MiB cap within encoding and memory bounds; rebased frames/calls, metadata, stale authority and denial/retry are checked; widened frame limits have witnesses beyond their old bounds |
+| C5 — self-hosted closure | Connect the resource-aware path to ordinary user-facing compiler invocation and the rebuild driver, including concurrent jobs and real service code | Exact CC2 generation fixed point, independent concurrent compilations, automatic growth, matching direct-vs-retried artifacts, protected-module execution, and affected regressions; document remaining genuine language/encoding limits |
 
-For larger local arrays/frames, stacks or parser nesting, piece 3 first identifies
-the limiting contract and piece 4 widens admission/runtime policy only where its
+For larger local arrays/frames, stacks or parser nesting, C3 first identifies
+the limiting contract and C4 widens admission/runtime policy only where its
 formal refinement permits it. If instruction or calling-convention changes are
 needed, split out that refinement rather than hiding it inside arena growth.
 No piece is accepted merely because a constant was raised.
@@ -7827,7 +10269,12 @@ checks permit it. The developer runs the long fixed-point and single-threaded
 regression tests locally; reserve a complete suite for the coherent integration
 checkpoint or a specific cross-cutting risk, rather than every small handoff.
 
-**Next action:** start piece 1 on `feat/anka108-compiler-resources`: formalize
-the resource plan, typed capacity result, fresh-attempt lifecycle and concrete
-adapter ABI. Stop that handoff at the passing Kleis gate and a documented ABI;
-implementation begins with piece 2 after that evidence is available.
+**Next action:** apply the direct-entry fixture correction and rerun the existing
+shared-producer CC2 rebuilt-application test on `feat/anka108-protected-allocation`.
+The developer run established 1344 passing tests, including the twelve A3 unit
+tests, and the new CC2 fixed point; the sole failed test stopped at the first
+malloc C probe. Later C/module/concurrent-client checks remain pending. No
+unchanged Kleis rerun is needed for this fixture-only correction. After integrated
+malloc/free acceptance, perform A4 and record its bounded follow-up work before
+compiler resource growth. No new green full-suite result or completed A4 review
+is claimed.
