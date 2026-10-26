@@ -1578,28 +1578,30 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 
 # 18. Current Implementation Facts
 
-Current planning/formal checkpoint: **2026-10-24**; latest developer runtime
-acceptance: **2026-10-23**. Older sizes and
-test totals in historical milestone sections describe those earlier checkpoints.
+Current implementation evidence and post-malloc review: **2026-10-25**.
+R1 local-frame initialization formal refinement: **2026-10-26**, with its
+runtime change still pending (DN-71).
+Historical sizes/counts describe their earlier checkpoints; A3/A4 supersede
+their pending integration language. Focused results remain separate runs.
 
 | Property | Status |
 |----------|--------|
 | ISA | Single-source instruction descriptions, including byte and protected-pointer operations; see `src/anka64/desc.rs` |
 | Self-hosted compiler | Exact CC2_1 == CC2_2 fixed point; CC_B == CC_C remains the bootstrap foundation |
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
-| Current CC2 witness | CC2_0 = 148984 bytes; CC2_1 = CC2_2 = 168888 bytes; entry 166200 |
+| Current CC2 witness | Developer rerun 2026-10-25: CC2_0 = 164840 bytes; exact CC2_1 = CC2_2 = 186920 bytes; entry 184232 |
 | CC2 source | `userspace/system/compiler/ankacc2_stage3.c` |
-| Regression evidence | Developer-reported full single-threaded library run: 1134 passed, 0 failed, 0 ignored, 0 filtered out in 1149.73s; acceptance recorded 2026-10-23 (DN-71) |
-| Protected modules | Two C units, four frames, 3336 code + 2048 metadata bytes; receipt-bound execution and hostile lifetime/bounds checks accepted (DN-69) |
+| Regression evidence | Latest full library run: 1344 passed / 1 failed in 1967.45s. After the entry-fixture fix, the sole failing integration passed: 1 passed / 0 failed / 1344 filtered in 1026.53s. Separate runs, not one green 1345-test suite; all twelve A3 unit tests passed in the full run (DN-71) |
+| Protected modules | Current rerun: two C units, four frames, 3520 code + 2048 metadata bytes; receipt-bound exit 0, output [65,0,255,66] and hostile lifetime/bounds rejection. A3 also accepts cross-module heap return/free (DN-71) |
 | Module formal gate | 217 positive / 168 explicitly disproved hostile witnesses |
-| Shared allocation and compiler resources | DN-71's six pairs through A2.2 are developer-accepted across focused runs; their combined local checkpoint was 1051 positive / 737 hostile. A2.1: 120 focused tests accepted 2026-10-22. A2.2 Kleis 215 / 180 and Rust accepted 2026-10-23: all 1134 library tests passed single-threaded in 1149.73s, including 21 new A2.2 witnesses. A3 now implements heap publication and C malloc/free; developer runtime/CC2 acceptance is pending, followed by whole-stack review and compiler growth. |
-| Allocation A2.3 | Formal gate developer-accepted 2026-10-24: 192 positive (30 quantified laws) / 162 hostile. A2.3.1 accepted: 17 new tests / 144 focused; A2.3.2: 18 / 162; A2.3.3: 22 / 184; A2.3.4: 17 / 201; A2.3.5a: 21 / 222; A2.3.5b: 21 / 243; A2.3.5c: 22 / 265, recorded 2026-10-25 (each focused run includes its new tests). A2.3.5 worker gate is accepted: 197 positive (23 quantified) / 172 hostile. A2.3.6 queued-job recovery is developer-accepted: 21 new / 286 focused tests (0.01s / 0.16s), recorded 2026-10-25. A2.3.7 authority retirement is developer-accepted: 21 new / 307 focused tests (0.02s / 0.19s), including the new tests. Complete trusted cleanup/reuse is developer-accepted: Kleis 92 positive / 79 hostile, 19 new tests in 0.01s and 326 focused tests in 0.19s (including those 19). A3 implements C malloc/free, owned results, production publication and automatic lifecycle cleanup. Its new Kleis gate passed locally at 52 / 43. The developer run reports 1344 passed / 1 failed: A3 unit tests and CC2 fixed point passed; malloc C integration awaits the direct-entry fixture correction. |
-| Residual-data isolation | New private lifetimes must receive initialized bytes and no inherited pointer kinds before authority publication. A2.3.2 private heap initialization is developer-accepted; A3 connects guest heap publication; runtime acceptance and local-frame payload initialization remain pending (DN-71). |
+| Shared allocation and compiler resources | DN-71's six pairs through A2.2 are developer-accepted across focused runs; their combined local checkpoint was 1051 positive / 737 hostile. A2.1: 120 focused tests accepted 2026-10-22. A2.2 Kleis 215 / 180 and Rust accepted 2026-10-23: all 1134 library tests passed single-threaded in 1149.73s, including 21 new A2.2 witnesses. A3 heap publication and C malloc/free now have developer runtime/CC2 acceptance; A4 review is delivered. R1 local initialization then the shared compiler resource contract are next. |
+| Allocation A2.3 | Formal gate developer-accepted 2026-10-24: 192 positive (30 quantified laws) / 162 hostile. A2.3.1 accepted: 17 new tests / 144 focused; A2.3.2: 18 / 162; A2.3.3: 22 / 184; A2.3.4: 17 / 201; A2.3.5a: 21 / 222; A2.3.5b: 21 / 243; A2.3.5c: 22 / 265, recorded 2026-10-25 (each focused run includes its new tests). A2.3.5 worker gate is accepted: 197 positive (23 quantified) / 172 hostile. A2.3.6 queued-job recovery is developer-accepted: 21 new / 286 focused tests (0.01s / 0.16s), recorded 2026-10-25. A2.3.7 authority retirement is developer-accepted: 21 new / 307 focused tests (0.02s / 0.19s), including the new tests. Complete trusted cleanup/reuse is developer-accepted: Kleis 92 positive / 79 hostile, 19 new tests in 0.01s and 326 focused tests in 0.19s (including those 19). A3 implements C malloc/free, owned results, production publication and automatic lifecycle cleanup. Its new Kleis gate passed locally at 52 / 43. The corrected integration passes in 1026.53s, including C malloc/free, hostile cases, linked modules and independent A/B/C reuse. Actual concurrent compiler jobs remain C5 work. |
+| Residual-data isolation | New private lifetimes must receive initialized bytes and no inherited pointer kinds before authority publication. A2.3.2 private heap initialization is developer-accepted; A3 guest heap publication and zeroed reuse are accepted. R1's local-frame initialization formal pair is delivered; runtime payload initialization remains open (DN-71). |
 | Protected application ABI | Metadata-bearing pointers, checked arithmetic, local-frame lifetimes, protected calls/spills and event-context save/restore |
 | Typed I/O | Exact protected-buffer output and process-owned immutable input |
 | Toolchain artifacts | Guest preprocessing, AOM emission, static linking, separate admission/publication/execution authority and ordered dependency receipts |
 | Networking | Ethernet through HTTP implemented; Phase 10's rebuild of the real socket/HTTP chain remains open |
-| Multicore | Implemented (SC + XCHG) |
+| Multicore | Existing emulator SC + XCHG support; A3 malloc acceptance covers serialized guest interleavings, not a native SMP allocation refinement |
 | DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
 | Protected CALL/RET | Implemented (return-stack authority) |
@@ -3567,9 +3569,11 @@ client and an adversarial gate before the next one depends on it:
       - A2.3.6 queued-job worker recovery developer-accepted 2026-10-25: 21 new / 286 focused tests (0.01s / 0.16s; includes new tests)
       - A2.3.7 authority retirement developer-accepted: 21 new / 307 focused tests (0.02s / 0.19s; includes new tests)
       - Complete trusted cleanup/reuse developer-accepted: Kleis 92 / 79; 19 new / 326 focused Rust tests passed (0.01s / 0.19s; includes new tests)
-      - A3 C malloc/free implemented with owned results, production publication, process-exit cleanup and independent C clients; local formal gate 52 / 43 passed; A3 unit tests and CC2 fixed point passed, C integration awaits explicit-exit fixture rerun
-      - required post-malloc whole-stack allocation/lifetime/authority review
-      - then compiler budgets, automatic output/source/workspace/link growth on the shared service
+      - A3 C malloc/free accepted 2026-10-25: local formal gate 52 / 43; developer unit tests, exact CC2 fixed point and C/module/A-B-C integration pass
+      - required A4 whole-stack review delivered in DN-71; track its findings
+      - R1 local-frame initialization formal pair delivered 2026-10-26; focused result in DN-71
+      - next: R1 bounded frame-admission runtime change
+      - then C1-C5 compiler budgets and automatic output/source/workspace/link growth on the shared service
       - compiler/toolchain modularization, headers, modules, and libraries
       - persistent tool/source receipts and rebuilt socket/HTTP services
 10.9  supply-chain closure, hostile audit, and CPU-to-HTTP rebuild gate
@@ -3594,13 +3598,12 @@ new Undertaker asynchronous-reclamation pair was developer-accepted on
 binary/root options. All five pairs now have developer acceptance across focused
 runs, and one local run passes all five at 836 / 557. A2.1 now supplies the bounded
 registry, account reservations and reserved cleanup directory with local runtime
-evidence below and developer acceptance recorded on 2026-10-22. Implement the common service in
-bounded pieces and expose the supported C malloc/free interface, then perform the required
-whole-stack review of allocation, lifetime, authority, resource accounting and
-recovery before proceeding with compiler-specific growth. The review covers
-CPU/events, Fabric/placement, processes, IPC, DMA/controllers, tools/artifacts,
-and network/other services, and records evidence, gaps and ordered formal gates
-in these existing documents.
+evidence below and developer acceptance recorded on 2026-10-22. A3 has now
+delivered and validated the common service's C interface; A4 has reviewed
+CPU/events, Fabric/placement, processes, IPC, DMA/controllers, tools/artifacts
+and network/other services. DN-71 records evidence, gaps and formal gates.
+Close R1 local-frame initialization, then continue C1-C5; hardware and future
+service ownership remain separately scoped.
 
 A2.1 integrates local and heap identities in one preallocated stable directory,
 with nonwrapping generations and fixed scope, owner-account and cleanup tables.
@@ -3855,7 +3858,8 @@ filtered out), followed by **184 focused tests passing in 0.13s** (1007 filtered
 out), including those 22. No full 1191-test run was reported. No accepted Kleis
 file or gate script changed. A2.3.4 below adds attached-failure closure;
 Undertaker/process integration follows before production publication. The
-post-malloc whole-stack review remains pending its actual entry condition.
+post-malloc review was deferred at that handoff; A3 now satisfies its entry
+condition and DN-71 A4 records the completed review.
 
 **A2.3.4 attached-failure closure, developer-accepted 2026-10-24.**
 The internal `close_attached_heap` operation binds one opaque reservation,
@@ -4118,8 +4122,7 @@ B's pending work stays correct, and A's stale aliases fail. These tests do not
 establish concurrent compiler execution. The last accepted full library run
 remains 1134 tests; no full 1333-test run was reported.
 
-**A3 C malloc/free, implementation delivered 2026-10-25; unit tests passed,
-C integration pending the direct-entry fixture correction.** The new `anka108_malloc_runtime` pair passed locally before runtime
+**A3 C malloc/free accepted; A4 review delivered, 2026-10-25.** The new `anka108_malloc_runtime` pair passed locally before runtime
 implementation: **52 positive witnesses (9 quantified/structural laws), 43/43
 hostile assertions disproved**. `--only-malloc` selects this pair. Rust
 compile checking passes; the agent ran no Rust tests or CC2 bootstraps.
@@ -4160,14 +4163,32 @@ exit normally if their forbidden access is accepted, avoiding false-positive
 RET faults. Allocator, compiler and Core semantics remain unchanged. The agent
 compile-checked the correction and left Rust execution to the developer.
 
-Rerun the single shared-producer rebuilt-application test first. Its later C
-cases were not reached in the failed run. They cover the C malloc probe, typed I/O,
-hostile frees/aliases, heap return across linked modules, and independent A/B/C
-clients: A exhausts/exits, C receives A's exact backing zeroed, B stays correct.
-The fast witness retains A's saved-event alias and checks its rejection.
-Passing this acceptance triggers the required whole-stack review in DN-71;
-that review precedes compiler growth. Integrated C success, a green full suite
-and the completed audit are not yet established.
+The corrected developer rerun passed: **1 passed, 0 failed, 1344 filtered out
+in 1026.53s**. It reached the malloc probe, typed I/O, hostile frees/aliases,
+heap return across linked modules and independent A/B/C clients: A exhausts
+and exits, C receives A's exact backing zeroed, and B stays correct. The separate
+fast witness retains A's saved-event alias and rejects its use. Hostile faults
+and compiler rejections are expected assertions in this passing test. The
+earlier full run and this rerun are separate evidence, not one all-green suite.
+
+**Post-malloc review result.** DN-71 A4 records the complete source-review
+matrix, assumptions, gates and bounded follow-ups. Protected heap allocation is
+usable by supported C clients. The compiler/preprocessor still create separate
+fixed-workspace machines; real network services retain their numeric-buffer
+profile. Allocator-client acceptance does not establish concurrent compiler
+jobs or the protected service-stack rebuild.
+
+| Boundary | Review decision |
+|---|---|
+| Fresh local storage | R1 formal pair delivered; bounded frame-admission implementation next. Frame issue still clears tags but leaves payload; initialize the full new frame before publishing local authority, preserving parent storage and incoming arguments. |
+| Compiler job resources | Continue C1-C5 after R1. Budget mutable regions, metadata, work/retries, copies and retained publications. RebuildArtifactStore retains per-record Fabric instances outside heap payload accounting. |
+| Independent compilation | Retain actual A/B/C compiler acceptance: A exhausts/exits, C reuses backing, B's canonical output/receipt remains correct, and A's stale references/messages fail. Current allocator clients are compiled before their concurrent run. |
+| IPC and DMA | Current sharing is delegation/notification; private-heap export and DMA remain denied. Prove concrete ownership-epoch handoff and controller borrow/drainage before enabling those boundaries. |
+| Scheduling and trust | Cleanup uses bounded software steps, but malloc initialization is synchronous and complete machine metadata/scans lack unified owner budgets. No unconditional progress, SMP or timing/cache guarantee follows. |
+
+The A4 review was documentation only. R1 now supplies the first follow-up formal
+pair; its result and pending runtime boundary are recorded below. The other
+proposed gates remain undelivered. Track these findings without repeating A4.
 
 The implemented initial heap profile is process-private and supports independent
 concurrent clients. Heap lifetimes are not LIFO local frames. Existing protected
@@ -4194,13 +4215,34 @@ the clean bytes under their own provenance checks. This policy does not require
 immediate zeroing when an allocation is freed.
 
 The current protected local-frame path invalidates lifetimes and storage tags
-without wiping payload. Its fresh-pointer residual-data gap requires a separate
-bounded initialization refinement and runtime change. Process stack/trap reuse
+without wiping payload. Its fresh-pointer residual-data gap has a delivered
+R1 initialization refinement; the bounded runtime change remains next. Process stack/trap reuse
 already zeroes before regrant, while generic object destruction and placement
-release do not scrub. DN-71 records these differences and the A4 audit
-obligations; the new uniform rule is not yet a complete-stack implementation
-claim. `--only-initialization` runs the new gate pair, and `--only-allocation`
-includes it with the allocation/ABI gates.
+release do not scrub. DN-71 A4 records these differences and selects R1
+as the next runtime change; the uniform rule is not yet implemented across
+the complete stack. `--only-initialization` continues to run the general
+residual-data gate pair; `--only-local-initialization` selects R1.
+`--only-allocation` includes both with the other allocation gates.
+
+**R1 formal delivery, 2026-10-26.** The new `anka108_local_initialization`
+pair refines synchronous PFRAME admission: validate exact current identity,
+whole-frame translation/authority, all manifest locals, physical exclusion and
+all required capacity before mutation; then zero the entire aligned frame and
+overlapping pointer-cell tags before publishing descriptors and cursor/FP/SP.
+It preserves incoming argument words/kinds, LR and caller storage. CC2 stages
+arguments in caller spills/registers and copies them into parameter locals
+after PFRAME, so full-frame clearing fits the existing call ABI. Padding is
+cleared without granting a pointer to it. Failed preflight preserves the old
+state; ERET restores an existing lifetime without scrubbing it. Nonwrapping
+generation checks continue to reject stale aliases after reuse.
+
+Focused local validation: **151 positive witnesses (26 quantified laws) / 118 explicitly disproved hostile witnesses**. Developer rerun and runtime acceptance
+are pending. This delivery changes no Rust/C files and runs no Rust tests or
+CC2 bootstrap. The Kleis models have no new axioms; complete validation, real
+authority/work census, stable translation and serialized nonfallible commit
+remain implementation obligations. These witnesses do not establish hardware
+cache/timing or SMP guarantees. DN-71 records the focused command and the single
+runtime handoff before C1's shared compiler resource contract.
 
 The reclamation refinement requires reusable physical and per-owner virtual
 extents, exact split/coalesce transitions, stable slot/generation history and
@@ -4260,9 +4302,10 @@ invocations with private mutable state, per-job budgets and atomic global
 reservations. Automatic sizing or fresh-attempt retries then remove per-program
 capacity tuning across preprocessing/source, tables/output, producer-image
 admission, linking, publication and loading. Real ISA/ABI bounds remain explicit.
-This is planned work: no general malloc/free or buffer-ownership handoff is
-claimed here, and the present 65528-byte effective-source, 256 KiB compiler-output
-and 1 MiB protected-linked-image policies still apply. Implementation proceeds in
+Compiler growth and buffer-ownership handoff remain planned work. Supported
+process-private C malloc/free is now accepted; the present 65528-byte
+effective-source, 256 KiB compiler-output and 1 MiB protected-linked-image
+policies still apply. Implementation proceeds in
 bounded pieces after the relevant formal gates.
 
 #### Phase 10.0 closure: AC2, bootstrap, and AOM/link contracts
