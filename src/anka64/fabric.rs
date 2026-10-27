@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 
 use super::state::*;
 mod heap;
+mod local_frames;
 pub(crate) use heap::{HeapInitialization, HeapCleanupSnapshot};
 pub(crate) use heap::{HeapWorkCounts, HeapWorkLimits, HeapWorkOutcome, HeapWorkTicket};
 
@@ -1394,38 +1395,6 @@ impl Fabric {
         true
     }
 
-    pub(crate) fn issue_pointer_frame(&mut self, owner:u64, registrations:Vec<(MemoryRequest,u64,bool)>)
-        -> Result<(super::scoped_pointers::Scope,Vec<super::scoped_pointers::ScopedPointer>),super::core::PointerMachineError> {
-        use super::core::PointerMachineError as E;
-        use super::scoped_pointers::PointerError;
-        self.scoped_pointers.preflight_frame(registrations.len()).map_err(E::Pointer)?;
-        // Validate EVERY entry and reserve the result vector before mutation.
-        // Exclusive &mut Fabric keeps the checked state stable through commit.
-        for (request, address, writable) in &registrations {
-            address.checked_add(request.length).ok_or(E::Pointer(PointerError::InvalidRange))?;
-            self.checked_local_backing(request, *writable)?;
-        }
-        let mut pointers = Vec::new();
-        pointers.try_reserve_exact(registrations.len()).map_err(|_| E::Pointer(PointerError::Exhausted))?;
-        let scope = self.scoped_pointers.enter_scope_for(owner).expect("frame preflight reserved scope");
-        for (request, address, writable) in registrations {
-            // Only bounded registry rows change in this loop. The validation,
-            // free slots and revision headroom above cannot become stale.
-            let pointer = self.register_scoped_pointer(scope, request, address, writable)
-                .expect("serialized frame preflight reserved every local");
-            pointers.push(pointer);
-        }
-        for &pointer in &pointers {
-            if let Some(backing) = self.scoped_pointers.backing(pointer) {
-                if let (Some(base), Some((_, length))) = (self.translate(backing.object, backing.offset),
-                    self.scoped_pointers.storage_span(pointer)) {
-                    self.clear_pointer_cells_physical(base, length);
-                }
-            }
-        }
-        Ok((scope, pointers))
-    }
-
     pub(crate) fn retire_pointer_frame(&mut self, scope:super::scoped_pointers::Scope,
         locals:&[super::scoped_pointers::ScopedPointer]) -> Result<(),super::core::PointerMachineError> {
         self.scoped_pointers.leave_scope(scope).map_err(super::core::PointerMachineError::Pointer)?;
@@ -1727,33 +1696,34 @@ mod tests {
     fn a21_frame_preflight_rejection_preserves_identity_backing_tags_and_payload() {
         let (mut f, object, domain) = setup_basic();
         f.register_agent(CPU0, AgentKind::Cpu(CoreId(0)), domain);
+        assert!(f.protect_pointer_stack(object,7,domain));
         f.scoped_pointers = super::super::scoped_pointers::ScopedPointers::new(4);
         let mut request = read_req(CPU0, domain, object, 0);
         request.length = 16;
-        let (scope, locals) = f.issue_pointer_frame(7, vec![(request.clone(), 0x8000, true)]).unwrap();
+        let (scope, locals) = f.issue_pointer_frame(7, request.clone(), 0x8000, vec![(request.clone(), 0x8000, true)]).unwrap();
         let pointer = locals[0];
-        let generation = f.objects[&object].generation;
         // A real previously issued pointer tag must survive a late bad entry,
         // including when an earlier candidate overlaps its physical storage.
-        f.pointer_cells.insert((object, generation, 0), pointer);
+        let mut cell = request; cell.kind = AccessKind::Write;
+        f.store_pointer_cell(cell, Some(pointer)).unwrap();
         let before = format!("{:?}", f.scoped_pointers);
         let tags = f.pointer_cells.clone();
         let bytes = f.read_physical(0x4000, 16).to_vec();
         let mut denied = request.clone();
         denied.offset = 0x1000;
-        assert!(f.issue_pointer_frame(7, vec![(request.clone(), 0x8010, true), (denied, 0x8020, true)]).is_err());
+        assert!(f.issue_pointer_frame(7, request.clone(), 0x8000, vec![(request.clone(), 0x8000, true), (denied, 0x8020, true)]).is_err());
         assert_eq!(format!("{:?}", f.scoped_pointers), before);
         assert_eq!(f.pointer_cells, tags);
         assert_eq!(f.read_physical(0x4000, 16), bytes);
         assert_eq!(f.scoped_pointer_backing(pointer, domain).unwrap(), (object, 0));
         // Capacity and overflow denial also happen before the first mutation.
-        assert!(f.issue_pointer_frame(7, vec![(request.clone(), 0x8000, true); 4]).is_err());
-        assert!(f.issue_pointer_frame(7, vec![(request.clone(), u64::MAX, true)]).is_err());
+        assert!(f.issue_pointer_frame(7, request.clone(), 0x8000, vec![(request.clone(), 0x8000, true); 4]).is_err());
+        assert!(f.issue_pointer_frame(7, request.clone(), 0x8000, vec![(request.clone(), u64::MAX, true)]).is_err());
         assert_eq!(format!("{:?}", f.scoped_pointers), before);
         f.retire_pointer_frame(scope, &locals).unwrap();
         assert!(f.pointer_cells.is_empty());
         assert!(f.scoped_pointer_backing(pointer, domain).is_err());
-        let (_, next) = f.issue_pointer_frame(7, vec![(request, 0x8000, true)]).unwrap();
+        let (_, next) = f.issue_pointer_frame(7, request.clone(), 0x8000, vec![(request, 0x8000, true)]).unwrap();
         assert_eq!(next[0].words()[0] as u32, pointer.words()[0] as u32);
         assert_ne!(next[0].words()[0], pointer.words()[0]);
         assert_eq!(f.scoped_pointer_backing(next[0], domain).unwrap(), (object, 0));

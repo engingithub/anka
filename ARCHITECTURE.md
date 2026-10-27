@@ -1342,6 +1342,105 @@ conditional bring-up stages, demonstration criteria and source-code anchors.
 The active objective remains the software self-hosting and end-to-end
 “Anka64 is alive” chain.
 
+
+<a id="future-metal"></a>
+
+## Future Apple Metal Execution Backend — Deferred
+
+**Scope decision, 2026-10-26; Metal 4 documentation update, 2026-10-27:**
+retain a hosted heterogeneous realization as a future research direction.
+No Metal implementation begins here, and this adds no prerequisite to C1-C5
+or Phase 10 closure. R1 is accepted on the existing Rust backend.
+
+The proposal is a Metal compute interpreter for existing Anka64 instructions.
+CC2 continues to emit Anka64 binaries. GPU buffers represent virtual registers,
+PC/flags, protected pointer kinds, saved contexts, object storage and working
+RAM. Indexed tables and bounded queues implement the Fabric's identity,
+authority, lifetime and placement rules; Rust's BTreeMap is not an architectural
+requirement. Guest references remain authenticated object/offset tokens and
+cannot become unchecked native GPU addresses. A trusted host bridge handles
+external I/O, dispatch and resource admission between bounded execution batches.
+
+Metal 4 supports a broader execution plan than a GPU interpreter alone. One
+Anka64 machine can expose the same architectural contracts while its backend
+submits suitable work to different M5 engines. The following are documented
+platform mechanisms and proposed Anka64 uses, not implemented backend features:
+
+| Interface | Documented execution path | Candidate Anka64 use |
+|---|---|---|
+| Metal compute / MSL kernels | GPU execution | Bounded interpreter batches and independent Fabric operations |
+| Metal 4 tensor operations and Metal Performance Primitives | GPU matrix operations, including M5 GPU neural accelerators | Suitable tensor workloads exposed through an explicit application/service contract |
+| `MTL4MachineLearningCommandEncoder` | Packaged Core ML model inference; the system selects an engine such as GPU or Apple Neural Engine (ANE) | Model inference integrated with compute passes and their data dependencies |
+
+The M5 GPU neural accelerators and the separate ANE are distinct facilities.
+Apple documents render, compute and machine-learning passes in the same command
+buffer, without an intervening CPU round trip between dependent stages. An ANE
+model can overlap independent GPU work; barriers still express dependencies.
+Models are converted to Metal packages at development time. Automatic engine
+selection applies to supported model inference, not arbitrary Anka64 opcodes.
+The host CPU remains available for scheduling, I/O and appropriate native work;
+backend selection and performance must be measured for each workload.
+
+This documentation establishes no automatic AMX acceleration of capability
+checks, rollback or logging, and no ANE implementation of Kleis/Z3 proof search.
+Exact authority and lifetime decisions remain obligations of the trusted
+implementation. Any proposed accelerator replacement must first preserve those
+semantics under an explicit refinement contract.
+
+Metal 4 command buffers do not retain strong references to their resources.
+The backend must retain buffers, authority metadata and intermediate heaps
+for the complete lifetime of submitted work. Reusable command buffers do not
+make their outstanding resources reusable. Submission must pin the exact
+allocation/epoch, and completion must match the current job/attempt before
+effects are accepted or pins released. A timeout or cancellation request alone
+cannot establish drainage, even when the work executes on the ANE.
+
+The first candidate is many independent machine instances with disjoint state.
+Compare exact architectural state, effects and faults with the Rust reference,
+then measure end-to-end performance including submission and synchronization.
+A shared multicore Fabric is a later extension. Parallel instances may improve
+throughput; no speedup is claimed for a single sequential CC2 compilation.
+Batch size, state footprint, branching and transfer/dispatch overhead need
+measurement before selecting a backend. Large independent Fabric operations
+are another candidate, without presuming that small local-frame clears benefit.
+
+Required Kleis contracts and hostile witnesses precede implementation:
+
+1. A completed GPU batch refines a valid sequence of Anka64 transitions,
+   preserving instruction semantics, events, faults and bounded execution.
+2. Every native memory access is preceded by the required authority/lifetime/
+   bounds checks; machine-instance payload and metadata remain isolated.
+3. Pointer payload/kind publication and shared effects have explicit serialized
+   commit rules, with defined ordering across GPU threads and dispatches.
+4. CPU/GPU/ANE ownership, resource retention and memory visibility are explicit.
+   Unified memory does not grant permission or remove synchronization.
+   Cancellation, faults and host process death cannot release or reuse backing
+   until outstanding device work is accounted for; partial batches cannot
+   masquerade as committed ones. Reject stale completions after allocation,
+   process or job reuse.
+5. Resource admission, completion identity and failure cleanup are bounded and
+   generation-qualified, including queued work, retained buffers and model
+   scratch storage. Shared-core/DMA extensions need their own refinement.
+6. A mixed-engine dependency graph preserves the specified visibility and
+   commit order. Model/tensor results are application data and confer no Fabric
+   authority. Any new guest accelerator interface needs its own typed contract.
+
+These are proposed proof obligations, not delivered gates or performance
+results. This backend would trust macOS, Metal's compiler/driver, any selected
+model runtime and the Apple execution engines used, in addition to the
+interpreter. Architectural equivalence would not
+establish timing/cache noninterference or a native FPGA implementation. The
+future hardware observer model remains a separate obligation.
+
+Official platform references, checked 2026-10-27:
+[Metal compute](https://developer.apple.com/documentation/metal/performing-calculations-on-a-gpu),
+[Apple GPU storage modes](https://developer.apple.com/documentation/metal/choosing-a-resource-storage-mode-for-apple-gpus),
+[resource synchronization](https://developer.apple.com/documentation/metal/resource-synchronization),
+[Metal 4 core API and resource retention](https://developer.apple.com/documentation/metal/understanding-the-metal-4-core-api),
+[machine-learning passes and engine selection](https://developer.apple.com/documentation/metal/machine-learning-passes),
+[inference on the GPU timeline](https://developer.apple.com/documentation/metal/running-a-machine-learning-model-on-the-gpu-timeline),
+and [M5 GPU neural accelerators with Metal 4](https://machinelearning.apple.com/research/exploring-llms-mlx-m5).
+
 ---
 
 # 11. What Anka64 Should Avoid
@@ -1578,9 +1677,9 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 
 # 18. Current Implementation Facts
 
-Current implementation evidence and post-malloc review: **2026-10-25**.
-R1 local-frame initialization formal refinement: **2026-10-26**, with its
-runtime change still pending (DN-71).
+Current implementation evidence: **2026-10-27**; post-malloc review delivered
+**2026-10-25**. R1 local-frame initialization is developer-accepted: its Kleis
+gate, focused Rust tests, shared CC2 integration and full suite pass (DN-71).
 Historical sizes/counts describe their earlier checkpoints; A3/A4 supersede
 their pending integration language. Focused results remain separate runs.
 
@@ -1589,14 +1688,14 @@ their pending integration language. Focused results remain separate runs.
 | ISA | Single-source instruction descriptions, including byte and protected-pointer operations; see `src/anka64/desc.rs` |
 | Self-hosted compiler | Exact CC2_1 == CC2_2 fixed point; CC_B == CC_C remains the bootstrap foundation |
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
-| Current CC2 witness | Developer rerun 2026-10-25: CC2_0 = 164840 bytes; exact CC2_1 = CC2_2 = 186920 bytes; entry 184232 |
+| Current CC2 witness | Latest developer rerun, recorded 2026-10-27: CC2_0 = 164840 bytes; exact CC2_1 = CC2_2 = 186920 bytes; entry 184232 |
 | CC2 source | `userspace/system/compiler/ankacc2_stage3.c` |
-| Regression evidence | Latest full library run: 1344 passed / 1 failed in 1967.45s. After the entry-fixture fix, the sole failing integration passed: 1 passed / 0 failed / 1344 filtered in 1026.53s. Separate runs, not one green 1345-test suite; all twelve A3 unit tests passed in the full run (DN-71) |
+| Regression evidence | Latest developer full suite: 1361 passed / 0 failed / 0 ignored in 2446.84s. Separate focused runs: 16 R1 tests passed in 0.02s; shared CC2 integration passed in 1008.62s with 1360 filtered. Earlier failing runs remain historical evidence (DN-71) |
 | Protected modules | Current rerun: two C units, four frames, 3520 code + 2048 metadata bytes; receipt-bound exit 0, output [65,0,255,66] and hostile lifetime/bounds rejection. A3 also accepts cross-module heap return/free (DN-71) |
 | Module formal gate | 217 positive / 168 explicitly disproved hostile witnesses |
-| Shared allocation and compiler resources | DN-71's six pairs through A2.2 are developer-accepted across focused runs; their combined local checkpoint was 1051 positive / 737 hostile. A2.1: 120 focused tests accepted 2026-10-22. A2.2 Kleis 215 / 180 and Rust accepted 2026-10-23: all 1134 library tests passed single-threaded in 1149.73s, including 21 new A2.2 witnesses. A3 heap publication and C malloc/free now have developer runtime/CC2 acceptance; A4 review is delivered. R1 local initialization then the shared compiler resource contract are next. |
+| Shared allocation and compiler resources | DN-71's six pairs through A2.2 are developer-accepted across focused runs; their combined local checkpoint was 1051 positive / 737 hostile. A2.1: 120 focused tests accepted 2026-10-22. A2.2 Kleis 215 / 180 and Rust accepted 2026-10-23: all 1134 library tests passed single-threaded in 1149.73s, including 21 new A2.2 witnesses. A3 heap publication and C malloc/free now have developer runtime/CC2 acceptance; A4 review is delivered. R1 is developer-accepted; C1, the shared compiler resource/ABI contract, is next. |
 | Allocation A2.3 | Formal gate developer-accepted 2026-10-24: 192 positive (30 quantified laws) / 162 hostile. A2.3.1 accepted: 17 new tests / 144 focused; A2.3.2: 18 / 162; A2.3.3: 22 / 184; A2.3.4: 17 / 201; A2.3.5a: 21 / 222; A2.3.5b: 21 / 243; A2.3.5c: 22 / 265, recorded 2026-10-25 (each focused run includes its new tests). A2.3.5 worker gate is accepted: 197 positive (23 quantified) / 172 hostile. A2.3.6 queued-job recovery is developer-accepted: 21 new / 286 focused tests (0.01s / 0.16s), recorded 2026-10-25. A2.3.7 authority retirement is developer-accepted: 21 new / 307 focused tests (0.02s / 0.19s), including the new tests. Complete trusted cleanup/reuse is developer-accepted: Kleis 92 positive / 79 hostile, 19 new tests in 0.01s and 326 focused tests in 0.19s (including those 19). A3 implements C malloc/free, owned results, production publication and automatic lifecycle cleanup. Its new Kleis gate passed locally at 52 / 43. The corrected integration passes in 1026.53s, including C malloc/free, hostile cases, linked modules and independent A/B/C reuse. Actual concurrent compiler jobs remain C5 work. |
-| Residual-data isolation | New private lifetimes must receive initialized bytes and no inherited pointer kinds before authority publication. A2.3.2 private heap initialization is developer-accepted; A3 guest heap publication and zeroed reuse are accepted. R1's local-frame initialization formal pair is delivered; runtime payload initialization remains open (DN-71). |
+| Residual-data isolation | New private lifetimes must receive initialized bytes and no inherited pointer kinds before authority publication. A2.3.2 private heap initialization is developer-accepted; A3 guest heap publication and zeroed reuse are accepted. R1's formal pair and full-frame byte/tag initialization runtime are developer-accepted, including fresh/reused C locals and typed nulls (DN-71). |
 | Protected application ABI | Metadata-bearing pointers, checked arithmetic, local-frame lifetimes, protected calls/spills and event-context save/restore |
 | Typed I/O | Exact protected-buffer output and process-owned immutable input |
 | Toolchain artifacts | Guest preprocessing, AOM emission, static linking, separate admission/publication/execution authority and ordered dependency receipts |
@@ -3571,9 +3670,9 @@ client and an adversarial gate before the next one depends on it:
       - Complete trusted cleanup/reuse developer-accepted: Kleis 92 / 79; 19 new / 326 focused Rust tests passed (0.01s / 0.19s; includes new tests)
       - A3 C malloc/free accepted 2026-10-25: local formal gate 52 / 43; developer unit tests, exact CC2 fixed point and C/module/A-B-C integration pass
       - required A4 whole-stack review delivered in DN-71; track its findings
-      - R1 local-frame initialization formal pair delivered 2026-10-26; focused result in DN-71
-      - next: R1 bounded frame-admission runtime change
-      - then C1-C5 compiler budgets and automatic output/source/workspace/link growth on the shared service
+      - R1 accepted: Kleis 151 / 118; 16 focused Rust tests, shared CC2 integration and full 1361-test suite pass (DN-71)
+      - next: C1 shared compiler resource/ABI Kleis contract
+      - then C2-C5 automatic output/source/workspace/link growth on the shared service
       - compiler/toolchain modularization, headers, modules, and libraries
       - persistent tool/source receipts and rebuilt socket/HTTP services
 10.9  supply-chain closure, hostile audit, and CPU-to-HTTP rebuild gate
@@ -4180,14 +4279,14 @@ jobs or the protected service-stack rebuild.
 
 | Boundary | Review decision |
 |---|---|
-| Fresh local storage | R1 formal pair delivered; bounded frame-admission implementation next. Frame issue still clears tags but leaves payload; initialize the full new frame before publishing local authority, preserving parent storage and incoming arguments. |
+| Fresh local storage | R1 accepted: full-frame byte/tag initialization before local authority preserves parent storage and incoming arguments. Kleis 151 / 118, 16 focused Rust tests, shared CC2/C integration and the 1361-test full suite pass. |
 | Compiler job resources | Continue C1-C5 after R1. Budget mutable regions, metadata, work/retries, copies and retained publications. RebuildArtifactStore retains per-record Fabric instances outside heap payload accounting. |
 | Independent compilation | Retain actual A/B/C compiler acceptance: A exhausts/exits, C reuses backing, B's canonical output/receipt remains correct, and A's stale references/messages fail. Current allocator clients are compiled before their concurrent run. |
 | IPC and DMA | Current sharing is delegation/notification; private-heap export and DMA remain denied. Prove concrete ownership-epoch handoff and controller borrow/drainage before enabling those boundaries. |
 | Scheduling and trust | Cleanup uses bounded software steps, but malloc initialization is synchronous and complete machine metadata/scans lack unified owner budgets. No unconditional progress, SMP or timing/cache guarantee follows. |
 
-The A4 review was documentation only. R1 now supplies the first follow-up formal
-pair; its result and pending runtime boundary are recorded below. The other
+The A4 review was documentation only. R1 supplies the first accepted follow-up
+formal pair and runtime; their passing execution evidence is recorded below. The other
 proposed gates remain undelivered. Track these findings without repeating A4.
 
 The implemented initial heap profile is process-private and supports independent
@@ -4214,35 +4313,48 @@ from authorizing publication. Explicit new image/local initializers may overlay
 the clean bytes under their own provenance checks. This policy does not require
 immediate zeroing when an allocation is freed.
 
-The current protected local-frame path invalidates lifetimes and storage tags
-without wiping payload. Its fresh-pointer residual-data gap has a delivered
-R1 initialization refinement; the bounded runtime change remains next. Process stack/trap reuse
-already zeroes before regrant, while generic object destruction and placement
-release do not scrub. DN-71 A4 records these differences and selects R1
-as the next runtime change; the uniform rule is not yet implemented across
-the complete stack. `--only-initialization` continues to run the general
-residual-data gate pair; `--only-local-initialization` selects R1.
-`--only-allocation` includes both with the other allocation gates.
+The protected local-frame path now zeroes the entire new aligned frame and
+clears overlapping pointer-cell kinds before publishing local authority.
+PUNFRAME retires authority without requiring an eager scrub; later PFRAME reuse
+initializes bytes again. ERET restores an existing lifetime without scrubbing.
+Process stack/trap reuse already zeroes before regrant; generic object destruction
+and placement release still do not scrub. The uniform rule is therefore not yet
+implemented across every legacy object path. `--only-initialization` selects
+the general residual-data pair; `--only-local-initialization` selects R1.
+`--only-allocation` includes both.
 
-**R1 formal delivery, 2026-10-26.** The new `anka108_local_initialization`
-pair refines synchronous PFRAME admission: validate exact current identity,
-whole-frame translation/authority, all manifest locals, physical exclusion and
-all required capacity before mutation; then zero the entire aligned frame and
-overlapping pointer-cell tags before publishing descriptors and cursor/FP/SP.
-It preserves incoming argument words/kinds, LR and caller storage. CC2 stages
-arguments in caller spills/registers and copies them into parameter locals
-after PFRAME, so full-frame clearing fits the existing call ABI. Padding is
-cleared without granting a pointer to it. Failed preflight preserves the old
-state; ERET restores an existing lifetime without scrubbing it. Nonwrapping
-generation checks continue to reject stale aliases after reuse.
+**R1 delivery, 2026-10-26.** The developer accepted the unchanged Kleis pair:
+151 positive witnesses (26 quantified laws), 118 explicitly disproved hostile
+witnesses. Runtime source is based on `Archive(20261026-212200).zip`; that archive
+omits the R1 pair/checker, so they are included with this delivery unchanged.
+Core checks stack identity/generation, full virtual/physical bounds and exact
+local mappings. Fabric checks full-frame authority, current physical aliases,
+live/event-suspended frames and nonterminal CPU/atomic/DMA transactions, including
+captured physical spans. All container and registry capacity is reserved before
+clearing. Whole-frame custody uses the existing bounded scope table, so padding
+and empty frames also exclude overlapping admission. Its larger row remains
+charged by the registry's fixed metadata accounting.
 
-Focused local validation: **151 positive witnesses (26 quantified laws) / 118 explicitly disproved hostile witnesses**. Developer rerun and runtime acceptance
-are pending. This delivery changes no Rust/C files and runs no Rust tests or
-CC2 bootstrap. The Kleis models have no new axioms; complete validation, real
-authority/work census, stable translation and serialized nonfallible commit
-remain implementation obligations. These witnesses do not establish hardware
-cache/timing or SMP guarantees. DN-71 records the focused command and the single
-runtime handoff before C1's shared compiler resource contract.
+Commit is serialized and has no allocation or fallible validation after the first
+byte write. Incoming register words/kinds, LR, flags, return state and caller
+storage survive. CC2 copies argument registers into clean parameter locals after
+PFRAME; explicit initializers then overlay the zeros. No compiler change is needed.
+
+This CPU-only profile conservatively rejects another registered agent in the
+owner domain at admission; trusted scheduling must maintain agent registrations.
+It does not establish SMP, hardware cache/timing or asynchronous DMA guarantees.
+The Kleis refinement contains no new axioms and is not a proof of the Rust source.
+
+`cargo check --tests --offline` passed at delivery. **Developer acceptance
+recorded 2026-10-27:** all 16 focused Rust tests passed in 0.02s after the fixture
+correction. Removing the C probe's unsupported leading block comment resolved
+the subsequent lexer failure. The shared CC2 integration passed in 1008.62s
+(1 passed / 0 failed / 1360 filtered), including fresh/reused local bytes, typed
+nulls, nested arguments, protected modules and malloc/free with independent
+A/B/C reuse. The full single-threaded suite passed: **1361 passed / 0 failed /
+0 ignored / 0 measured / 0 filtered in 2446.84s**. These are developer-run results;
+this documentation update ran no Rust tests or CC2 bootstrap. Proceed to C1's
+shared compiler resource/ABI contract without reopening the completed A4 audit.
 
 The reclamation refinement requires reusable physical and per-owner virtual
 extents, exact split/coalesce transitions, stable slot/generation history and

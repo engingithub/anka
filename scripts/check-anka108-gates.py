@@ -31,9 +31,11 @@ def main():
     selection.add_argument('--only-modules', action='store_true',
                            help='run only the protected-module composition gate pair')
     selection.add_argument('--only-allocation', action='store_true',
-                           help='run allocation lifecycle, ABI, initialization, reclamation, Undertaker, A2.2 placement, A2.3 Fabric and concrete worker gates')
+                           help='run all allocation, initialization, cleanup and malloc gates')
     selection.add_argument('--only-initialization', action='store_true',
                            help='run only the residual-data isolation gate pair')
+    selection.add_argument('--only-local-initialization', action='store_true',
+                           help='run only the protected local-frame initialization gate pair')
     selection.add_argument('--only-reclamation', action='store_true',
                            help='run only the reusable-extents and bounded-metadata gate pair')
     selection.add_argument('--only-undertaker', action='store_true',
@@ -69,7 +71,8 @@ def main():
     if not (args.only_108 or args.only_input or args.only_rebuild or args.only_adapter
             or args.only_modules or args.only_allocation or args.only_initialization
             or args.only_reclamation or args.only_undertaker or args.only_a22 or args.only_a23
-            or args.only_workers or args.only_cleanup or args.only_malloc):
+            or args.only_workers or args.only_cleanup or args.only_malloc
+            or args.only_local_initialization):
         try:
             previous = subprocess.run(
                 [sys.executable, str(root / 'scripts/check-anka107-gates.py'),
@@ -81,7 +84,9 @@ def main():
         if previous.returncode:
             return 1
     all_ok = True
-    if args.only_malloc:
+    if args.only_local_initialization:
+        stems = ('anka108_local_initialization',)
+    elif args.only_malloc:
         stems = ('anka108_malloc_runtime',)
     elif args.only_cleanup:
         stems = ('anka108_cleanup_reuse',)
@@ -101,7 +106,8 @@ def main():
         stems = ('anka108_allocation', 'anka108_allocation_abi',
                  'anka108_memory_initialization', 'anka108_allocation_reclamation',
                  'anka108_async_reclamation', 'anka108_allocation_placement',
-                 'anka108_allocation_fabric', 'anka108_cleanup_workers', 'anka108_cleanup_reuse', 'anka108_malloc_runtime')
+                 'anka108_allocation_fabric', 'anka108_cleanup_workers', 'anka108_cleanup_reuse',
+                 'anka108_malloc_runtime', 'anka108_local_initialization')
     elif args.only_modules:
         stems = ('anka108_protected_modules',)
     elif args.only_adapter:
@@ -117,7 +123,8 @@ def main():
                  'anka108_allocation_abi', 'anka108_memory_initialization',
                  'anka108_allocation_reclamation', 'anka108_async_reclamation',
                  'anka108_allocation_placement', 'anka108_allocation_fabric',
-                 'anka108_cleanup_workers', 'anka108_cleanup_reuse', 'anka108_malloc_runtime')
+                 'anka108_cleanup_workers', 'anka108_cleanup_reuse', 'anka108_malloc_runtime',
+                 'anka108_local_initialization')
     for stem in stems:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')

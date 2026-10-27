@@ -95,10 +95,18 @@ impl Slot {
     }
 }
 
+/// Complete frame custody includes padding and frames with no locals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LocalFrameBacking {
+    pub backing: PointerBacking,
+    pub length: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ScopeRecord {
     scope: Scope,
     owner: u64,
+    frame: Option<LocalFrameBacking>,
 }
 
 /// Tables are fully allocated at construction; their capacity never grows.
@@ -138,10 +146,29 @@ impl ScopedPointers {
         let index = self.scopes.iter().position(Option::is_none).unwrap();
         let scope = Scope(self.next_scope);
         self.next_scope += 1;
-        self.scopes[index] = Some(ScopeRecord { scope, owner });
+        self.scopes[index] = Some(ScopeRecord { scope, owner, frame: None });
         self.active_scopes_end = self.active_scopes_end.max(index + 1);
         self.heap.advance();
         Ok(scope)
+    }
+
+    pub(super) fn bind_frame(&mut self, scope: Scope, frame: LocalFrameBacking) {
+        let record = self.scopes.iter_mut().flatten().find(|s| s.scope == scope)
+            .expect("preflighted scope");
+        assert!(record.frame.is_none());
+        record.frame = Some(frame);
+    }
+
+    pub(super) fn live_frame_backings(&self) -> impl Iterator<Item = LocalFrameBacking> + '_ {
+        self.scopes.iter().flatten().filter_map(|s| s.frame)
+    }
+
+    pub(super) fn live_local_backings(&self) -> impl Iterator<Item = LocalFrameBacking> + '_ {
+        self.slots.iter().filter_map(|slot| {
+            if slot.state != SlotState::Live { return None; }
+            let Record::Local(local) = slot.record else { return None; };
+            Some(LocalFrameBacking { backing: local.backing?, length: local.length })
+        })
     }
 
     fn scope_owner(&self, scope: Scope) -> Option<u64> {

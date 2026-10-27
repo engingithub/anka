@@ -433,14 +433,16 @@ impl Anka64Core {
         let physical=fabric.translate(object,offset).ok_or_else(fail)?;
         if physical.checked_add(program.code.len() as u64).is_none_or(|n| n>fabric.mem_size() as u64)
             || fabric.read_physical(physical,program.code.len() as u64)!=program.code { return Err(fail()); }
-        let (stack_object,_)=self.checked_pointer_mapping(stack_low,stack_high-stack_low)?;
+        let (stack_object,stack_offset)=self.checked_pointer_mapping(stack_low,stack_high-stack_low)?;
+        let stack_generation=fabric.objects.get(&stack_object).ok_or_else(fail)?.generation;
         let (_,code_offset)=self.checked_pointer_mapping(code_base,4)?;
         let fetch=self.make_request(object,code_offset,Width::Word,AccessKind::Fetch);
         if !matches!(fabric.authorize(&fetch),super::fabric::AuthResult::Authorized(_)) { return Err(fail()); }
         if !fabric.protect_pointer_stack(stack_object,self.context_id,self.domain) { return Err(PointerMachineError::Frame(FrameError::Context)); }
         self.enable_protected_context()?;
         self.pointer_frames=Some(FrameState { program,context:self.context_id,domain:self.domain,
-            code_object:object,code_generation:generation,code_offset:offset,code_base,stack_low,cursor:stack_high,
+            code_object:object,code_generation:generation,code_offset:offset,code_base,stack_low,
+            stack_high,stack_object,stack_generation,stack_offset,cursor:stack_high,
             pending_entry:Some(code_base),active:Vec::new() });
         self.write_register(SP as usize,stack_high);
         Ok(())
@@ -460,20 +462,46 @@ impl Anka64Core {
         let state=self.frame_current(fabric)?;
         let frame=state.program.frames.get(index).ok_or(PointerMachineError::Frame(FrameError::Manifest))?;
         if state.pending_entry!=Some(self.pc)||self.pc!=state.code_base+frame.entry
-            || state.active.iter().any(|f| f.call_depth==self.return_stack.len()) { return Err(PointerMachineError::Frame(FrameError::Control)); }
-        let base=state.cursor.checked_sub(frame.size).filter(|&n| n>=state.stack_low).ok_or(PointerMachineError::Frame(FrameError::Capacity))?;
+            || state.active.iter().any(|f| f.call_depth==self.return_stack.len()) {
+            return Err(PointerMachineError::Frame(FrameError::Control));
+        }
+        let geometry=||PointerMachineError::Frame(FrameError::Geometry);
+        let capacity=||PointerMachineError::Frame(FrameError::Capacity);
+        let stack_len=state.stack_high.checked_sub(state.stack_low).filter(|&n|n>0).ok_or_else(geometry)?;
+        if state.stack_low%16!=0 || state.stack_high%16!=0 || state.cursor%16!=0
+            || state.cursor>state.stack_high || frame.size==0 || frame.size%16!=0
+            || self.checked_pointer_mapping(state.stack_low,stack_len)?!=(state.stack_object,state.stack_offset)
+            || !fabric.objects.get(&state.stack_object).is_some_and(|o|o.generation==state.stack_generation
+                && matches!(o.state,ObjectState::Active|ObjectState::Sealed)
+                && state.stack_offset.checked_add(stack_len).is_some_and(|end|end<=o.size)) {
+            return Err(geometry());
+        }
+        let stack_physical=fabric.translate(state.stack_object,state.stack_offset).ok_or_else(geometry)?;
+        if stack_physical%16!=0 || stack_physical.checked_add(stack_len).is_none_or(|n|n>fabric.mem_size() as u64) {
+            return Err(geometry());
+        }
+        let base=state.cursor.checked_sub(frame.size).filter(|&n| n>=state.stack_low).ok_or_else(capacity)?;
+        let offset=state.stack_offset.checked_add(base-state.stack_low).ok_or_else(geometry)?;
+        if self.checked_pointer_mapping(base,frame.size)?!=(state.stack_object,offset) {return Err(geometry());}
+        let mut whole=self.make_request(state.stack_object,offset,Width::Byte,AccessKind::Read);
+        whole.length=frame.size;
         let mut registrations=Vec::new();
+        registrations.try_reserve_exact(frame.locals.len()).map_err(|_|capacity())?;
         for local in &frame.locals {
-            let address=base.checked_add(local.offset).ok_or(PointerMachineError::Unmapped)?;
-            let (object,offset)=self.checked_pointer_mapping(address,local.length)?;
-            if local.pointer_slot && offset%16!=0 { return Err(PointerMachineError::Unaligned); }
-            let mut request=self.make_request(object,offset,Width::Byte,AccessKind::Read);
+            let address=base.checked_add(local.offset).ok_or_else(geometry)?;
+            let (object,local_offset)=self.checked_pointer_mapping(address,local.length)?;
+            if object!=state.stack_object || offset.checked_add(local.offset)!=Some(local_offset)
+                || (local.pointer_slot && local_offset%16!=0) {return Err(geometry());}
+            let mut request=self.make_request(object,local_offset,Width::Byte,AccessKind::Read);
             request.length=local.length;
             registrations.push((request,address,local.writable));
         }
-        let (scope,locals)=fabric.issue_pointer_frame(self.context_id,registrations)?;
+        let parent_cursor=state.cursor;
+        // Reserve every host container before Fabric's first payload/tag write.
+        self.pointer_frames.as_mut().unwrap().active.try_reserve(1).map_err(|_|capacity())?;
+        let (scope,locals)=fabric.issue_pointer_frame(self.context_id,whole,base,registrations)?;
         let active=ActiveFrame { scope,manifest:index,call_depth:self.return_stack.len(),
-            parent_cursor:state.cursor,parent_fp:self.r[FP as usize],return_lr:self.r[LR as usize],locals };
+            parent_cursor,parent_fp:self.r[FP as usize],return_lr:self.r[LR as usize],locals };
         let state=self.pointer_frames.as_mut().unwrap();
         state.active.push(active);state.cursor=base;state.pending_entry=None;
         self.write_register(SP as usize,base);self.write_register(FP as usize,base);
@@ -1380,7 +1408,7 @@ mod tests {
     }
 
 
-    fn protected_frame_fixture() -> (Fabric,Anka64Core,usize) {
+    pub(super) fn protected_frame_fixture() -> (Fabric,Anka64Core,usize) {
         use super::super::pointer_frames::*;
         let (mut fabric,text,_,domain,mut core)=setup();
         let mut asm=Asm64::new();
@@ -3072,3 +3100,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod local_initialization_tests;

@@ -1,0 +1,765 @@
+// Phase 10.8 R1: synchronous protected local-frame initialization refinement.
+// Specification only; no new axioms and no runtime/hardware proof claim.
+// PFRAME is one serialized reference-machine transition: validate/reserve ALL
+// state, zero the full aligned new frame and overlapping tags, then publish
+// descriptors/cursor. No allocation, callback, yield or fallible validation may
+// follow the first mutation. Interrupted hardware clearing needs another model.
+//
+// Physical stack span is the CURRENT translation of the admitted virtual stack.
+// Mapping/object generation, private stack ownership, sealed code/control flow,
+// complete local-list validation, capacity and work/export census are concrete
+// implementation obligations, not guest-supplied booleans or clean receipts.
+// Incoming arguments remain in registers across PFRAME; CC2 stores them into
+// the new frame afterward. ERET resumes an existing lifetime and never scrubs.
+import "anka108_memory_initialization.kleis"
+import "anka107_pointer_frames.kleis"
+import "anka107_pointer_events.kleis"
+
+define local108_true() = (bvconst(1,8)=bvconst(1,8))
+define local108_false() = (bvconst(0,8)=bvconst(1,8))
+define local108_bit(value : Bool) = if value then bvconst(1,8) else bvconst(0,8)
+define local108_in(base : BitVec64, size : BitVec64, query : BitVec64) =
+    bvule(base,query) ∧ bvult(bvsub(query,base),size)
+
+// Reuse the existing frame rule and require a complete aligned, nonwrapping
+// physical stack extent. The whole extent must fit the backing RAM.
+// The translated frame is also checked directly, as the concrete backing
+// preflight must do: do not trust virtual containment as a physical access check.
+// The quantified proof below factors physical-end safety into base <= limit,
+// size <= limit - base and checked addition. All three lemmas are verified;
+// substituting the exact projected base establishes the final RAM bound.
+define local108_projection(base : BitVec64, offset : BitVec64,
+    size : BitVec64, limit : BitVec64) =
+    init108_aligned(base) ∧ init108_aligned(offset) ∧ init108_aligned(size) ∧
+    bvugt(size,bvconst(0,64)) ∧ bvule(base,limit) ∧
+    bvule(offset,bvsub(limit,base)) ∧
+    bvule(size,bvsub(bvsub(limit,base),offset))
+define local108_geometry(cursor : BitVec64, low : BitVec64, high : BitVec64,
+    size : BitVec64, stack_physical : BitVec64, ram : BitVec64) =
+    bvult(low,high) ∧ init108_aligned(low) ∧ init108_aligned(high) ∧
+    frame107_enter(bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),
+        cursor,low,high,size,bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)) ∧
+    init108_range(stack_physical,bvsub(high,low)) ∧
+    bvule(stack_physical,ram) ∧ bvule(bvsub(high,low),bvsub(ram,stack_physical)) ∧
+    local108_projection(stack_physical,bvsub(frame107_base(cursor,size),low),size,ram)
+define local108_physical(cursor : BitVec64, low : BitVec64, size : BitVec64,
+    stack_physical : BitVec64) =
+    bvadd(stack_physical,bvsub(frame107_base(cursor,size),low))
+
+define local108_binding(context : BitVec64, owner : BitVec64,
+    domain : BitVec64, owner_domain : BitVec64, object : BitVec64,
+    expected_object : BitVec64, generation : BitVec64, expected_generation : BitVec64,
+    sealed_code : Bool, stack_private : Bool) =
+    bvugt(context,bvconst(0,64)) ∧ (context=owner) ∧ (domain=owner_domain) ∧
+    (object=expected_object) ∧ (generation=expected_generation) ∧
+    sealed_code ∧ stack_private
+
+// Each local/spill must name the same current frame backing at its exact
+// relative offset. This predicate is folded over the COMPLETE manifest.
+define local108_member(offset : BitVec64, length : BitVec64, size : BitVec64,
+    align : BitVec64, frame_object : BitVec64, local_object : BitVec64,
+    frame_generation : BitVec64, local_generation : BitVec64,
+    frame_offset : BitVec64, actual_offset : BitVec64) =
+    frame107_local(offset,length,size,align) ∧
+    (frame_object=local_object) ∧ (frame_generation=local_generation) ∧
+    bvule(size,bvsub(ptr107_max(),frame_offset)) ∧
+    (actual_offset=bvadd(frame_offset,offset))
+define local108_fold(prior : Bool, member : Bool) = prior ∧ member
+
+// Free slots exclude terminal generations. All vectors/tables needed for the
+// result, local registrations and active-frame push are reserved in preflight.
+// The current registry needs one scope mutation plus one per local.
+define local108_capacity(count : BitVec64, slots : BitVec64, scopes : BitVec64,
+    result_capacity : BitVec64, active_room : BitVec64,
+    next_scope : BitVec64, revision : BitVec64) =
+    bvule(count,bvconst(4096,64)) ∧ bvule(count,slots) ∧
+    bvugt(scopes,bvconst(0,64)) ∧ bvule(count,result_capacity) ∧
+    bvugt(active_room,bvconst(0,64)) ∧ bvugt(next_scope,bvconst(0,64)) ∧
+    bvult(next_scope,ptr107_max()) ∧
+    bvule(bvadd(count,bvconst(1,64)),bvsub(ptr107_max(),revision))
+
+// Counts cover aliases/operations intersecting this exact physical frame,
+// including same-domain foreign contexts and event-suspended live storage.
+define local108_quiet(live_overlap : BitVec64, cpu : BitVec64, dma : BitVec64,
+    atomic : BitVec64, readers : BitVec64, writers : BitVec64) =
+    (live_overlap=bvconst(0,64)) ∧ (cpu=bvconst(0,64)) ∧
+    (dma=bvconst(0,64)) ∧ (atomic=bvconst(0,64)) ∧
+    (readers=bvconst(0,64)) ∧ (writers=bvconst(0,64))
+
+define local108_prepare(geometry : Bool, binding : Bool, entry : Bool,
+    all_locals : Bool, disjoint : Bool, capacity : Bool, quiet : Bool,
+    frame_read_write : Bool, revision : BitVec64, expected_revision : BitVec64,
+    exclusive : Bool, no_fallible_tail : Bool) =
+    geometry ∧ binding ∧ entry ∧ all_locals ∧ disjoint ∧ capacity ∧ quiet ∧
+    frame_read_write ∧ (revision=expected_revision) ∧ exclusive ∧ no_fallible_tail
+
+// operation=1 is new-frame admission; operation=2 is event return, 3 is
+// retirement. Only admission writes zeros. These are model labels, not opcodes.
+define local108_scrub(prepared : Bool, operation : BitVec8) =
+    prepared ∧ (operation=bvconst(1,8))
+define local108_byte(scrub : Bool, physical : BitVec64, size : BitVec64,
+    query : BitVec64, old : BitVec8) =
+    init108_byte(scrub,physical,size,query,old)
+define local108_tag(scrub : Bool, physical : BitVec64, size : BitVec64,
+    cell : BitVec64, old : BitVec8) =
+    init108_tag(scrub,physical,bvconst(0,64),size,cell,old)
+
+// These are trusted results of the in-operation complete store, not receipts
+// accepted from a caller. Partial or tag-only progress cannot publish authority.
+define local108_done(scrub : Bool, size : BitVec64) =
+    if scrub then size else bvconst(0,64)
+define local108_publish(prepared : Bool, size : BitVec64, bytes : BitVec64,
+    tags : BitVec64, visible : Bool) =
+    prepared ∧ bvugt(size,bvconst(0,64)) ∧ init108_aligned(size) ∧
+    (bytes=size) ∧ (tags=size) ∧ visible
+define local108_issue(prepared : Bool, operation : BitVec8, size : BitVec64) =
+    local108_publish(prepared,size,
+        local108_done(local108_scrub(prepared,operation),size),
+        local108_done(local108_scrub(prepared,operation),size),local108_true())
+define local108_cursor(issued : Bool, cursor : BitVec64, size : BitVec64) =
+    if issued then frame107_base(cursor,size) else cursor
+define local108_live(issued : Bool, old : BitVec64, count : BitVec64) =
+    if issued then bvadd(old,count) else old
+
+// PFRAME changes SP/FP only; argument words, LR, flags, return stack and pair
+// kinds retain their prior values. Typed parameter stores occur AFTER this step.
+define local108_register(issued : Bool, register : BitVec64, base : BitVec64,
+    old : BitVec64) =
+    if issued ∧ ((register=bvconst(13,64)) ∨ (register=bvconst(15,64)))
+    then base else old
+define local108_register_kind(old : BitVec8) = old
+
+// A successful new pointer reads a freshly issued LOCAL, not an arbitrary
+// address in the zeroed frame/padding. Descriptor-current and logical bounds
+// remain mandatory after initialization, parameter copies and event restore.
+define local108_read(issued : Bool, handle : BitVec64, slot : BitVec64,
+    epoch : BitVec64, tagged : BitVec8, domain : BitVec64, owner_domain : BitVec64,
+    logical : BitVec64, position : BitVec64, width : BitVec64) =
+    issued ∧ repr107_lookup(handle,tagged,slot,epoch,bvconst(1,8),domain,owner_domain) ∧
+    init108_new_read(bvconst(2,8),logical,logical,position,width,bvconst(1,8))
+
+// Concrete child-frame trace: virtual stack [4096,8192), cursor 6144,
+// new frame [6080,6144), physical stack starts 16384 => frame [18368,18432).
+// Two locals (8 bytes at 0, pointer cell at 16); remaining padding is zeroed too.
+define local108_trace_prepare() = local108_prepare(
+    local108_geometry(bvconst(6144,64),bvconst(4096,64),bvconst(8192,64),bvconst(64,64),bvconst(16384,64),bvconst(65536,64)),
+    local108_binding(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),local108_true(),local108_true()),
+    local108_true(),
+    local108_fold(
+        local108_member(bvconst(0,64),bvconst(8,64),bvconst(64,64),bvconst(8,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),bvconst(1984,64),bvconst(1984,64)),
+        local108_member(bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),bvconst(1984,64),bvconst(2000,64))),
+    frame107_disjoint(bvconst(0,64),bvconst(8,64),bvconst(16,64),bvconst(16,64)),
+    local108_capacity(bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(20,64)),
+    local108_quiet(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+    local108_true(),bvconst(20,64),bvconst(20,64),local108_true(),local108_true())
+define local108_trace_scrub() = local108_scrub(local108_trace_prepare(),bvconst(1,8))
+define local108_trace_issued() = local108_issue(local108_trace_prepare(),bvconst(1,8),bvconst(64,64))
+define local108_trace_byte(secret : BitVec8, query : BitVec64) =
+    local108_byte(local108_trace_scrub(),bvconst(18368,64),bvconst(64,64),query,secret)
+define local108_trace_tag(old : BitVec8, cell : BitVec64) =
+    local108_tag(local108_trace_scrub(),bvconst(18368,64),bvconst(64,64),cell,old)
+
+
+example "local108_geometry accepts" {
+    assert(local108_geometry(bvconst(6144,64),bvconst(4096,64),bvconst(8192,64),bvconst(64,64),bvconst(16384,64),bvconst(65536,64)))
+}
+
+example "local108_geometry rejects underflow" {
+    assert(¬(local108_geometry(bvconst(6144,64),bvconst(4096,64),bvconst(8192,64),bvconst(4096,64),bvconst(16384,64),bvconst(65536,64))))
+}
+
+example "local108_geometry rejects cursor below stack" {
+    assert(¬(local108_geometry(bvconst(4080,64),bvconst(4096,64),bvconst(8192,64),bvconst(64,64),bvconst(16384,64),bvconst(65536,64))))
+}
+
+example "local108_geometry rejects cursor above stack" {
+    assert(¬(local108_geometry(bvconst(8208,64),bvconst(4096,64),bvconst(8192,64),bvconst(64,64),bvconst(16384,64),bvconst(65536,64))))
+}
+
+example "local108_geometry rejects empty stack" {
+    assert(¬(local108_geometry(bvconst(6144,64),bvconst(4096,64),bvconst(4096,64),bvconst(64,64),bvconst(16384,64),bvconst(65536,64))))
+}
+
+example "local108_geometry rejects reversed stack" {
+    assert(¬(local108_geometry(bvconst(6144,64),bvconst(9000,64),bvconst(8192,64),bvconst(64,64),bvconst(16384,64),bvconst(65536,64))))
+}
+
+example "local108_geometry rejects unaligned virtual stack" {
+    assert(¬(local108_geometry(bvconst(6144,64),bvconst(4097,64),bvconst(8192,64),bvconst(64,64),bvconst(16384,64),bvconst(65536,64))))
+}
+
+example "local108_geometry rejects unaligned cursor" {
+    assert(¬(local108_geometry(bvconst(6145,64),bvconst(4096,64),bvconst(8192,64),bvconst(64,64),bvconst(16384,64),bvconst(65536,64))))
+}
+
+example "local108_geometry rejects zero frame" {
+    assert(¬(local108_geometry(bvconst(6144,64),bvconst(4096,64),bvconst(8192,64),bvconst(0,64),bvconst(16384,64),bvconst(65536,64))))
+}
+
+example "local108_geometry rejects unaligned frame" {
+    assert(¬(local108_geometry(bvconst(6144,64),bvconst(4096,64),bvconst(8192,64),bvconst(63,64),bvconst(16384,64),bvconst(65536,64))))
+}
+
+example "local108_geometry rejects unaligned physical stack" {
+    assert(¬(local108_geometry(bvconst(6144,64),bvconst(4096,64),bvconst(8192,64),bvconst(64,64),bvconst(16385,64),bvconst(65536,64))))
+}
+
+example "local108_geometry rejects RAM overrun" {
+    assert(¬(local108_geometry(bvconst(6144,64),bvconst(4096,64),bvconst(8192,64),bvconst(64,64),bvconst(16384,64),bvconst(19000,64))))
+}
+
+example "local108_geometry rejects physical wrap" {
+    assert(¬(local108_geometry(bvconst(6144,64),bvconst(4096,64),bvconst(8192,64),bvconst(64,64),bvsub(ptr107_max(),bvconst(31,64)),bvconst(65536,64))))
+}
+
+example "local108_geometry rejects frame size wrap" {
+    assert(¬(local108_geometry(bvconst(6144,64),bvconst(4096,64),bvconst(8192,64),ptr107_max(),bvconst(16384,64),bvconst(65536,64))))
+}
+
+example "physical child base is exact" {
+    assert(local108_physical(bvconst(6144,64),bvconst(4096,64),bvconst(64,64),bvconst(16384,64))=bvconst(18368,64))
+}
+
+example "last stack aligned frame fits" {
+    assert(local108_geometry(bvconst(4112,64),bvconst(4096,64),bvconst(8192,64),bvconst(16,64),bvconst(16384,64),bvconst(65536,64)))
+}
+
+example "local108_binding accepts" {
+    assert(local108_binding(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),local108_true(),local108_true()))
+}
+
+example "local108_binding rejects zero context" {
+    assert(¬(local108_binding(bvconst(0,64),bvconst(0,64),bvconst(3,64),bvconst(3,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),local108_true(),local108_true())))
+}
+
+example "local108_binding rejects foreign context" {
+    assert(¬(local108_binding(bvconst(7,64),bvconst(8,64),bvconst(3,64),bvconst(3,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),local108_true(),local108_true())))
+}
+
+example "local108_binding rejects foreign domain" {
+    assert(¬(local108_binding(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(4,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),local108_true(),local108_true())))
+}
+
+example "local108_binding rejects substituted object" {
+    assert(¬(local108_binding(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(12,64),bvconst(13,64),bvconst(5,64),bvconst(5,64),local108_true(),local108_true())))
+}
+
+example "local108_binding rejects stale object generation" {
+    assert(¬(local108_binding(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(6,64),local108_true(),local108_true())))
+}
+
+example "local108_binding rejects unsealed or changed code" {
+    assert(¬(local108_binding(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),local108_false(),local108_true())))
+}
+
+example "local108_binding rejects exported or wrong-owner stack" {
+    assert(¬(local108_binding(bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(3,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),local108_true(),local108_false())))
+}
+
+example "local108_member accepts" {
+    assert(local108_member(bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),bvconst(1984,64),bvconst(2000,64)))
+}
+
+example "local108_member rejects zero local" {
+    assert(¬(local108_member(bvconst(16,64),bvconst(0,64),bvconst(64,64),bvconst(16,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),bvconst(1984,64),bvconst(2000,64))))
+}
+
+example "local108_member rejects local beyond frame" {
+    assert(¬(local108_member(bvconst(64,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),bvconst(1984,64),bvconst(2048,64))))
+}
+
+example "local108_member rejects oversize local" {
+    assert(¬(local108_member(bvconst(16,64),bvconst(64,64),bvconst(64,64),bvconst(16,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),bvconst(1984,64),bvconst(2000,64))))
+}
+
+example "local108_member rejects misaligned pointer cell" {
+    assert(¬(local108_member(bvconst(17,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),bvconst(1984,64),bvconst(2001,64))))
+}
+
+example "local108_member rejects invalid alignment" {
+    assert(¬(local108_member(bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(3,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),bvconst(1984,64),bvconst(2000,64))))
+}
+
+example "local108_member rejects different backing object" {
+    assert(¬(local108_member(bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(12,64),bvconst(13,64),bvconst(5,64),bvconst(5,64),bvconst(1984,64),bvconst(2000,64))))
+}
+
+example "local108_member rejects different backing generation" {
+    assert(¬(local108_member(bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(6,64),bvconst(1984,64),bvconst(2000,64))))
+}
+
+example "local108_member rejects aliased parent offset" {
+    assert(¬(local108_member(bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),bvconst(1984,64),bvconst(2048,64))))
+}
+
+example "local108_member rejects offset overflow" {
+    assert(¬(local108_member(bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),ptr107_max(),bvconst(15,64))))
+}
+
+example "local108_capacity accepts" {
+    assert(local108_capacity(bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(20,64)))
+}
+
+example "local108_capacity rejects insufficient slots" {
+    assert(¬(local108_capacity(bvconst(2,64),bvconst(1,64),bvconst(1,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(20,64))))
+}
+
+example "local108_capacity rejects no scope row" {
+    assert(¬(local108_capacity(bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(20,64))))
+}
+
+example "local108_capacity rejects output vector too small" {
+    assert(¬(local108_capacity(bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(9,64),bvconst(20,64))))
+}
+
+example "local108_capacity rejects active frame push may allocate" {
+    assert(¬(local108_capacity(bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(2,64),bvconst(0,64),bvconst(9,64),bvconst(20,64))))
+}
+
+example "local108_capacity rejects zero scope identity" {
+    assert(¬(local108_capacity(bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(2,64),bvconst(1,64),bvconst(0,64),bvconst(20,64))))
+}
+
+example "local108_capacity rejects exhausted scope identity" {
+    assert(¬(local108_capacity(bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(2,64),bvconst(1,64),ptr107_max(),bvconst(20,64))))
+}
+
+example "local108_capacity rejects revision headroom short" {
+    assert(¬(local108_capacity(bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvsub(ptr107_max(),bvconst(2,64)))))
+}
+
+example "local108_capacity rejects too many manifest entries" {
+    assert(¬(local108_capacity(bvconst(4097,64),bvconst(4097,64),bvconst(1,64),bvconst(4097,64),bvconst(1,64),bvconst(9,64),bvconst(20,64))))
+}
+
+example "local108_capacity rejects count arithmetic wrap" {
+    assert(¬(local108_capacity(ptr107_max(),ptr107_max(),bvconst(1,64),ptr107_max(),bvconst(1,64),bvconst(9,64),bvconst(20,64))))
+}
+
+example "empty-local frame still reserves its scope" {
+    assert(local108_capacity(bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(1,64),bvconst(9,64),bvconst(20,64)))
+}
+
+example "exact final revision headroom is accepted" {
+    assert(local108_capacity(bvconst(2,64),bvconst(2,64),bvconst(1,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvsub(ptr107_max(),bvconst(3,64))))
+}
+
+example "local108_quiet accepts" {
+    assert(local108_quiet(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)))
+}
+
+example "local108_quiet rejects active or event-suspended overlap" {
+    assert(¬(local108_quiet(bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64))))
+}
+
+example "local108_quiet rejects pending CPU work" {
+    assert(¬(local108_quiet(bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64))))
+}
+
+example "local108_quiet rejects pending DMA work" {
+    assert(¬(local108_quiet(bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64))))
+}
+
+example "local108_quiet rejects pending atomic work" {
+    assert(¬(local108_quiet(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64))))
+}
+
+example "local108_quiet rejects foreign readable alias" {
+    assert(¬(local108_quiet(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64))))
+}
+
+example "local108_quiet rejects foreign writable alias" {
+    assert(¬(local108_quiet(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64))))
+}
+
+example "local108_prepare accepts" {
+    assert(local108_prepare(local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),bvconst(20,64),bvconst(20,64),local108_true(),local108_true()))
+}
+
+example "local108_prepare rejects invalid geometry" {
+    assert(¬(local108_prepare(local108_false(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),bvconst(20,64),bvconst(20,64),local108_true(),local108_true())))
+}
+
+example "local108_prepare rejects stale binding" {
+    assert(¬(local108_prepare(local108_true(),local108_false(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),bvconst(20,64),bvconst(20,64),local108_true(),local108_true())))
+}
+
+example "local108_prepare rejects wrong entry or duplicate activation" {
+    assert(¬(local108_prepare(local108_true(),local108_true(),local108_false(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),bvconst(20,64),bvconst(20,64),local108_true(),local108_true())))
+}
+
+example "local108_prepare rejects one invalid manifest local" {
+    assert(¬(local108_prepare(local108_true(),local108_true(),local108_true(),local108_false(),local108_true(),local108_true(),local108_true(),local108_true(),bvconst(20,64),bvconst(20,64),local108_true(),local108_true())))
+}
+
+example "local108_prepare rejects overlapping locals" {
+    assert(¬(local108_prepare(local108_true(),local108_true(),local108_true(),local108_true(),local108_false(),local108_true(),local108_true(),local108_true(),bvconst(20,64),bvconst(20,64),local108_true(),local108_true())))
+}
+
+example "local108_prepare rejects unreserved capacity" {
+    assert(¬(local108_prepare(local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_false(),local108_true(),local108_true(),bvconst(20,64),bvconst(20,64),local108_true(),local108_true())))
+}
+
+example "local108_prepare rejects nonquiescent backing" {
+    assert(¬(local108_prepare(local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_false(),local108_true(),bvconst(20,64),bvconst(20,64),local108_true(),local108_true())))
+}
+
+example "local108_prepare rejects missing full-frame RW authority" {
+    assert(¬(local108_prepare(local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_false(),bvconst(20,64),bvconst(20,64),local108_true(),local108_true())))
+}
+
+example "local108_prepare rejects stale same-operation revision" {
+    assert(¬(local108_prepare(local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),bvconst(20,64),bvconst(19,64),local108_true(),local108_true())))
+}
+
+example "local108_prepare rejects unserialized transition" {
+    assert(¬(local108_prepare(local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),bvconst(20,64),bvconst(20,64),local108_false(),local108_true())))
+}
+
+example "local108_prepare rejects fallible work after first write" {
+    assert(¬(local108_prepare(local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),local108_true(),bvconst(20,64),bvconst(20,64),local108_true(),local108_false())))
+}
+
+example "local108_publish accepts" {
+    assert(local108_publish(local108_true(),bvconst(64,64),bvconst(64,64),bvconst(64,64),local108_true()))
+}
+
+example "local108_publish rejects failed preflight" {
+    assert(¬(local108_publish(local108_false(),bvconst(64,64),bvconst(64,64),bvconst(64,64),local108_true())))
+}
+
+example "local108_publish rejects partial bytes" {
+    assert(¬(local108_publish(local108_true(),bvconst(64,64),bvconst(32,64),bvconst(64,64),local108_true())))
+}
+
+example "local108_publish rejects partial tags" {
+    assert(¬(local108_publish(local108_true(),bvconst(64,64),bvconst(64,64),bvconst(32,64),local108_true())))
+}
+
+example "local108_publish rejects uncleared tags" {
+    assert(¬(local108_publish(local108_true(),bvconst(64,64),bvconst(64,64),bvconst(0,64),local108_true())))
+}
+
+example "local108_publish rejects overclaimed bytes" {
+    assert(¬(local108_publish(local108_true(),bvconst(64,64),bvconst(80,64),bvconst(64,64),local108_true())))
+}
+
+example "local108_publish rejects overclaimed tags" {
+    assert(¬(local108_publish(local108_true(),bvconst(64,64),bvconst(64,64),bvconst(80,64),local108_true())))
+}
+
+example "local108_publish rejects invisible stores" {
+    assert(¬(local108_publish(local108_true(),bvconst(64,64),bvconst(64,64),bvconst(64,64),local108_false())))
+}
+
+example "local108_publish rejects empty publication" {
+    assert(¬(local108_publish(local108_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),local108_true())))
+}
+
+example "local108_publish rejects unaligned publication" {
+    assert(¬(local108_publish(local108_true(),bvconst(63,64),bvconst(63,64),bvconst(63,64),local108_true())))
+}
+
+example "complete trace has valid preflight" {
+    assert(local108_trace_prepare())
+}
+
+example "complete trace publishes" {
+    assert(local108_trace_issued())
+}
+
+example "first local byte is clean" {
+    assert(local108_trace_byte(bvconst(91,8),bvconst(18368,64))=bvconst(0,8))
+}
+
+example "pointer cell byte is clean" {
+    assert(local108_trace_byte(bvconst(91,8),bvconst(18384,64))=bvconst(0,8))
+}
+
+example "spill padding byte is clean" {
+    assert(local108_trace_byte(bvconst(91,8),bvconst(18408,64))=bvconst(0,8))
+}
+
+example "last padding byte byte is clean" {
+    assert(local108_trace_byte(bvconst(91,8),bvconst(18431,64))=bvconst(0,8))
+}
+
+example "parent byte survives" {
+    assert(local108_trace_byte(bvconst(91,8),bvconst(18432,64))=bvconst(91,8))
+}
+
+example "lower neighbor byte survives" {
+    assert(local108_trace_byte(bvconst(91,8),bvconst(18367,64))=bvconst(91,8))
+}
+
+example "clears overlapping tag 18368" {
+    assert(local108_trace_tag(bvconst(1,8),bvconst(18368,64))=bvconst(0,8))
+}
+
+example "clears overlapping tag 18384" {
+    assert(local108_trace_tag(bvconst(1,8),bvconst(18384,64))=bvconst(0,8))
+}
+
+example "clears overlapping tag 18400" {
+    assert(local108_trace_tag(bvconst(1,8),bvconst(18400,64))=bvconst(0,8))
+}
+
+example "clears overlapping tag 18416" {
+    assert(local108_trace_tag(bvconst(1,8),bvconst(18416,64))=bvconst(0,8))
+}
+
+example "preserves neighboring tag 18352" {
+    assert(local108_trace_tag(bvconst(1,8),bvconst(18352,64))=bvconst(1,8))
+}
+
+example "preserves neighboring tag 18432" {
+    assert(local108_trace_tag(bvconst(1,8),bvconst(18432,64))=bvconst(1,8))
+}
+
+example "no scrub for existing lifetime operation 2" {
+    assert(¬(local108_scrub(local108_trace_prepare(),bvconst(2,8))))
+}
+
+example "no new issuance for existing lifetime operation 2" {
+    assert(¬(local108_issue(local108_trace_prepare(),bvconst(2,8),bvconst(64,64))))
+}
+
+example "no scrub for existing lifetime operation 3" {
+    assert(¬(local108_scrub(local108_trace_prepare(),bvconst(3,8))))
+}
+
+example "no new issuance for existing lifetime operation 3" {
+    assert(¬(local108_issue(local108_trace_prepare(),bvconst(3,8),bvconst(64,64))))
+}
+
+example "late bad local leaves first byte unchanged" {
+    assert(local108_byte(local108_scrub(local108_prepare(local108_true(),local108_true(),local108_true(),local108_fold(local108_member(bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),bvconst(1984,64),bvconst(2000,64)),local108_member(bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),bvconst(1984,64),bvconst(2048,64))),local108_true(),local108_true(),local108_true(),local108_true(),bvconst(20,64),bvconst(20,64),local108_true(),local108_true()),bvconst(1,8)),bvconst(18368,64),bvconst(64,64),bvconst(18368,64),bvconst(91,8))=bvconst(91,8))
+}
+
+example "late bad local preserves parent cursor" {
+    assert(local108_cursor(local108_issue(local108_prepare(local108_true(),local108_true(),local108_true(),local108_fold(local108_member(bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),bvconst(1984,64),bvconst(2000,64)),local108_member(bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),bvconst(1984,64),bvconst(2048,64))),local108_true(),local108_true(),local108_true(),local108_true(),bvconst(20,64),bvconst(20,64),local108_true(),local108_true()),bvconst(1,8),bvconst(64,64)),bvconst(6144,64),bvconst(64,64))=bvconst(6144,64))
+}
+
+example "late bad local publishes no descriptors" {
+    assert(local108_live(local108_issue(local108_prepare(local108_true(),local108_true(),local108_true(),local108_fold(local108_member(bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),bvconst(1984,64),bvconst(2000,64)),local108_member(bvconst(16,64),bvconst(16,64),bvconst(64,64),bvconst(16,64),bvconst(12,64),bvconst(12,64),bvconst(5,64),bvconst(5,64),bvconst(1984,64),bvconst(2048,64))),local108_true(),local108_true(),local108_true(),local108_true(),bvconst(20,64),bvconst(20,64),local108_true(),local108_true()),bvconst(1,8),bvconst(64,64)),bvconst(4,64),bvconst(2,64))=bvconst(4,64))
+}
+
+example "admission commits exact frame cursor" {
+    assert(local108_cursor(local108_trace_issued(),bvconst(6144,64),bvconst(64,64))=bvconst(6080,64))
+}
+
+example "admission commits all descriptors" {
+    assert(local108_live(local108_trace_issued(),bvconst(4,64),bvconst(2,64))=bvconst(6,64))
+}
+
+example "argument or LR register preserved 0" {
+    assert(local108_register(local108_trace_issued(),bvconst(0,64),bvconst(6080,64),bvconst(42,64))=bvconst(42,64))
+}
+
+example "argument or LR register preserved 1" {
+    assert(local108_register(local108_trace_issued(),bvconst(1,64),bvconst(6080,64),bvconst(42,64))=bvconst(42,64))
+}
+
+example "argument or LR register preserved 2" {
+    assert(local108_register(local108_trace_issued(),bvconst(2,64),bvconst(6080,64),bvconst(42,64))=bvconst(42,64))
+}
+
+example "argument or LR register preserved 3" {
+    assert(local108_register(local108_trace_issued(),bvconst(3,64),bvconst(6080,64),bvconst(42,64))=bvconst(42,64))
+}
+
+example "argument or LR register preserved 14" {
+    assert(local108_register(local108_trace_issued(),bvconst(14,64),bvconst(6080,64),bvconst(42,64))=bvconst(42,64))
+}
+
+example "only FP SP updated 13" {
+    assert(local108_register(local108_trace_issued(),bvconst(13,64),bvconst(6080,64),bvconst(99,64))=bvconst(6080,64))
+}
+
+example "only FP SP updated 15" {
+    assert(local108_register(local108_trace_issued(),bvconst(15,64),bvconst(6080,64),bvconst(99,64))=bvconst(6080,64))
+}
+
+example "incoming pointer kind is preserved" {
+    assert(local108_register_kind(bvconst(1,8))=bvconst(1,8))
+}
+
+example "argument overlays clean bytes after entry" {
+    assert(init108_overlay(local108_true(),bvconst(8,64),bvconst(0,64),bvconst(42,8),local108_trace_byte(bvconst(91,8),bvconst(18368,64)))=bvconst(42,8))
+}
+
+example "padding is not argument payload" {
+    assert(init108_overlay(local108_true(),bvconst(8,64),bvconst(63,64),bvconst(42,8),local108_trace_byte(bvconst(91,8),bvconst(18431,64)))=bvconst(0,8))
+}
+
+example "local108_read accepts" {
+    assert(local108_read(local108_trace_issued(),repr107_handle(bvconst(3,64),bvconst(8,64)),bvconst(3,64),bvconst(8,64),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(0,64),bvconst(1,64)))
+}
+
+example "local108_read rejects not issued" {
+    assert(¬(local108_read(local108_false(),repr107_handle(bvconst(3,64),bvconst(8,64)),bvconst(3,64),bvconst(8,64),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(0,64),bvconst(1,64))))
+}
+
+example "local108_read rejects retired alias from prior occupant" {
+    assert(¬(local108_read(local108_trace_issued(),repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(3,64),bvconst(8,64),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(0,64),bvconst(1,64))))
+}
+
+example "local108_read rejects untagged numeric copy" {
+    assert(¬(local108_read(local108_trace_issued(),repr107_handle(bvconst(3,64),bvconst(8,64)),bvconst(3,64),bvconst(8,64),bvconst(0,8),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(0,64),bvconst(1,64))))
+}
+
+example "local108_read rejects different domain" {
+    assert(¬(local108_read(local108_trace_issued(),repr107_handle(bvconst(3,64),bvconst(8,64)),bvconst(3,64),bvconst(8,64),bvconst(1,8),bvconst(3,64),bvconst(4,64),bvconst(8,64),bvconst(0,64),bvconst(1,64))))
+}
+
+example "local108_read rejects one-past read" {
+    assert(¬(local108_read(local108_trace_issued(),repr107_handle(bvconst(3,64),bvconst(8,64)),bvconst(3,64),bvconst(8,64),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(8,64),bvconst(1,64))))
+}
+
+example "local108_read rejects wide access past local" {
+    assert(¬(local108_read(local108_trace_issued(),repr107_handle(bvconst(3,64),bvconst(8,64)),bvconst(3,64),bvconst(8,64),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(7,64),bvconst(8,64))))
+}
+
+example "local108_read rejects frame padding as local payload" {
+    assert(¬(local108_read(local108_trace_issued(),repr107_handle(bvconst(3,64),bvconst(8,64)),bvconst(3,64),bvconst(8,64),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(32,64),bvconst(1,64))))
+}
+
+example "local108_read rejects zero-width read" {
+    assert(¬(local108_read(local108_trace_issued(),repr107_handle(bvconst(3,64),bvconst(8,64)),bvconst(3,64),bvconst(8,64),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(0,64),bvconst(0,64))))
+}
+
+example "fresh valid local read returns zero" {
+    assert(local108_read(local108_trace_issued(),repr107_handle(bvconst(3,64),bvconst(8,64)),bvconst(3,64),bvconst(8,64),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(8,64),bvconst(0,64),bvconst(1,64)) ∧ (local108_trace_byte(bvconst(91,8),bvconst(18368,64))=bvconst(0,8)))
+}
+
+example "same slot generation advances" {
+    assert(repr107_publish(bvconst(3,64),bvconst(7,64),bvconst(8,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "generation exhaustion cannot reuse" {
+    assert(¬(repr107_publish(bvconst(3,64),repr107_mask(),bvconst(0,64),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "clean bytes cannot mint pointer kind" {
+    assert(local108_trace_tag(bvconst(0,8),bvconst(18384,64))=bvconst(0,8))
+}
+
+example "typed incoming pointer can be stored after clean entry" {
+    assert(local108_trace_issued() ∧ kind107_typed_storage(repr107_handle(bvconst(4,64),bvconst(8,64)),bvconst(0,64),bvconst(1,8),repr107_handle(bvconst(4,64),bvconst(8,64)),bvconst(0,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8),bvconst(1,8)))
+}
+
+example "stale argument cannot get kind from zeroing" {
+    assert(¬(kind107_typed_storage(repr107_handle(bvconst(4,64),bvconst(8,64)),bvconst(0,64),bvconst(1,8),repr107_handle(bvconst(4,64),bvconst(8,64)),bvconst(0,64),bvconst(1,8),bvconst(16,64),bvconst(64,64),bvconst(1,8),bvconst(0,8),bvconst(1,8),bvconst(1,8),bvconst(1,8))))
+}
+
+example "event restore preserves argument words" {
+    assert(event107_word(bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(42,64),bvconst(0,64),bvconst(91,64))=bvconst(42,64))
+}
+
+example "event restore preserves pointer kind but not lifetime" {
+    assert(event107_tag(bvconst(1,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,64),bvconst(1,8),bvconst(0,8))=bvconst(1,8) ∧ ¬(repr107_lookup(repr107_handle(bvconst(3,64),bvconst(7,64)),bvconst(1,8),bvconst(3,64),bvconst(8,64),bvconst(1,8),bvconst(3,64),bvconst(3,64))))
+}
+
+example "law checked virtual frame ends at cursor" {
+    assert(∀(c : BitVec64). ∀(l : BitVec64). ∀(h : BitVec64). ∀(n : BitVec64). ∀(p : BitVec64). ∀(r : BitVec64). local108_geometry(c,l,h,n,p,r) → ((bvadd(frame107_base(c,n),n)=c) ∧ bvuge(frame107_base(c,n),l)))
+}
+
+example "law geometry checks physical projection" {
+    assert(∀(c : BitVec64). ∀(l : BitVec64). ∀(h : BitVec64). ∀(n : BitVec64). ∀(p : BitVec64). ∀(r : BitVec64). local108_geometry(c,l,h,n,p,r) → local108_projection(p,bvsub(frame107_base(c,n),l),n,r))
+}
+
+example "law physical projection starts inside stack" {
+    assert(∀(p : BitVec64). ∀(o : BitVec64). ∀(n : BitVec64). ∀(r : BitVec64). local108_projection(p,o,n,r) → bvuge(bvadd(p,o),p))
+}
+
+example "law physical projection base stays below RAM limit" {
+    assert(∀(p : BitVec64). ∀(o : BitVec64). ∀(n : BitVec64). ∀(r : BitVec64). local108_projection(p,o,n,r) → bvule(bvadd(p,o),r))
+}
+
+example "law physical projection leaves room for frame" {
+    assert(∀(p : BitVec64). ∀(o : BitVec64). ∀(n : BitVec64). ∀(r : BitVec64). local108_projection(p,o,n,r) → bvule(n,bvsub(r,bvadd(p,o))))
+}
+
+example "law checked physical end stays below RAM limit" {
+    assert(∀(b : BitVec64). ∀(n : BitVec64). ∀(r : BitVec64). (bvule(b,r) ∧ bvule(n,bvsub(r,b))) → bvule(bvadd(b,n),r))
+}
+
+example "law physical projection is nonwrapping and aligned" {
+    assert(∀(p : BitVec64). ∀(o : BitVec64). ∀(n : BitVec64). ∀(r : BitVec64). local108_projection(p,o,n,r) → init108_range(bvadd(p,o),n))
+}
+
+example "law every clean frame byte is zero" {
+    assert(∀(b : BitVec64). ∀(n : BitVec64). ∀(q : BitVec64). ∀(old : BitVec8). (init108_range(b,n) ∧ local108_in(b,n,q)) → (local108_byte(local108_true(),b,n,q,old)=bvconst(0,8)))
+}
+
+example "law outside bytes are preserved" {
+    assert(∀(b : BitVec64). ∀(n : BitVec64). ∀(q : BitVec64). ∀(old : BitVec8). ¬(local108_in(b,n,q)) → (local108_byte(local108_true(),b,n,q,old)=old))
+}
+
+example "law all overlapping tags are cleared" {
+    assert(∀(b : BitVec64). ∀(n : BitVec64). ∀(cell : BitVec64). ∀(old : BitVec8). kind107_overlap(b,n,cell) → (local108_tag(local108_true(),b,n,cell,old)=bvconst(0,8)))
+}
+
+example "law nonoverlapping tags are preserved" {
+    assert(∀(b : BitVec64). ∀(n : BitVec64). ∀(cell : BitVec64). ∀(old : BitVec8). ¬(kind107_overlap(b,n,cell)) → (local108_tag(local108_true(),b,n,cell,old)=old))
+}
+
+example "law failed preflight preserves every byte" {
+    assert(∀(b : BitVec64). ∀(n : BitVec64). ∀(q : BitVec64). ∀(old : BitVec8). local108_byte(local108_scrub(local108_false(),bvconst(1,8)),b,n,q,old)=old)
+}
+
+example "law failed preflight preserves every tag" {
+    assert(∀(b : BitVec64). ∀(n : BitVec64). ∀(cell : BitVec64). ∀(old : BitVec8). local108_tag(local108_scrub(local108_false(),bvconst(1,8)),b,n,cell,old)=old)
+}
+
+example "law failed preflight preserves cursor and live count" {
+    assert(∀(c : BitVec64). ∀(n : BitVec64). ∀(old : BitVec64). (local108_cursor(local108_false(),c,n)=c) ∧ (local108_live(local108_false(),old,n)=old))
+}
+
+example "law invalid manifest member poisons fold" {
+    assert(∀(prior : Bool). ¬(local108_fold(prior,local108_false())))
+}
+
+example "law cannot resurrect earlier failed member" {
+    assert(∀(next : Bool). ¬(local108_fold(local108_false(),next)))
+}
+
+example "law publication needs complete bytes and tags" {
+    assert(∀(p : Bool). ∀(n : BitVec64). ∀(b : BitVec64). ∀(t : BitVec64). ∀(v : Bool). local108_publish(p,n,b,t,v) → ((b=n) ∧ (t=n) ∧ v))
+}
+
+example "law capacity reserves nonwrapping registry mutations" {
+    assert(∀(n : BitVec64). ∀(r : BitVec64). local108_capacity(n,n,bvconst(1,64),n,bvconst(1,64),bvconst(9,64),r) → (bvuge(bvadd(r,bvadd(n,bvconst(1,64))),r) ∧ bvugt(bvadd(n,bvconst(1,64)),n)))
+}
+
+example "law incoming words and LR survive PFRAME" {
+    assert(∀(reg : BitVec64). ∀(base : BitVec64). ∀(old : BitVec64). (bvule(reg,bvconst(12,64)) ∨ (reg=bvconst(14,64))) → (local108_register(local108_true(),reg,base,old)=old))
+}
+
+example "law incoming kinds survive PFRAME" {
+    assert(∀(old : BitVec8). local108_register_kind(old)=old)
+}
+
+example "law no scrub on event restore for any payload" {
+    assert(∀(b : BitVec64). ∀(n : BitVec64). ∀(q : BitVec64). ∀(old : BitVec8). local108_byte(local108_scrub(local108_true(),bvconst(2,8)),b,n,q,old)=old)
+}
+
+example "law trace is independent of former occupant" {
+    assert(∀(a : BitVec8). ∀(b : BitVec8). ∀(q : BitVec64). local108_in(bvconst(18368,64),bvconst(64,64),q) → (local108_trace_byte(a,q)=local108_trace_byte(b,q)))
+}
+
+example "law parent bytes above child are preserved" {
+    assert(∀(q : BitVec64). ∀(old : BitVec8). local108_in(bvconst(18432,64),bvconst(2048,64),q) → (local108_trace_byte(old,q)=old))
+}
+
+example "law fresh local reads every in-bounds byte as zero" {
+    assert(∀(pos : BitVec64). ∀(old : BitVec8). local108_read(local108_trace_issued(),repr107_handle(bvconst(3,64),bvconst(8,64)),bvconst(3,64),bvconst(8,64),bvconst(1,8),bvconst(3,64),bvconst(3,64),bvconst(8,64),pos,bvconst(1,64)) → (local108_trace_byte(old,bvadd(bvconst(18368,64),pos))=bvconst(0,8)))
+}
+
+example "law same new initializer is independent of old bytes" {
+    assert(∀(a : BitVec8). ∀(b : BitVec8). ∀(input : BitVec8). ∀(q : BitVec64). bvult(q,bvconst(64,64)) → (init108_overlay(local108_true(),bvconst(8,64),q,input,local108_trace_byte(a,bvadd(bvconst(18368,64),q)))=init108_overlay(local108_true(),bvconst(8,64),q,input,local108_trace_byte(b,bvadd(bvconst(18368,64),q)))))
+}
+
+example "law local interval cannot expose frame padding" {
+    assert(∀(off : BitVec64). ∀(len : BitVec64). ∀(n : BitVec64). ∀(pos : BitVec64). (frame107_local(off,len,n,bvconst(1,64)) ∧ bvult(pos,len)) → bvult(bvadd(off,pos),n))
+}

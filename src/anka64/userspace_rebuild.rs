@@ -288,6 +288,13 @@ mod tests {
             include_bytes!("../../userspace/system/compiler/ankapp.c"),
             include_bytes!("../../userspace/system/compiler/ankald.c")).unwrap();
         check_protected_module_emission(&producer, &authority, &publication);
+        let mut local_probe = rebuild_protected_application(&producer,
+            &bundle(include_bytes!("../../userspace/bin/local_initialization_probe.c")),
+            Some(&authority), Some(&publication)).unwrap();
+        let report = local_probe.run(Some(&authority)).unwrap();
+        assert_eq!(report.child_result, ProcessResult::Exited(0));
+        assert!(report.byte_output.is_empty());
+        eprintln!("protected local initialization: fresh/reused bytes, typed nulls and nested arguments passed");
         super::malloc_tests::check_malloc_free(&producer, &authority, &publication);
         let source = include_bytes!("../../userspace/bin/pointer_probe.c");
         let mut application = rebuild_application(&producer, &bundle(source), Some(&authority)).unwrap();
