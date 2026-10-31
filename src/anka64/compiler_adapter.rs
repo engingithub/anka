@@ -18,6 +18,11 @@ use super::state::*;
 mod protected_modules;
 pub use protected_modules::{FrozenModuleLink, LinkedModuleDependency, LinkedRebuildReceipt};
 
+/// ABI-2 wire validation and output-growth planning. The existing runner still
+/// uses ABI 1; a plan from this module is not allocation or execution authority.
+pub mod resources;
+pub(crate) mod producer;
+
 /// Validation role is evidence, never execution or publication authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebuildAdmissionRole { ClosedTranslationUnit, RelocatableModule, LinkedImage }

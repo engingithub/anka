@@ -288,6 +288,8 @@ mod tests {
             include_bytes!("../../userspace/system/compiler/ankapp.c"),
             include_bytes!("../../userspace/system/compiler/ankald.c")).unwrap();
         check_protected_module_emission(&producer, &authority, &publication);
+        crate::anka64::os::compiler_retry::producer_tests::check_protected_producer(
+            &producer, &authority);
         let mut local_probe = rebuild_protected_application(&producer,
             &bundle(include_bytes!("../../userspace/bin/local_initialization_probe.c")),
             Some(&authority), Some(&publication)).unwrap();

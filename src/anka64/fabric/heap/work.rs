@@ -318,6 +318,9 @@ impl Fabric {
             return Err(HeapError::Owner);
         }
         let live = self.checked_live_heap(owner, agent, pointer.ok_or(HeapError::MissingKind)?)?;
+        if write.is_some() && live.row.planned_rights != Permissions::RW {
+            return Err(HeapError::Pointer(crate::anka64::scoped_pointers::PointerError::Rights));
+        }
         self.checked_heap_span(&live, length, false)?;
         let binding = WorkBinding {
             reservation: live.pointer.reservation(),
@@ -403,7 +406,8 @@ impl Fabric {
             .prepare_retained_heap_work(b.reservation, b.owner)?;
         self.check_attached_heap_custody(&plan, b.object)?;
         if b.object_generation != Generation(0)
-            || b.rights != Permissions::RW
+            || b.rights != plan.rights()
+            || (b.access == CpuAccess::Write && b.rights != Permissions::RW)
             || b.logical != plan.logical()
             || b.extents != plan.extents()
         {

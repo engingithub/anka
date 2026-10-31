@@ -303,6 +303,22 @@ pub(crate) enum PointerMachineError {
     Frame(super::pointer_frames::FrameError), ContextMode, Pointer(super::scoped_pointers::PointerError), Heap(super::scoped_pointers::heap::HeapError), Fabric(FaultRecord),
 }
 
+impl std::fmt::Display for PointerMachineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Frame(error) => write!(f, "frame: {error:?}"),
+            Self::Pointer(error) => write!(f, "pointer registry: {error:?}"),
+            Self::Heap(error) => write!(f, "heap: {error:?}"),
+            Self::Fabric(error) => write!(f, "fabric: {error:?}"),
+            Self::InvalidPair => f.write_str("invalid register pair"),
+            Self::MissingKind => f.write_str("missing pointer kind"),
+            Self::Unmapped => f.write_str("unmapped pointer"),
+            Self::Unaligned => f.write_str("unaligned pointer"),
+            Self::ContextMode => f.write_str("invalid pointer context"),
+        }
+    }
+}
+
 impl Anka64Core {
     /// Ordinary writes never confer pointer kind, even if the new integer is unchanged.
     pub fn write_register(&mut self, register: usize, value: u64) {
@@ -349,7 +365,7 @@ impl Anka64Core {
         -> Result<(ObjectId, u64), PointerMachineError> {
         if fabric.scoped_pointers.is_heap_pointer(pointer) {
             let owner=self.heap_owner().map_err(PointerMachineError::Heap)?;
-            fabric.check_heap_application_span(owner,self.agent,pointer,length).map_err(PointerMachineError::Heap)?;
+            fabric.check_heap_application_span(owner,self.agent,pointer,length,false).map_err(PointerMachineError::Heap)?;
             return Ok((fabric.heap_object_for_pointer(owner,self.agent,pointer).map_err(PointerMachineError::Heap)?,pointer.words()[1]));
         }
         let address = fabric.scoped_pointers.read_span(pointer, self.domain.0,
@@ -372,7 +388,7 @@ impl Anka64Core {
         -> Result<(ObjectId, u64), PointerMachineError> {
         if fabric.scoped_pointers.is_heap_pointer(pointer) {
             let owner=self.heap_owner().map_err(PointerMachineError::Heap)?;
-            fabric.check_heap_application_span(owner,self.agent,pointer,length).map_err(PointerMachineError::Heap)?;
+            fabric.check_heap_application_span(owner,self.agent,pointer,length,true).map_err(PointerMachineError::Heap)?;
             return Ok((fabric.heap_object_for_pointer(owner,self.agent,pointer).map_err(PointerMachineError::Heap)?,pointer.words()[1]));
         }
         let address = fabric.scoped_pointers.write_span(pointer, self.domain.0,
@@ -446,6 +462,13 @@ impl Anka64Core {
             pending_entry:Some(code_base),active:Vec::new() });
         self.write_register(SP as usize,stack_high);
         Ok(())
+    }
+
+    /// A compiler entry can be installed only before the first admitted frame.
+    pub(crate) fn compiler_entry_ready(&self, fabric: &Fabric) -> bool {
+        self.event_frames.is_empty() && self.return_stack.is_empty() && !self.halted
+            && self.frame_current(fabric).is_ok_and(|s| s.active.is_empty()
+                && s.pending_entry == Some(self.pc) && self.pc == s.code_base)
     }
 
     fn frame_current(&self,fabric:&Fabric) -> Result<&super::pointer_frames::FrameState,PointerMachineError> {
@@ -548,6 +571,10 @@ impl Anka64Core {
         Ok(address)
     }
     fn pointer_fault(&self,error:PointerMachineError) -> StepResult {
+        // Test diagnostics retain the cause before architectural fault conversion.
+        // Guest-visible fault classification and transition semantics are unchanged.
+        #[cfg(test)]
+        eprintln!("protected pointer fault: pc={:#x}: {error}", self.pc);
         if let PointerMachineError::Fabric(fault)=error { return StepResult::Fault(fault); }
         StepResult::Fault(FaultRecord {agent:self.agent,domain:self.domain,privilege:self.privilege,
             transaction:TransactionId(0),object:ObjectId(0),generation:None,offset:self.pc,
@@ -593,7 +620,7 @@ impl Anka64Core {
         self.install_pointer(dst, Some(pointer))
     }
 
-    fn authenticated_pointer(&self, fabric: &Fabric, start: u8) -> Result<Option<super::scoped_pointers::ScopedPointer>, PointerMachineError> {
+    pub(crate) fn authenticated_pointer(&self, fabric: &Fabric, start: u8) -> Result<Option<super::scoped_pointers::ScopedPointer>, PointerMachineError> {
         let pointer = self.captured_pointer(start)?;
         if let Some(pointer) = pointer {
             self.check_application_pointer(fabric, pointer)?;

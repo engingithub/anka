@@ -1,0 +1,1489 @@
+// C1: shared compiler resource/ABI contract, revision 2. Specification only.
+// No new axioms. Existing ABI-1/bootstrap gates retain their enforced limits.
+// Imports reuse protected allocation admission and pointwise account rules;
+// this file does not weaken private-heap ownership to support legacy raw loads.
+//
+// Trusted checks below concern ONE current serialized snapshot. They are not
+// bits accepted from the guest. Exact binding keys resolve immutable records
+// containing source/root, ordered dependencies, tools, profile and resource plan.
+// Job, owner and attempt IDs are nonreused trusted names, not capabilities.
+// The owner record contains ProcessKey incarnation, context and domain.
+//
+// Concrete internal ABI: little-endian u64 fields; header=128, region=128,
+// reply=128 bytes. The region's protected pair occupies offsets 32/40 and must
+// have authenticated kind state; serialized words cannot manufacture it.
+// Full field layout, inventory, assumptions and C2-C5 gates are in DN-71 C1.
+import "anka108_allocation.kleis"
+
+define res108_z() = bvconst(0,64)
+define res108_one() = bvconst(1,64)
+define res108_true() = (bvconst(1,8)=bvconst(1,8))
+define res108_false() = (bvconst(0,8)=bvconst(1,8))
+define res108_page(x : BitVec64) =
+    bvugt(x,res108_z()) ∧ bvule(x,heap108_signed_max()) ∧
+    (bvand(x,bvconst(4095,64))=res108_z())
+define res108_add(a : BitVec64, b : BitVec64, limit : BitVec64) =
+    bvule(a,limit) ∧ bvule(b,bvsub(limit,a))
+define res108_round(n : BitVec64) =
+    bvand(bvadd(n,bvconst(4095,64)),bvsub(res108_z(),bvconst(4096,64)))
+
+// Count*stride is checked BEFORE multiplication or address formation. Logical
+// bounds are independent of the page-rounded backing and never widen to it.
+define res108_table(count : BitVec64, stride : BitVec64, capacity : BitVec64) =
+    bvugt(stride,res108_z()) ∧ bvule(capacity,heap108_signed_max()) ∧
+    bvule(count,bvudiv(capacity,stride))
+define res108_span(offset : BitVec64, width : BitVec64, capacity : BitVec64) =
+    bvule(capacity,heap108_signed_max()) ∧ bvule(offset,capacity) ∧
+    bvule(width,bvsub(capacity,offset))
+define res108_reservation(used : BitVec64, width : BitVec64, capacity : BitVec64) =
+    bvugt(width,res108_z()) ∧ res108_span(used,width,capacity)
+define res108_cursor(ok : Bool, used : BitVec64, width : BitVec64) =
+    if ok then bvadd(used,width) else used
+
+// ABI magic is the u64 value 0x41435232 ("ACR2"). Only version 2 is decoded by
+// this route. Total includes every declared record; no trailing hidden records.
+define res108_header(magic : BitVec64, version : BitVec64, header : BitVec64,
+    count : BitVec64, max_count : BitVec64, stride : BitVec64,
+    total : BitVec64, reply : BitVec64, reserved : BitVec64) =
+    (magic=bvconst(1094930994,64)) ∧ (version=bvconst(2,64)) ∧
+    (header=bvconst(128,64)) ∧ (stride=bvconst(128,64)) ∧
+    bvugt(count,res108_z()) ∧ bvule(count,max_count) ∧ bvule(max_count,bvconst(16,64)) ∧
+    res108_table(count,stride,bvsub(heap108_signed_max(),header)) ∧
+    (total=bvadd(header,bvmul(count,stride))) ∧
+    (reply=bvconst(128,64)) ∧ (reserved=res108_z())
+define res108_record_offset(index : BitVec64) =
+    bvadd(bvconst(128,64),bvmul(index,bvconst(128,64)))
+define res108_pair_offset(index : BitVec64) =
+    bvadd(res108_record_offset(index),bvconst(32,64))
+define res108_fresh(before : BitVec64, after : BitVec64) =
+    bvult(before,ptr107_max()) ∧ (after=bvadd(before,res108_one()))
+// Source text starts at position zero in ABI 2; its length is in the descriptor.
+// Any final legacy word fetch still fits initialized logical storage. Padding
+// is excluded from text length, emitted bytes and source identity.
+define res108_source(length : BitVec64, capacity : BitVec64, padding_zero : Bool) =
+    bvule(length,bvsub(heap108_signed_max(),bvconst(7,64))) ∧
+    bvule(bvand(bvadd(length,bvconst(7,64)),bvsub(res108_z(),bvconst(8,64))),capacity) ∧
+    padding_zero
+
+// Binding is matched word-by-word to the frozen coordinator record. Apply to
+// source/root, tools, ordered dependencies, profile and immutable budget plan.
+define res108_binding(value : BitVec64, expected : BitVec64,
+    present : Bool, current : Bool, exact : Bool) =
+    bvugt(value,res108_z()) ∧ (value=expected) ∧ present ∧ current ∧ exact
+define res108_identity(job : BitVec64, attempt : BitVec64, owner : BitVec64,
+    expected_job : BitVec64, expected_attempt : BitVec64,
+    expected_owner : BitVec64, live : Bool, authenticated : Bool) =
+    bvugt(job,res108_z()) ∧ bvugt(attempt,res108_z()) ∧ bvugt(owner,res108_z()) ∧
+    (job=expected_job) ∧ (attempt=expected_attempt) ∧ (owner=expected_owner) ∧
+    live ∧ authenticated
+
+// A region descriptor describes authority already installed for this exact
+// compiler owner. Tool RX images use the separate immutable tool binding, not
+// these data-region records. resource=1 is immutable effective source and 15
+// is the READ-only request; other roles are private RW data enumerated in DN-71.
+// Supported growth IDs are an
+// explicit producer/plan subset, not every syntactically recognized resource.
+define res108_resource(resource : BitVec64) =
+    bvuge(resource,res108_one()) ∧ bvule(resource,bvconst(16,64))
+define res108_region(resource : BitVec64, capacity : BitVec64,
+    valid_bytes : BitVec64, stride : BitVec64, count : BitVec64,
+    rounded : BitVec64, rights : BitVec64, position : BitVec64,
+    reserved : BitVec64, pointer_current : Bool, owner_exact : Bool,
+    object_binding : Bool, mapping_exact : Bool, no_raw_bypass : Bool) =
+    res108_resource(resource) ∧ heap108_size(capacity) ∧
+    bvule(valid_bytes,capacity) ∧ res108_table(count,stride,capacity) ∧
+    pm93g_rounding_valid(capacity,rounded) ∧ (position=res108_z()) ∧
+    (reserved=res108_z()) ∧ pointer_current ∧ owner_exact ∧ object_binding ∧
+    mapping_exact ∧ no_raw_bypass ∧
+    (if (resource=res108_one()) ∨ (resource=bvconst(15,64))
+     then rights=res108_one() else rights=bvconst(3,64))
+// The trusted decoder folds all fields/records and all pairs. A true prefix
+// cannot hide a rejected later record; duplicate role IDs are forbidden.
+define res108_fold(prefix : Bool, next : Bool) = prefix ∧ next
+define res108_pair(id_a : BitVec64, id_b : BitVec64,
+    start_a : BitVec64, size_a : BitVec64, start_b : BitVec64,
+    size_b : BitVec64, different_backing : Bool) =
+    ¬(id_a=id_b) ∧ different_backing ∧
+    vm93g_range_well_formed(start_a,size_a) ∧
+    vm93g_range_well_formed(start_b,size_b) ∧
+    vm93g_disjoint(start_a,size_a,start_b,size_b)
+
+// Billing folds every retained-capacity class: payload rounding, shadow,
+// metadata, images, stacks, scratch/copies, publications and legacy history.
+// A storage identity is charged once; references do not silently add or remove
+// its charge. The complete ledger/census remains an implementation obligation.
+define res108_bill(prior : BitVec64, amount : BitVec64, total : BitVec64) =
+    res108_add(prior,amount,ptr107_max()) ∧ (total=bvadd(prior,amount))
+define res108_admit(charge : BitVec64, job_used : BitVec64, job_limit : BitVec64,
+    owner_used : BitVec64, owner_limit : BitVec64, total : BitVec64,
+    ceiling : BitVec64, revision : BitVec64, expected : BitVec64,
+    exact_ledger : BitVec8) =
+    bvule(job_used,owner_used) ∧ res108_add(job_used,charge,job_limit) ∧
+    heap108_budget(charge,owner_used,owner_limit,total,ceiling,revision,expected,exact_ledger)
+define res108_charged(ok : Bool, before : BitVec64, amount : BitVec64) =
+    if ok then bvadd(before,amount) else before
+define res108_account(ok : Bool, owner : BitVec64, query : BitVec64,
+    before : BitVec64, after : BitVec64) = heap108_account(ok,owner,query,before,after)
+
+// The supervisor meters work before each bounded slice. No zero-cost retry or
+// reset of cumulative work; cleanup has separately reserved service capacity.
+define res108_work(spent : BitVec64, slice : BitVec64, budget : BitVec64) =
+    bvugt(slice,res108_z()) ∧ res108_add(spent,slice,budget)
+define res108_launch(header : Bool, identity : Bool, bindings : Bool,
+    all_regions : Bool, all_pairs : Bool, budget : Bool, initialized : Bool,
+    cleanup_reserved : Bool, entry_kinds : Bool, revision : BitVec64,
+    expected : BitVec64, serialized : Bool) =
+    header ∧ identity ∧ bindings ∧ all_regions ∧ all_pairs ∧ budget ∧
+    initialized ∧ cleanup_reserved ∧ entry_kinds ∧
+    (revision=expected) ∧ serialized
+
+// Guest reply tags: 0 Success, 1 NeedCapacity, 2 SourceRejected,
+// 3 RepresentationRejected. Coordinator-only outcomes: 4 BudgetDenied,
+// 5 ExecutionFailure, 6 ProtocolRejected; guest reports cannot select these.
+// Every guest report requires normal transport exit and exact frozen controls.
+// An execution fault is supervisor outcome 5, never an automatic retry hint.
+define res108_report(magic : BitVec64, version : BitVec64,
+    identity : Bool, bindings : Bool, controls : Bool,
+    normal_exit : Bool, exit_code : BitVec64, no_execution : Bool,
+    stopped : Bool, drained : Bool, reserved : BitVec64) =
+    (magic=bvconst(1094930994,64)) ∧ (version=bvconst(2,64)) ∧
+    identity ∧ bindings ∧ controls ∧ normal_exit ∧ (exit_code=res108_z()) ∧
+    no_execution ∧ stopped ∧ drained ∧ (reserved=res108_z())
+define res108_success(status : BitVec64, used : BitVec64, capacity : BitVec64,
+    resource : BitVec64, minimum : BitVec64, detail : BitVec64,
+    consumed : BitVec64, source_length : BitVec64, report : Bool,
+    artifact_valid : Bool) =
+    report ∧ artifact_valid ∧ (status=res108_z()) ∧
+    bvuge(used,bvconst(112,64)) ∧ bvule(used,capacity) ∧
+    bvule(capacity,heap108_signed_max()) ∧
+    (bvand(used,bvconst(7,64))=res108_z()) ∧
+    (resource=res108_z()) ∧ (minimum=res108_z()) ∧ (detail=res108_z()) ∧
+    (consumed=source_length)
+define res108_need(status : BitVec64, resource : BitVec64,
+    selected : BitVec64, minimum : BitVec64, capacity : BitVec64,
+    used : BitVec64, detail : BitVec64, consumed : BitVec64,
+    source_length : BitVec64, report : Bool, growth_supported : Bool) =
+    report ∧ growth_supported ∧ (status=res108_one()) ∧
+    res108_resource(resource) ∧ (resource=selected) ∧
+    bvugt(minimum,capacity) ∧ bvule(minimum,heap108_signed_max()) ∧
+    (used=res108_z()) ∧ (detail=res108_z()) ∧ bvule(consumed,source_length)
+define res108_rejected(status : BitVec64, resource : BitVec64,
+    minimum : BitVec64, used : BitVec64, detail : BitVec64,
+    consumed : BitVec64, source_length : BitVec64, report : Bool) =
+    report ∧ ((status=bvconst(2,64)) ∨ (status=bvconst(3,64))) ∧
+    (resource=res108_z()) ∧ (minimum=res108_z()) ∧ (used=res108_z()) ∧
+    bvugt(detail,res108_z()) ∧ bvule(consumed,source_length)
+
+// Growth capacities and per-resource ceilings are page aligned. Saturate the
+// geometric target at the admitted ceiling, never modulo-add then compare.
+// A well-formed requirement beyond the ceiling yields BudgetDenied. Values
+// <= current capacity or above signed AC2 range are protocol errors.
+define res108_growth(old : BitVec64, minimum : BitVec64, limit : BitVec64) =
+    res108_page(old) ∧ res108_page(limit) ∧ bvugt(minimum,old) ∧ bvule(minimum,limit)
+define res108_geometric(old : BitVec64, limit : BitVec64) =
+    if bvule(old,bvsub(limit,old)) then bvadd(old,old) else limit
+define res108_next_capacity(old : BitVec64, minimum : BitVec64, limit : BitVec64) =
+    if bvuge(res108_round(minimum),res108_geometric(old,limit))
+    then res108_round(minimum) else res108_geometric(old,limit)
+
+// All old aliases are fenced centrally. Return/scrub can finish after denial;
+// no refund, reuse, new attempt or publication follows mere timeout/notification.
+define res108_drained(fenced : Bool, cpu : BitVec64, dma : BitVec64,
+    readers : BitVec64, writers : BitVec64, grants_gone : Bool,
+    current_census : Bool) =
+    fenced ∧ (cpu=res108_z()) ∧ (dma=res108_z()) ∧
+    (readers=res108_z()) ∧ (writers=res108_z()) ∧ grants_gone ∧ current_census
+define res108_released(drained : Bool, exact_return : Bool, clean_bytes : Bool,
+    clean_kinds : Bool, current_receipt : Bool, amount : BitVec64, held : BitVec64) =
+    drained ∧ exact_return ∧ clean_bytes ∧ clean_kinds ∧ current_receipt ∧
+    bvugt(amount,res108_z()) ∧ bvule(amount,held)
+define res108_refund(released : Bool, held : BitVec64, amount : BitVec64) =
+    if released then bvsub(held,amount) else held
+define res108_retry(need : Bool, growth : Bool, released : Bool,
+    new_admission : Bool, frozen_current : Bool, fresh_workspace : Bool,
+    attempt : BitVec64, remaining : BitVec64, work : Bool) =
+    need ∧ growth ∧ released ∧ new_admission ∧ frozen_current ∧ fresh_workspace ∧
+    bvugt(attempt,res108_z()) ∧ bvult(attempt,ptr107_max()) ∧
+    bvugt(remaining,res108_z()) ∧ work
+define res108_attempt(retry : Bool, old : BitVec64) =
+    if retry then bvadd(old,res108_one()) else old
+define res108_retries(retry : Bool, remaining : BitVec64) =
+    if retry then bvsub(remaining,res108_one()) else remaining
+
+// Old register/spill/saved-event copies all authenticate the current trusted
+// row. Reusing the same physical address never revalidates an old identity.
+define res108_alias(job : BitVec64, attempt : BitVec64, owner : BitVec64,
+    current_job : BitVec64, current_attempt : BitVec64, current_owner : BitVec64,
+    generation : BitVec64, current_generation : BitVec64, live : Bool, kind : Bool) =
+    res108_identity(job,attempt,owner,current_job,current_attempt,current_owner,live,kind) ∧
+    bvugt(generation,res108_z()) ∧ (generation=current_generation)
+
+// Copy only the validated used prefix in bounded Fabric transactions. Full
+// image validity, source/tool lineage and publication authority are independent
+// trusted checks; a syntactically valid guest status does not establish them.
+define res108_copy(used : BitVec64, cursor : BitVec64, chunk : BitVec64,
+    current_read_grant : Bool) =
+    current_read_grant ∧ bvugt(chunk,res108_z()) ∧ bvule(chunk,bvconst(65536,64)) ∧
+    res108_span(cursor,chunk,used)
+define res108_publish(success : Bool, frozen_current : Bool, authority : Bool,
+    used : BitVec64, copied : BitVec64, logical_size : BitVec64,
+    read_only : Bool, fresh_object : Bool, charged : Bool, drained : Bool,
+    epoch : BitVec64, result_ready : Bool) =
+    success ∧ frozen_current ∧ authority ∧ (copied=used) ∧ (logical_size=used) ∧
+    read_only ∧ fresh_object ∧ charged ∧ drained ∧
+    bvult(epoch,ptr107_max()) ∧ result_ready
+define res108_epoch(published : Bool, epoch : BitVec64) =
+    if published then bvadd(epoch,res108_one()) else epoch
+// New publication inserts one fresh key; existing receipt/dependency entries
+// remain immutable and charged until their own validated retention release.
+define res108_receipt(published : Bool, fresh_key : BitVec64, query : BitVec64,
+    before : BitVec64, new_value : BitVec64) =
+    if published ∧ (fresh_key=query) then new_value else before
+
+// Determinism is conditional on the GUEST serializer producing the canonical
+// bytes for the frozen job. This model states that obligation per byte; it does
+// not prove the C serializer, use a host compiler, or identify equal receipts.
+define res108_canonical(candidate : BitVec8, canonical : BitVec8,
+    frozen_job : Bool, guest_serialized : Bool) =
+    frozen_job ∧ guest_serialized ∧ (candidate=canonical)
+
+// C1 WITNESSES
+
+example "table accepts" {
+    assert(res108_table(bvconst(64,64),bvconst(80,64),bvconst(5120,64)))
+}
+
+example "table rejects multiplication wrap" {
+    assert(¬(res108_table(ptr107_max(),bvconst(80,64),bvconst(5120,64))))
+}
+
+example "table rejects short storage" {
+    assert(¬(res108_table(bvconst(64,64),bvconst(80,64),bvconst(5119,64))))
+}
+
+example "table rejects zero stride" {
+    assert(¬(res108_table(bvconst(64,64),bvconst(0,64),bvconst(5120,64))))
+}
+
+example "reservation accepts" {
+    assert(res108_reservation(bvconst(4090,64),bvconst(6,64),bvconst(4096,64)))
+}
+
+example "reservation rejects overrun" {
+    assert(¬(res108_reservation(bvconst(4090,64),bvconst(7,64),bvconst(4096,64))))
+}
+
+example "reservation rejects wrapped cursor" {
+    assert(¬(res108_reservation(ptr107_max(),bvconst(6,64),bvconst(4096,64))))
+}
+
+example "reservation rejects empty operation" {
+    assert(¬(res108_reservation(bvconst(4090,64),bvconst(0,64),bvconst(4096,64))))
+}
+
+example "ABI header accepts" {
+    assert(res108_header(bvconst(1094930994,64),bvconst(2,64),bvconst(128,64),bvconst(3,64),bvconst(16,64),bvconst(128,64),bvconst(512,64),bvconst(128,64),bvconst(0,64)))
+}
+
+example "ABI header rejects ABI1" {
+    assert(¬(res108_header(bvconst(1094930994,64),bvconst(1,64),bvconst(128,64),bvconst(3,64),bvconst(16,64),bvconst(128,64),bvconst(512,64),bvconst(128,64),bvconst(0,64))))
+}
+
+example "ABI header rejects unknown revision" {
+    assert(¬(res108_header(bvconst(1094930994,64),bvconst(3,64),bvconst(128,64),bvconst(3,64),bvconst(16,64),bvconst(128,64),bvconst(512,64),bvconst(128,64),bvconst(0,64))))
+}
+
+example "ABI header rejects wrong magic" {
+    assert(¬(res108_header(bvconst(0,64),bvconst(2,64),bvconst(128,64),bvconst(3,64),bvconst(16,64),bvconst(128,64),bvconst(512,64),bvconst(128,64),bvconst(0,64))))
+}
+
+example "ABI header rejects short header" {
+    assert(¬(res108_header(bvconst(1094930994,64),bvconst(2,64),bvconst(120,64),bvconst(3,64),bvconst(16,64),bvconst(128,64),bvconst(512,64),bvconst(128,64),bvconst(0,64))))
+}
+
+example "ABI header rejects empty directory" {
+    assert(¬(res108_header(bvconst(1094930994,64),bvconst(2,64),bvconst(128,64),bvconst(0,64),bvconst(16,64),bvconst(128,64),bvconst(128,64),bvconst(128,64),bvconst(0,64))))
+}
+
+example "ABI header rejects descriptor budget" {
+    assert(¬(res108_header(bvconst(1094930994,64),bvconst(2,64),bvconst(128,64),bvconst(17,64),bvconst(16,64),bvconst(128,64),bvconst(2304,64),bvconst(128,64),bvconst(0,64))))
+}
+
+example "ABI header rejects wrong stride" {
+    assert(¬(res108_header(bvconst(1094930994,64),bvconst(2,64),bvconst(128,64),bvconst(3,64),bvconst(16,64),bvconst(64,64),bvconst(512,64),bvconst(128,64),bvconst(0,64))))
+}
+
+example "ABI header rejects wrapped count" {
+    assert(¬(res108_header(bvconst(1094930994,64),bvconst(2,64),bvconst(128,64),ptr107_max(),ptr107_max(),bvconst(128,64),bvconst(512,64),bvconst(128,64),bvconst(0,64))))
+}
+
+example "ABI header rejects trailing record" {
+    assert(¬(res108_header(bvconst(1094930994,64),bvconst(2,64),bvconst(128,64),bvconst(3,64),bvconst(16,64),bvconst(128,64),bvconst(640,64),bvconst(128,64),bvconst(0,64))))
+}
+
+example "ABI header rejects wrong reply size" {
+    assert(¬(res108_header(bvconst(1094930994,64),bvconst(2,64),bvconst(128,64),bvconst(3,64),bvconst(16,64),bvconst(128,64),bvconst(512,64),bvconst(120,64),bvconst(0,64))))
+}
+
+example "ABI header rejects reserved bits" {
+    assert(¬(res108_header(bvconst(1094930994,64),bvconst(2,64),bvconst(128,64),bvconst(3,64),bvconst(16,64),bvconst(128,64),bvconst(512,64),bvconst(128,64),bvconst(1,64))))
+}
+
+example "frozen binding accepts" {
+    assert(res108_binding(bvconst(7,64),bvconst(7,64),res108_true(),res108_true(),res108_true()))
+}
+
+example "frozen binding rejects substitution" {
+    assert(¬(res108_binding(bvconst(8,64),bvconst(7,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "frozen binding rejects revocation" {
+    assert(¬(res108_binding(bvconst(7,64),bvconst(7,64),res108_true(),res108_false(),res108_true())))
+}
+
+example "frozen binding rejects inexact record" {
+    assert(¬(res108_binding(bvconst(7,64),bvconst(7,64),res108_true(),res108_true(),res108_false())))
+}
+
+example "job identity accepts" {
+    assert(res108_identity(bvconst(7,64),bvconst(3,64),bvconst(9,64),bvconst(7,64),bvconst(3,64),bvconst(9,64),res108_true(),res108_true()))
+}
+
+example "job identity rejects old attempt" {
+    assert(¬(res108_identity(bvconst(7,64),bvconst(2,64),bvconst(9,64),bvconst(7,64),bvconst(3,64),bvconst(9,64),res108_true(),res108_true())))
+}
+
+example "job identity rejects foreign owner" {
+    assert(¬(res108_identity(bvconst(7,64),bvconst(3,64),bvconst(8,64),bvconst(7,64),bvconst(3,64),bvconst(9,64),res108_true(),res108_true())))
+}
+
+example "job identity rejects dead incarnation" {
+    assert(¬(res108_identity(bvconst(7,64),bvconst(3,64),bvconst(9,64),bvconst(7,64),bvconst(3,64),bvconst(9,64),res108_false(),res108_true())))
+}
+
+example "job identity rejects unauthenticated words" {
+    assert(¬(res108_identity(bvconst(7,64),bvconst(3,64),bvconst(9,64),bvconst(7,64),bvconst(3,64),bvconst(9,64),res108_true(),res108_false())))
+}
+
+example "private region accepts" {
+    assert(res108_region(bvconst(3,64),bvconst(8192,64),bvconst(0,64),bvconst(8,64),bvconst(1024,64),bvconst(8192,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "private region rejects unknown resource" {
+    assert(¬(res108_region(bvconst(17,64),bvconst(8192,64),bvconst(0,64),bvconst(8,64),bvconst(1024,64),bvconst(8192,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "private region rejects empty allocation" {
+    assert(¬(res108_region(bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(8,64),bvconst(0,64),bvconst(8192,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "private region rejects used prefix overflow" {
+    assert(¬(res108_region(bvconst(3,64),bvconst(8192,64),bvconst(8193,64),bvconst(8,64),bvconst(1024,64),bvconst(8192,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "private region rejects table overflow" {
+    assert(¬(res108_region(bvconst(3,64),bvconst(8192,64),bvconst(0,64),bvconst(8,64),bvconst(1025,64),bvconst(8192,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "private region rejects insufficient backing" {
+    assert(¬(res108_region(bvconst(3,64),bvconst(8192,64),bvconst(0,64),bvconst(8,64),bvconst(1024,64),bvconst(4096,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "private region rejects execute rights" {
+    assert(¬(res108_region(bvconst(3,64),bvconst(8192,64),bvconst(0,64),bvconst(8,64),bvconst(1024,64),bvconst(8192,64),bvconst(7,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "private region rejects interior pointer" {
+    assert(¬(res108_region(bvconst(3,64),bvconst(8192,64),bvconst(0,64),bvconst(8,64),bvconst(1024,64),bvconst(8192,64),bvconst(3,64),bvconst(1,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "private region rejects reserved field" {
+    assert(¬(res108_region(bvconst(3,64),bvconst(8192,64),bvconst(0,64),bvconst(8,64),bvconst(1024,64),bvconst(8192,64),bvconst(3,64),bvconst(0,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "private region rejects forged pointer kind" {
+    assert(¬(res108_region(bvconst(3,64),bvconst(8192,64),bvconst(0,64),bvconst(8,64),bvconst(1024,64),bvconst(8192,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),res108_false(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "private region rejects foreign owner" {
+    assert(¬(res108_region(bvconst(3,64),bvconst(8192,64),bvconst(0,64),bvconst(8,64),bvconst(1024,64),bvconst(8192,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_false(),res108_true(),res108_true(),res108_true())))
+}
+
+example "private region rejects changed backing" {
+    assert(¬(res108_region(bvconst(3,64),bvconst(8192,64),bvconst(0,64),bvconst(8,64),bvconst(1024,64),bvconst(8192,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_false(),res108_true(),res108_true())))
+}
+
+example "private region rejects stale mapping" {
+    assert(¬(res108_region(bvconst(3,64),bvconst(8192,64),bvconst(0,64),bvconst(8,64),bvconst(1024,64),bvconst(8192,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "private region rejects raw-address bypass" {
+    assert(¬(res108_region(bvconst(3,64),bvconst(8192,64),bvconst(0,64),bvconst(8,64),bvconst(1024,64),bvconst(8192,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_false())))
+}
+
+example "private region rejects writable immutable source" {
+    assert(¬(res108_region(bvconst(1,64),bvconst(8192,64),bvconst(64,64),bvconst(8,64),bvconst(1024,64),bvconst(8192,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "immutable source accepts READ" {
+    assert(res108_region(bvconst(1,64),bvconst(8192,64),bvconst(64,64),bvconst(1,64),bvconst(8192,64),bvconst(8192,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "region pair accepts" {
+    assert(res108_pair(bvconst(1,64),bvconst(3,64),bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(8192,64),res108_true()))
+}
+
+example "region pair rejects duplicate role" {
+    assert(¬(res108_pair(bvconst(1,64),bvconst(1,64),bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(8192,64),res108_true())))
+}
+
+example "region pair rejects overlap" {
+    assert(¬(res108_pair(bvconst(1,64),bvconst(3,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),res108_true())))
+}
+
+example "region pair rejects physical alias" {
+    assert(¬(res108_pair(bvconst(1,64),bvconst(3,64),bvconst(4096,64),bvconst(4096,64),bvconst(8192,64),bvconst(8192,64),res108_false())))
+}
+
+example "region pair rejects unaligned placement" {
+    assert(¬(res108_pair(bvconst(1,64),bvconst(3,64),bvconst(4097,64),bvconst(4096,64),bvconst(8192,64),bvconst(8192,64),res108_true())))
+}
+
+example "region pair rejects wrapped range" {
+    assert(¬(res108_pair(bvconst(1,64),bvconst(3,64),bvconst(4096,64),bvconst(4096,64),bvsub(ptr107_max(),bvconst(4095,64)),bvconst(8192,64),res108_true())))
+}
+
+example "billing accepts" {
+    assert(res108_bill(bvconst(8192,64),bvconst(512,64),bvconst(8704,64)))
+}
+
+example "billing rejects missing shadow charge" {
+    assert(¬(res108_bill(bvconst(8192,64),bvconst(512,64),bvconst(8192,64))))
+}
+
+example "billing rejects overflow" {
+    assert(¬(res108_bill(ptr107_max(),bvconst(1,64),bvconst(0,64))))
+}
+
+example "shared admission accepts" {
+    assert(res108_admit(bvconst(4096,64),bvconst(8192,64),bvconst(16384,64),bvconst(12288,64),bvconst(32768,64),bvconst(24576,64),bvconst(65536,64),bvconst(7,64),bvconst(7,64),bvconst(1,8)))
+}
+
+example "shared admission rejects job quota" {
+    assert(¬(res108_admit(bvconst(4096,64),bvconst(8192,64),bvconst(8192,64),bvconst(12288,64),bvconst(32768,64),bvconst(24576,64),bvconst(65536,64),bvconst(7,64),bvconst(7,64),bvconst(1,8))))
+}
+
+example "shared admission rejects owner quota" {
+    assert(¬(res108_admit(bvconst(4096,64),bvconst(8192,64),bvconst(16384,64),bvconst(12288,64),bvconst(12288,64),bvconst(24576,64),bvconst(65536,64),bvconst(7,64),bvconst(7,64),bvconst(1,8))))
+}
+
+example "shared admission rejects global quota" {
+    assert(¬(res108_admit(bvconst(4096,64),bvconst(8192,64),bvconst(16384,64),bvconst(12288,64),bvconst(32768,64),bvconst(24576,64),bvconst(24576,64),bvconst(7,64),bvconst(7,64),bvconst(1,8))))
+}
+
+example "shared admission rejects stale revision" {
+    assert(¬(res108_admit(bvconst(4096,64),bvconst(8192,64),bvconst(16384,64),bvconst(12288,64),bvconst(32768,64),bvconst(24576,64),bvconst(65536,64),bvconst(7,64),bvconst(6,64),bvconst(1,8))))
+}
+
+example "shared admission rejects revision wrap" {
+    assert(¬(res108_admit(bvconst(4096,64),bvconst(8192,64),bvconst(16384,64),bvconst(12288,64),bvconst(32768,64),bvconst(24576,64),bvconst(65536,64),ptr107_max(),ptr107_max(),bvconst(1,8))))
+}
+
+example "shared admission rejects incomplete ledger" {
+    assert(¬(res108_admit(bvconst(4096,64),bvconst(8192,64),bvconst(16384,64),bvconst(12288,64),bvconst(32768,64),bvconst(24576,64),bvconst(65536,64),bvconst(7,64),bvconst(7,64),bvconst(0,8))))
+}
+
+example "shared admission rejects inconsistent job charge" {
+    assert(¬(res108_admit(bvconst(4096,64),bvconst(16384,64),bvconst(16384,64),bvconst(12288,64),bvconst(32768,64),bvconst(24576,64),bvconst(65536,64),bvconst(7,64),bvconst(7,64),bvconst(1,8))))
+}
+
+example "work budget accepts" {
+    assert(res108_work(bvconst(900,64),bvconst(100,64),bvconst(1000,64)))
+}
+
+example "work budget rejects cumulative exhaustion" {
+    assert(¬(res108_work(bvconst(900,64),bvconst(101,64),bvconst(1000,64))))
+}
+
+example "work budget rejects zero-cost retry" {
+    assert(¬(res108_work(bvconst(900,64),bvconst(0,64),bvconst(1000,64))))
+}
+
+example "work budget rejects overflow" {
+    assert(¬(res108_work(ptr107_max(),bvconst(1,64),ptr107_max())))
+}
+
+example "launch accepts" {
+    assert(res108_launch(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),res108_true()))
+}
+
+example "launch rejects bad request" {
+    assert(¬(res108_launch(res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),res108_true())))
+}
+
+example "launch rejects bad later region" {
+    assert(¬(res108_launch(res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),res108_true())))
+}
+
+example "launch rejects bad pair census" {
+    assert(¬(res108_launch(res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),res108_true())))
+}
+
+example "launch rejects over-budget machine" {
+    assert(¬(res108_launch(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),res108_true())))
+}
+
+example "launch rejects unclean storage" {
+    assert(¬(res108_launch(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),res108_true())))
+}
+
+example "launch rejects unreserved cleanup" {
+    assert(¬(res108_launch(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),bvconst(7,64),bvconst(7,64),res108_true())))
+}
+
+example "launch rejects scalar entry pair" {
+    assert(¬(res108_launch(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),bvconst(7,64),bvconst(7,64),res108_true())))
+}
+
+example "launch rejects stale admission" {
+    assert(¬(res108_launch(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(6,64),res108_true())))
+}
+
+example "launch rejects unserialized commit" {
+    assert(¬(res108_launch(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),res108_false())))
+}
+
+example "reply snapshot accepts" {
+    assert(res108_report(bvconst(1094930994,64),bvconst(2,64),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(0,64)))
+}
+
+example "reply snapshot rejects legacy format" {
+    assert(¬(res108_report(bvconst(1094930994,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(0,64))))
+}
+
+example "reply snapshot rejects stale attempt" {
+    assert(¬(res108_report(bvconst(1094930994,64),bvconst(2,64),res108_false(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(0,64))))
+}
+
+example "reply snapshot rejects changed tool/source" {
+    assert(¬(res108_report(bvconst(1094930994,64),bvconst(2,64),res108_true(),res108_false(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(0,64))))
+}
+
+example "reply snapshot rejects mutated controls" {
+    assert(¬(res108_report(bvconst(1094930994,64),bvconst(2,64),res108_true(),res108_true(),res108_false(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(0,64))))
+}
+
+example "reply snapshot rejects faulted execution" {
+    assert(¬(res108_report(bvconst(1094930994,64),bvconst(2,64),res108_true(),res108_true(),res108_true(),res108_false(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(0,64))))
+}
+
+example "reply snapshot rejects nonzero exit" {
+    assert(¬(res108_report(bvconst(1094930994,64),bvconst(2,64),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(1,64),res108_true(),res108_true(),res108_true(),bvconst(0,64))))
+}
+
+example "reply snapshot rejects output execution" {
+    assert(¬(res108_report(bvconst(1094930994,64),bvconst(2,64),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_false(),res108_true(),res108_true(),bvconst(0,64))))
+}
+
+example "reply snapshot rejects active writer" {
+    assert(¬(res108_report(bvconst(1094930994,64),bvconst(2,64),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_false(),res108_true(),bvconst(0,64))))
+}
+
+example "reply snapshot rejects pending work" {
+    assert(¬(res108_report(bvconst(1094930994,64),bvconst(2,64),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_false(),bvconst(0,64))))
+}
+
+example "success accepts" {
+    assert(res108_success(bvconst(0,64),bvconst(512,64),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1024,64),bvconst(1024,64),res108_true(),res108_true()))
+}
+
+example "success rejects capacity status" {
+    assert(¬(res108_success(bvconst(1,64),bvconst(512,64),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1024,64),bvconst(1024,64),res108_true(),res108_true())))
+}
+
+example "success rejects short AOM" {
+    assert(¬(res108_success(bvconst(0,64),bvconst(104,64),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1024,64),bvconst(1024,64),res108_true(),res108_true())))
+}
+
+example "success rejects capacity overrun" {
+    assert(¬(res108_success(bvconst(0,64),bvconst(8200,64),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1024,64),bvconst(1024,64),res108_true(),res108_true())))
+}
+
+example "success rejects unaligned prefix" {
+    assert(¬(res108_success(bvconst(0,64),bvconst(513,64),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1024,64),bvconst(1024,64),res108_true(),res108_true())))
+}
+
+example "success rejects hidden capacity hint" {
+    assert(¬(res108_success(bvconst(0,64),bvconst(512,64),bvconst(8192,64),bvconst(0,64),bvconst(16384,64),bvconst(0,64),bvconst(1024,64),bvconst(1024,64),res108_true(),res108_true())))
+}
+
+example "success rejects unfinished input" {
+    assert(¬(res108_success(bvconst(0,64),bvconst(512,64),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1023,64),bvconst(1024,64),res108_true(),res108_true())))
+}
+
+example "success rejects invalid artifact" {
+    assert(¬(res108_success(bvconst(0,64),bvconst(512,64),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1024,64),bvconst(1024,64),res108_true(),res108_false())))
+}
+
+example "capacity reply accepts" {
+    assert(res108_need(bvconst(1,64),bvconst(3,64),bvconst(3,64),bvconst(8193,64),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(400,64),bvconst(1024,64),res108_true(),res108_true()))
+}
+
+example "capacity reply rejects ordinary source error" {
+    assert(¬(res108_need(bvconst(2,64),bvconst(3,64),bvconst(3,64),bvconst(8193,64),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(400,64),bvconst(1024,64),res108_true(),res108_true())))
+}
+
+example "capacity reply rejects generic legacy error 8" {
+    assert(¬(res108_need(bvconst(8,64),bvconst(3,64),bvconst(3,64),bvconst(8193,64),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(400,64),bvconst(1024,64),res108_true(),res108_true())))
+}
+
+example "capacity reply rejects wrong resource" {
+    assert(¬(res108_need(bvconst(1,64),bvconst(4,64),bvconst(3,64),bvconst(8193,64),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(400,64),bvconst(1024,64),res108_true(),res108_true())))
+}
+
+example "capacity reply rejects unknown resource" {
+    assert(¬(res108_need(bvconst(1,64),bvconst(17,64),bvconst(17,64),bvconst(8193,64),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(400,64),bvconst(1024,64),res108_true(),res108_true())))
+}
+
+example "capacity reply rejects no progress" {
+    assert(¬(res108_need(bvconst(1,64),bvconst(3,64),bvconst(3,64),bvconst(8192,64),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(400,64),bvconst(1024,64),res108_true(),res108_true())))
+}
+
+example "capacity reply rejects zero minimum" {
+    assert(¬(res108_need(bvconst(1,64),bvconst(3,64),bvconst(3,64),bvconst(0,64),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(400,64),bvconst(1024,64),res108_true(),res108_true())))
+}
+
+example "capacity reply rejects signed overflow" {
+    assert(¬(res108_need(bvconst(1,64),bvconst(3,64),bvconst(3,64),bvsub(ptr107_max(),bvconst(9223372036854775807,64)),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(400,64),bvconst(1024,64),res108_true(),res108_true())))
+}
+
+example "capacity reply rejects partial artifact export" {
+    assert(¬(res108_need(bvconst(1,64),bvconst(3,64),bvconst(3,64),bvconst(8193,64),bvconst(8192,64),bvconst(128,64),bvconst(0,64),bvconst(400,64),bvconst(1024,64),res108_true(),res108_true())))
+}
+
+example "capacity reply rejects cursor beyond source" {
+    assert(¬(res108_need(bvconst(1,64),bvconst(3,64),bvconst(3,64),bvconst(8193,64),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(1025,64),bvconst(1024,64),res108_true(),res108_true())))
+}
+
+example "capacity reply rejects unsupported growth role" {
+    assert(¬(res108_need(bvconst(1,64),bvconst(3,64),bvconst(3,64),bvconst(8193,64),bvconst(8192,64),bvconst(0,64),bvconst(0,64),bvconst(400,64),bvconst(1024,64),res108_true(),res108_false())))
+}
+
+example "source rejection accepts" {
+    assert(res108_rejected(bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(9,64),bvconst(50,64),bvconst(1024,64),res108_true()))
+}
+
+example "source rejection rejects capacity disguised as syntax" {
+    assert(¬(res108_rejected(bvconst(2,64),bvconst(0,64),bvconst(8192,64),bvconst(0,64),bvconst(9,64),bvconst(50,64),bvconst(1024,64),res108_true())))
+}
+
+example "source rejection rejects partial output" {
+    assert(¬(res108_rejected(bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(128,64),bvconst(9,64),bvconst(50,64),bvconst(1024,64),res108_true())))
+}
+
+example "source rejection rejects missing diagnostic" {
+    assert(¬(res108_rejected(bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(50,64),bvconst(1024,64),res108_true())))
+}
+
+example "source rejection rejects guest budget-denied tag" {
+    assert(¬(res108_rejected(bvconst(4,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(9,64),bvconst(50,64),bvconst(1024,64),res108_true())))
+}
+
+example "source rejection rejects guest execution-failure tag" {
+    assert(¬(res108_rejected(bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(9,64),bvconst(50,64),bvconst(1024,64),res108_true())))
+}
+
+example "representation rejection is terminal" {
+    assert(res108_rejected(bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(16,64),bvconst(50,64),bvconst(1024,64),res108_true()))
+}
+
+example "growth accepts" {
+    assert(res108_growth(bvconst(8192,64),bvconst(8193,64),bvconst(32768,64)))
+}
+
+example "growth rejects unaligned old arena" {
+    assert(¬(res108_growth(bvconst(8191,64),bvconst(8193,64),bvconst(32768,64))))
+}
+
+example "growth rejects unaligned ceiling" {
+    assert(¬(res108_growth(bvconst(8192,64),bvconst(8193,64),bvconst(32769,64))))
+}
+
+example "growth rejects over-budget minimum" {
+    assert(¬(res108_growth(bvconst(8192,64),bvconst(32769,64),bvconst(32768,64))))
+}
+
+example "growth rejects nonprogress minimum" {
+    assert(¬(res108_growth(bvconst(8192,64),bvconst(8192,64),bvconst(32768,64))))
+}
+
+example "growth rejects signed ceiling overflow" {
+    assert(¬(res108_growth(bvconst(8192,64),bvconst(8193,64),bvsub(ptr107_max(),bvconst(9223372036854775807,64)))))
+}
+
+example "geometric growth doubles" {
+    assert(res108_next_capacity(bvconst(8192,64),bvconst(8193,64),bvconst(32768,64))=bvconst(16384,64))
+}
+
+example "large request rounds up" {
+    assert(res108_next_capacity(bvconst(8192,64),bvconst(20000,64),bvconst(32768,64))=bvconst(20480,64))
+}
+
+example "growth saturates at admitted ceiling" {
+    assert(res108_next_capacity(bvconst(12288,64),bvconst(12289,64),bvconst(16384,64))=bvconst(16384,64))
+}
+
+example "growth remains below signed boundary" {
+    assert(res108_next_capacity(bvconst(4611686018427387904,64),bvconst(4611686018427387905,64),bvconst(9223372036854771712,64))=bvconst(9223372036854771712,64))
+}
+
+example "drain accepts" {
+    assert(res108_drained(res108_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true()))
+}
+
+example "drain rejects unfenced aliases" {
+    assert(¬(res108_drained(res108_false(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true())))
+}
+
+example "drain rejects pending CPU" {
+    assert(¬(res108_drained(res108_true(),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true())))
+}
+
+example "drain rejects pending DMA" {
+    assert(¬(res108_drained(res108_true(),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true())))
+}
+
+example "drain rejects pending reader" {
+    assert(¬(res108_drained(res108_true(),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),res108_true(),res108_true())))
+}
+
+example "drain rejects pending writer" {
+    assert(¬(res108_drained(res108_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),res108_true(),res108_true())))
+}
+
+example "drain rejects retained grants" {
+    assert(¬(res108_drained(res108_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),res108_false(),res108_true())))
+}
+
+example "drain rejects stale census" {
+    assert(¬(res108_drained(res108_true(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_false())))
+}
+
+example "release accepts" {
+    assert(res108_released(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(8192,64),bvconst(12288,64)))
+}
+
+example "release rejects timeout without drain" {
+    assert(¬(res108_released(res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(8192,64),bvconst(12288,64))))
+}
+
+example "release rejects wrong extent return" {
+    assert(¬(res108_released(res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),bvconst(8192,64),bvconst(12288,64))))
+}
+
+example "release rejects unclean bytes" {
+    assert(¬(res108_released(res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),bvconst(8192,64),bvconst(12288,64))))
+}
+
+example "release rejects inherited kinds" {
+    assert(¬(res108_released(res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),bvconst(8192,64),bvconst(12288,64))))
+}
+
+example "release rejects stale scrub receipt" {
+    assert(¬(res108_released(res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),bvconst(8192,64),bvconst(12288,64))))
+}
+
+example "release rejects refund underflow" {
+    assert(¬(res108_released(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(16384,64),bvconst(12288,64))))
+}
+
+example "retry accepts" {
+    assert(res108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(3,64),bvconst(2,64),res108_true()))
+}
+
+example "retry rejects non-capacity outcome" {
+    assert(¬(res108_retry(res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(3,64),bvconst(2,64),res108_true())))
+}
+
+example "retry rejects ceiling denial" {
+    assert(¬(res108_retry(res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(3,64),bvconst(2,64),res108_true())))
+}
+
+example "retry rejects unclean old arena" {
+    assert(¬(res108_retry(res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),bvconst(3,64),bvconst(2,64),res108_true())))
+}
+
+example "retry rejects new budget denial" {
+    assert(¬(res108_retry(res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),bvconst(3,64),bvconst(2,64),res108_true())))
+}
+
+example "retry rejects revoked frozen inputs" {
+    assert(¬(res108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),bvconst(3,64),bvconst(2,64),res108_true())))
+}
+
+example "retry rejects reused dirty workspace" {
+    assert(¬(res108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),bvconst(3,64),bvconst(2,64),res108_true())))
+}
+
+example "retry rejects identity wrap" {
+    assert(¬(res108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),ptr107_max(),bvconst(2,64),res108_true())))
+}
+
+example "retry rejects retry exhaustion" {
+    assert(¬(res108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(3,64),bvconst(0,64),res108_true())))
+}
+
+example "retry rejects work exhaustion" {
+    assert(¬(res108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(3,64),bvconst(2,64),res108_false())))
+}
+
+example "alias accepts" {
+    assert(res108_alias(bvconst(7,64),bvconst(3,64),bvconst(9,64),bvconst(7,64),bvconst(3,64),bvconst(9,64),bvconst(5,64),bvconst(5,64),res108_true(),res108_true()))
+}
+
+example "alias rejects stale job" {
+    assert(¬(res108_alias(bvconst(7,64),bvconst(3,64),bvconst(9,64),bvconst(8,64),bvconst(3,64),bvconst(9,64),bvconst(5,64),bvconst(5,64),res108_true(),res108_true())))
+}
+
+example "alias rejects stale attempt" {
+    assert(¬(res108_alias(bvconst(7,64),bvconst(3,64),bvconst(9,64),bvconst(7,64),bvconst(4,64),bvconst(9,64),bvconst(5,64),bvconst(5,64),res108_true(),res108_true())))
+}
+
+example "alias rejects new owner same backing" {
+    assert(¬(res108_alias(bvconst(7,64),bvconst(3,64),bvconst(9,64),bvconst(7,64),bvconst(3,64),bvconst(10,64),bvconst(5,64),bvconst(5,64),res108_true(),res108_true())))
+}
+
+example "alias rejects new allocation generation" {
+    assert(¬(res108_alias(bvconst(7,64),bvconst(3,64),bvconst(9,64),bvconst(7,64),bvconst(3,64),bvconst(9,64),bvconst(5,64),bvconst(6,64),res108_true(),res108_true())))
+}
+
+example "alias rejects closed row" {
+    assert(¬(res108_alias(bvconst(7,64),bvconst(3,64),bvconst(9,64),bvconst(7,64),bvconst(3,64),bvconst(9,64),bvconst(5,64),bvconst(5,64),res108_false(),res108_true())))
+}
+
+example "alias rejects erased kind" {
+    assert(¬(res108_alias(bvconst(7,64),bvconst(3,64),bvconst(9,64),bvconst(7,64),bvconst(3,64),bvconst(9,64),bvconst(5,64),bvconst(5,64),res108_true(),res108_false())))
+}
+
+example "prefix copy accepts" {
+    assert(res108_copy(bvconst(70000,64),bvconst(65536,64),bvconst(4464,64),res108_true()))
+}
+
+example "prefix copy rejects padding exposure" {
+    assert(¬(res108_copy(bvconst(70000,64),bvconst(65536,64),bvconst(8192,64),res108_true())))
+}
+
+example "prefix copy rejects oversize transaction" {
+    assert(¬(res108_copy(bvconst(70000,64),bvconst(0,64),bvconst(70000,64),res108_true())))
+}
+
+example "prefix copy rejects stale read grant" {
+    assert(¬(res108_copy(bvconst(70000,64),bvconst(65536,64),bvconst(4464,64),res108_false())))
+}
+
+example "prefix copy rejects wrapped cursor" {
+    assert(¬(res108_copy(bvconst(70000,64),ptr107_max(),bvconst(4464,64),res108_true())))
+}
+
+example "publication accepts" {
+    assert(res108_publish(res108_true(),res108_true(),res108_true(),bvconst(512,64),bvconst(512,64),bvconst(512,64),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(7,64),res108_true()))
+}
+
+example "publication rejects failed attempt" {
+    assert(¬(res108_publish(res108_false(),res108_true(),res108_true(),bvconst(512,64),bvconst(512,64),bvconst(512,64),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(7,64),res108_true())))
+}
+
+example "publication rejects revoked binding" {
+    assert(¬(res108_publish(res108_true(),res108_false(),res108_true(),bvconst(512,64),bvconst(512,64),bvconst(512,64),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(7,64),res108_true())))
+}
+
+example "publication rejects missing authority" {
+    assert(¬(res108_publish(res108_true(),res108_true(),res108_false(),bvconst(512,64),bvconst(512,64),bvconst(512,64),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(7,64),res108_true())))
+}
+
+example "publication rejects incomplete prefix" {
+    assert(¬(res108_publish(res108_true(),res108_true(),res108_true(),bvconst(512,64),bvconst(504,64),bvconst(512,64),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(7,64),res108_true())))
+}
+
+example "publication rejects capacity exported as logical size" {
+    assert(¬(res108_publish(res108_true(),res108_true(),res108_true(),bvconst(512,64),bvconst(512,64),bvconst(8192,64),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(7,64),res108_true())))
+}
+
+example "publication rejects writable object" {
+    assert(¬(res108_publish(res108_true(),res108_true(),res108_true(),bvconst(512,64),bvconst(512,64),bvconst(512,64),res108_false(),res108_true(),res108_true(),res108_true(),bvconst(7,64),res108_true())))
+}
+
+example "publication rejects old object reused" {
+    assert(¬(res108_publish(res108_true(),res108_true(),res108_true(),bvconst(512,64),bvconst(512,64),bvconst(512,64),res108_true(),res108_false(),res108_true(),res108_true(),bvconst(7,64),res108_true())))
+}
+
+example "publication rejects unbilled retained artifact" {
+    assert(¬(res108_publish(res108_true(),res108_true(),res108_true(),bvconst(512,64),bvconst(512,64),bvconst(512,64),res108_true(),res108_true(),res108_false(),res108_true(),bvconst(7,64),res108_true())))
+}
+
+example "publication rejects pending work" {
+    assert(¬(res108_publish(res108_true(),res108_true(),res108_true(),bvconst(512,64),bvconst(512,64),bvconst(512,64),res108_true(),res108_true(),res108_true(),res108_false(),bvconst(7,64),res108_true())))
+}
+
+example "publication rejects epoch wrap" {
+    assert(¬(res108_publish(res108_true(),res108_true(),res108_true(),bvconst(512,64),bvconst(512,64),bvconst(512,64),res108_true(),res108_true(),res108_true(),res108_true(),ptr107_max(),res108_true())))
+}
+
+example "publication rejects missing receipt capacity" {
+    assert(¬(res108_publish(res108_true(),res108_true(),res108_true(),bvconst(512,64),bvconst(512,64),bvconst(512,64),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(7,64),res108_false())))
+}
+
+example "A exhaustion preserves B account" {
+    assert(res108_account(res108_admit(bvconst(4096,64),bvconst(8192,64),bvconst(8192,64),bvconst(8192,64),bvconst(8192,64),bvconst(16384,64),bvconst(32768,64),bvconst(7,64),bvconst(7,64),bvconst(1,8)),bvconst(7,64),bvconst(8,64),bvconst(8192,64),bvconst(12345,64))=bvconst(8192,64))
+}
+
+example "failed A admission preserves global charge" {
+    assert(res108_charged(res108_admit(bvconst(4096,64),bvconst(8192,64),bvconst(8192,64),bvconst(8192,64),bvconst(8192,64),bvconst(16384,64),bvconst(32768,64),bvconst(7,64),bvconst(7,64),bvconst(1,8)),bvconst(16384,64),bvconst(4096,64))=bvconst(16384,64))
+}
+
+example "A death while pending work retains full charge" {
+    assert(res108_refund(res108_drained(res108_true(),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true()),bvconst(12288,64),bvconst(8192,64))=bvconst(12288,64))
+}
+
+example "A payload release retains metadata charge" {
+    assert(res108_refund(res108_released(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(8192,64),bvconst(12288,64)),bvconst(12288,64),bvconst(8192,64))=bvconst(4096,64))
+}
+
+example "C can reserve returned backing with B charged" {
+    assert(res108_admit(bvconst(8192,64),bvconst(0,64),bvconst(8192,64),bvconst(0,64),bvconst(8192,64),bvconst(8192,64),bvconst(16384,64),bvconst(8,64),bvconst(8,64),bvconst(1,8)))
+}
+
+example "old A alias fails after C reuse" {
+    assert(¬(res108_alias(bvconst(7,64),bvconst(3,64),bvconst(7,64),bvconst(9,64),bvconst(1,64),bvconst(9,64),bvconst(5,64),bvconst(6,64),res108_true(),res108_true())))
+}
+
+example "B alias survives A and C changes" {
+    assert(res108_alias(bvconst(8,64),bvconst(1,64),bvconst(8,64),bvconst(8,64),bvconst(1,64),bvconst(8,64),bvconst(4,64),bvconst(4,64),res108_true(),res108_true()))
+}
+
+example "C publication preserves B receipt" {
+    assert(res108_receipt(res108_true(),bvconst(9,64),bvconst(8,64),bvconst(42,64),bvconst(99,64))=bvconst(42,64))
+}
+
+example "retry consumes no publication epoch" {
+    assert(res108_epoch(res108_false(),bvconst(17,64))=bvconst(17,64))
+}
+
+example "canonical bytes exclude arena padding" {
+    assert(res108_canonical(bvconst(65,8),bvconst(65,8),res108_true(),res108_true()))
+}
+
+example "capacity-dependent byte is not canonical" {
+    assert(¬(res108_canonical(bvconst(66,8),bvconst(65,8),res108_true(),res108_true())))
+}
+
+example "fresh job identity accepts" {
+    assert(res108_fresh(bvconst(7,64),bvconst(8,64)))
+}
+
+example "fresh job identity rejects wrap" {
+    assert(¬(res108_fresh(ptr107_max(),bvconst(0,64))))
+}
+
+example "fresh job identity rejects replay" {
+    assert(¬(res108_fresh(bvconst(7,64),bvconst(7,64))))
+}
+
+example "source padding accepts" {
+    assert(res108_source(bvconst(65529,64),bvconst(65536,64),res108_true()))
+}
+
+example "source padding rejects word overread" {
+    assert(¬(res108_source(bvconst(65529,64),bvconst(65529,64),res108_true())))
+}
+
+example "source padding rejects residual padding" {
+    assert(¬(res108_source(bvconst(65529,64),bvconst(65536,64),res108_false())))
+}
+
+example "source padding rejects rounding overflow" {
+    assert(¬(res108_source(ptr107_max(),bvconst(65536,64),res108_true())))
+}
+
+example "request role is READ only" {
+    assert(res108_region(bvconst(15,64),bvconst(4096,64),bvconst(512,64),bvconst(128,64),bvconst(3,64),bvconst(4096,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "writable request rejected" {
+    assert(¬(res108_region(bvconst(15,64),bvconst(4096,64),bvconst(512,64),bvconst(128,64),bvconst(3,64),bvconst(4096,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "output grows beyond legacy 256 KiB" {
+    assert(res108_next_capacity(bvconst(262144,64),bvconst(262145,64),bvconst(1048576,64))=bvconst(524288,64))
+}
+
+example "large canonical AOM geometry is admissible" {
+    assert(res108_success(bvconst(0,64),bvconst(524288,64),bvconst(524288,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(65529,64),bvconst(65529,64),res108_true(),res108_true()))
+}
+
+example "protected pair starts at aligned offset 32" {
+    assert(res108_pair_offset(bvconst(0,64))=bvconst(160,64))
+}
+
+example "record 15 ends within complete directory" {
+    assert(res108_record_offset(bvconst(15,64))=bvconst(2048,64))
+}
+
+example "law: checked sum stays within limit" {
+    assert(∀(a : BitVec64). ∀(b : BitVec64). ∀(l : BitVec64). res108_add(a,b,l) → (bvule(bvadd(a,b),l) ∧ bvuge(bvadd(a,b),a)))
+}
+
+example "law: reservation commit stays within logical bound" {
+    assert(∀(o : BitVec64). ∀(w : BitVec64). ∀(c : BitVec64). res108_reservation(o,w,c) → bvule(res108_cursor(res108_true(),o,w),c))
+}
+
+example "law: failed reservation preserves cursor" {
+    assert(∀(o : BitVec64). ∀(w : BitVec64). ∀(c : BitVec64). ¬res108_reservation(o,w,c) → (res108_cursor(res108_reservation(o,w,c),o,w)=o))
+}
+
+example "law: full record fold cannot ignore rejection" {
+    assert(∀(p : Bool). ¬res108_fold(p,res108_false()))
+}
+
+example "law: ABI directory extent is bounded" {
+    assert(∀(n : BitVec64). ∀(m : BitVec64). ∀(t : BitVec64). res108_header(bvconst(1094930994,64),bvconst(2,64),bvconst(128,64),n,m,bvconst(128,64),t,bvconst(128,64),bvconst(0,64)) → bvule(t,heap108_signed_max()))
+}
+
+example "law: nonselected owner preserved" {
+    assert(∀(a : BitVec64). ∀(b : BitVec64). ∀(old : BitVec64). ∀(new : BitVec64). ∀(ok : Bool). ¬(a=b) → (res108_account(ok,a,b,old,new)=old))
+}
+
+example "law: failed admission changes no charge" {
+    assert(∀(old : BitVec64). ∀(n : BitVec64). res108_charged(res108_false(),old,n)=old)
+}
+
+example "law: work is cumulative and bounded" {
+    assert(∀(w : BitVec64). ∀(s : BitVec64). ∀(b : BitVec64). res108_work(w,s,b) → (bvugt(bvadd(w,s),w) ∧ bvule(bvadd(w,s),b)))
+}
+
+example "law: growth is strict" {
+    assert(∀(o : BitVec64). ∀(n : BitVec64). ∀(l : BitVec64). res108_growth(o,n,l) → bvugt(res108_next_capacity(o,n,l),o))
+}
+
+example "law: growth respects ceiling" {
+    assert(∀(o : BitVec64). ∀(n : BitVec64). ∀(l : BitVec64). res108_growth(o,n,l) → bvule(res108_next_capacity(o,n,l),l))
+}
+
+example "law: growth covers minimum" {
+    assert(∀(o : BitVec64). ∀(n : BitVec64). ∀(l : BitVec64). res108_growth(o,n,l) → bvuge(res108_next_capacity(o,n,l),n))
+}
+
+example "law: growth remains page aligned" {
+    assert(∀(o : BitVec64). ∀(n : BitVec64). ∀(l : BitVec64). res108_growth(o,n,l) → res108_page(res108_next_capacity(o,n,l)))
+}
+
+example "law: retry advances fresh identity" {
+    assert(∀(a : BitVec64). ∀(r : BitVec64). res108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),a,r,res108_true()) → bvugt(res108_attempt(res108_true(),a),a))
+}
+
+example "law: retry decreases finite allowance" {
+    assert(∀(a : BitVec64). ∀(r : BitVec64). res108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),a,r,res108_true()) → bvult(res108_retries(res108_true(),r),r))
+}
+
+example "law: denied retry preserves identity" {
+    assert(∀(a : BitVec64). res108_attempt(res108_false(),a)=a)
+}
+
+example "law: unreleased memory retains charges" {
+    assert(∀(h : BitVec64). ∀(n : BitVec64). res108_refund(res108_false(),h,n)=h)
+}
+
+example "law: released bytes cannot underflow held charge" {
+    assert(∀(n : BitVec64). ∀(h : BitVec64). res108_released(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),n,h) → bvule(res108_refund(res108_true(),h,n),h))
+}
+
+example "law: stale attempt aliases fail" {
+    assert(∀(j : BitVec64). ∀(a : BitVec64). ∀(b : BitVec64). ∀(o : BitVec64). ∀(g : BitVec64). ¬(a=b) → ¬res108_alias(j,a,o,j,b,o,g,g,res108_true(),res108_true()))
+}
+
+example "law: stale generation aliases fail" {
+    assert(∀(j : BitVec64). ∀(a : BitVec64). ∀(o : BitVec64). ∀(g : BitVec64). ∀(h : BitVec64). ¬(g=h) → ¬res108_alias(j,a,o,j,a,o,g,h,res108_true(),res108_true()))
+}
+
+example "law: prefix copy cannot expose capacity tail" {
+    assert(∀(n : BitVec64). ∀(c : BitVec64). ∀(k : BitVec64). res108_copy(n,c,k,res108_true()) → bvule(bvadd(c,k),n))
+}
+
+example "law: failed publication preserves epoch" {
+    assert(∀(e : BitVec64). res108_epoch(res108_false(),e)=e)
+}
+
+example "law: new receipt preserves all previous keys" {
+    assert(∀(k : BitVec64). ∀(q : BitVec64). ∀(old : BitVec64). ∀(new : BitVec64). ∀(ok : Bool). ¬(k=q) → (res108_receipt(ok,k,q,old,new)=old))
+}
+
+example "law: conditional canonical bytes equal" {
+    assert(∀(a : BitVec8). ∀(b : BitVec8). ∀(c : BitVec8). (res108_canonical(a,c,res108_true(),res108_true()) ∧ res108_canonical(b,c,res108_true(),res108_true())) → (a=b))
+}
+
+example "law: fresh job identity never wraps" {
+    assert(∀(a : BitVec64). ∀(b : BitVec64). res108_fresh(a,b) → bvugt(b,a))
+}
+
+example "law: protected record pair is aligned" {
+    assert(∀(i : BitVec64). (bvand(res108_pair_offset(i),bvconst(15,64))=bvconst(0,64)))
+}
+
+example "law: declared record remains inside request" {
+    assert(∀(i : BitVec64). ∀(n : BitVec64). ∀(m : BitVec64). ∀(t : BitVec64). (res108_header(bvconst(1094930994,64),bvconst(2,64),bvconst(128,64),n,m,bvconst(128,64),t,bvconst(128,64),bvconst(0,64)) ∧ bvult(i,n)) → bvule(bvadd(res108_record_offset(i),bvconst(128,64)),t))
+}
+
+// C2.3: trusted initialized overlays before FIRST publication. Immutable
+// registry/Fabric rights must agree; this never seals an existing RW alias.
+define res108_load_role(r : BitVec64) = (r=bvconst(1,64)) ∨ (r=bvconst(2,64)) ∨ (r=bvconst(3,64)) ∨ (r=bvconst(15,64)) ∨ (r=bvconst(16,64))
+define res108_load_rights(r : BitVec64) = if (r=bvconst(1,64)) ∨ (r=bvconst(15,64)) then bvconst(1,64) else bvconst(3,64)
+define res108_load_publish(role : BitVec64, logical : BitVec64, payload : BitVec64,
+    reserved : Bool, full_zero : Bool, current_owner : Bool, private_drain : Bool,
+    exact_overlay : Bool, authentic_cells : Bool) =
+    res108_load_role(role) ∧ bvugt(logical,bvconst(0,64)) ∧ bvule(logical,heap108_signed_max()) ∧ bvule(payload,logical) ∧ reserved ∧ full_zero ∧ current_owner ∧ private_drain ∧ exact_overlay ∧ authentic_cells
+define res108_loaded_access(rights : BitVec64, registry_rights : BitVec64, write : Bool, current : Bool) =
+    (rights=registry_rights) ∧ ((rights=bvconst(1,64)) ∨ (rights=bvconst(3,64))) ∧ current ∧ (¬write ∨ (rights=bvconst(3,64)))
+define res108_loader_entry(fresh : Bool, all_published : Bool, typed_request : Bool,
+    typed_reply : Bool, exact_source : Bool, complete_roles : Bool) =
+    fresh ∧ all_published ∧ typed_request ∧ typed_reply ∧ exact_source ∧ complete_roles
+
+example "loader publication role 1" {
+    assert(res108_load_publish(bvconst(1,64),bvconst(8,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "loader publication role 2" {
+    assert(res108_load_publish(bvconst(2,64),bvconst(8,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "loader publication role 3" {
+    assert(res108_load_publish(bvconst(3,64),bvconst(8,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "loader publication role 15" {
+    assert(res108_load_publish(bvconst(15,64),bvconst(8,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "loader publication role 16" {
+    assert(res108_load_publish(bvconst(16,64),bvconst(8,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "loader missing obligation 3" {
+    assert(¬(res108_load_publish(bvconst(1,64),bvconst(8,64),bvconst(3,64),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "loader missing obligation 4" {
+    assert(¬(res108_load_publish(bvconst(1,64),bvconst(8,64),bvconst(3,64),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "loader missing obligation 5" {
+    assert(¬(res108_load_publish(bvconst(1,64),bvconst(8,64),bvconst(3,64),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true())))
+}
+
+example "loader missing obligation 6" {
+    assert(¬(res108_load_publish(bvconst(1,64),bvconst(8,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true())))
+}
+
+example "loader missing obligation 7" {
+    assert(¬(res108_load_publish(bvconst(1,64),bvconst(8,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "loader missing obligation 8" {
+    assert(¬(res108_load_publish(bvconst(1,64),bvconst(8,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false())))
+}
+
+example "loader bad field 0 value 0" {
+    assert(¬(res108_load_publish(bvconst(0,64),bvconst(8,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "loader bad field 0 value 4" {
+    assert(¬(res108_load_publish(bvconst(4,64),bvconst(8,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "loader bad field 1 value 0" {
+    assert(¬(res108_load_publish(bvconst(1,64),bvconst(0,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "loader bad field 2 value 9" {
+    assert(¬(res108_load_publish(bvconst(1,64),bvconst(8,64),bvconst(9,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "loader immutable role 1" {
+    assert(¬(res108_loaded_access(res108_load_rights(bvconst(1,64)),bvconst(1,64),res108_true(),res108_true())))
+}
+
+example "loader immutable role 15" {
+    assert(¬(res108_loaded_access(res108_load_rights(bvconst(15,64)),bvconst(1,64),res108_true(),res108_true())))
+}
+
+example "loader access 0" {
+    assert(res108_loaded_access(bvconst(1,64),bvconst(1,64),res108_false(),res108_true()))
+}
+
+example "loader access 1" {
+    assert(res108_loaded_access(bvconst(3,64),bvconst(3,64),res108_true(),res108_true()))
+}
+
+example "loader access 2" {
+    assert(res108_loaded_access(bvconst(3,64),bvconst(3,64),res108_false(),res108_true()))
+}
+
+example "loader access 3" {
+    assert(¬(res108_loaded_access(bvconst(3,64),bvconst(3,64),res108_true(),res108_false())))
+}
+
+example "loader rights substitution 1 3" {
+    assert(¬(res108_loaded_access(bvconst(1,64),bvconst(3,64),res108_false(),res108_true())))
+}
+
+example "loader rights substitution 3 1" {
+    assert(¬(res108_loaded_access(bvconst(3,64),bvconst(1,64),res108_false(),res108_true())))
+}
+
+example "loader rights substitution 7 7" {
+    assert(¬(res108_loaded_access(bvconst(7,64),bvconst(7,64),res108_false(),res108_true())))
+}
+
+example "loader complete entry" {
+    assert(res108_loader_entry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "loader incomplete entry 0" {
+    assert(¬(res108_loader_entry(res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "loader incomplete entry 1" {
+    assert(¬(res108_loader_entry(res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "loader incomplete entry 2" {
+    assert(¬(res108_loader_entry(res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true())))
+}
+
+example "loader incomplete entry 3" {
+    assert(¬(res108_loader_entry(res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true())))
+}
+
+example "loader incomplete entry 4" {
+    assert(¬(res108_loader_entry(res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "loader incomplete entry 5" {
+    assert(¬(res108_loader_entry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false())))
+}
+
+example "law: read-only allocation rejects every write" {
+    assert(∀(r : BitVec64). ∀(live : Bool). ¬(res108_loaded_access(bvconst(1,64),r,res108_true(),live)))
+}
+example "law: successful write needs matching writable registry" {
+    assert(∀(r : BitVec64). ∀(s : BitVec64). res108_loaded_access(r,s,res108_true(),res108_true()) → ((r=bvconst(3,64)) ∧ (s=r)))
+}
+
+// C2.4: numeric selectors are internal offsets, never raw memory authority.
+// Actual PLOAD/PADD/PREAD/PWRITE still require the authenticated region token.
+define res108_selector(a : BitVec64, ws : BitVec64, out : BitVec64) =
+    (bvand(a,bvconst(7,64))=res108_z()) ∧
+    ((bvuge(a,bvconst(49152,64)) ∧ bvult(a,bvconst(73728,64)) ∧
+      res108_span(bvsub(a,bvconst(49152,64)),bvconst(8,64),ws)) ∨
+     (bvuge(a,bvconst(73728,64)) ∧
+      res108_span(bvsub(a,bvconst(73728,64)),bvconst(8,64),out)))
+define res108_producer_extra(code : BitVec64) =
+    if code=bvconst(18,64) then bvconst(56,64) else bvconst(8,64)
+define res108_producer_min(front : BitVec64, tail : BitVec64, cap : BitVec64, code : BitVec64) =
+    bvadd(bvadd(front,bvsub(cap,tail)),res108_producer_extra(code))
+define res108_producer_hint(front : BitVec64, tail : BitVec64, cap : BitVec64, code : BitVec64) =
+    ((code=bvconst(17,64)) ∨ (code=bvconst(18,64))) ∧
+    bvule(front,tail) ∧ bvule(tail,cap) ∧ bvule(cap,heap108_signed_max()) ∧
+    res108_add(front,bvsub(cap,tail),heap108_signed_max()) ∧
+    res108_add(bvadd(front,bvsub(cap,tail)),res108_producer_extra(code),heap108_signed_max()) ∧
+    bvugt(res108_producer_min(front,tail,cap,code),cap)
+define res108_name_pack(start : BitVec64, length : BitVec64) =
+    bvor(bvshl(start,bvconst(8,64)),length)
+
+example "producer selector 49152" {
+    assert(res108_selector(bvconst(49152,64),bvconst(24576,64),bvconst(4096,64)))
+}
+
+example "producer selector 73720" {
+    assert(res108_selector(bvconst(73720,64),bvconst(24576,64),bvconst(4096,64)))
+}
+
+example "producer selector 73728" {
+    assert(res108_selector(bvconst(73728,64),bvconst(24576,64),bvconst(4096,64)))
+}
+
+example "producer selector 77816" {
+    assert(res108_selector(bvconst(77816,64),bvconst(24576,64),bvconst(4096,64)))
+}
+
+example "producer selector 77824" {
+    assert(¬(res108_selector(bvconst(77824,64),bvconst(24576,64),bvconst(4096,64))))
+}
+
+example "producer selector 49144" {
+    assert(¬(res108_selector(bvconst(49144,64),bvconst(24576,64),bvconst(4096,64))))
+}
+
+example "producer selector 49153" {
+    assert(¬(res108_selector(bvconst(49153,64),bvconst(24576,64),bvconst(4096,64))))
+}
+
+example "producer hint 4096 4096 4096 17" {
+    assert(res108_producer_hint(bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(17,64)))
+}
+
+example "producer hint 4088 4096 4096 17" {
+    assert(¬(res108_producer_hint(bvconst(4088,64),bvconst(4096,64),bvconst(4096,64),bvconst(17,64))))
+}
+
+example "producer hint 4056 4096 4096 18" {
+    assert(res108_producer_hint(bvconst(4056,64),bvconst(4096,64),bvconst(4096,64),bvconst(18,64)))
+}
+
+example "producer hint 4000 4096 4096 18" {
+    assert(¬(res108_producer_hint(bvconst(4000,64),bvconst(4096,64),bvconst(4096,64),bvconst(18,64))))
+}
+
+example "producer hint 4096 4096 4096 8" {
+    assert(¬(res108_producer_hint(bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(8,64))))
+}
+
+example "producer hint 4096 4096 4096 13" {
+    assert(¬(res108_producer_hint(bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),bvconst(13,64))))
+}
+
+example "producer hint 4096 4088 4096 17" {
+    assert(¬(res108_producer_hint(bvconst(4096,64),bvconst(4088,64),bvconst(4096,64),bvconst(17,64))))
+}
+
+example "producer hint 4096 4104 4096 17" {
+    assert(¬(res108_producer_hint(bvconst(4096,64),bvconst(4104,64),bvconst(4096,64),bvconst(17,64))))
+}
+
+example "producer hint 9223372036854775800 9223372036854775800 9223372036854775800 17" {
+    assert(¬(res108_producer_hint(bvconst(9223372036854775800,64),bvconst(9223372036854775800,64),bvconst(9223372036854775800,64),bvconst(17,64))))
+}
+
+example "law: name offsets survive bounded packing" {
+    assert(∀(s : BitVec64). ∀(n : BitVec64).
+      (bvule(s,bvconst(65528,64)) ∧ bvule(n,bvconst(63,64))) →
+      ((bvlshr(res108_name_pack(s,n),bvconst(8,64))=s) ∧
+       (bvand(res108_name_pack(s,n),bvconst(255,64))=n)))
+}
+// Same universal obligation, proved by an exhaustive split of the error code:
+//   forall f,t,c,e: hint(f,t,c,e) -> c < minimum(f,t,c,e) <= signed_max.
+// The first law proves that every accepted hint selects code 17 or code 18.
+// The next two prove the unchanged conclusion for ALL f,t,c in each case.
+// Together these cover every e; they are not sampled boundary witnesses.
+// No hint guard, arithmetic definition, assumption or solver limit is changed.
+example "law: producer hint excludes other codes" {
+    assert(∀(f : BitVec64). ∀(t : BitVec64). ∀(c : BitVec64). ∀(e : BitVec64).
+      res108_producer_hint(f,t,c,e) → ((e=bvconst(17,64)) ∨ (e=bvconst(18,64))))
+}
+example "law: producer word hint is strictly larger and representable" {
+    assert(∀(f : BitVec64). ∀(t : BitVec64). ∀(c : BitVec64).
+      res108_producer_hint(f,t,c,bvconst(17,64)) →
+      (bvugt(res108_producer_min(f,t,c,bvconst(17,64)),c) ∧
+       bvule(res108_producer_min(f,t,c,bvconst(17,64)),heap108_signed_max())))
+}
+example "law: producer metadata hint is strictly larger and representable" {
+    assert(∀(f : BitVec64). ∀(t : BitVec64). ∀(c : BitVec64).
+      res108_producer_hint(f,t,c,bvconst(18,64)) →
+      (bvugt(res108_producer_min(f,t,c,bvconst(18,64)),c) ∧
+       bvule(res108_producer_min(f,t,c,bvconst(18,64)),heap108_signed_max())))
+}
+
+// C2.4 linker transport control +88: 0 preserves application policy;
+// 2 selects one protected compiler tool and its exact ABI-2 entry signature.
+// These checks supplement, never replace, AOM/frame/call/metadata validation.
+define res108_tool_link_input(profile : BitVec64, modules : BitVec64,
+    protected : Bool, bytes : BitVec64) =
+    bvugt(modules,res108_z()) ∧ bvugt(bytes,res108_z()) ∧
+    (((profile=res108_z()) ∧ bvule(bytes,bvconst(262144,64))) ∨
+     ((profile=bvconst(2,64)) ∧ (modules=bvconst(1,64)) ∧ protected ∧
+      bvule(bytes,bvconst(1048576,64))))
+define res108_tool_link_entry(profile : BitVec64, entry : BitVec64,
+    main_name : Bool, result : BitVec64, argc : BitVec64,
+    p0 : BitVec64, p1 : BitVec64) =
+    (entry=res108_z()) ∧ main_name ∧ (result=bvconst(1,64)) ∧
+    (((profile=res108_z()) ∧ (argc=res108_z()) ∧ (p0=res108_z()) ∧ (p1=res108_z())) ∨
+     ((profile=bvconst(2,64)) ∧ (argc=bvconst(2,64)) ∧
+      (p0=bvconst(2001,64)) ∧ (p1=bvconst(1001,64))))
+
+example "tool link: application exact input bound" {
+    assert(res108_tool_link_input(bvconst(0,64),bvconst(2,64),res108_true(),bvconst(262144,64)))
+}
+
+example "tool link: application cannot borrow compiler bound" {
+    assert(¬(res108_tool_link_input(bvconst(0,64),bvconst(1,64),res108_true(),bvconst(262145,64))))
+}
+
+example "tool link: compiler exact input bound" {
+    assert(res108_tool_link_input(bvconst(2,64),bvconst(1,64),res108_true(),bvconst(1048576,64)))
+}
+
+example "tool link: compiler input beyond bound" {
+    assert(¬(res108_tool_link_input(bvconst(2,64),bvconst(1,64),res108_true(),bvconst(1048577,64))))
+}
+
+example "tool link: compiler rejects multiple modules" {
+    assert(¬(res108_tool_link_input(bvconst(2,64),bvconst(2,64),res108_true(),bvconst(4096,64))))
+}
+
+example "tool link: compiler rejects legacy input" {
+    assert(¬(res108_tool_link_input(bvconst(2,64),bvconst(1,64),res108_false(),bvconst(4096,64))))
+}
+
+example "tool link: unknown linker profile rejected" {
+    assert(¬(res108_tool_link_input(bvconst(3,64),bvconst(1,64),res108_true(),bvconst(4096,64))))
+}
+
+example "tool link: compiler rejects empty input" {
+    assert(¬(res108_tool_link_input(bvconst(2,64),bvconst(1,64),res108_true(),bvconst(0,64))))
+}
+
+example "tool link: compiler exact entry signature" {
+    assert(res108_tool_link_entry(bvconst(2,64),bvconst(0,64),res108_true(),bvconst(1,64),bvconst(2,64),bvconst(2001,64),bvconst(1001,64)))
+}
+
+example "tool link: application exact entry signature" {
+    assert(res108_tool_link_entry(bvconst(0,64),bvconst(0,64),res108_true(),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)))
+}
+
+example "tool link: compiler rejects application entry" {
+    assert(¬(res108_tool_link_entry(bvconst(2,64),bvconst(0,64),res108_true(),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64))))
+}
+
+example "tool link: application rejects compiler entry" {
+    assert(¬(res108_tool_link_entry(bvconst(0,64),bvconst(0,64),res108_true(),bvconst(1,64),bvconst(2,64),bvconst(2001,64),bvconst(1001,64))))
+}
+
+example "tool link: compiler rejects swapped pointer types" {
+    assert(¬(res108_tool_link_entry(bvconst(2,64),bvconst(0,64),res108_true(),bvconst(1,64),bvconst(2,64),bvconst(1001,64),bvconst(2001,64))))
+}
+
+example "tool link: compiler rejects scalar parameter" {
+    assert(¬(res108_tool_link_entry(bvconst(2,64),bvconst(0,64),res108_true(),bvconst(1,64),bvconst(2,64),bvconst(2001,64),bvconst(1,64))))
+}
+
+example "tool link: compiler rejects shifted entry" {
+    assert(¬(res108_tool_link_entry(bvconst(2,64),bvconst(8,64),res108_true(),bvconst(1,64),bvconst(2,64),bvconst(2001,64),bvconst(1001,64))))
+}
+
+example "tool link: compiler rejects wrong name" {
+    assert(¬(res108_tool_link_entry(bvconst(2,64),bvconst(0,64),res108_false(),bvconst(1,64),bvconst(2,64),bvconst(2001,64),bvconst(1001,64))))
+}
+
+example "tool link: compiler rejects wrong return type" {
+    assert(¬(res108_tool_link_entry(bvconst(2,64),bvconst(0,64),res108_true(),bvconst(2,64),bvconst(2,64),bvconst(2001,64),bvconst(1001,64))))
+}
+
+example "law: compiler link input is one protected bounded module" {
+    assert(∀(n : BitVec64). ∀(p : Bool). ∀(b : BitVec64).
+      res108_tool_link_input(bvconst(2,64),n,p,b) →
+      ((n=bvconst(1,64)) ∧ p ∧ bvule(b,bvconst(1048576,64))))
+}
+example "law: compiler link entry preserves exact pointer types" {
+    assert(∀(a : BitVec64). ∀(x : BitVec64). ∀(y : BitVec64).
+      res108_tool_link_entry(bvconst(2,64),res108_z(),res108_true(),bvconst(1,64),a,x,y) →
+      ((a=bvconst(2,64)) ∧ (x=bvconst(2001,64)) ∧ (y=bvconst(1001,64))))
+}

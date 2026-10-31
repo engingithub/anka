@@ -22,6 +22,19 @@ pub(super) struct HeapFreeWait {
 }
 
 impl Kernel {
+    /// Loader-only admission for an exact new compiler process. Shares the
+    /// same owner/global account policy and cleanup role as guest malloc.
+    pub(super) fn compiler_heap_account(
+        &mut self, key: ProcessKey,
+    ) -> Result<crate::anka64::scoped_pointers::heap::OwnerAccount, HeapError> {
+        let owner = self.process_heap_owner(key.slot)?;
+        if owner.process != key || self.fabric.scoped_pointers.heap_account(owner).is_some() {
+            return Err(HeapError::Owner);
+        }
+        let service = self.heap_service_ready()?;
+        self.fabric.scoped_pointers.admit_owner(owner, service.owner_limit)
+    }
+
     /// Explicit fresh runtime setup; reserve the cleanup role before admitting
     /// guest allocations. Its descriptor is kernel-owned, never guest scheduled.
     pub(crate) fn enable_heap_service(&mut self, owner_limit: u64) -> Result<(), HeapError> {

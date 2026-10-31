@@ -10105,14 +10105,14 @@ interleavings; they need not run in parallel to establish that behavior.
 #### Required Kleis gates and bounded follow-up order
 
 R1's theory pair and runtime are developer-accepted; the passing execution
-evidence and implementation boundary are recorded below. The other new filenames remain **proposals only**,
+evidence and implementation boundary are recorded below. The C1 compiler-resource pair is delivered below; the other new filenames remain **proposals only**,
 not delivered theories or passing results. Existing gates retain their stated scope. After a contract changes,
 rerun affected/importing gates; unchanged independent gates need no repeat here.
 
 | Work item | Formal gate before implementation | Bounded acceptance |
 |---|---|---|
 | **R1 — local-frame initialization, accepted** | Delivered `anka108_local_initialization.kleis` and hostile counterpart, composing memory initialization, frame/encoding, kind/representation and saved-event contracts. The focused result below covers full-frame byte/tag initialization after complete preflight and before new authority. | Developer acceptance: 16 focused tests, the shared CC2 integration and the full 1361-test suite pass. A writes a secret; a later fresh local at reused storage reads zero. Parent/parameter data survive, nested/event-suspended lifetimes remain valid and escaped aliases still fault. |
-| **C1 — shared compiler resource/ABI contract** | The planned `anka108_compiler_resources` positive/hostile pair covers job/attempt identities, owner/global peak budgets, metadata/retained artifacts, work/retry limits, typed capacity outcomes and nonwrapping denial. Refine compiler-adapter/rebuild/protected-module, allocation/cleanup and lifecycle gates where boundaries change. Specify the concrete ABI revision and legacy metadata/history bounds together. | A finite C2-C5 plan and complete resource/limit inventory. Invalid hints, denial and stale events preserve B and prior receipts. This uses the accepted allocator. |
+| **C1 — shared compiler resource/ABI contract** | The delivered `anka108_compiler_resources` positive/hostile pair covers job/attempt identities, owner/global peak budgets, metadata/retained artifacts, work/retry limits, typed capacity outcomes and nonwrapping denial. Refine compiler-adapter/rebuild/protected-module, allocation/cleanup and lifecycle gates where boundaries change. Specify the concrete ABI revision and legacy metadata/history bounds together. | A finite C2-C5 plan and complete resource/limit inventory. Invalid hints, denial and stale events preserve B and prior receipts. This uses the accepted allocator. |
 | **C2-C4 — resource migration and growth** | Compose C1 with `anka106_compiler_virtual_layout`, `anka105_include_preprocessing`, `anka104_ankald_process_abi`/static-linker and protected artifact/frame gates. Preserve lineage, checked encodability, exact used bytes and capacity-independent output. | Output growth/retry first; then source/tables; then linking/publication/loading. Cross actual old boundaries and preserve receipts on denial. C5 subsequently re-establishes the fixed point and real compiler A/B/C scenario. |
 | **Service ownership boundary** | Proposed `anka108_buffer_ownership` positive/hostile pair, then a concrete runtime ABI refinement. Compose lifecycle/IPC/capability and `anka107_pointer_concurrency`: centralized revocation/new authority, recipient incarnation, failed-transfer preservation, bounded borrows and current drainage. | A epoch 12 → B 13 → A 14: old saved/spilled epoch-12 aliases remain invalid despite matching owner/address. Reject stale notifications/dead recipients. Define explicit typed handoff before porting shared-buffer clients. |
 | **Heap/controller boundary** | Proposed `anka108_heap_dma` positive/hostile pair before admitting private heap buffers to devices. Compose `anka93e3_nic_controller`, `anka93e4_finite_nic_dma`, generic device, heap worker/reclamation and pointer-concurrency contracts. Bind allocation/epoch/span/rights/request to current terminal controller state. | Pending DMA prevents release/reuse; death/cancellation cannot drop accepted work; stale completion cannot affect C; failed admission preserves RX input/credits. Keep current denial until this boundary is accepted. |
@@ -10317,6 +10317,570 @@ R1 is complete. Proceed directly to C1's shared compiler resource/ABI contract
 and the existing C2-C5 milestones. This documentation-only update changes no
 runtime or Kleis files and requires no repeat of the accepted test runs.
 
+### C1 — Shared compiler resources and adapter ABI 2 (2026-10-27)
+
+**Formal gate developer-accepted; C2.1 implementation below.** Baseline is GitHub commit
+`47105f008ef673876474a216bfe117411d9d6be8` on
+`feat/anka108-compiler-resources`. The new
+`anka108_compiler_resources.kleis` / `_false_witnesses.kleis` pair passes locally:
+**221 positive witnesses, including 26 quantified laws; 195/195 hostile
+assertions explicitly disproved.** No unknown or evaluation failure is accepted.
+The developer independently confirmed **221 positive / 195 explicitly disproved**
+with `--only-compiler-resources` on 2026-10-27. The existing 1361-test full-suite
+acceptance remains the integration baseline; C2.1 adds focused Rust evidence
+below, without rerunning unchanged Kleis gates or the long CC2 chain.
+
+The model imports the existing allocation contract and reuses its owner/global
+budget admission, rounding, virtual disjointness and pointwise account rules.
+It introduces no axioms. Request/region/result guards are a specification for
+C2-C5, not evidence that today's compiler accepts ABI 2 or grows automatically.
+ABI 1 and its enforced limits remain intact until each caller/producer migrates.
+
+#### Decisions and scope
+
+- One frozen job binds an exact source bundle/root, ordered dependencies, tools,
+  target profile and immutable resource plan. Nonreused job/attempt/owner keys
+  resolve trusted records; an owner includes process incarnation, context and
+  domain. Possession of these numeric keys grants no authority.
+- New admission reserves job, owner and global peak charges atomically against
+  the same current ledger revision. Charge retained capacity, page rounding,
+  shadow, metadata, images/stacks, copies, scratch, publications, histories and
+  cleanup obligations. Guest counters and requested sizes cannot set quotas.
+- A failed attempt remains charged until the accepted close/drain/scrub/return
+  machinery finishes. Retry uses a fresh identity and workspace with unchanged
+  frozen bindings. No arena copying preserves embedded compiler pointers.
+- Growth is `max(round_page(minimum), min(2 * old_capacity, ceiling))`, with
+  checked arithmetic and page-aligned positive capacities/ceilings. The model
+  branches before doubling to avoid overflow. A valid minimum must exceed the
+  old capacity. A requirement beyond the admitted ceiling is BudgetDenied.
+- Only a validated NeedCapacity report for a producer-supported resource can
+  retry. Source/representation errors, generic legacy error 8, malformed reports,
+  faults and timeouts are terminal. Both retry count and cumulatively metered
+  execution work are finite; a retry does not reset the work counter.
+- Publication requires independent authority, validated complete guest output,
+  exact used-prefix copying, a fresh READ artifact, retained-storage charges
+  and receipt capacity. A failed attempt consumes no publication epoch and
+  preserves prior artifacts, dependency records and receipts.
+
+#### Concrete internal ABI 2
+
+All scalar fields are little-endian u64 words. Magic is `0x41435232` (ACR2),
+version is 2, header and reply are each 128 bytes, and every region record is
+128 bytes. A request contains exactly `128 + count * 128` bytes. The admitted
+plan bounds count at at most 16 unique roles; table entries and payload capacities
+inside those roles can grow. Reserved words must each be zero. A different
+version/layout is rejected, never decoded as legacy workspace controls.
+
+| Header byte offset | Meaning |
+|---|---|
+| 0, 8, 16 | Magic, ABI version, header size |
+| 24, 32, 40 | Job key, attempt key, exact owner key |
+| 48, 56, 64 | Frozen source/root binding, tool-chain binding, target-profile binding |
+| 72, 80 | Ordered-dependency binding, immutable resource-plan binding |
+| 88, 96 | Region count, record stride (128) |
+| 104, 112, 120 | Exact request size, reply size (128), zero reserved word |
+
+Each binding key resolves a complete immutable coordinator record, rather than
+an unverified hash or a guest name. All binding words are compared against the
+current frozen record on launch, completion, retry and publication. Producer
+execution profile and target application profile remain distinct.
+
+| Region byte offset | Meaning |
+|---|---|
+| 0, 8 | Resource role, exact rights (READ=1 or RW=3) |
+| 16, 24 | Exact object identity and current object generation |
+| 32, 40 | Protected pointer handle/position pair, position zero |
+| 48, 56 | Logical capacity bytes, valid input bytes |
+| 64, 72 | Entry stride bytes, entry capacity count |
+| 80, 88 | Checked virtual mapping base, actual rounded backing size |
+| 96, 104 | Exact owner key, current allocation incarnation |
+| 112, 120 | Two individually zero reserved words |
+
+The pair starts on a 16-byte boundary and must carry authenticated pointer-kind
+state. Its backing, allocation incarnation, owner, bounds and mapping must match
+the actual current allocation record. Mapping addresses and serialized handle
+words create no authority. Count-times-stride, logical bounds, every descriptor
+and every pairwise placement/physical-alias check precede launch.
+
+Roles are: 1 source; 2 workspace; 3 compiler output; 4 functions; 5 call fixups;
+6 local names; 7 typedefs; 8 structure records; 9 fields; 10 enum entries;
+11 frame/literal scratch; 12 preprocessing workspace; 13 linked output;
+14 linker scratch; 15 request/control; 16 reply. Roles 1 and 15 are READ-only;
+other data roles are private RW. Immutable tool RX authority is separate.
+Missing roles depend on the selected stage/profile and must be validated by its
+trusted schema. Only the explicitly advertised growth subset may emit hints;
+C2 initially enables compiler output role 3. Schema/completeness checks are
+trusted implementation obligations, not guest boolean certificates.
+
+The resource-aware entry receives a protected READ request pair in R0:R1 and a
+protected RW reply pair in R2:R3, installed for the compiler's exact owner before
+execution. This is a proposed service entry ABI, not a new opcode or a change
+to ordinary application calls. It must be advertised by the admitted producer.
+Private heap regions must use authenticated protected access. Neither bootstrap
+compatibility nor a numeric mapping authorizes raw loads into private heap.
+Legacy code remains on ABI 1 until its corresponding access path is migrated;
+remaining legacy storage is still included in the complete resource budget.
+
+Source bytes start at position zero in the ABI-2 source region; their length is
+`valid input bytes`, not the old eight-byte envelope. Enough initialized logical
+padding must exist for any final aligned word fetch. Padding is not source text.
+C2 must preserve the explicit ABI-1 envelope for unmigrated producers.
+
+| Reply byte offset | Meaning |
+|---|---|
+| 0, 8 | Magic, ABI version |
+| 16, 24 | Exact job and attempt keys |
+| 32, 40, 48 | Status, resource role, minimum required bytes |
+| 56, 64, 72 | Exact used output bytes, source cursor, diagnostic code |
+| 80, 88, 96 | Source, tool-chain and target-profile bindings |
+| 104, 112, 120 | Ordered-dependency binding, resource-plan binding, zero reserved word |
+
+Guest tags: 0 Success, 1 NeedCapacity, 2 SourceRejected, 3 RepresentationRejected.
+The coordinator alone produces 4 BudgetDenied, 5 ExecutionFailure or
+6 ProtocolRejected. Guest reports require normal transport exit with code zero,
+unchanged controls/bindings, no output execution, stopped writers and actual
+drainage. A zeroed or partially written reply cannot count as success.
+Success requires the entire source consumed and a validated aligned AOM prefix
+of at least 112 bytes, with resource/minimum/diagnostic zero. NeedCapacity
+requires used/diagnostic zero and a checked minimum greater than current capacity;
+its source cursor is bounded by the frozen input length. Rejections have no
+output/minimum/resource and carry a nonzero diagnostic. All unused fields are
+canonical. Future stage-specific artifact formats require their own validator;
+ABI 2 does not silently change AOM version 1.
+
+A minimum is an untrusted request for a blocked reservation, not a promise of
+final size. Even a well-formed inflated hint can consume only the admitted quota,
+work and retry allowance. Compiler instrumentation must establish correct hint
+production; the coordinator cannot infer C semantics from a numeric request.
+
+#### Source inventory and implementation ownership
+
+This extends the inventory below with concrete source locations and separates
+storage policy from language/encoding constraints. It does not raise any limit.
+
+| Current boundary at baseline | Location | Treatment |
+|---|---|---|
+| Default preprocessed output 20472 bytes; strict adapter source ceiling 65528 | `source_bundle.rs::EFFECTIVE_SOURCE_CAPACITY`; `dev_compiler.rs` source admission | Distinct limits: C3 migrates preprocessing and immutable source regions; preserve ABI-1 envelope/padding during transition |
+| Output/tool-image admission 262144 bytes; workspace 24576 bytes | `dev_compiler.rs`; `guest_compiler.rs::WS_SIZE` | C2 output and producer admission; C3 region-based workspace |
+| 64 functions at stride 80; 128 fixups at stride 16; 32 local names at stride 40 | `ankacc2_stage3.c::q40/q41/q43` | C3 described tables with checked counts and offsets |
+| 32 typedefs, stride 24; 16 structures, stride 48; 64 fields, stride 40; 64 enum entries, stride 24 | `q21/q23/q27/q29` | C3 storage migration; structure codes 100..115 also encode a profile limit, so widening requires the type representation to change coherently |
+| Identifier length 63; four parameter slots and protected argument-lane constraints | `q8/q48`, call lowering | Language/call ABI limits, not automatically growable storage |
+| Array count 1024; local/structure allocation 8192; frame local/spill records 4096 | `q27/q43/q60`; `pointer_frames.rs` | C3 inventory and C4 admission/runtime refinement where policy is widened; preserve instruction encodability |
+| Source member name 127, include depth 32; include cycles rejected | `source_bundle.rs`; guest `ankapp.c` | Name/profile validation remains; C3 explicitly budgets include stack, bundle/member copies and output |
+| Linked code+metadata 1 MiB; frame/dependency counts 4096 | `ankald.rs`, `ankald.c`, `pointer_frames.rs`, `compiler_adapter/protected_modules.rs` | C4 coordinated linker/publication/loader budgets and gates |
+| Linker scratch derived from input size; format records 112/160/48 bytes | `ankald.rs`; `aom.rs` | Checked sizing and retained peak charge; AOM wire layout unchanged |
+| Compiler, preprocessor and linker RAM 16 MiB; compiler virtual ceiling 16 MiB, other tools 8 MiB; tool stacks 16 KiB | `dev_compiler.rs`, `source_bundle.rs`, `ankald.rs` | Provision/account complete machines; C3/C4 migrate policy, preserve target/host address bounds |
+| 100000-step quanta and 10000-round launch budgets | Same runners | Meter cumulative work across attempts; reserve cleanup work separately |
+| Copy transactions at most 65536 bytes; fixed call/immediate encodings | `compiler_adapter.rs`; ISA/AOM validation | Preserve per-transaction limit while iterating over larger used prefixes; reject unencodable artifacts |
+| Process/context/transaction logs, directory/shadow capacity, sealed tool copies and per-record Fabric/placement retention | A4 layer matrix; `compiler_adapter.rs::RebuildArtifactStore` | C1 complete-ledger obligation; C2-C4 charge peak/retained capacity and give retained records a safe release policy |
+
+#### Proof boundary and next implementation
+
+The 26 quantified laws cover checked addition/reservation bounds, full folds,
+ABI directory/record containment and pair alignment, foreign-owner preservation,
+finite work/retry progress, bounded geometric growth, stale identities, release
+arithmetic, exact prefix copying, publication preservation and conditional
+canonical byte equality. Hostile witnesses cover overflow, stale snapshots,
+foreign owners, raw bypass, unsupported hints, active work, dirty reuse and
+publication/receipt failures. The modeled A/B/C sequence preserves B's account,
+alias and receipt while A exhausts and C is admitted after A's exact release.
+
+Trusted obligations remain explicit: complete current owner/ledger/region and
+work censuses, actual protected-kind authentication, correct meters and staging
+charges, full guest artifact validation, and canonical serialization. The
+conditional canonical-byte law assumes both guest results represent the same
+frozen job; it is not a proof of the C compiler. A header/role bound is not a
+proof of the concrete decoder. These guards must be implemented and tested in
+C2-C5; no hostile witness count is a claim of whole-stack security or fairness.
+
+With developer acceptance recorded, proceed directly through **C2 output growth**: add the
+versioned producer/adapter path and typed capacity result, use checked fresh
+attempts and shared allocation admission, then cross the actual 256 KiB boundary.
+Retain the C3 source/tables, C4 linking/publication and C5 fixed-point/concurrent
+compiler milestones below. C5 still needs actual concurrent compiler jobs:
+A exhausts/exits, C reuses its backing, B emits the expected artifact/receipt,
+and A's delayed replies and saved aliases fail. This theory's model sequence
+and the accepted malloc-client tests do not replace that executable witness.
+Existing gates are rerun when those implementations change their boundaries;
+unchanged independent gates need no repeat for this handoff.
+
+Run only this new pair:
+
+```sh
+python3 scripts/check-anka108-gates.py \
+  --kleis /Users/enginatik/.cargo/bin/kleis \
+  --kleis-root ~/git/cee/kleis \
+  --only-compiler-resources
+```
+
+### C2.1 — ABI-2 reply decoder and output retry planner (2026-10-27)
+
+**First bounded implementation piece; C2 output growth remains open.**
+`compiler_adapter::resources` implements the scalar part of C1 without changing
+any guest compiler source, ABI-1 runner, allocation, publication or artifact
+limits. The new API is available to the upcoming ABI-2 bridge; the existing
+production compiler path does not call it yet.
+
+The decoder consumes exactly 128 bytes in the specified little-endian layout.
+It checks magic/version, job/attempt identity, all five frozen binding keys,
+reserved zero, source cursor and every status-specific field. Only an admitted
+output-growth producer can return role-3 NeedCapacity. Success metadata requires
+an aligned complete output prefix and exact source consumption. Source and
+representation errors stay terminal. Guest tags 4/5/6 and generic legacy error
+8 cannot trigger retry.
+
+The planner uses checked page rounding and geometric growth, a nonwrapping next
+attempt, finite remaining retries and positive cumulatively metered work. It
+preserves counters in the proposed next budget; a fresh attempt cannot obtain a
+zero-work retry. Over-ceiling requests, stale hints and exhausted work/retries
+leave the current budget unchanged. A proposal is only a sizing decision: its
+public API has **no commit, allocation, refund, launch or publication operation**.
+This prevents a numerical plan from masquerading as completed cleanup or fresh
+allocation admission.
+
+Formal mapping: the decoder implements the scalar fields of `res108_report`,
+`res108_success`, `res108_need` and `res108_rejected`; planning implements
+`res108_page`, `res108_work`, growth arithmetic and the identity/counter portion
+of `res108_retry`. It does not establish the model's trusted current-owner,
+protected-kind, frozen-record, normal-exit, stopped/drained, artifact-valid,
+release or shared-budget predicates. The runner must obtain those facts from
+actual current runtime records. No guest-provided boolean substitutes for them.
+
+Developer acceptance: **18 focused Rust tests passed, 0 failed**, with 1361
+filtered out, in 0.00s. This independently confirms the local C2.1 result. Coverage includes
+all 16 reply words, truncation/trailing bytes/endianness, stale bindings, invalid
+statuses and cursor/output geometry, unsupported growth, signed-limit rounding,
+work overflow, attempt exhaustion, finite retries and unchanged-state denial.
+The arithmetic test proposes growth from 256 KiB to 512 KiB; it is **not** a
+compiler-produced artifact or a completed retry witness. The existing 1361-test
+full-suite result remains historical integration evidence; no new full suite,
+CC2 bootstrap or unchanged Kleis gate was run for this piece.
+
+Run the focused handoff test:
+
+```sh
+cargo test --lib anka64::compiler_adapter::resources::tests -- --test-threads=1
+```
+
+**C2 integration sequence (C2.2 and C2.3 checkpoints below).** Wire the admitted ABI-2 producer and
+protected request/reply transport into the existing compiler adapter. Connect
+NeedCapacity to actual terminal/drain/cleanup evidence and fresh shared-service
+allocation, keeping complete peak charges and frozen inputs. Migrate the guest
+output accesses through authenticated pointers without granting raw heap
+access. Then demonstrate a forced retry, exact direct-versus-retried bytes and
+an emitted artifact beyond 256 KiB before claiming C2 closure. Continue to use
+ABI 1 for unmigrated bootstrap producers. Existing C1 gates cover this planned
+boundary; refine them before implementation only if the concrete ABI or
+invariants change.
+
+### C2.2 — Protected runtime capacity-retry bridge (2026-10-27)
+
+**Bounded runtime checkpoint accepted; guest CC2 integration remains open.**
+`os::compiler_retry` now connects the C2.1 planner to actual protected processes,
+shared-service malloc buffers, real CPU execution and the existing cleanup
+service. Its internal binding captures an output token from R4:R5 and a 128-byte
+reply token from R2:R3, checking current process incarnation/context/domain,
+protected kind, exact logical sizes and distinct private allocations. These
+are bridge staging lanes; C1's service-entry R0:R1 request / R2:R3 reply
+ABI is unchanged. C2.3 below adds that loader; the guest compiler has not migrated.
+
+The bridge reserves cumulative work before each bounded real CPU slice. Its
+compile-only dispatch permits malloc/free and intercepts the authenticated
+SYS_EXIT trap; execution, device and IPC syscalls are rejected. At a zero exit,
+it checks current output/reply custody and the full registered-work census,
+then copies the exact reply through the private heap access checks. Outstanding
+or terminal-but-unconsumed work blocks capture. Malformed reports, faults,
+nonzero exits, source/representation errors, legacy error 8 and budget denial
+cannot produce a next-attempt budget.
+
+On a valid NeedCapacity result, normal process completion centrally closes the
+owner. Old aliases immediately fail authentication, while storage and charges
+remain until the accepted cleanup machinery performs actual retirement, full
+byte/tag scrub, exact extent returns and refunds. Polling advances at most one
+existing cleanup step; it releases the proposed next budget only after **all**
+private allocations and the account for that exact owner are gone. A Kernel-only
+receipt gates consumption of the non-Clone proposal, preserving cumulative work,
+remaining retries and frozen binding keys. Polling the same completion twice
+cannot create another budget. The next process still needs fresh malloc
+admission; a returned scalar budget is not memory or execution authority.
+
+Development validation: **11 new runtime tests passed, 0 failed, 1379 filtered
+out, in 0.90s**. These use a small admitted Anka ISA producer that performs real
+guest malloc calls, protected PWRITE report construction and a real exit trap.
+They exercise actual 256 KiB output allocation followed by cleanup and fresh
+512 KiB allocation, independent A/B/C backing reuse with B preserved, stale and
+forged tokens, changed bindings, malformed/terminal reports, work/budget denial,
+forbidden execution and outstanding CPU work. This is **not** a C compilation,
+AOM emission, compiler fixed-point or concurrent compiler-job witness. Final
+handoff checkpoint was subsequently accepted for progression on 2026-10-27:
+the developer reported **12 heap-runtime tests in 0.01s**, and the supplied
+archive reproduced **11 bridge tests in 0.82s** plus **18 planner tests in 0.00s**
+in the development environment. No long regression, CC2 bootstrap or unchanged
+Kleis gate was run for that checkpoint.
+
+```sh
+cargo test --lib anka64::os::compiler_retry::tests -- --test-threads=1
+cargo test --lib anka64::compiler_adapter::resources::tests -- --test-threads=1
+cargo test --lib anka64::os::heap_application::tests -- --test-threads=1
+```
+
+C1 supplies the identity/report/work/drain/retry requirements; existing A3 and
+cleanup gates supply the actual malloc, closure and release mechanisms. This
+piece does not change the architectural contract or add a theory prerequisite.
+The ordinary scheduler uses its existing dispatch behavior. The specialized
+bridge currently supports capacity-probe attempts only: a Success result is
+terminal metadata, not an admitted or published artifact, and this route cleans
+its storage. Ordinary compilation continues through ABI 1.
+
+**Remaining integration after C2.3:** migrate the resource-aware CC2 producer,
+using the ABI-2 loader, this runtime bridge and a success path that
+validates/copies output before releasing its storage. Complete job/owner/global
+peak accounting must also include legacy tool/stack/control copies and retained
+publications; this patch reuses existing heap accounting and does not claim that
+whole-job census is complete. C2 closes only with an actual automatic compiler
+retry, emitted AOM beyond 256 KiB, direct-versus-retried byte equality and prior
+publication preservation. The existing C3-C5 sequence remains unchanged.
+
+### C2.3 — Protected ABI-2 request loader (2026-10-27)
+
+**Implemented and locally checked; developer acceptance pending.**
+`os::compiler_retry::loader` now prepares a fresh, already admitted protected
+process for the concrete ABI-2 entry. Its trusted coordinator must select an
+ABI-2 producer and supply the frozen effective source and binding keys; this
+loader does not authenticate a new tool image or infer its ABI from code.
+
+The shared allocation service reserves, attaches and fully zeroes five separate
+regions. Source is read-only, workspace and output are read/write, the 768-byte
+request is read-only, and the 128-byte reply is read/write. The request contains
+the exact 128-byte header and five 128-byte region records in role order
+`1, 2, 3, 15, 16`. Records describe actual object/incarnation, owner account,
+logical capacity, valid bytes and reserved virtual/physical sizes. Their five
+pointer cells carry protected kind, including an authenticated self-reference
+to the request; copying their numeric bytes cannot reproduce that authority.
+Entry receives request in **R0:R1** and reply in **R2:R3**. The attempt retains
+its output token directly from publication, without an R4 staging dependency.
+
+**Formal refinement before implementation.** The existing compiler-resource
+pair now specifies first publication of a checked initialized image, immutable
+role rights, agreement between registry and Fabric rights, and complete fresh
+entry installation. Local Kleis results: **254 positive witnesses (28 quantified
+laws) / 226 hostile assertions explicitly disproved**. The added laws establish
+that read-only allocations reject writes and successful writes require matching
+writable registry state. Concrete custody, byte/tag atomicity and exact-source
+checks remain implementation obligations, tested below; these theory results
+are not a proof of the Rust implementation or future hardware.
+
+Rights are fixed at first publication in both the registry and Fabric. A trusted
+image overlay follows full zeroing and current custody/drain checks, then commits
+payload, protected cells and publication together. Source/request never receive
+a writable guest alias. Scalar stores, pointer-cell stores, queued CPU writes
+and typed syscall input all check write authority, including empty input spans.
+Read-only allocations retain the normal process-death and cleanup behavior.
+Ordinary `malloc` still publishes zeroed read/write memory. Arbitrary private
+staging writes still invalidate initialization and require a fresh scrub.
+
+The loader rejects a started/stale process, an existing heap account or a source
+length mismatch before allocating. Failure after owner admission fences the
+process and leaves partial storage charged until actual cleanup. Registers are
+installed only after all five regions publish. No scheduler interleaves this
+exclusive Kernel operation. Initialization uses the existing bounded scrub
+chunks; the complete load is synchronous, and its coordinator work is not yet
+part of the instruction-budget meter.
+
+Local validation: **8 new loader tests passed in 0.27s**; **19 bridge/loader tests
+passed in 1.36s** (including those 8); **18 planner tests in 0.01s**; and **250 heap
+tests in 0.57s**. The ISA producer exercises actual directory PLOAD, source PREAD,
+output/reply PWRITE, exit, cleanup and fresh retry loading. Other tests cover
+read-only enforcement, numeric-copy forgery, exact metadata/padding, duplicate
+entry, partial allocation failure with an unaffected peer, and source bounds.
+No CC2 bootstrap or full regression suite was run for this patch.
+
+```sh
+python3 scripts/check-anka108-gates.py \
+  --kleis /Users/enginatik/.cargo/bin/kleis \
+  --kleis-root ~/git/cee/kleis --only-compiler-resources
+cargo test --lib anka64::os::compiler_retry -- --test-threads=1
+cargo test --lib anka64::compiler_adapter::resources::tests -- --test-threads=1
+cargo test --lib heap -- --test-threads=1
+```
+
+**Next bounded task: C2.4, guest producer migration.** Route CC2's source,
+workspace, output and reply accesses through these protected regions and emit
+the structured capacity result. Preserve the unmigrated ABI-1 bootstrap path.
+The C2.3 source ceiling remains 65528 bytes, with initialized logical padding to
+the next eight-byte boundary (minimum eight); workspace remains 0x6000 bytes.
+Their growth belongs to C3. Successful output capture/admission/publication and
+complete job accounting still need integration: the current bridge treats
+Success as terminal metadata and releases its storage. The five new regions
+use shared heap accounting; legacy tool/stack/control copies and retained
+publications still need the complete job census. C2 remains open until the
+real compiler produces an automatically retried AOM beyond 256 KiB, matching a
+direct adequate-capacity build and preserving prior publication on denial.
+
+### C2.4 — Guest producer migration checkpoint (2026-10-27)
+
+**Status: producer implementation checkpoint delivered; guest execution acceptance pending.**
+The earlier formal-only checkpoint is extended by the implementation below. C2.3 is now developer-accepted: 19 runtime/loader tests passed in
+0.56s, 18 planner tests passed in 0.00s, 250 heap tests passed in 0.18s, and the
+compiler-resource gates passed 254 positive / 226 hostile witnesses. These
+focused results do not establish a new full-suite result.
+
+Source inspection found that the current producer uses numeric addresses for
+its private workspace and output arena. The proposed ABI-2 migration retains
+the existing ABI-1 bootstrap source and introduces a separate protected
+producer. It would pass an authenticated request-directory pointer through
+memory-using routines, resolve internal selectors relative to authenticated
+workspace/output roots, and use protected loads/stores. A numeric selector
+alone must never confer authority. The four-register argument ABI and the
+64-function table limit constrain this migration; bounded parameter packing
+and removal of a trivial helper are candidate implementation choices, not
+completed changes. Source and workspace/table growth remain C3 work.
+
+The preliminary extension in the existing compiler-resource theory pair adds
+20 positive checks (including four quantified laws) and 16 hostile checks for
+aligned region selectors, bounded name packing, and strictly increasing,
+representable output-capacity hints. Only dedicated output collision cases
+may request output growth; generic table/representation errors must remain
+terminal. These checks establish the stated model properties, not equivalence
+of a migrated compiler or end-to-end output publication.
+
+**Proof correction and local validation (2026-10-27).** The first version
+reported 271/272 positive checks and 242/242 hostile disproofs; the combined
+universal capacity-bound assertion returned unknown. That delivery did not
+satisfy the formal gate. An isolated rerun of the unchanged assertion passed
+through Kleis in 4.607s; a separately expanded bit-vector counterexample query
+returned unsat in 0.242s. These diagnostics did not establish the cause of the
+earlier full-run unknown and did not replace the required gate.
+
+The correction proves the same universal obligation by exhaustive cases:
+
+1. Every accepted hint has error code 17 or 18, for all frontiers, capacities
+   and error codes.
+2. For code 17 (an 8-byte emission), every accepted hint is strictly larger
+   than the current capacity and no greater than `2^63 - 1`.
+3. For code 18 (a 48-byte metadata record plus an 8-byte gap), the same bound
+   holds for every accepted hint.
+
+The three laws cover all four original quantified variables. No predicate,
+arithmetic definition, guard, assumption, axiom or solver limit was changed.
+No boundary sampling replaces a universal check. The existing nonempty valid
+hint witnesses and hostile overflow/rejection witnesses remain in the gate.
+The corrected complete compiler-resource gate now passes **274 positive
+witnesses and 242/242 hostile witnesses explicitly disproved** locally.
+Developer confirmation remains pending; the C2.3 accepted baseline is 254 / 226.
+The runner's fail-closed treatment of unknown and errors is unchanged.
+
+This is a proof-formulation correction, not a runtime vulnerability fix or a
+claim that the producer migration is complete. The guarantee concerns hints
+that satisfy the specified checks; the producer must still implement those
+checks and emit the matching reply through ABI 2.
+
+Next implement the protected producer and structured replies, then validate a
+real CC2 compilation through the admitted ABI-2 path. Successful output
+capture/admission/publication and complete job accounting remain separate
+unfinished integration requirements. No Rust or long regression tests were
+run for this documentation/formal checkpoint.
+
+#### C2.4 implementation handoff — awaiting local execution
+
+This patch adds `userspace/system/compiler/ankacc2_abi2.c`: a separate protected
+producer with a five-region request entry, protected source/workspace/output
+access, and ABI-2 success, output-capacity, source-error and representation-error
+replies. The accepted ABI-1 compiler source is unchanged. The protected producer
+supports the application profile; source/table growth and its own new fixed
+point remain later work.
+
+The producer specializes away unused legacy backend paths, packs bounded
+internal scalar arguments to fit the existing four-register call ABI, and
+splits primary-expression parsing from the precedence loop. It has 62 functions
+and stays within the existing compiler name/frame limits in a short host-side
+diagnostic. Parameter staging is aligned at internal workspace offset 61904.
+All emitted compiler accesses still need their authenticated region pointers.
+Output failures are distinguished from fixed-table/representation failures;
+only checked output collisions produce a NeedCapacity reply.
+
+`compiler_adapter/producer.rs` builds the checked-in source with the accepted
+CC2 lineage and guest ankald, then validates its protected executable manifest.
+Building this tool uses an explicit bounded 1 MiB bootstrap output reservation;
+this does not change ordinary application policy or close automatic output
+growth. No host-generated diagnostic artifact enters the accepted lineage.
+
+The existing shared fixed-point integration test now includes the new producer:
+exact protected AOM comparison against ABI 1, adequate-capacity independence,
+real NeedCapacity through the runtime bridge and owner cleanup, source rejection,
+and table exhaustion that must remain terminal. Successful output observation
+is test-only at the authenticated exit boundary. Production artifact capture,
+publication and complete job accounting remain unfinished.
+
+**Validation at handoff:** `cargo check --tests --offline` passed. A short native
+source diagnostic accepted the producer source, but it is not an Anka execution
+witness. The new guest build/runtime integration and regression suite have NOT
+been run here. This implementation is not yet accepted. The previously verified
+formal gate remains 274 positive / 242 hostile; no theory or gate script changes
+are included in this implementation patch.
+
+Run locally:
+
+```sh
+cargo test --lib p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address -- --test-threads=1 --nocapture
+```
+
+Acceptance requires the new `protected CC2 ABI 2` success line and a passing test.
+
+#### C2.4 linker-profile correction (2026-10-27)
+
+The first developer execution failed after compilation at
+`ProducerBuildError::Link(LinkerRejected(9))` (577.18s). The guest linker still
+used the application module's 256 KiB input bound. It also required a protected
+`int main()` entry, while the ABI-2 producer requires
+`int main(int **request, int *reply)`. Increasing only the compiler's output
+reservation had not updated either downstream contract. This was an integration
+mistake; the unused-field warnings were unrelated to the linker rejection.
+
+The correction adds an explicit trusted linker transport profile at control
+byte offset 88. Value 0 retains application behavior. Value 2 admits exactly
+one protected compiler-tool module, bounded to 1 MiB, with `main` at byte zero,
+integer return type, and exactly two pointer parameters `[2001, 1001]` (the
+existing type codes for `int **` and `int *`). Unknown profiles, legacy inputs
+in the tool profile, and wrong entry signatures are rejected. The existing
+1 MiB combined-image and 4096 frame/record limits are unchanged.
+
+A distinct module constructor validates the bounded compiler tool. Ordinary
+application linking rechecks its 256 KiB module limit even if it receives a
+module constructed through the tool path. Both guest and host check the
+selected profile; host validation retains complete frame, instruction, call,
+metadata and exact-byte checks. The host neither repairs nor synthesizes linked
+bytes. The linker control profile is covered by the existing unchanged-control
+check. This creates no publication or execution authority and does not close
+C2 automatic growth or C4's general link-limit work.
+
+Before implementing the correction, the compiler-resource gate passed **293
+positive witnesses and 259/259 hostile witnesses explicitly disproved**,
+including new application/tool policy separation, exact ABI signature,
+unknown-profile, oversized-input, legacy-input and multiple-module checks.
+These are model checks, not a proof of the complete C/Rust implementations.
+
+The three new `ProducerBuildError` dead-field warnings are resolved by a
+`Display` implementation that actually reads and preserves the nested errors;
+the acceptance panic uses that diagnostic. Existing `PointerMachineError`
+payload warnings reflect errors retained for Debug diagnostics. Unused
+`CCA_FUNC_COUNT`, `CompileArtifact.funcs`, test `NetRun.buffer` fields and the
+cleanup `lease()` accessor are separate cleanup work. No error payload is
+replaced with `()` and no broad `cargo fix` is applied.
+
+**Local validation:** the two `p108_compiler_producer_link` Rust regressions
+passed (2/2, 153.22s). They execute guest ankald, cover a module above 256 KiB,
+retain application input/signature rejection, verify the exact linked bytes,
+reject wrong producer pointer types and reject over-limit/malformed tool inputs.
+The test build reports 79 warnings, down from 82; the three producer diagnostic
+warnings are removed. No full CC2 integration or regression suite was run here.
+The full ABI-2 producer execution remains pending until the developer reruns
+the shared fixed-point acceptance test successfully.
+
+A failure should be investigated before another full regression run. Phase 10.8
+remains open: C2 output growth/publication integration, C3 source/workspace growth,
+C4 link/admission growth and C5 self-hosted/concurrent closure remain in DN-71.
+
 ### Inventory: output size is only one limit
 
 The following are observed current limits, not proposed permanent capacities:
@@ -10336,6 +10900,203 @@ The first audit must also cover typedef/struct/field tables, parser work stacks,
 preprocessor members/include depth and cycles, fixup storage, string/literal
 packing, compiler stacks and protected runtime tables. Increasing the output
 constant alone would simply move the first failure to another fixed table.
+
+### C2.4 entry-frame fixture correction (2026-10-27)
+
+The developer's next run confirms successful protected producer linking:
+322816 code bytes, 479296 backing bytes, entry zero. Execution then faults on
+its first PFRAME at PC zero; no producer C body has executed. This result does
+not establish ABI-2 producer acceptance.
+
+The runtime fixture incorrectly reused the small transport probe's registry:
+64 shared identity slots, with five already occupied by the ABI regions. A
+short native compiler-metadata diagnostic reports 174 local registrations for
+the producer entry (2144 frame bytes), exceeding the remaining 59 slots. The
+native diagnostic is an inspection aid, not trusted compiler-lineage evidence.
+The existing registry correctly refuses the entire frame before modifying
+payload or issuing any local pointers; the architectural fault mapper reports
+that refusal as ControlFlowViolation.
+
+The producer fixture now uses Fabric's existing bounded application heap
+profile: 4096 shared slots and 4096 scopes. It retains the two-MiB owner quota
+and the existing authenticated loader and frame checks. This corrects fixture
+provisioning; it does not implement dynamic table growth or claim arbitrary
+recursion capacity. No architectural invariant or Kleis theory changes.
+
+A short ISA-only regression loads the actual five ABI regions, reproduces the
+old first-instruction exhaustion with 174 locals, and checks that registers,
+registry and dirty stack bytes are unchanged. A second regression uses the
+application profile to enter 174- and 588-local nested frames, spill/restore
+both protected arguments, retire the frames and preserve the heap regions.
+These probes do not rebuild CC2.
+
+PointerMachineError now formats all nested causes without discarding payloads.
+Test builds print that cause before architectural fault conversion, so a future
+failure reports e.g. `pointer registry: Exhausted` instead of only the generic
+ControlFlowViolation. Guest-visible fault behavior is unchanged. This also
+removes the two Frame/Heap dead-field warnings; unrelated warnings are deferred.
+
+**Local validation:** both `p108_producer_entry` regressions passed (2/2,
+0.40s). The old fixture reports `pointer registry: Exhausted` at PC zero;
+the corrected profile passes nested entry and argument preservation. The test
+build reports 77 warnings, down from 79. No long CC2 or full-suite run was
+performed here. Full producer execution still needs the developer's rerun:
+
+```sh
+cargo test --lib p108_producer_entry -- --test-threads=1 --nocapture
+cargo test --lib p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address -- --test-threads=1 --nocapture
+```
+
+### C2.4 producer diagnostic-history slowdown (2026-10-31)
+
+The developer's two entry regressions pass (0.19s), but the integrated witness
+was interrupted after printing the 4096-slot frame budget. That log is not
+evidence of producer completion or of an infinite guest loop.
+
+Source inspection identifies an unbounded-history performance defect in the
+new test harness. `Fabric::submit` appends every legacy transaction, including
+instruction fetches, to `transactions`. Both protected-frame exclusion in
+`fabric/local_frames.rs` and the heap privacy check in `fabric/heap.rs` scan
+that vector to find nonterminal work. The heap check also runs when authenticating
+live heap pointers in `fabric/heap/cells.rs`. Terminal entries are skipped only
+after being visited. The ABI-2 compiler repeatedly accesses its heap-backed
+workspace and enters helper functions, so retaining the entire trace causes
+history-dependent overhead on its hot path, potentially quadratic overall,
+plus unbounded diagnostic-memory growth. The older development compiler and
+guest linker harnesses already collect completed traces between batches; the
+new `observe` and NeedCapacity test loops omitted that collection.
+
+The test-only correction uses 256-step execution slices and calls the existing
+`discard_completed_compiler_trace` collector between them, including the exit
+slice. Collection is refused if a controller or non-CPU agent is present, and
+the collector refuses to discard anything while any transaction is nonterminal.
+The fixture is synchronous and retains no transaction-vector handles between
+successful collections. Transaction IDs remain monotonic. Fault records,
+heap-work tickets, pointer-kind cells, owner lifetimes and all authorization,
+initialization, overlap and cleanup checks are retained. This change is not
+a general-purpose trace compactor for concurrent controllers or DMA.
+
+The billion-step guest-work cap is unchanged. Stage labels and five-second
+progress reports now identify the current case, elapsed time, dispatched work
+budget, sampled PC and process state. `ANKA_PRODUCER_TIMEOUT_SECS` sets a
+positive per-stage diagnostic wall limit (default 300 seconds); the timeout
+reports registers and fails the test, never counts as acceptance. Checks run
+between slices, so this is not a preemptive host watchdog. Dispatched work is
+an upper bound, not an exact retired-instruction count. These diagnostics cover
+the producer cases and owner cleanup, not the preceding CC2 bootstrap/link.
+
+Two focused regressions compare every instruction's PC/register state with and
+without collection through real nested frames and loader-issued heap pointers;
+they also check actual trace release, nonterminal-transaction refusal, DMA-agent
+refusal and monotonic transaction identity. Existing entry regressions remain.
+No architecture/ABI change or new Kleis gate is required for this test-only
+use of the existing synchronous collector. All existing formal gates remain
+required for the production transitions they cover.
+
+**Validation status:** source-reviewed; Rust/cargo is unavailable in the patch
+environment, so the new regressions have not been compiled or run here. No long
+integration or full suite was run. The slowdown mechanism is established from
+source; its wall-time contribution and complete producer acceptance require
+the developer's rerun. Do not mark C2.4 accepted from this patch alone.
+
+```sh
+cargo test --lib p108_producer_ -- --test-threads=1 --nocapture
+cargo test --lib p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address -- --test-threads=1 --nocapture
+```
+
+### C2.4 local-metadata traversal correction (2026-10-31)
+
+The developer confirms all four entry/trace regressions pass (0.43s). With
+trace collection, exact-AOM and capacity-independence producer executions
+complete in 44.74s and 44.67s (555008 dispatched steps each). NeedCapacity
+completes in 266.76s (3167744 dispatched steps), followed by owner cleanup.
+The adequate-output case still reaches the 900-second diagnostic deadline
+after 11068416 dispatched steps. Advancing PCs and a stable dispatch rate do
+not by themselves establish compiler progress or termination. Do not treat
+the prior recommendation to increase a timeout as evidence of correctness.
+
+Inspection found a second performance defect in ABI-2 `q59`: for every local
+ordinal, the emitter restarts at the head of a reverse-linked metadata list.
+With N locals this traverses N*(N-1)/2 links. The 70-assignment fixture has
+71 locals and therefore performs 2485 link traversals. Each traversal calls
+the guest qptr helper, including its protected calls, frames and heap checks.
+The small-buffer case fails during code emission before this metadata walk,
+so its measured duration does not predict the successful case's duration.
+
+The ABI-2 emitter now reverses the private scratch list once, checking that
+ordinals descend by one and that the chain has exactly the declared length.
+It then emits records in ascending ordinal order in one forward pass. The
+reversal is bounded by the local count; a missing, repeated, out-of-order or
+extra link fails with the existing representation diagnostic 19. The existing
+q55 output-capacity checks, metadata format, field order, frame registrations
+and authority checks remain in place. No additional allocation or guest ABI
+is introduced. ABI-1 stays unchanged as the independent reference algorithm.
+
+Formal-contract assessment: this is an implementation optimization under the
+existing exact-artifact and local-ordinal contracts, not a new architectural
+permission or lifetime transition. Existing Kleis gates are unchanged. Native
+differential checks below do not constitute a universal formal refinement
+proof or replace the guest-lineage acceptance requirement.
+
+**Diagnostic validation:** a host C adapter widened integers and literals to
+64 bits, supplied ordinary host arrays in place of protected regions, and ran
+the old/new ABI-2 source algorithms. All 24 combinations of 0/1/2/10/35/70
+assignments and 4096/8192/65536/131072-byte output capacities matched status,
+cursor, size and every emitted AOM byte. For 70 assignments at capacity 65536,
+both produce 8872 bytes and consume all 449 source bytes. qptr calls fall from
+26083 to 18700; the old 2485-link repeated search is replaced by two linear
+passes over 71 records. These measurements establish source-level behavior
+only; they do not rule out a separate generated-code problem.
+
+The integrated witness now also compares the larger result byte-for-byte with
+the accepted ABI-1 compiler, whose ordinal-search implementation is unchanged,
+then validates the resulting protected module. Rust/cargo is unavailable in
+this patch environment: guest compilation/execution and the added assertion
+remain unverified. C2.4 remains pending. Do not extend the diagnostic deadline
+again as a substitute for investigating a further failure.
+
+For the next local run, use an optimized host emulator while explicitly
+retaining debug assertions and overflow checks; guest C and acceptance checks
+are unchanged. This builds a separate release test binary and incurs a one-time
+host compilation cost. It is a separate performance configuration, not a claim
+that the ordinary debug-profile regression suite has passed.
+
+```sh
+CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true \
+ANKA_PRODUCER_TIMEOUT_SECS=900 \
+cargo test --release --lib p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address -- --test-threads=1 --nocapture
+```
+
+### C2.4 bounded output observation correction (2026-10-31)
+
+The user's optimized guest run with the linear metadata traversal reached the
+successful exit boundary for the larger source, then failed in the test observer
+at `producer_tests.rs:151` with `Pointer(Bounds)`. Exact-AOM and capacity-independence
+stages completed in 4.47s and 4.29s; NeedCapacity completed in 25.40s. The whole
+test failed after 189.99s. This is evidence of progress past the earlier timeout,
+not acceptance of the full producer witness.
+
+Root cause: the observer passed the entire successful output to `read_heap_bytes`
+in one operation. `checked_heap_backing_span` deliberately rejects lengths above
+4096 bytes. Allocation/output capacity is distinct from the per-read limit.
+The larger source's native diagnostic emitted 8872 bytes; the guest run's actual
+artifact bytes have not yet passed the reference comparison.
+
+The test-only observer now validates the reported length against its bound
+request capacity and copies in at-most-4096-byte chunks. Each chunk derives an
+offset from the original protected token and uses the existing authenticated
+Fabric read; no direct physical-memory access or limit widening is introduced.
+Empty captures also authenticate the token. Failure returns no output vector.
+The existing stopped-process/exclusive-Kernel observation boundary is retained.
+
+Two fast Rust regressions cover patterned data across 4096-byte boundaries,
+an 8872-byte prefix, exact capacity, over-capacity rejection, the unchanged
+single-read limit, and retired-owner rejection including empty output.
+Rust tooling is unavailable in the editing environment; these tests and the
+full guest witness remain pending local execution. No machine contract changes
+or new Kleis gates are needed for this test-harness correction. Production
+artifact capture/publication remains the separate C2.5 milestone.
 
 ### Compiler client design after the allocation checkpoint
 
@@ -10425,8 +11186,7 @@ implementation obligations before enabling the corresponding runtime behavior.
 After the allocation interface and required stack review, add the compiler-client
 resource/lifecycle theory and its hostile counterpart, provisionally
 `anka108_compiler_resources.kleis` and
-`anka108_compiler_resources_false_witnesses.kleis`. These are proposed filenames,
-not files or passing results delivered with this plan. Then refine the concrete
+`anka108_compiler_resources_false_witnesses.kleis`. This pair is developer-accepted in C1 above (221 positive / 195 hostile). Then implement/refine the concrete
 adapter and the affected preprocessing, rebuild, module and pointer-admission
 contracts. Existing constants remain the enforced contract until those
 refinements and their implementations are accepted together.
@@ -10492,8 +11252,8 @@ compiler-only architecture or permanent compatibility with temporary service ABI
 | A3 — C malloc/free | CC2 builtins, owned replies, private heap publication/access, free completion and lifecycle cleanup | Accepted 2026-10-25: all 12 A3 unit tests passed in the earlier full run; corrected shared CC2/C/module/A-B-C integration passed in 1026.53s. Kleis 52 / 43 passed locally before implementation |
 | A4 — whole-stack review | Source review delivered 2026-10-25 | Evidence/gap matrix and formal gate mapping above; follow-ups remain open |
 | R1 — local initialization | Formal pair and whole-frame byte/tag initialization runtime accepted | Kleis 151 / 118; 16 focused tests in 0.02s; shared CC2/C integration in 1008.62s; full 1361-test suite in 2446.84s, all passing |
-| C1 — compiler contract and ABI | Finish the limit inventory; prove job budgets, outcome, region-layout and retry lifecycle laws using the shared service; specify adapter ABI revision and diagnostics | Positive and hostile Kleis gates; every current hard limit classified, with no claim of executable growth yet |
-| C2 — output growth | Implement validated resource plans, typed output-exhaustion status and fresh-attempt retries for the CC2 adapter; update validators/receipts and producer-image admission consistently | The same valid C input fails a deliberately small initial arena, retries automatically and emits an AOM larger than 256 KiB; two adequate capacities yield identical bytes; budget denial preserves prior publications |
+| C1 — compiler contract and ABI | Delivered resource/lifecycle theory, concrete ABI-2 layout and expanded limit inventory above | Original gate developer-accepted: 221 positive (26 quantified) / 195 hostile. C2.3 first-publication refinement developer-accepted: 254 (28 quantified) / 226. C2.4 selector/capacity and linker-profile refinements locally pass 293 / 259; developer confirmation pending |
+| C2 — output growth (in progress) | C2.1, C2.2 and C2.3 checkpoints accepted; C2.3 implements the five-region protected loader. C2.4 producer implementation is delivered with guest acceptance pending. Guest producer migration, successful output admission/publication and complete job charging remain open | The same valid C input fails a deliberately small initial arena, retries automatically and emits an AOM larger than 256 KiB; two adequate capacities yield identical bytes; budget denial preserves prior publications |
 | C3 — source and workspace | Add preprocessing/source growth and replace fixed compiler tables with described regions; eliminate hard-coded table-address assumptions | Meaningful source beyond 65528 bytes, more than 64 function entries, more than 128 deferred calls and more than 32 local names compile where permitted by the target profile; boundary failures remain explicit |
 | C4 — link and admission | Extend the budget contract through guest ankald, publication, closed-image validation and ordinary loading; parameterize policy-only frame/metadata bounds | Modules link and execute beyond the old 1 MiB cap within encoding and memory bounds; rebased frames/calls, metadata, stale authority and denial/retry are checked; widened frame limits have witnesses beyond their old bounds |
 | C5 — self-hosted closure | Connect the resource-aware path to ordinary user-facing compiler invocation and the rebuild driver, including concurrent jobs and real service code | Exact CC2 generation fixed point, independent concurrent compilations, automatic growth, matching direct-vs-retried artifacts, protected-module execution, and affected regressions; document remaining genuine language/encoding limits |
@@ -10514,9 +11274,10 @@ checks permit it. The developer runs the long fixed-point and single-threaded
 regression tests locally; reserve a complete suite for the coherent integration
 checkpoint or a specific cross-cutting risk, rather than every small handoff.
 
-**Next action:** commit and push the accepted R1 implementation, formal files
-and documentation. The focused R1 tests, shared CC2 integration and full
-1361-test suite pass. A3 and A4 remain accepted; start C1's shared compiler
-resource/ABI Kleis contract, then the existing C2-C5 milestones. The Metal 4
-direction remains deferred. This documentation-only update requires no Rust
-tests or independent unchanged-Kleis rerun.
+**Next action:** run the C2.4 guest producer acceptance test above; after it passes, complete production output capture,
+followed by successful artifact capture/publication and complete accounting.
+The original C1, C2.1, C2.2 and C2.3 checkpoints are accepted; the existing C1 pair was
+refined before C2.3 implementation. No repeated A4 review is needed. C2 remains open until an actual compiler retry
+crosses 256 KiB with admission/publication evidence. C3-C5 follow the existing
+order. Metal 4 remains deferred.
+

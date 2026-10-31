@@ -50,7 +50,7 @@ impl Fabric {
             || row.object.0 >= heap.object_id_floor
             || row.logical != plan.logical()
             || row.extents != plan.extents()
-            || row.planned_rights != Permissions::RW
+            || row.planned_rights != plan.rights()
         {
             return Err(HeapError::StaleReservation);
         }

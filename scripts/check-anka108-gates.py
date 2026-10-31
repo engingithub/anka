@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run 10.7 prerequisites and the 10.8 I/O, rebuild and allocation gates.
+"""Run 10.7 prerequisites and the 10.8 I/O, rebuild, allocation and compiler-resource gates.
 
 Unknown, timeout, parse/evaluation errors and absent witnesses fail closed.
 The hostile Kleis test command intentionally reports failing examples; only
@@ -50,6 +50,8 @@ def main():
                            help='run only the software cleanup/reuse refinement pair')
     selection.add_argument('--only-malloc', action='store_true',
                            help='run the concrete malloc/free runtime and ABI refinement')
+    selection.add_argument('--only-compiler-resources', action='store_true',
+                           help='run only the C1 shared compiler resource/ABI gate pair')
     parser.add_argument('--timeout', type=int, default=120,
                         help='wall-clock seconds per command (default: 120)')
     args = parser.parse_args()
@@ -72,7 +74,7 @@ def main():
             or args.only_modules or args.only_allocation or args.only_initialization
             or args.only_reclamation or args.only_undertaker or args.only_a22 or args.only_a23
             or args.only_workers or args.only_cleanup or args.only_malloc
-            or args.only_local_initialization):
+            or args.only_local_initialization or args.only_compiler_resources):
         try:
             previous = subprocess.run(
                 [sys.executable, str(root / 'scripts/check-anka107-gates.py'),
@@ -84,7 +86,9 @@ def main():
         if previous.returncode:
             return 1
     all_ok = True
-    if args.only_local_initialization:
+    if args.only_compiler_resources:
+        stems = ('anka108_compiler_resources',)
+    elif args.only_local_initialization:
         stems = ('anka108_local_initialization',)
     elif args.only_malloc:
         stems = ('anka108_malloc_runtime',)
@@ -124,7 +128,7 @@ def main():
                  'anka108_allocation_reclamation', 'anka108_async_reclamation',
                  'anka108_allocation_placement', 'anka108_allocation_fabric',
                  'anka108_cleanup_workers', 'anka108_cleanup_reuse', 'anka108_malloc_runtime',
-                 'anka108_local_initialization')
+                 'anka108_local_initialization', 'anka108_compiler_resources')
     for stem in stems:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')

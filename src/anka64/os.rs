@@ -25,6 +25,8 @@ mod heap_cleanup;
 mod heap_application;
 use heap_application::{HeapService, HeapFreeWait};
 mod heap_work;
+pub(crate) mod compiler_retry;
+pub(crate) use compiler_retry::CompilerRetryRelease;
 pub(crate) use heap_context::{CurrentHeapProcess, CurrentHeapRetirement};
 
 // ───────────────────────────────────────────────────────────────────
@@ -2394,6 +2396,10 @@ impl Kernel {
     }
 
     fn run_process(&mut self, idx: usize, quantum: usize) {
+        self.run_process_with_exit_stop(idx, quantum, false);
+    }
+
+    fn run_process_with_exit_stop(&mut self, idx: usize, quantum: usize, compiler: bool) -> bool {
         // Machine event sequence (Phase 9.0d):
         //
         //   Before any instruction fetch, if P ∧ ¬M, delivery gets
@@ -2407,7 +2413,7 @@ impl Kernel {
 
         for _ in 0..quantum {
             if self.processes[idx].exited() {
-                return;
+                return false;
             }
 
             // ── Pre-fetch delivery check ──────────────────────────
@@ -2420,7 +2426,7 @@ impl Kernel {
             if self.processes[idx].core.deliver_pending() {
                 self.processes[idx].core.halted = true;
                 self.handle_async_interrupt(idx);
-                return;
+                return false;
             }
 
             // ── Execute one instruction ───────────────────────────
@@ -2440,7 +2446,22 @@ impl Kernel {
 
                     match classify_halt(&self.processes[idx].core) {
                         HaltDisposition::Syscall => {
-                            self.handle_syscall(idx);
+                            if compiler {
+                                // The capacity-retry bridge snapshots an owned reply
+                                // at the real exit trap, before normal owner closure.
+                                // No execution/device/IPC syscall enters this route.
+                                match self.processes[idx].core.protected_syscall_image() {
+                                    Some((words, kinds)) => match words[0] {
+                                        SYS_EXIT => return true,
+                                        SYS_MALLOC => self.handle_malloc(idx, words, kinds),
+                                        SYS_FREE => self.handle_free(idx, words, kinds),
+                                        _ => self.finish_process(idx, ProcessResult::ProtectionFault),
+                                    },
+                                    None => self.finish_process(idx, ProcessResult::ProtectionFault),
+                                }
+                            } else {
+                                self.handle_syscall(idx);
+                            }
                         }
                         HaltDisposition::TimerInterrupt
                         | HaltDisposition::DeviceInterrupt => {
@@ -2456,7 +2477,7 @@ impl Kernel {
                             self.finish_process(idx, ProcessResult::Exited(code));
                         }
                     }
-                    return;
+                    return false;
                 }
                 super::core::StepResult::Fault(f) => {
                     // Faulted instruction: NO timer tick, NO async
@@ -2466,10 +2487,11 @@ impl Kernel {
                         f.object, f.offset, f.kind,
                         self.processes[idx].core.pc);
                     self.finish_process(idx, ProcessResult::ProtectionFault);
-                    return;
+                    return false;
                 }
             }
         }
+        false
     }
 
     /// Tick all devices and route source assertions to the core.

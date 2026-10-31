@@ -44,7 +44,24 @@ const CTRL_CODE_SIZE: u64 = 56;
 const CTRL_LIT_START: u64 = 64;
 const CTRL_ENTRY: u64 = 72;
 const CTRL_IMAGE_SIZE: u64 = 80;
+// Trusted transport policy; no AOM header or guest reply selects this profile.
+const CTRL_LINK_PROFILE: usize = 88;
 const CTRL_PREFIX_SIZE: usize = 128;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LinkProfile { Application, CompilerAbi2 }
+impl LinkProfile {
+    fn wire(self) -> u64 { match self { Self::Application => 0, Self::CompilerAbi2 => 2 } }
+    fn module_limit(self) -> u64 {
+        match self {
+            Self::Application => super::dev_compiler::DEVELOPMENT_COMPILER_OUTPUT_SIZE,
+            Self::CompilerAbi2 => 1024 * 1024,
+        }
+    }
+    fn entry_parameters(self) -> &'static [u64] {
+        match self { Self::Application => &[], Self::CompilerAbi2 => &[2001, 1001] }
+    }
+}
 const MODULE_DESCRIPTOR_SIZE: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,10 +200,10 @@ pub fn run_ankald(
     inputs: &[&[u8]],
     entry_name: &str,
 ) -> Result<AnkaldLinkedImage, AnkaldError> {
-    run_ankald_process(linker_image, inputs, entry_name, false).map(|output| output.image)
+    run_ankald_process(linker_image, inputs, entry_name, false, LinkProfile::Application).map(|output| output.image)
 }
 
-fn run_ankald_process(linker_image: &[u8], inputs: &[&[u8]], entry_name: &str, application_heap: bool)
+fn run_ankald_process(linker_image: &[u8], inputs: &[&[u8]], entry_name: &str, application_heap: bool, profile: LinkProfile)
     -> Result<AnkaldOutput, AnkaldError> {
     if linker_image.is_empty() {
         return Err(AnkaldError::EmptyLinkerImage);
@@ -301,6 +318,7 @@ fn run_ankald_process(linker_image: &[u8], inputs: &[&[u8]], entry_name: &str, a
         ANKALD_CONTROL_VADDR + entry_offset as u64);
     put_u64(&mut control, CTRL_ENTRY_LEN, entry_name.len() as u64);
     put_u64(&mut control, CTRL_STATUS as usize, u64::MAX);
+    put_u64(&mut control, CTRL_LINK_PROFILE, profile.wire());
     for (index, (map, bytes)) in input_maps.iter().zip(inputs.iter()).enumerate() {
         let base = CTRL_PREFIX_SIZE + index * MODULE_DESCRIPTOR_SIZE;
         put_u64(&mut control, base, map.base);
@@ -472,14 +490,19 @@ fn run_ankald_process(linker_image: &[u8], inputs: &[&[u8]], entry_name: &str, a
 
 const PROTECTED_IMAGE_LIMIT: u64 = 1024 * 1024;
 
-fn protected_geometry(inputs: &[ValidatedPointerModule]) -> Result<(u64, u64, usize), AnkaldError> {
+fn protected_geometry(inputs: &[ValidatedPointerModule], profile: LinkProfile) -> Result<(u64, u64, usize), AnkaldError> {
     if inputs.is_empty() { return Err(AnkaldError::EmptyInput); }
+    if profile == LinkProfile::CompilerAbi2 && inputs.len() != 1 {
+        return Err(AnkaldError::InvalidProtectedLayout);
+    }
     let mut code = 0u64;
     let mut metadata = 32u64;
     let mut frames = 0usize;
     for input in inputs {
         let module = input.module();
-        if code % module.header.code_align != 0 {
+        // Recheck here: a tool-validated module cannot widen application admission.
+        if input.bytes().len() as u64 > profile.module_limit()
+            || code % module.header.code_align != 0 {
             return Err(AnkaldError::InvalidProtectedLayout);
         }
         code = code.checked_add(module.code.len() as u64).ok_or(AnkaldError::InvalidProtectedLayout)?;
@@ -498,11 +521,16 @@ fn protected_geometry(inputs: &[ValidatedPointerModule]) -> Result<(u64, u64, us
 /// address. It does not search by import name, select a target, or emit a CALL.
 pub(crate) fn validate_protected_link_result(inputs: &[ValidatedPointerModule],
     image: &AnkaldLinkedImage) -> Result<(), AnkaldError> {
+    validate_protected_link_profile(inputs, image, LinkProfile::Application)
+}
+
+fn validate_protected_link_profile(inputs: &[ValidatedPointerModule],
+    image: &AnkaldLinkedImage, profile: LinkProfile) -> Result<(), AnkaldError> {
     use std::collections::{BTreeMap, BTreeSet};
     use super::desc::Sem;
     use super::isa::decode;
 
-    let (code_size, metadata_size, frame_count) = protected_geometry(inputs)?;
+    let (code_size, metadata_size, frame_count) = protected_geometry(inputs, profile)?;
     let reject = || AnkaldError::InvalidProtectedResult;
     if image.code_size != code_size || image.lit_start != code_size || image.entry != 0
         || image.bytes.len() as u64 != code_size + metadata_size || image.process_slots_observed != 1 {
@@ -525,7 +553,7 @@ pub(crate) fn validate_protected_link_result(inputs: &[ValidatedPointerModule],
         base += input.module().code.len() as u64;
     }
     let entry = exports_at.get(&0).ok_or_else(reject)?;
-    if entry.name != "main" || entry.return_type != 1 || !entry.parameter_types.is_empty() {
+    if entry.name != "main" || entry.return_type != 1 || entry.parameter_types != profile.entry_parameters() {
         return Err(reject());
     }
 
@@ -583,11 +611,22 @@ pub(crate) fn run_protected_ankald(linker_image: &[u8], inputs: &[ValidatedPoint
 
 pub(crate) fn run_protected_ankald_for_publication(linker_image: &[u8], inputs: &[ValidatedPointerModule])
     -> Result<AnkaldOutput, AnkaldError> {
-    protected_geometry(inputs)?;
+    protected_geometry(inputs, LinkProfile::Application)?;
     let bytes: Vec<_> = inputs.iter().map(ValidatedPointerModule::bytes).collect();
-    let output = run_ankald_process(linker_image, &bytes, "main", true)?;
+    let output = run_ankald_process(linker_image, &bytes, "main", true, LinkProfile::Application)?;
     validate_protected_link_result(inputs, &output.image)?;
     Ok(output)
+}
+
+/// One protected compiler tool with the loader's exact two-pointer ABI.
+/// This returns checked bytes only, not publication or execution authority.
+pub(crate) fn run_compiler_producer_ankald(linker_image: &[u8], input: &ValidatedPointerModule)
+    -> Result<AnkaldLinkedImage, AnkaldError> {
+    let inputs = std::slice::from_ref(input);
+    protected_geometry(inputs, LinkProfile::CompilerAbi2)?;
+    let output = run_ankald_process(linker_image, &[input.bytes()], "main", false, LinkProfile::CompilerAbi2)?;
+    validate_protected_link_profile(inputs, &output.image, LinkProfile::CompilerAbi2)?;
+    Ok(output.image)
 }
 
 /// Publish exact bytes produced by `run_ankald` into a caller-owned Fabric.

@@ -4,6 +4,47 @@ use crate::anka64::scoped_pointers::heap::HeapJob;
 use crate::anka64::state::{AccessKind, AgentId, MemoryRequest};
 
 impl Fabric {
+    /// Snapshot a stopped compiler's reply through its exact live heap tokens.
+    /// The caller holds Kernel exclusively and has checked the real exit trap.
+    /// Outstanding registered work blocks the snapshot, including terminal but
+    /// unconsumed work. No bytes, tags, reservations or authority change here.
+    pub(crate) fn read_compiler_capacity_reply(
+        &mut self,
+        owner: AllocationOwner,
+        agent: AgentId,
+        output: ScopedPointer,
+        reply: ScopedPointer,
+        capacity: u64,
+    ) -> Result<[u8; 128], HeapError> {
+        let out = self.checked_live_heap(owner, agent, output)?;
+        let report = self.checked_live_heap(owner, agent, reply)?;
+        if out.pointer.position() != 0 || report.pointer.position() != 0
+            || out.row.logical != capacity || report.row.logical != 128
+            || out.row.object == report.row.object
+            || out.row.planned_rights != Permissions::RW
+            || report.row.planned_rights != Permissions::RW
+        {
+            return Err(HeapError::Size);
+        }
+        for live in [&out, &report] {
+            let closure = self.scoped_pointers
+                .prepare_attached_heap_closure(live.row.reservation, owner)?;
+            self.check_heap_cleanup_drain(&closure, live.row.object)?;
+        }
+        let mut bytes = [0; 128];
+        self.read_heap_bytes(owner, agent, reply, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Actual owner release, not a timeout or a caller-supplied drain flag.
+    /// Closed accounts disappear only after exact returns/refunds, and private
+    /// rows disappear only after the cleanup service's complete byte/tag scrub.
+    pub(crate) fn compiler_heap_owner_released(&self, owner: AllocationOwner) -> bool {
+        self.private_heap.as_ref().is_some_and(|heap|
+            heap.rows.iter().flatten().all(|row| row.owner != owner))
+            && self.scoped_pointers.heap_account(owner).is_none()
+    }
+
     /// Explicit software application profile. Runtime/loader objects live outside
     /// this pool; physical_high_watermark also includes it. Policy, not a C limit.
     pub(crate) fn with_application_heap(mem_size: usize) -> Result<Self, HeapError> {
@@ -89,8 +130,12 @@ impl Fabric {
         agent: AgentId,
         pointer: ScopedPointer,
         length: u64,
+        write: bool,
     ) -> Result<(), HeapError> {
         let live = self.checked_live_heap(owner, agent, pointer)?;
+        if write && live.row.planned_rights != Permissions::RW {
+            return Err(HeapError::Pointer(crate::anka64::scoped_pointers::PointerError::Rights));
+        }
         if length > 4096 || length > live.row.logical - live.pointer.position() {
             return Err(HeapError::Size);
         }

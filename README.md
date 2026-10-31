@@ -144,3 +144,10 @@ closure; it does not by itself prove every compiler transformation correct.
 The current reference runtime depends on a trusted host. Native FPGA realization
 is a deferred direction and requires substantial new timing/cache refinement
 before implementation. The active work is the software rebuild milestone.
+
+## License
+
+Anka, including Anka64, is available under the [non-commercial license](LICENSE).
+Non-commercial use, modification and redistribution are permitted subject to
+its terms. Commercial use requires prior written permission from Engin Atik;
+contact **atik@kleis.io**. Third-party components retain their own licenses.

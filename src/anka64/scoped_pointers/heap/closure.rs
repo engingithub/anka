@@ -16,6 +16,7 @@ pub(crate) struct HeapClosurePlan {
     reservation: HeapReservation,
     owner: AllocationOwner,
     logical: u64,
+    writable: bool,
     extents: HeapExtents,
     cleanup: usize,
     stage: SlotState,
@@ -23,6 +24,9 @@ pub(crate) struct HeapClosurePlan {
 }
 
 impl HeapClosurePlan {
+    pub(crate) fn rights(&self) -> crate::anka64::state::Permissions {
+        if self.writable { crate::anka64::state::Permissions::RW } else { crate::anka64::state::Permissions::READ }
+    }
     pub(crate) fn is_retired(&self) -> bool {
         self.stage == SlotState::Retired
     }
@@ -102,6 +106,7 @@ impl ScopedPointers {
             logical: record.logical,
             extents,
             cleanup: record.cleanup,
+            writable: record.writable,
             stage,
             revision: self.heap.revision,
         })

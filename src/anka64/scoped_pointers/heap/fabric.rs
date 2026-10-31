@@ -1,5 +1,6 @@
 //! A2.3: exact private attachment/initialization under the common revision.
-//! Publication plans issue a pointer only through the owned reply commit.
+//! Publication plans issue a pointer only through the owned reply commit or
+//! the C2.3 trusted image/entry loader's first-publication transition.
 //! The legacy local-pointer path cannot expose private heap backing.
 use super::*;
 
@@ -15,6 +16,10 @@ pub(crate) struct HeapAttachmentPlan {
 }
 
 impl HeapAttachmentPlan {
+    /// Payload for a reserved row, not usable authority until publication.
+    pub(crate) fn pointer(&self) -> ScopedPointer {
+        ScopedPointer { slot: self.reservation.slot, generation: self.reservation.generation, position: 0 }
+    }
     pub(crate) fn slot(&self) -> usize {
         self.reservation.slot
     }
@@ -154,6 +159,11 @@ impl ScopedPointers {
     /// Fabric has checked full initialization and the owned one-use event reply.
     /// Commit occurs within that same exclusive operation, with no fallible tail.
     pub(crate) fn commit_heap_publication(&mut self, plan: HeapAttachmentPlan) -> ScopedPointer {
+        self.commit_heap_image_publication(plan, true)
+    }
+
+    /// Rights are fixed at FIRST publication; no writable alias is downgraded.
+    pub(crate) fn commit_heap_image_publication(&mut self, plan: HeapAttachmentPlan, writable: bool) -> ScopedPointer {
         assert_eq!(plan.revision, self.heap.revision);
         let slot = &mut self.slots[plan.reservation.slot];
         assert_eq!(slot.state, SlotState::Reserved);
@@ -161,6 +171,7 @@ impl ScopedPointers {
         let Record::Heap(record) = &mut slot.record else { unreachable!() };
         assert!(record.ever_attached && !record.published);
         record.published = true;
+        record.writable = writable;
         slot.state = SlotState::Live;
         self.heap.advance();
         ScopedPointer { slot: plan.reservation.slot, generation: plan.reservation.generation, position: 0 }

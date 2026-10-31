@@ -1693,7 +1693,7 @@ their pending integration language. Focused results remain separate runs.
 | Regression evidence | Latest developer full suite: 1361 passed / 0 failed / 0 ignored in 2446.84s. Separate focused runs: 16 R1 tests passed in 0.02s; shared CC2 integration passed in 1008.62s with 1360 filtered. Earlier failing runs remain historical evidence (DN-71) |
 | Protected modules | Current rerun: two C units, four frames, 3520 code + 2048 metadata bytes; receipt-bound exit 0, output [65,0,255,66] and hostile lifetime/bounds rejection. A3 also accepts cross-module heap return/free (DN-71) |
 | Module formal gate | 217 positive / 168 explicitly disproved hostile witnesses |
-| Shared allocation and compiler resources | DN-71's six pairs through A2.2 are developer-accepted across focused runs; their combined local checkpoint was 1051 positive / 737 hostile. A2.1: 120 focused tests accepted 2026-10-22. A2.2 Kleis 215 / 180 and Rust accepted 2026-10-23: all 1134 library tests passed single-threaded in 1149.73s, including 21 new A2.2 witnesses. A3 heap publication and C malloc/free now have developer runtime/CC2 acceptance; A4 review is delivered. R1 is developer-accepted; C1, the shared compiler resource/ABI contract, is next. |
+| Shared allocation and compiler resources | DN-71's six pairs through A2.2 are developer-accepted across focused runs; their combined local checkpoint was 1051 positive / 737 hostile. A2.1: 120 focused tests accepted 2026-10-22. A2.2 Kleis 215 / 180 and Rust accepted 2026-10-23: all 1134 library tests passed single-threaded in 1149.73s, including 21 new A2.2 witnesses. A3 heap publication and C malloc/free now have developer runtime/CC2 acceptance; A4 review is delivered. R1 is developer-accepted. C1 resource/ABI-2 gate is developer-accepted: 221 positive (26 quantified) / 195 hostile. C2.1/C2.2 checkpoints are accepted (18 planner / 11 bridge tests). C2.3 adds a protected five-region loader with 8 new local tests and a refined Kleis gate (254 / 226); developer confirmation is pending. Guest CC2 still uses ABI 1 and C2 output-growth acceptance remains open (DN-71). |
 | Allocation A2.3 | Formal gate developer-accepted 2026-10-24: 192 positive (30 quantified laws) / 162 hostile. A2.3.1 accepted: 17 new tests / 144 focused; A2.3.2: 18 / 162; A2.3.3: 22 / 184; A2.3.4: 17 / 201; A2.3.5a: 21 / 222; A2.3.5b: 21 / 243; A2.3.5c: 22 / 265, recorded 2026-10-25 (each focused run includes its new tests). A2.3.5 worker gate is accepted: 197 positive (23 quantified) / 172 hostile. A2.3.6 queued-job recovery is developer-accepted: 21 new / 286 focused tests (0.01s / 0.16s), recorded 2026-10-25. A2.3.7 authority retirement is developer-accepted: 21 new / 307 focused tests (0.02s / 0.19s), including the new tests. Complete trusted cleanup/reuse is developer-accepted: Kleis 92 positive / 79 hostile, 19 new tests in 0.01s and 326 focused tests in 0.19s (including those 19). A3 implements C malloc/free, owned results, production publication and automatic lifecycle cleanup. Its new Kleis gate passed locally at 52 / 43. The corrected integration passes in 1026.53s, including C malloc/free, hostile cases, linked modules and independent A/B/C reuse. Actual concurrent compiler jobs remain C5 work. |
 | Residual-data isolation | New private lifetimes must receive initialized bytes and no inherited pointer kinds before authority publication. A2.3.2 private heap initialization is developer-accepted; A3 guest heap publication and zeroed reuse are accepted. R1's formal pair and full-frame byte/tag initialization runtime are developer-accepted, including fresh/reused C locals and typed nulls (DN-71). |
 | Protected application ABI | Metadata-bearing pointers, checked arithmetic, local-frame lifetimes, protected calls/spills and event-context save/restore |
@@ -3671,8 +3671,9 @@ client and an adversarial gate before the next one depends on it:
       - A3 C malloc/free accepted 2026-10-25: local formal gate 52 / 43; developer unit tests, exact CC2 fixed point and C/module/A-B-C integration pass
       - required A4 whole-stack review delivered in DN-71; track its findings
       - R1 accepted: Kleis 151 / 118; 16 focused Rust tests, shared CC2 integration and full 1361-test suite pass (DN-71)
-      - next: C1 shared compiler resource/ABI Kleis contract
-      - then C2-C5 automatic output/source/workspace/link growth on the shared service
+      - C1 shared compiler resource/ABI-2 gate developer-accepted: 221 positive / 195 hostile
+      - C2.1/C2.2 checkpoints accepted; C2.3 five-region ABI-2 loader locally checked; guest CC2 migration, successful publication and C2 output-growth acceptance remain open
+      - then C3-C5 source/workspace/link growth and concurrent compiler closure
       - compiler/toolchain modularization, headers, modules, and libraries
       - persistent tool/source receipts and rebuilt socket/HTTP services
 10.9  supply-chain closure, hostile audit, and CPU-to-HTTP rebuild gate
@@ -3701,8 +3702,8 @@ evidence below and developer acceptance recorded on 2026-10-22. A3 has now
 delivered and validated the common service's C interface; A4 has reviewed
 CPU/events, Fabric/placement, processes, IPC, DMA/controllers, tools/artifacts
 and network/other services. DN-71 records evidence, gaps and formal gates.
-Close R1 local-frame initialization, then continue C1-C5; hardware and future
-service ownership remain separately scoped.
+R1 and C1 are accepted. Continue C2-C5; hardware and future service ownership
+remain separately scoped.
 
 A2.1 integrates local and heap identities in one preallocated stable directory,
 with nonwrapping generations and fixed scope, owner-account and cleanup tables.
@@ -4353,8 +4354,67 @@ the subsequent lexer failure. The shared CC2 integration passed in 1008.62s
 nulls, nested arguments, protected modules and malloc/free with independent
 A/B/C reuse. The full single-threaded suite passed: **1361 passed / 0 failed /
 0 ignored / 0 measured / 0 filtered in 2446.84s**. These are developer-run results;
-this documentation update ran no Rust tests or CC2 bootstrap. Proceed to C1's
-shared compiler resource/ABI contract without reopening the completed A4 audit.
+this documentation update ran no Rust tests or CC2 bootstrap. C1 has since been developer-accepted; proceed through C2 without reopening the
+completed A4 audit.
+
+**C1 formal handoff, 2026-10-27.** DN-71 records the shared compiler resource
+contract, concrete internal ABI 2 and source limit inventory. The focused new
+Kleis pair passes locally: 221 positive witnesses (26 quantified laws) and
+195/195 explicitly disproved hostile assertions, independently confirmed by the
+developer on 2026-10-27.
+The contract requires frozen job/tool/source/profile/plan bindings, exact owner
+and fresh attempt identities, job/owner/global peak budgets, authenticated data
+regions, cumulative work/retry limits, safe drainage/reuse and exact-prefix
+publication. ABI-2 header/region/reply layouts use protected pointer-kind state;
+numeric addresses create no authority. Existing ABI-1 runtime limits remain
+unchanged. C2 implements output growth; C3-C5 retain their source/workspace,
+linking/publication and actual concurrent-compiler obligations.
+
+**C2.1 implementation, 2026-10-27.** `compiler_adapter::resources` now decodes
+all scalar ABI-2 reply fields and computes bounded output retry proposals.
+The developer independently accepted all 18 focused Rust tests. The decoder rejects stale identities/bindings,
+malformed results, unsupported growth and guest claims of coordinator outcomes.
+The planner preserves cumulative work/retry limits and checks growth/attempt
+arithmetic. Its proposal has no allocation, refund or launch authority. It does
+not establish stopped/drained work, current protected grants, artifact validity
+or complete shared accounting. Existing compilation still uses ABI 1; no guest
+source or runtime capacity changed.
+
+**C2.2 runtime bridge, 2026-10-27.** The specialized capacity-probe runner now
+binds genuine malloc output/reply tokens, meters real instruction slices,
+checks the owned zero-exit event and registered work before reading the reply,
+and waits for actual owner cleanup/release before consuming a retry proposal.
+Old aliases are fenced at process completion; charges remain until cleanup.
+An internal release receipt cannot be replaced by a guest integer or drain flag.
+Eleven runtime tests passed locally (0.90s), including fresh 256-to-512 KiB heap
+allocation and independent-client reuse. The checkpoint was accepted for
+progression after the supplied archive reproduced 11 bridge tests (0.82s) and
+18 planner tests (0.00s); the developer also reported 12 heap-runtime tests
+(0.01s). These ISA probes are not compiler-generated AOMs. C2.3 adds the request
+loader below; the CC2 producer still needs migration, together with successful
+output admission/publication and complete whole-job charging. Ordinary compilation
+continues through ABI 1. Actual automatic compiler retry and an emitted artifact
+beyond 256 KiB remain required for C2 closure; see DN-71.
+
+**C2.3 ABI-2 loader, 2026-10-27.** A fresh admitted protected producer now receives
+an authenticated request in R0:R1 and reply in R2:R3. Five shared-service regions
+hold source, workspace, output, request and reply. Source/request are read-only
+from first publication, with matching registry/Fabric rights; the other regions
+are read/write. Full backing zeroing precedes trusted payload and pointer-kind
+installation. The exact 768-byte request includes five typed region references,
+including its self-reference. Raw copies preserve bytes but cannot mint kind.
+Write paths and typed input require write authority; cleanup handles both rights
+classes. A failed partial load fences its owner and retains charges until cleanup.
+
+The existing compiler-resource Kleis pair was refined before implementation and
+passes locally at **254 positive / 226 hostile**, including 28 quantified laws.
+Local Rust evidence: 8 new loader tests, 19 combined bridge/loader tests, 18
+planner tests and 250 heap tests, all passing; developer acceptance is pending.
+This is an ISA-level request/entry/cleanup witness. CC2 still uses ABI 1, source
+and workspace limits remain for C3, and successful artifact publication plus
+whole-job accounting are still open. Next is C2.4 guest producer migration;
+DN-71 records the concrete scope and local test commands. No long regressions
+were run for C2.3.
 
 The reclamation refinement requires reusable physical and per-owner virtual
 extents, exact split/coalesce transitions, stable slot/generation history and

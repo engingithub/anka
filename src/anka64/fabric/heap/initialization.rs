@@ -5,6 +5,7 @@ use super::*;
 use std::ops::Range;
 
 const CHUNK_LIMIT: u64 = 4096;
+mod compiler_loader;
 
 /// Opaque snapshot of exact private custody and trusted progress. Copies are
 /// harmless: every use rechecks the current row, registry and both managers.
@@ -201,8 +202,8 @@ impl Fabric {
         Ok(self.commit_private_initialization(plan, span, None))
     }
 
-    /// The only non-scrub byte writer for private heap backing. This is a
-    /// trusted runtime API, not guest I/O or an initialized-image overlay.
+    /// Arbitrary private-staging byte writer. This is a trusted runtime API,
+    /// not guest I/O or the C2.3 checked image overlay at first publication.
     /// Every successful write (even writing zero-valued bytes) invalidates
     /// the ENTIRE prefix and all older completion records. Re-scrub is required.
     pub(crate) fn write_private_heap(

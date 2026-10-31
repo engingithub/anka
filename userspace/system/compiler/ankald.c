@@ -305,7 +305,9 @@ int pvalid(int m){
 int b=modbase(m);
 int cs=*(b+40);
 int rs=*(b+64);
-if(((1<<18)<*(b+24))|(rs<64)){return 0;}
+int limit=1<<18;
+if(*(131000+160)==2){limit=1<<20;}
+if((limit<*(b+24))|(rs<64)){return 0;}
 if(*(b+56)!=112+cs){return 0;}
 if(*(b+80)!=*(b+56)+rs){return 0;}
 int h=pmeta(m);
@@ -660,6 +662,8 @@ return code;
 int main(){
 int mc=*(131000+72);
 if(mc<=0){return fail(1);}
+int profile=*(131000+160);
+if((profile!=0)&(profile!=2)){return fail(9);}
 int d=*(131000+80);
 int out=*(131000+88);
 int cap=*(131000+96);
@@ -672,6 +676,7 @@ int p=1;
 while(p<el){if(restc(rb(ep+p))==0){return fail(8);}p=p+1;}
 int m=0;
 while(m<mc){if(validmod(m)==0){return fail(2);}m=m+1;}
+if(profile==2){if((mc!=1)|(pmode(0)!=1)){return fail(9);}}
 int pf=pprofile();
 if(pf<0){return fail(9);}
 if(alldefs()==0){return fail(3);}
@@ -691,7 +696,12 @@ if(0<pf){
 if((ent!=0)|(el!=4)){return fail(8);}
 if((rb(ep)!=109)|(rb(ep+1)!=97)|(rb(ep+2)!=105)|(rb(ep+3)!=110)){return fail(8);}
 int entrysym=symbase(em,es);
-if((*(entrysym+112)!=1)|(*(entrysym+120)!=0)){return fail(8);}
+if(*(entrysym+112)!=1){return fail(8);}
+if(profile==2){
+if((*(entrysym+120)!=2)|(*(entrysym+128)!=2001)|(*(entrysym+136)!=1001)){return fail(8);}
+}else{
+if(*(entrysym+120)!=0){return fail(8);}
+}
 }
 int rr=relocsok();
 if(rr!=0){return fail(rr);}

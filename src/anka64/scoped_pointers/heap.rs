@@ -121,6 +121,7 @@ pub(super) struct HeapRecord {
     rounded: u64,
     cleanup: usize,
     published: bool,
+    writable: bool,
     /// Sticky once Fabric/work is attached; direct cancellation then closes.
     ever_attached: bool,
     extents: Option<HeapExtents>,
@@ -177,6 +178,9 @@ fn bytes<T>(count: usize) -> Result<u64, HeapError> {
         .and_then(|n| u64::try_from(n).ok())
         .ok_or(HeapError::Configuration)
 }
+
+impl OwnerAccount { pub(crate) fn serial(self) -> u64 { self.serial } }
+impl HeapReservation { pub(crate) fn incarnation(self) -> u64 { self.job } }
 
 impl ScopedPointers {
     pub(crate) fn with_limits(limits: RegistryLimits) -> Result<Self, HeapError> {
@@ -383,6 +387,7 @@ impl ScopedPointers {
                 rounded,
                 cleanup,
                 published: false,
+                writable: true,
                 ever_attached: false,
                 extents,
             }),

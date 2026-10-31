@@ -451,3 +451,61 @@ fn p104_failed_link_does_not_mutate_target_fabric_or_placement() {
     assert_eq!(fabric.objects.len(), objects_before);
     assert_eq!(placement.allocated_count(), allocations_before);
 }
+
+// Link-profile regression fixtures avoid rebuilding CC2. They still execute
+// the real guest ankald and independently validate its exact output bytes.
+fn compiler_producer_link_fixture(size: usize, parameters: &[u64]) -> Vec<u8> {
+    assert!(size >= 24 && size % 8 == 0);
+    let mut code: Vec<u8> = std::iter::repeat_n((63u32 << 26).to_le_bytes(), size / 4)
+        .flatten().collect();
+    code[..4].copy_from_slice(&(44u32 << 26).to_le_bytes());
+    code[size-16..size-12].copy_from_slice(&(46u32 << 26).to_le_bytes());
+    let mut ending = super::isa::Asm64::new(); ending.ret();
+    code[size-8..size-4].copy_from_slice(&ending.to_bytes());
+    let metadata: Vec<u8> = [1345400887u64, 2, size as u64, 1, 0, size as u64, 16, 0]
+        .iter().flat_map(|w| w.to_le_bytes()).collect();
+    protected_test_aom(&code, &metadata, &[("main", 1, 0, parameters)], &[])
+}
+
+#[test]
+fn p108_compiler_producer_link_accepts_large_tool_without_widening_applications() {
+    use super::ankald::{run_compiler_producer_ankald, run_protected_ankald};
+    use super::pointer_frames::{PointerModuleError, ValidatedPointerModule};
+    let bytes = compiler_producer_link_fixture(262144, &[2001, 1001]);
+    assert!(matches!(ValidatedPointerModule::from_aom(&bytes), Err(PointerModuleError::Capacity)));
+    let module = ValidatedPointerModule::from_compiler_producer_aom(&bytes).unwrap();
+    assert_eq!(run_protected_ankald(&[], std::slice::from_ref(&module)),
+        Err(AnkaldError::InvalidProtectedLayout));
+    assert_eq!(run_ankald(&ankald_image().bytes, &[&bytes], "main"),
+        Err(AnkaldError::LinkerRejected(9)));
+    let image = run_compiler_producer_ankald(&ankald_image().bytes, &module).unwrap();
+    assert_eq!(image.entry, 0);
+    assert_eq!(&image.bytes[..image.code_size as usize], module.module().code);
+    assert_eq!(&image.bytes[image.lit_start as usize..], module.module().rodata);
+    let too_large = compiler_producer_link_fixture(1048576, &[2001, 1001]);
+    assert!(matches!(ValidatedPointerModule::from_compiler_producer_aom(&too_large),
+        Err(PointerModuleError::Capacity)));
+    let mut bad = bytes;
+    set_word(&mut bad, 112, (44u64 << 26) | 1 | ((63u64 << 26) << 32));
+    assert!(ValidatedPointerModule::from_compiler_producer_aom(&bad).is_err(),
+        "tool policy must retain manifest validation");
+}
+
+#[test]
+fn p108_compiler_producer_link_requires_exact_loader_entry_signature() {
+    use super::ankald::run_compiler_producer_ankald;
+    use super::pointer_frames::ValidatedPointerModule;
+    let bytes = compiler_producer_link_fixture(24, &[2001, 1001]);
+    let module = ValidatedPointerModule::from_compiler_producer_aom(&bytes).unwrap();
+    run_compiler_producer_ankald(&ankald_image().bytes, &module).unwrap();
+    assert_eq!(run_ankald(&ankald_image().bytes, &[&bytes], "main"),
+        Err(AnkaldError::LinkerRejected(8)));
+    for parameters in [&[][..], &[1001, 2001], &[2001, 1]] {
+        let bytes = compiler_producer_link_fixture(24, parameters);
+        let module = ValidatedPointerModule::from_compiler_producer_aom(&bytes).unwrap();
+        assert_eq!(run_compiler_producer_ankald(&ankald_image().bytes, &module),
+            Err(AnkaldError::LinkerRejected(8)), "parameters={parameters:?}");
+    }
+    let bytes = compiler_producer_link_fixture(24, &[]);
+    run_ankald(&ankald_image().bytes, &[&bytes], "main").unwrap();
+}

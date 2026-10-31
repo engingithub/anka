@@ -173,13 +173,22 @@ impl ValidatedPointerModule {
     pub(crate) fn frames(&self) -> &[FrameManifest] { &self.frames }
 
     pub(crate) fn from_aom(bytes: &[u8]) -> Result<Self, PointerModuleError> {
+        Self::from_aom_with_limit(bytes, super::dev_compiler::DEVELOPMENT_COMPILER_OUTPUT_SIZE)
+    }
+
+    // A bounded compiler-tool bootstrap, not a wider application/publication policy.
+    pub(crate) fn from_compiler_producer_aom(bytes: &[u8]) -> Result<Self, PointerModuleError> {
+        Self::from_aom_with_limit(bytes, 1024 * 1024)
+    }
+
+    fn from_aom_with_limit(bytes: &[u8], limit: u64) -> Result<Self, PointerModuleError> {
         use super::aom::AOM_HEADER_SIZE;
         use super::desc::Sem;
         use super::isa::decode;
 
         const NOP: u32 = 63 << 26;
         const CALL: u32 = 50 << 26;
-        if bytes.len() as u64 > super::dev_compiler::DEVELOPMENT_COMPILER_OUTPUT_SIZE {
+        if bytes.len() as u64 > limit {
             return Err(PointerModuleError::Capacity);
         }
         let module = AomModule::parse(bytes).map_err(PointerModuleError::Aom)?;

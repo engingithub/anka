@@ -66,7 +66,7 @@ impl Fabric {
         {
             return Err(HeapError::StaleReservation);
         }
-        if row.planned_rights != Permissions::RW {
+        if row.planned_rights != plan.rights() {
             return Err(HeapError::Pointer(PointerError::Rights));
         }
         // The registry's published live state is the visibility gate. Complete
@@ -186,6 +186,9 @@ impl Fabric {
         source: Option<ScopedPointer>,
     ) -> Result<(), HeapError> {
         let live = self.checked_live_heap(owner, agent, destination)?;
+        if live.row.planned_rights != Permissions::RW {
+            return Err(HeapError::Pointer(PointerError::Rights));
+        }
         let span = self.checked_heap_span(&live, 16, true)?;
         if let Some(pointer) = source {
             self.authenticate_heap_cell_source(owner, agent, pointer)?;
@@ -230,6 +233,9 @@ impl Fabric {
         bytes: &[u8],
     ) -> Result<(), HeapError> {
         let live = self.checked_live_heap(owner, agent, destination)?;
+        if live.row.planned_rights != Permissions::RW {
+            return Err(HeapError::Pointer(PointerError::Rights));
+        }
         let length = u64::try_from(bytes.len()).map_err(|_| HeapError::Size)?;
         let span = self.checked_heap_span(&live, length, false)?;
         self.memory[span.bytes].copy_from_slice(bytes);

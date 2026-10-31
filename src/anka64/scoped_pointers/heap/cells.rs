@@ -8,11 +8,15 @@ pub(crate) struct HeapPointerPlan {
     reservation: HeapReservation,
     owner: AllocationOwner,
     logical: u64,
+    writable: bool,
     extents: HeapExtents,
     position: u64,
 }
 
 impl HeapPointerPlan {
+    pub(crate) fn rights(&self) -> crate::anka64::state::Permissions {
+        if self.writable { crate::anka64::state::Permissions::RW } else { crate::anka64::state::Permissions::READ }
+    }
     pub(crate) fn slot(self) -> usize {
         self.reservation.slot
     }
@@ -106,6 +110,7 @@ impl ScopedPointers {
             logical: record.logical,
             extents,
             position: pointer.position,
+            writable: record.writable,
         })
     }
 }

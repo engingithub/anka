@@ -265,8 +265,25 @@ pub(crate) fn compile_protected_application_aom_with_linked_compiler(
     compile_linked_aom(image,source,2)
 }
 
+/// One bounded bootstrap reservation for the ABI-2 producer itself. Ordinary
+/// application compilation retains its existing policy; automatic output
+/// growth is exercised by the resulting producer through the shared service.
+pub(crate) fn compile_protected_producer_aom(
+    image: &super::ankald::AnkaldLinkedImage, source: &[u8],
+    _authority: &super::dev_runner::DeveloperExecutionAuthority,
+) -> Result<CompiledAomModule, DevelopmentCompileError> {
+    compile_linked_aom_with_capacity(image, source, 2, 0x100000)
+}
+
 fn compile_linked_aom(
     image: &super::ankald::AnkaldLinkedImage, source: &[u8], profile: u64,
+) -> Result<CompiledAomModule, DevelopmentCompileError> {
+    compile_linked_aom_with_capacity(image, source, profile, DEVELOPMENT_COMPILER_OUTPUT_SIZE)
+}
+
+fn compile_linked_aom_with_capacity(
+    image: &super::ankald::AnkaldLinkedImage, source: &[u8], profile: u64,
+    capacity: u64,
 ) -> Result<CompiledAomModule, DevelopmentCompileError> {
     if image.code_size == 0 || image.code_size > image.bytes.len() as u64
         || image.entry >= image.code_size || image.entry % 8 != 0
@@ -276,7 +293,7 @@ fn compile_linked_aom(
         return Err(DevelopmentCompileError::InvalidOutputGeometry);
     }
     let raw = compile_c_with_geometry(&image.bytes, false, source,
-        DEVELOPMENT_COMPILER_OUTPUT_SIZE, Some(image), profile)?;
+        capacity, Some(image), profile)?;
     Ok(CompiledAomModule { bytes: raw.bytes,
         process_slots_observed: raw.process_slots_observed })
 }
