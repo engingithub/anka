@@ -47,6 +47,8 @@ pub(crate) struct CompilerOutputAttempt {
     output: ScopedPointer,
     reply: ScopedPointer,
     budget: Option<OutputRetryBudget>,
+    loaded_source: Option<ScopedPointer>,
+    publication: Option<publication::PublicationKey>,
 }
 
 #[derive(Debug)]
@@ -139,6 +141,8 @@ impl Kernel {
             output,
             reply,
             budget: Some(budget),
+            loaded_source: None,
+            publication: None,
         })
     }
 
@@ -150,6 +154,40 @@ impl Kernel {
         attempt: &mut CompilerOutputAttempt,
         quantum: usize,
     ) -> Result<CompilerSlice, CompilerRuntimeError> {
+        let Some(budget) = self.drive_compiler_attempt(attempt, quantum)? else {
+            return Ok(CompilerSlice::Running);
+        };
+        let key = attempt.owner.process;
+        // The process is at an authenticated syscall halt. No callback, other
+        // CPU slice or cleanup step can interleave this read and owner closure.
+        let result = (|| {
+            let bytes = self.fabric.read_compiler_capacity_reply(
+                attempt.owner,
+                attempt.agent,
+                attempt.output,
+                attempt.reply,
+                budget.context().output_capacity(),
+            )?;
+            match budget.context().decode(&bytes)? {
+                CompilerReplyMetadata::NeedOutputCapacity(need) => Ok(budget.propose_retry(&need)?),
+                other => Err(CompilerRuntimeError::TerminalMetadata(other)),
+            }
+        })();
+        // Every real zero-exit ends its owner, even if its report was malformed
+        // or denied. Failure never rolls back authority retirement or refunds
+        // cleanup early; existing published artifacts are not touched.
+        self.finish_process(key.slot, ProcessResult::Exited(0));
+        let proposal = result?;
+        Ok(CompilerSlice::AwaitingCleanup(CompilerRetryPending {
+            owner: attempt.owner,
+            proposal: Some(proposal),
+        }))
+    }
+
+    // Shared actual-execution boundary for retry-only and capture routes.
+    fn drive_compiler_attempt(
+        &mut self, attempt: &mut CompilerOutputAttempt, quantum: usize,
+    ) -> Result<Option<OutputRetryBudget>, CompilerRuntimeError> {
         let key = attempt.owner.process;
         if self.compiler_owner(key)? != attempt.owner
             || self.processes[key.slot].core.agent != attempt.agent
@@ -176,7 +214,7 @@ impl Kernel {
                 attempt.budget = None;
                 return Err(CompilerRuntimeError::ExecutionFailure);
             }
-            return Ok(CompilerSlice::Running);
+            return Ok(None);
         }
         let budget = attempt
             .budget
@@ -190,30 +228,7 @@ impl Kernel {
             self.finish_process(key.slot, ProcessResult::ProtectionFault);
             return Err(CompilerRuntimeError::ExecutionFailure);
         }
-        // The process is at an authenticated syscall halt. No callback, other
-        // CPU slice or cleanup step can interleave this read and owner closure.
-        let result = (|| {
-            let bytes = self.fabric.read_compiler_capacity_reply(
-                attempt.owner,
-                attempt.agent,
-                attempt.output,
-                attempt.reply,
-                budget.context().output_capacity(),
-            )?;
-            match budget.context().decode(&bytes)? {
-                CompilerReplyMetadata::NeedOutputCapacity(need) => Ok(budget.propose_retry(&need)?),
-                other => Err(CompilerRuntimeError::TerminalMetadata(other)),
-            }
-        })();
-        // Every real zero-exit ends its owner, even if its report was malformed
-        // or denied. Failure never rolls back authority retirement or refunds
-        // cleanup early; existing published artifacts are not touched.
-        self.finish_process(key.slot, ProcessResult::Exited(0));
-        let proposal = result?;
-        Ok(CompilerSlice::AwaitingCleanup(CompilerRetryPending {
-            owner: attempt.owner,
-            proposal: Some(proposal),
-        }))
+        Ok(Some(budget))
     }
 
     /// Perform at most one existing cleanup step. None means blocked/pending,
@@ -251,7 +266,11 @@ impl Kernel {
     }
 }
 
-mod loader;
+pub(super) mod loader;
+pub(crate) mod capture;
+pub(crate) mod retained;
+pub(crate) mod publication;
+pub(crate) mod flow;
 
 #[cfg(test)]
 mod tests;

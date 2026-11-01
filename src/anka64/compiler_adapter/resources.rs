@@ -274,6 +274,15 @@ impl OutputRetryBudget {
     pub fn context(&self) -> CompilerReplyContext {
         self.context
     }
+    /// Canonical immutable publication-plan snapshot, including actual policy
+    /// and already-spent cumulative work. Never read back from guest metadata.
+    pub(crate) fn publication_plan_words(&self) -> [u64; 22] {
+        let mut words = [0; 22];
+        words[..16].copy_from_slice(&self.context.request_header(0));
+        words[16..].copy_from_slice(&[self.policy.ceiling, self.policy.retries,
+            self.policy.work_limit, self.remaining, self.spent, self.attempt_start]);
+        words
+    }
     pub fn spent_work(&self) -> u64 {
         self.spent
     }

@@ -152,3 +152,35 @@ impl Fabric {
         Ok(region)
     }
 }
+
+impl Fabric {
+    /// Dedicated final artifact seal: exact initialized logical length, no typed
+    /// cells, READ-only first publication. The returned kind stays Kernel-private
+    /// until the complete artifact/receipt record is committed. No RW interval.
+    pub(crate) fn publish_compiler_artifact(
+        &mut self, current: &CurrentHeapProcess<'_>, snapshot: HeapInitialization,
+        payload: &[u8],
+    ) -> Result<(ObjectId, ScopedPointer), HeapError> {
+        let owner = current.owner();
+        let mut plan = self.check_initialization_snapshot(snapshot, owner, self.scoped_pointers.revision())?;
+        if !snapshot.is_complete() || snapshot.version() == 0 || payload.is_empty()
+            || payload.len() as u64 != plan.row.logical
+            || payload.len() as u64 > crate::anka64::dev_compiler::DEVELOPMENT_COMPILER_OUTPUT_SIZE
+            || !self.agents.get(&current.agent()).is_some_and(|a| a.domain == owner.domain
+                && matches!(a.kind, crate::anka64::state::AgentKind::Cpu(_))) {
+            return Err(HeapError::Configuration);
+        }
+        let closure = self.scoped_pointers.prepare_attached_heap_closure(plan.row.reservation, owner)?;
+        self.check_heap_cleanup_drain(&closure, plan.row.object)?;
+        plan.row.initialization_version = plan.row.initialization_version.checked_add(1)
+            .ok_or(HeapError::Capacity(Resource::Identity))?;
+        plan.row.planned_rights = Permissions::READ;
+        let slot = plan.registry.slot();
+        let object = plan.row.object;
+        let start = plan.row.extents.physical.base as usize;
+        self.memory[start..start+payload.len()].copy_from_slice(payload);
+        self.private_heap.as_mut().unwrap().rows[slot] = Some(plan.row);
+        let pointer = self.scoped_pointers.commit_heap_image_publication(plan.registry, false);
+        Ok((object, pointer))
+    }
+}

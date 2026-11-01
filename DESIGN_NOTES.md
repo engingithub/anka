@@ -10719,7 +10719,12 @@ direct adequate-capacity build and preserving prior publication on denial.
 
 ### C2.4 — Guest producer migration checkpoint (2026-10-27)
 
-**Status: producer implementation checkpoint delivered; guest execution acceptance pending.**
+**Status updated 2026-10-31: C2.4 developer-accepted and merged to main.**
+Kleis: 293 positive / 259 hostile explicitly disproved; targeted runtime witness
+passed in 410.74s; full suite: 1406 passed, zero failures, in 589.71s.
+The Rust runs used optimized host execution with debug assertions and overflow
+checks enabled. Earlier handoff notes below are historical; C2.5 is next.
+
 The earlier formal-only checkpoint is extended by the implementation below. C2.3 is now developer-accepted: 19 runtime/loader tests passed in
 0.56s, 18 planner tests passed in 0.00s, 250 heap tests passed in 0.18s, and the
 compiler-resource gates passed 254 positive / 226 hostile witnesses. These
@@ -11052,7 +11057,8 @@ The integrated witness now also compares the larger result byte-for-byte with
 the accepted ABI-1 compiler, whose ordinal-search implementation is unchanged,
 then validates the resulting protected module. Rust/cargo is unavailable in
 this patch environment: guest compilation/execution and the added assertion
-remain unverified. C2.4 remains pending. Do not extend the diagnostic deadline
+were pending at this patch handoff; both passed in the 2026-10-31 acceptance
+run recorded below. Do not extend the diagnostic deadline
 again as a substitute for investigating a further failure.
 
 For the next local run, use an optimized host emulator while explicitly
@@ -11094,9 +11100,275 @@ Two fast Rust regressions cover patterned data across 4096-byte boundaries,
 an 8872-byte prefix, exact capacity, over-capacity rejection, the unchanged
 single-read limit, and retired-owner rejection including empty output.
 Rust tooling is unavailable in the editing environment; these tests and the
-full guest witness remain pending local execution. No machine contract changes
+full guest witness were pending at this patch handoff; both are now developer-accepted
+(2 focused tests in 0.12s and the integrated witness in 410.74s). No machine contract changes
 or new Kleis gates are needed for this test-harness correction. Production
 artifact capture/publication remains the separate C2.5 milestone.
+
+### C2.5 — ABI-2 capture, retained custody and publication
+
+This is the single current C2.5 design section. The **implementation checkpoint
+table near the end of DN-71** records acceptance and remaining work; historical
+C2.4 handoffs above do not override it. The developer reported the publication
+Kleis pair passing **136 positive / 118 hostile**, then the nine C2.5a capture
+tests passing in **0.01s**, eight retention tests in **0.00s**, and the complete
+42-test compiler-retry bridge group in **0.04s**, followed by all 11
+publication tests in **0.01s** and the 53-test bridge group in **0.04s**. These are focused acceptance;
+no updated full-suite or real CC2 publication result is inferred.
+
+**Contract and proof scope.** `anka108_artifact_publication.kleis` and its hostile
+pair import the compiler-resource contract. They specify bounded exact-prefix
+copying, role admission, independently retained charges, exact producer cleanup,
+and atomic READ-only artifact/receipt publication. The 136 positive witnesses
+include 18 quantified laws; all 118 hostile claims were explicitly disproved.
+The accepted compiler-resource baseline remains 293 / 259. One earlier
+monolithic peak-sum law timed out without a counterexample; decomposing checked
+addition and subtotal laws resolved it without weakening a guard or adding an
+axiom. The accepted pair has no unknown result.
+
+The concrete implementation uses the existing 4096-byte heap read limit and
+ABI-2 source offset zero. The older ABI-1 adapter's length prefix, 64-KiB copy
+policy and isolated-Fabric receipt cannot silently become ABI-2 heap rules.
+
+| Formal phase | Required custody and transition |
+|---|---|
+| 0 executing | Actual protected zero exit, exact owner/incarnation and request bindings; exclude writers and outstanding output/reply work; reserve capture space while source tokens remain live. |
+| 1 capturing | Exclusive Kernel custody; consecutive authenticated reads of at most 4096 bytes; exact successful prefix only; no partial visibility. |
+| 2 admitted candidate | Exact AOM and role validation; independent candidate custody/charge established before retiring the producer. |
+| 3 ready | Real cleanup/return for the exact producer owner; candidate remains immutable and charged. Final provenance and authority checks are still required. |
+| 4 published | One complete artifact/receipt insertion under the expected epoch; fresh exact-length READ-only object, no execution grant. |
+| 5 aborted | Destroy private payload before refund; retain unsettled cleanup obligations and preserve earlier records. |
+
+**Implemented capture.** `os/compiler_retry/capture.rs` shares actual execution
+and exit checks with the retry bridge. It rechecks original protected output
+and reply tokens, owner/agent, geometry and drainage, decodes the bound report,
+and copies the exact prefix in bounded reads. Closed units reject imports and
+relocations and pass program validation; relocatable modules use their separate
+validator. Neither can claim linked-image admission.
+
+The non-Clone `CapturedCompilerOutput` holds exclusive Kernel access. Its bytes
+are immutable; there is no detached-Vec conversion, receipt or execution grant.
+Before copying, the shared heap reserves page-rounded **32 * used + 4096** for
+staging and bounded parser payload. An allocation-free preflight bounds aggregate
+frame scan length by code length before allocating exit lists. This allowance
+is conservative, not measured host RSS or complete job accounting. Existing
+parser allocations still assume the host process can allocate; host allocator
+failure is not converted into an Anka resource reply. The current 256-KiB
+application admission limit remains explicit. These limits may reject output
+that fits the producer arena; growing admission is separate work.
+
+**C2.5b custody/cleanup — focused Rust acceptance received.**
+`CapturedCompilerOutput::retain()` reserves independently before moving the
+already admitted Vec into a private Kernel record. The existing unscheduled
+runtime service is the trusted custodian; it uses a separate owner account in
+the same shared allocator, under the existing service owner/global quota.
+The reservation covers actual Vec capacity, the fixed candidate record and a
+4096-byte conservative map-node allowance, page-rounded by the shared service.
+Old staging and new retention are both charged at the handoff peak. Payload is
+moved without cloning. No guest pointer, backing object or public receipt is
+issued for these private reserved extents.
+
+The reservation-incarnation/custodian-context handle has no integer constructor
+or Clone. The bytes, role, original context and producer owner remain in the
+Kernel even if its caller loses the handle. On successful handoff the capture
+guard refunds its old staging reservation and retires the producer. A failed
+retention reservation instead follows normal capture discard/cleanup and cannot
+replace another candidate. Other clients remain included in shared accounting.
+
+`poll_compiler_candidate` advances at most one existing cleanup step and derives
+readiness from `compiler_heap_owner_released` for the exact producer. Pending or
+unconsumed work on any producer allocation blocks readiness. A ready view borrows
+immutable bytes from the Kernel and rechecks the custodian, exact still-reserved
+charge and producer release. Readiness is private admission evidence, **not
+publication authority**. Producer cleanup cannot refund the separate custodian
+reservation or erase its host candidate.
+
+Cancellation destroys payload before aborting the exact never-attached
+reservation. A failed abort retains an unreadable tombstone and charge for retry.
+Custodian death destroys its candidates before account closure; orderly service
+shutdown cancels them before dismantling the service. A failed cancellation
+keeps custody quarantined rather than inventing a refund. Runtime guards and
+handles are trusted host mechanisms; guest code cannot invoke these operations
+or forge their fields. This is serialized emulator custody, not a hardware or
+external-DMA fence guarantee.
+
+Eight new focused tests cover retained bytes/charges through cleanup, A/B
+isolation with C reusing A's backing, stale/foreign-Kernel handles, cancellation,
+retention quota denial preserving prior candidates, shutdown/custodian death,
+and pending work on another producer region blocking readiness. The existing
+real CC2 witness now traverses capture, independent retention, actual cleanup
+and candidate discard before its exact reference comparison; the comparison
+Vec is test-owned. The developer accepted all eight retention tests and the
+42-test bridge group. The updated real CC2 integration remains unreported.
+
+**C2.5b publication commit — focused developer acceptance received.**
+`os/compiler_retry/publication.rs` adds a pre-execution frozen job, carried by
+opaque binding through capture and retention. Freeze requires an authentic
+five-region loader attempt at the unstarted protected entry. It compares actual
+loaded source bytes, admitted compiler object/generation/code, canonical frame
+manifest, ABI/profile and the actual retry budget against the selected sealed
+inputs. Source offset is zero; ABI and target profile are 2. Bundle, selected
+preprocessor/linker and ordered dependencies are independently snapshotted.
+These are trusted coordinator selections: snapshots alone do not prove the
+preprocessor produced the source or that the compiler has accepted self-host
+lineage. C2.5c must supply that derivation and lineage evidence.
+
+Before snapshots allocate, the custodian reserves a conservative allowance:
+`2 * (input bytes + admission-word bytes) + 128 * input count + 8192`.
+Inputs are bounded to 1 MiB each and 4096 ordered dependencies; shared owner and
+global quotas still apply. These are conservative charged payload allowances,
+not measured host RSS. Reserving this evidence can deny a large compiler under
+a small custodian quota; the coordinator must account for the complete peak.
+
+Commit requires exact producer release, current custodian and reservation,
+publication authority, matching nonwrapping expected epoch, and a fresh read
+of every sealed input under current grants. Artifact backing is separately
+reserved while the candidate and provenance charges remain held. Fabric first
+initializes the whole backing, then overlays the exact admitted payload and
+publishes a READ-only protected token directly: there is no RW alias interval.
+The token remains Kernel-private until one complete artifact/receipt record is
+inserted. Candidate payload is destroyed before its staging charge is refunded;
+artifact and receipt/provenance charges survive publication. Failures before
+that insertion preserve prior records and epoch; attached storage goes through
+actual cleanup, never an invented immediate refund. Cancellation, custodian death
+and service shutdown destroy retained metadata before account teardown.
+
+The concrete seal is immutable private-heap first publication, **not** a legacy
+`ObjectState::Sealed` row. The receipt uses the protected slot generation rather
+than the private object's legacy generation-zero field. It binds actual code
+admission and exact input bytes; it grants no EXEC permission. Reads authenticate
+the current custodian and protected token and remain bounded to 4096 bytes.
+Trusted host code and exclusive Kernel access remain part of the implementation
+boundary; BTreeMap allocation failure retains the existing host-OOM assumption.
+
+Eleven new focused tests cover exact bytes/READ rights/receipt identity, missing
+pre-execution binding, source/compiler/profile/plan mismatch, authority and
+cleanup readiness, every changed sealed input, revoked grants, stale/exhausted
+epochs preserving prior records, quota denial/retry, failure after private sealing,
+cancellation/late freeze and service shutdown. These are ISA transport fixtures,
+not a real C compiler publication witness. Rust is unavailable in the editing
+environment. The developer subsequently reported all 11 publication tests and
+all 53 affected bridge tests passing after the fetch-history correction.
+
+**Publication regression correction (2026-10-31).** The first focused run
+reported 4 passes and 7 failures. Source inspection found that `sealed_length`
+applied `compiler_trace_safe` to every provenance object, including the compiler
+that had just executed. That helper enforces an output-only no-FETCH policy:
+legitimate terminal compiler fetches therefore rejected successful publication.
+The correction retains global transaction quiescence and each input's current
+seal, generation, READ grant and exact-byte recheck, while permitting executed
+sealed tools. Output capture's compile-only policy is unchanged. The existing
+success test now explicitly requires actual compiler FETCH history and verifies
+that this history passes sealed-input admission while failing the output-only
+predicate. No formal contract was weakened or changed. The developer's rerun
+passed all 11 tests in 0.01s and all 53 bridge tests in 0.04s.
+
+**C2.5c retry/publication integration — delivered, runtime acceptance pending.**
+`os/compiler_retry/flow.rs` composes the existing guarded operations into one
+bounded runtime flow: execution, actual retry cleanup, independently retained
+candidate, cleanup readiness and atomic publication. Each advance performs one
+execution slice or one cleanup step. NeedCapacity returns the original opaque
+next budget exactly once, after producer release and cancellation of old frozen
+metadata; it never resets cumulative work or retry fuel. Terminal errors close
+or discard only the flow's producer/candidate and frozen record, leaving real
+cleanup obligations charged. A lost flow handle cannot detach payload from
+Kernel custody; service teardown still owns cancellation. Process admission and
+current lineage selection remain trusted coordinator duties.
+
+Concurrent jobs may finish against a newer publication epoch. A new explicit
+`refresh_compiler_publication_epoch` revalidates readiness, exact producer release,
+current custodian/reservation/charge, every sealed input and publication authority
+before changing only the candidate's expected epoch. It refuses backwards or
+exhausted epochs and cannot insert/overwrite any visible record. The flow uses
+this operation when a peer has committed; the existing direct publication API
+still rejects stale epochs. Kleis now includes this transition: **149 positive
+witnesses (20 quantified laws), 129/129 hostile claims explicitly disproved**
+locally on 2026-10-31. The earlier 136/118 result remains the accepted C2.5b
+baseline; the new pair needs developer-machine acceptance.
+
+Six fast flow tests passed on the developer machine in 0.00s. They cover
+success and one-shot completion; cancellation with an
+independent client; missing commit authority; two concurrent candidates whose
+commits advance the epoch; changed provenance/missing authority during refresh;
+and a real ISA NeedCapacity reply followed by actual cleanup and preserved retry
+budget. They supplement, rather than relabel, the accepted 53-test baseline.
+
+The shared real CC2 witness now runs `producer_publication_tests.rs` using the
+same guest-built protected ABI-2 producer and accepted fixed-point lineage.
+Actual guest ankapp expands an include-bearing source bundle. Exact bundle bytes,
+effective source, selected tool bytes, accepted compiler bytes, producer source,
+admitted code/frame manifest and actual resource plan are frozen in publication
+inputs. The lineage remains immutably borrowed and is rechecked at phase boundaries.
+The host fixture transports/schedules; it does not emit or repair accepted AOM.
+
+A and B run in one Kernel with separate owners and output arenas. A deliberately
+exhausts 4096 bytes while B executes smaller quanta. Real cleanup releases A;
+a fresh C attempt consumes the returned budget and reuses A backing. Old A tokens
+must fail even under C's owner; B's charge and live output token remain valid.
+B publishes while C is live. C then publishes via guarded epoch refresh; B's
+prior receipt and exact bytes must remain unchanged. Further capacity replies
+repeat this bounded loop. A second adequate-capacity small compilation must emit
+identical published bytes. Outputs are compared byte-for-byte with compilations
+from the accepted lineage and receipts are checked for ABI, role, source offset,
+producer, ordered evidence, exact length, generation and READ-only rights.
+
+The integration fixture explicitly provisions 64 MiB RAM, a 32 MiB private pool,
+a 128 MiB global accounting ceiling and 16 MiB per-owner quota. Accounting covers
+fixed host-side metadata as well as charged payload; it is not physical guest RAM.
+The first integration run failed at fixture construction with `Capacity(GlobalBytes)`:
+the former 64 MiB ceiling could not accommodate 2,097,152 shadow entries plus
+registry/work storage. The allocator correctly rejected that configuration.
+Only the fixture ceiling changes. A new cheap setup test uses Rust's actual
+`size_of::<Option<ScopedPointer>>()` and the registry's reported fixed metadata
+charge to assert enough headroom for the complete 32 MiB pool before CC2 runs.
+This does not widen production output admission. Its sealed tool/source ingestion,
+legacy code/stacks and comparison Vecs are test infrastructure, not complete
+shared-service job billing or an ordinary user-facing command. C2's artifact
+above 256 KiB and complete accounting remain open; C3-C5 retain their order.
+No new guest instruction, syscall, permission or hardware claim is introduced.
+
+The theory's Boolean certificates are trusted implementation obligations, never
+guest flags. The candidate and publication paths refine `pub108_queue_cleanup`,
+`pub108_ready`, `pub108_retained` and the serialized commit of `pub108_publish`.
+The end-to-end coordinator must still establish the selected-tool derivation
+and accepted-lineage obligations; passing model witnesses do not establish
+that integration or verify this Rust implementation. Proofs are not whole-program correctness, unconditional
+liveness or hardware side-channel proofs. Scheduler fairness, allocator
+correctness and eventual drain remain explicit assumptions. Metal/FPGA execution
+requires its own memory-ordering and synchronization refinement.
+
+Run the new tests and the affected fast bridge group first:
+
+```bash
+CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true \
+cargo test --release --lib c25_flow -- --test-threads=1
+
+CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true \
+cargo test --release --lib anka64::os::compiler_retry:: -- --test-threads=1
+```
+
+For the coherent guest integration checkpoint, reuse the existing witness:
+
+```bash
+CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true \
+cargo test --release --lib \
+  anka64::userspace_rebuild::tests::p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address \
+  -- --exact --nocapture --test-threads=1
+```
+
+Run only the changed publication pair for the epoch-refresh refinement:
+
+```bash
+python3 scripts/check-anka108-gates.py \
+  --kleis /Users/enginatik/.cargo/bin/kleis \
+  --kleis-root ~/git/cee/kleis --only-publication
+```
+
+Run the six fast flow tests and affected bridge group first, then the shared
+real CC2 witness above. A full suite is deferred until this integration passes.
 
 ### Compiler client design after the allocation checkpoint
 
@@ -11252,8 +11524,12 @@ compiler-only architecture or permanent compatibility with temporary service ABI
 | A3 — C malloc/free | CC2 builtins, owned replies, private heap publication/access, free completion and lifecycle cleanup | Accepted 2026-10-25: all 12 A3 unit tests passed in the earlier full run; corrected shared CC2/C/module/A-B-C integration passed in 1026.53s. Kleis 52 / 43 passed locally before implementation |
 | A4 — whole-stack review | Source review delivered 2026-10-25 | Evidence/gap matrix and formal gate mapping above; follow-ups remain open |
 | R1 — local initialization | Formal pair and whole-frame byte/tag initialization runtime accepted | Kleis 151 / 118; 16 focused tests in 0.02s; shared CC2/C integration in 1008.62s; full 1361-test suite in 2446.84s, all passing |
-| C1 — compiler contract and ABI | Delivered resource/lifecycle theory, concrete ABI-2 layout and expanded limit inventory above | Original gate developer-accepted: 221 positive (26 quantified) / 195 hostile. C2.3 first-publication refinement developer-accepted: 254 (28 quantified) / 226. C2.4 selector/capacity and linker-profile refinements locally pass 293 / 259; developer confirmation pending |
-| C2 — output growth (in progress) | C2.1, C2.2 and C2.3 checkpoints accepted; C2.3 implements the five-region protected loader. C2.4 producer implementation is delivered with guest acceptance pending. Guest producer migration, successful output admission/publication and complete job charging remain open | The same valid C input fails a deliberately small initial arena, retries automatically and emits an AOM larger than 256 KiB; two adequate capacities yield identical bytes; budget denial preserves prior publications |
+| C1 — compiler contract and ABI | Delivered resource/lifecycle theory, concrete ABI-2 layout and expanded limit inventory above | Original gate developer-accepted: 221 positive (26 quantified) / 195 hostile. C2.3 first-publication refinement developer-accepted: 254 (28 quantified) / 226. C2.4 selector/capacity and linker-profile refinements developer-accepted: 293 / 259 on 2026-10-31 |
+| C2 — output growth (in progress) | C2.1-C2.4 and focused C2.5b accepted; runtime flow and C2.5c real-compiler witness delivered pending tests. Complete job charging and oversized-artifact acceptance remain open | The same valid C input fails a deliberately small initial arena, retries automatically and emits an AOM larger than 256 KiB; two adequate capacities yield identical bytes; budget denial preserves prior publications |
+| C2.5 formal gate | ABI-2 capture, retained custody, cleanup and publication contract | Developer-accepted: 136 positive (18 quantified laws) / 118 explicitly disproved hostile |
+| C2.5a — capture/admission | Production bounded authenticated capture, role validation and quota-reserved staging | Developer-accepted: 9 capture tests in 0.01s; subsequent 42-test bridge group passed in 0.04s. Updated guest/full-suite acceptance not reported |
+| C2.5b — retained custody/publication | Focused acceptance complete: retention, cleanup, frozen provenance and atomic READ-only publication | 11 publication tests passed in 0.01s; affected bridge 53 passed in 0.04s. Real CC2 publication moves to C2.5c |
+| C2.5c — retry/publication integration | Bounded runtime flow plus real CC2 retry/publication and concurrent A/B/C witness delivered | Epoch-refresh Kleis refinement locally passes 149 / 129. Six flow tests passed in 0.00s. Guest integration blocked at fixture setup; accounting-budget correction and new cheap setup test supplied, rerun pending. Above-256-KiB closure remains open |
 | C3 — source and workspace | Add preprocessing/source growth and replace fixed compiler tables with described regions; eliminate hard-coded table-address assumptions | Meaningful source beyond 65528 bytes, more than 64 function entries, more than 128 deferred calls and more than 32 local names compile where permitted by the target profile; boundary failures remain explicit |
 | C4 — link and admission | Extend the budget contract through guest ankald, publication, closed-image validation and ordinary loading; parameterize policy-only frame/metadata bounds | Modules link and execute beyond the old 1 MiB cap within encoding and memory bounds; rebased frames/calls, metadata, stale authority and denial/retry are checked; widened frame limits have witnesses beyond their old bounds |
 | C5 — self-hosted closure | Connect the resource-aware path to ordinary user-facing compiler invocation and the rebuild driver, including concurrent jobs and real service code | Exact CC2 generation fixed point, independent concurrent compilations, automatic growth, matching direct-vs-retried artifacts, protected-module execution, and affected regressions; document remaining genuine language/encoding limits |
@@ -11274,10 +11550,11 @@ checks permit it. The developer runs the long fixed-point and single-threaded
 regression tests locally; reserve a complete suite for the coherent integration
 checkpoint or a specific cross-cutting risk, rather than every small handoff.
 
-**Next action:** run the C2.4 guest producer acceptance test above; after it passes, complete production output capture,
-followed by successful artifact capture/publication and complete accounting.
-The original C1, C2.1, C2.2 and C2.3 checkpoints are accepted; the existing C1 pair was
-refined before C2.3 implementation. No repeated A4 review is needed. C2 remains open until an actual compiler retry
-crosses 256 KiB with admission/publication evidence. C3-C5 follow the existing
-order. Metal 4 remains deferred.
-
+**Next action:** run `c25_producer_publication_fixture_accounts_metadata_and_pool`
+first, then rerun the shared real CC2 witness with release assertions and overflow
+checks enabled. The six flow tests are developer-accepted (0.00s); the updated
+59-test bridge group has not yet been reported. Verify the changed publication Kleis pair (149/129). Do not mark
+C2.5c accepted before these results. The last accepted complete suite remains
+C2.4's 1406 tests. C2 remains open until actual compiler retry crosses 256 KiB
+with admission/publication evidence and complete accounting. C3-C5 follow the
+existing order. Metal 4 remains planned and deferred.

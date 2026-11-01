@@ -1552,6 +1552,12 @@ impl Fabric {
 
     // ───────────────── Observation ───────────────────────────────
 
+    /// Sealed publication inputs may include tools that have executed. Require
+    /// completed transactions, without applying the output-only no-FETCH rule.
+    pub(crate) fn compiler_provenance_quiescent(&self) -> bool {
+        self.transactions.iter().all(|tx| tx.state.is_terminal())
+    }
+
     /// Checked before each compiler trace collection, including the final round.
     /// Even a faulted attempt to fetch generated output invalidates compile-only.
     pub(crate) fn compiler_trace_safe(&self, output: ObjectId) -> bool {
@@ -1753,9 +1759,11 @@ mod tests {
         let request=read_req(CPU0,domain,object,0);
         let index=fabric.submit(request,None);let first=fabric.transaction(index).id;
         assert!(!fabric.compiler_trace_safe(object));
+        assert!(!fabric.compiler_provenance_quiescent());
         assert!(!fabric.discard_completed_compiler_trace());
         fabric.advance(index);fabric.advance(index);fabric.advance(index);
         assert!(fabric.compiler_trace_safe(object));
+        assert!(fabric.compiler_provenance_quiescent());
         assert!(fabric.discard_completed_compiler_trace());
         let next=fabric.submit(request,None);
         assert!(fabric.transaction(next).id.0>first.0);

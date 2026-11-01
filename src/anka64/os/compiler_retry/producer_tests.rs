@@ -138,43 +138,58 @@ fn read_producer_output(k: &Kernel, attempt: &CompilerOutputAttempt, used: u64)
     Ok(output)
 }
 
-// Test-only observation at the authenticated exit boundary, before the ordinary
-// bridge retires the owner. C2.5 must implement production artifact capture and
-// admission; this helper does not pretend that terminal metadata publishes it.
+// Exercise production capture, independent retention and real cleanup. Only the diagnostic
+// comparison Vec escapes: it is test-owned, never publication authority.
 fn observe(label: &'static str, image: &AnkaldLinkedImage, source: &[u8], capacity: u64)
     -> (CompilerReplyMetadata, Vec<u8>)
 {
+    use super::capture::{CompilerCaptureError, CompilerCaptureSlice};
+    use crate::anka64::compiler_adapter::RebuildAdmissionRole;
     let (mut k, key) = machine(image);
     let mut attempt = k.load_compiler_request(key, budget(source, capacity), source).unwrap();
-    let context = attempt.budget.as_ref().unwrap().context();
-    let mut stopped = false;
     let mut progress = ProducerProgress::new(label);
     assert!(collect_producer_trace(&mut k));
     for _ in 0..PRODUCER_WORK_LIMIT / PRODUCER_QUANTUM as u64 {
-        attempt.budget.as_mut().unwrap().reserve_work(PRODUCER_QUANTUM as u64).unwrap();
-        let at_exit = k.run_process_with_exit_stop(key.slot, PRODUCER_QUANTUM, true);
+        let result = match k.run_compiler_capture_slice(&mut attempt, PRODUCER_QUANTUM,
+            RebuildAdmissionRole::RelocatableModule) {
+            Ok(CompilerCaptureSlice::Running) => None,
+            Ok(CompilerCaptureSlice::Captured(capture)) => {
+                // Retain first; capture's Drop then closes the producer owner.
+                Some(Ok(capture.retain().expect("independent candidate reservation")))
+            }
+            Err(CompilerCaptureError::Runtime(CompilerRuntimeError::TerminalMetadata(report))) =>
+                Some(Err(report)),
+            Ok(CompilerCaptureSlice::AwaitingCleanup(_)) => panic!("adequate-output observer unexpectedly needs capacity"),
+            Err(error) => panic!("production capture/admission failed: {error:?}"),
+        };
         progress.check(&k, key, PRODUCER_QUANTUM);
         assert!(collect_producer_trace(&mut k), "producer trace has live work or device handles");
-        if at_exit { stopped = true; break; }
+        if let Some(result) = result {
+            assert!(k.fabric.read_heap_bytes(attempt.owner, attempt.agent, attempt.output, &mut [0;8]).is_err());
+            let result = match result {
+                Err(report) => (report, Vec::new()),
+                Ok(handle) => {
+                    let mut ready = false;
+                    for _ in 0..200_000 {
+                        if k.poll_compiler_candidate(&handle).unwrap() { ready = true; break; }
+                        progress.check(&k, key, 0);
+                    }
+                    assert!(ready, "retained candidate requires exact producer cleanup");
+                    let view = k.compiler_candidate(&handle).unwrap().unwrap();
+                    assert_eq!(view.producer, attempt.owner);
+                    assert_eq!(view.role, RebuildAdmissionRole::RelocatableModule);
+                    let bytes = view.bytes.to_vec(); // Test-owned comparison only.
+                    k.discard_compiler_candidate(&handle).unwrap();
+                    (CompilerReplyMetadata::SuccessMetadata { used_output: bytes.len() as u64 }, bytes)
+                }
+            };
+            progress.done();
+            return result;
+        }
         assert_eq!(k.processes[key.slot].state, ProcessState::Running,
             "ABI-2 producer faulted: pc={:#x}", k.processes[key.slot].core.pc);
     }
-    assert!(stopped, "ABI-2 producer exhausted its work budget");
-    let (words, kinds) = k.processes[key.slot].core.protected_syscall_image().unwrap();
-    assert_eq!(&words[..2], &[SYS_EXIT, 0]);
-    assert!(kinds[0].is_none());
-    let reply = k.fabric.read_compiler_capacity_reply(attempt.owner, attempt.agent,
-        attempt.output, attempt.reply, capacity).unwrap();
-    let report = context.decode(&reply).unwrap();
-    let mut output = Vec::new();
-    if let CompilerReplyMetadata::SuccessMetadata { used_output } = report {
-        output = read_producer_output(&k, &attempt, used_output)
-            .expect("capture successful producer output through bounded authenticated reads");
-    }
-    k.finish_process(key.slot, ProcessResult::Exited(0));
-    assert!(k.fabric.read_heap_bytes(attempt.owner, attempt.agent, attempt.output, &mut [0;8]).is_err());
-    progress.done();
-    (report, output)
+    panic!("ABI-2 producer exhausted its work budget");
 }
 
 pub(crate) fn check_protected_producer(lineage: &Cc2FixedPointWitness,
@@ -189,56 +204,7 @@ pub(crate) fn check_protected_producer(lineage: &Cc2FixedPointWitness,
     let entry = program.frames.iter().find(|frame| frame.entry == 0).unwrap();
     eprintln!("protected CC2 frame budget: entry_locals={} largest_frame_locals={} ABI_regions=5 registry_slots=4096",
         entry.locals.len(), program.frames.iter().map(|frame| frame.locals.len()).max().unwrap());
-    let source = b"int main(){int x=41;int *p=&x;return *p+1;}";
-    let (report, output) = observe("exact AOM", &image, source, 65536);
-    assert!(matches!(report, CompilerReplyMetadata::SuccessMetadata { .. }));
-    let (compiler, _, _) = lineage.application_tools().unwrap();
-    eprintln!("protected CC2: compiling reference AOM with accepted lineage");
-    let reference = crate::anka64::dev_compiler::compile_protected_application_aom_with_linked_compiler(
-        compiler, source, authority).unwrap();
-    assert_eq!(output, reference.bytes, "ABI-2 must preserve exact protected AOM bytes");
-    crate::anka64::pointer_frames::ValidatedPointerModule::from_aom(&output).unwrap();
-
-    let (_, adequate) = observe("capacity independence", &image, source, 131072);
-    assert_eq!(output, adequate, "adequate arena capacity must not affect artifact bytes");
-    let mut larger = String::from("int main(){int x=0;");
-    larger.push_str(&"x=x+1;".repeat(70));
-    larger.push_str("return x;}");
-    let (mut k, key) = machine(&image);
-    let mut attempt = k.load_compiler_request(key, budget(larger.as_bytes(), 4096), larger.as_bytes()).unwrap();
-    let mut progress = ProducerProgress::new("NeedCapacity");
-    assert!(collect_producer_trace(&mut k));
-    let mut pending = loop {
-        let slice = k.run_compiler_retry_slice(&mut attempt, PRODUCER_QUANTUM).unwrap();
-        progress.check(&k, key, PRODUCER_QUANTUM);
-        assert!(collect_producer_trace(&mut k), "producer trace has live work or device handles");
-        match slice {
-            CompilerSlice::Running => {},
-            CompilerSlice::AwaitingCleanup(pending) => break pending,
-        }
-    };
-    progress.done();
-    let mut progress = ProducerProgress::new("owner cleanup");
-    let mut released = None;
-    for _ in 0..200_000 {
-        released = k.poll_compiler_retry(&mut pending).unwrap();
-        progress.check(&k, key, 0);
-        if released.is_some() { break; }
-    }
-    let next = released.expect("actual owner cleanup must release the next budget");
-    progress.done();
-    assert!(next.context().output_capacity() > 4096);
-    let (report, larger_output) = observe("adequate output", &image, larger.as_bytes(), 65536);
-    assert!(matches!(report, CompilerReplyMetadata::SuccessMetadata { .. }));
-    // The ABI-1 reference retains the original ordinal-search algorithm.
-    // Compare the multi-local case too: this covers ABI-2's linear traversal,
-    // not just the one-local/tiny-source path above.
-    eprintln!("protected CC2: comparing multi-local AOM with accepted lineage");
-    let reference = crate::anka64::dev_compiler::compile_protected_application_aom_with_linked_compiler(
-        compiler, larger.as_bytes(), authority).unwrap();
-    assert_eq!(larger_output, reference.bytes,
-        "linear local-metadata traversal must preserve exact protected AOM bytes");
-    crate::anka64::pointer_frames::ValidatedPointerModule::from_aom(&larger_output).unwrap();
+    publication_tests::check(&image,lineage,authority);
 
     let (report, bytes) = observe("source rejection", &image, b"int main(){return missing;}", 65536);
     assert!(matches!(report, CompilerReplyMetadata::SourceRejected { .. }));
@@ -248,8 +214,11 @@ pub(crate) fn check_protected_producer(lineage: &Cc2FixedPointWitness,
     let (report, bytes) = observe("table exhaustion", &image, tables.as_bytes(), 65536);
     assert!(matches!(report, CompilerReplyMetadata::RepresentationRejected { diagnostic: 8, .. }));
     assert!(bytes.is_empty(), "table exhaustion must not become an output retry");
-    eprintln!("protected CC2 ABI 2: exact AOM, capacity independence, real NeedCapacity/cleanup and terminal rejection passed");
+    eprintln!("protected CC2 ABI 2: real retry/publication integration and terminal rejection passed");
 }
 
 #[path = "producer_entry_tests.rs"]
 mod entry_tests;
+
+#[path = "producer_publication_tests.rs"]
+mod publication_tests;

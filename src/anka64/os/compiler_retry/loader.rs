@@ -132,6 +132,8 @@ impl Kernel {
                 output: output.pointer,
                 reply: reply.pointer,
                 budget: Some(budget),
+                loaded_source: Some(source.pointer),
+                publication: None,
             })
         })();
         if loaded.is_err() {
@@ -144,4 +146,4 @@ impl Kernel {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

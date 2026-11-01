@@ -35,6 +35,25 @@ impl Kernel {
         self.fabric.scoped_pointers.admit_owner(owner, service.owner_limit)
     }
 
+    /// Current trusted custodian of retained compiler candidates. It is the
+    /// existing non-guest-scheduled runtime service, never a supplied owner ID.
+    pub(super) fn compiler_candidate_custodian(&self) -> Result<AllocationOwner, HeapError> {
+        let service = self.heap_service_ready()?;
+        self.process_heap_owner(service.worker.slot)
+    }
+
+    pub(super) fn compiler_candidate_account(&mut self) -> Result<
+        (AllocationOwner, crate::anka64::scoped_pointers::heap::OwnerAccount), HeapError>
+    {
+        let service = self.heap_service_ready()?;
+        let owner = self.process_heap_owner(service.worker.slot)?;
+        let account = match self.fabric.scoped_pointers.heap_account(owner) {
+            Some(account) => account,
+            None => self.fabric.scoped_pointers.admit_owner(owner, service.owner_limit)?,
+        };
+        Ok((owner, account))
+    }
+
     /// Explicit fresh runtime setup; reserve the cleanup role before admitting
     /// guest allocations. Its descriptor is kernel-owned, never guest scheduled.
     pub(crate) fn enable_heap_service(&mut self, owner_limit: u64) -> Result<(), HeapError> {
@@ -376,15 +395,25 @@ impl Kernel {
             context: core.context_identity(),
             domain: core.domain,
         };
+        // Destroy any host candidate payload before closing its custodian's
+        // account. Producer death does not match these independent owners.
+        self.discard_compiler_candidates_owned_by(owner);
+        self.discard_compiler_publications_owned_by(owner);
         if let Some(account) = self.fabric.scoped_pointers.heap_account(owner) {
             let _ = self.fabric.scoped_pointers.close_owner(account);
         }
     }
     pub(super) fn stop_heap_service(&mut self) {
+        // One-shot teardown discards retained candidates before dismantling the
+        // custodian. Failed refunds remain charged/quarantined, never forgotten.
+        if !self.discard_all_compiler_candidates() { return; }
+        if !self.discard_all_compiler_publications() { return; }
         // A one-shot runtime must not abandon the work it can finish. Each call
         // is bounded; progress ends at release or explicit retained quarantine.
         while self.advance_heap_cleanup() {}
         if let Some(service) = self.heap_service.take() {
+            self.close_process_heap(service.worker.slot);
+            self.fabric.scoped_pointers.release_closed_heap_accounts();
             let _ = self.fence_cleanup_worker(service.role);
             let _ = self.remove_cleanup_worker(service.role);
             let core = &self.processes[service.worker.slot].core;

@@ -1,0 +1,762 @@
+// C2.5 ABI-2 capture -> admission -> owner release -> atomic publication.
+// Specification/refinement only. No new axioms; no implementation proof.
+// Phases: 0 executing, 1 capturing, 2 admitted private candidate,
+// 3 producer released / candidate ready, 4 published, 5 aborted.
+// Bool certificates below are trusted CURRENT runtime observations, never
+// guest flags. Each guard and update linearizes under exclusive coordinator
+// custody. Across yields, paused producer + fenced scheduler + excluded other
+// writers preserve the source snapshot. Merely seeing SYS_EXIT is insufficient.
+// Object/owner/binding IDs denote context-qualified immutable records; their
+// injective encoding and concrete byte validators are refinement obligations.
+import "anka108_compiler_resources.kleis"
+
+define pub108_z() = bvconst(0,64)
+define pub108_one() = bvconst(1,64)
+define pub108_live_phase(p : BitVec8) = bvule(p,bvconst(3,8))
+
+// The trusted job carries every frozen input binding; apply this equality
+// separately to source/bundle, tool lineage, profile, dependencies and plan.
+define pub108_binding(actual : BitVec64, frozen : BitVec64, current : Bool) =
+    res108_binding(actual,frozen,res108_true(),current,res108_true())
+define pub108_owner(job : BitVec64, attempt : BitVec64, owner : BitVec64,
+    frozen_job : BitVec64, frozen_attempt : BitVec64, frozen_owner : BitVec64,
+    incarnation : BitVec64, frozen_incarnation : BitVec64, current : Bool) =
+    res108_identity(job,attempt,owner,frozen_job,frozen_attempt,frozen_owner,
+        current,res108_true()) ∧ bvugt(incarnation,pub108_z()) ∧
+    (incarnation=frozen_incarnation)
+
+// artifact_valid=true here deliberately means WIRE SHAPE ONLY; success status
+// is not AOM validation. pub108_admit is required after all bytes are copied.
+define pub108_metadata(status : BitVec64, used : BitVec64, capacity : BitVec64,
+    resource : BitVec64, minimum : BitVec64, detail : BitVec64,
+    consumed : BitVec64, source_length : BitVec64, report : Bool) =
+    res108_success(status,used,capacity,resource,minimum,detail,consumed,
+        source_length,report,res108_true())
+
+define pub108_freeze(phase : BitVec8, metadata : Bool, owner : Bool,
+    bindings : Bool, actual_exit : Bool, exit_code : BitVec64,
+    protected_controls : Bool, scheduler_fenced : Bool, exclusive_writers : Bool,
+    cpu : BitVec64, dma : BitVec64, current_census : Bool,
+    heap_live : Bool, staging_reserved : Bool) =
+    (phase=bvconst(0,8)) ∧ metadata ∧ owner ∧ bindings ∧ actual_exit ∧
+    (exit_code=pub108_z()) ∧ protected_controls ∧ scheduler_fenced ∧
+    exclusive_writers ∧ (cpu=pub108_z()) ∧ (dma=pub108_z()) ∧
+    current_census ∧ heap_live ∧ staging_reserved
+
+// Snapshot includes real owner/incarnation, output object/generation, position
+// zero and exact capacity; protected kind cannot be manufactured from words.
+define pub108_snapshot(owner : Bool, object : BitVec64, expected_object : BitVec64,
+    generation : BitVec64, expected_generation : BitVec64, position : BitVec64,
+    capacity : BitVec64, expected_capacity : BitVec64, kind : Bool,
+    live : Bool, custody : Bool) =
+    owner ∧ (object=expected_object) ∧ bvugt(generation,pub108_z()) ∧
+    (generation=expected_generation) ∧ (position=pub108_z()) ∧
+    (capacity=expected_capacity) ∧ heap108_size(capacity) ∧ kind ∧ live ∧ custody
+
+define pub108_chunk(used : BitVec64, copied : BitVec64) =
+    if bvult(copied,used) then
+        (if bvule(bvsub(used,copied),bvconst(4096,64))
+         then bvsub(used,copied) else bvconst(4096,64)) else pub108_z()
+define pub108_copy(phase : BitVec8, used : BitVec64, copied : BitVec64,
+    offset : BitVec64, count : BitVec64, snapshot : Bool,
+    frozen : Bool, charged_private_stage : Bool, exact_read : Bool) =
+    (phase=bvconst(1,8)) ∧ bvuge(used,bvconst(112,64)) ∧
+    bvule(used,heap108_signed_max()) ∧ (offset=copied) ∧
+    (count=pub108_chunk(used,copied)) ∧ snapshot ∧ frozen ∧
+    charged_private_stage ∧ exact_read ∧
+    res108_copy(used,copied,count,snapshot) ∧ bvule(count,bvconst(4096,64))
+define pub108_cursor(commit : Bool, copied : BitVec64, count : BitVec64) =
+    if commit then bvadd(copied,count) else copied
+// Pointwise byte model: source is the byte at THE SAME offset in the frozen
+// output. Quantification over q expresses exact copying, not digest equality.
+define pub108_byte(commit : Bool, copied : BitVec64, count : BitVec64,
+    q : BitVec64, source : BitVec8, before : BitVec8) =
+    if commit ∧ bvuge(q,copied) ∧ bvult(q,bvadd(copied,count))
+    then source else before
+
+// Role 1 closed application; role 2 relocatable protected module; linked image
+// role 3 requires the independent linker route. Every declared byte consumed.
+define pub108_admit(phase : BitVec8, used : BitVec64, copied : BitVec64,
+    declared : BitVec64, exact_aom : Bool, all_frames : Bool,
+    role : BitVec8, imports : BitVec64, relocations : BitVec64,
+    module_valid : Bool, closed_valid : Bool, bindings : Bool,
+    immutable_stage : Bool) =
+    (phase=bvconst(1,8)) ∧ bvuge(used,bvconst(112,64)) ∧
+    bvule(used,heap108_signed_max()) ∧ (bvand(used,bvconst(7,64))=pub108_z()) ∧
+    (copied=used) ∧ (declared=used) ∧ exact_aom ∧ all_frames ∧ bindings ∧
+    immutable_stage ∧
+    (((role=bvconst(1,8)) ∧ (imports=pub108_z()) ∧ (relocations=pub108_z()) ∧ closed_valid)
+     ∨ ((role=bvconst(2,8)) ∧ module_valid))
+
+// Capture data must survive independently before retiring the producer. On
+// any abort the candidate is discarded, not published. Actual scrub/return is
+// still mandatory: an abort flag does not refund memory or make it reusable.
+define pub108_queue_cleanup(phase : BitVec8, abort : Bool,
+    independent_candidate : Bool, central_fence : Bool) =
+    central_fence ∧ pub108_live_phase(phase) ∧
+    (abort ∨ ((phase=bvconst(2,8)) ∧ independent_candidate))
+define pub108_ready(phase : BitVec8, admitted : Bool, retained_stage : Bool,
+    released : Bool, exact_owner_release : Bool) =
+    (phase=bvconst(2,8)) ∧ admitted ∧ retained_stage ∧ released ∧ exact_owner_release
+
+// Reserve peak residency before allocating: producer + stage + artifact +
+// receipt/lineage metadata. Values are charged extents, not just used payload.
+// Other clients' charge is already included in held; no ignored temporary copy.
+define pub108_reserve(held : BitVec64, stage : BitVec64, artifact : BitVec64,
+    metadata : BitVec64, used : BitVec64, limit : BitVec64) =
+    bvugt(used,pub108_z()) ∧ bvule(used,stage) ∧ bvule(used,artifact) ∧
+    bvugt(metadata,pub108_z()) ∧ res108_add(held,stage,limit) ∧
+    res108_add(bvadd(held,stage),artifact,limit) ∧
+    res108_add(bvadd(bvadd(held,stage),artifact),metadata,limit)
+define pub108_charge(commit : Bool, held : BitVec64, amount : BitVec64) =
+    if commit then bvadd(held,amount) else held
+define pub108_retained(released : Bool, held : BitVec64, producer_charge : BitVec64) =
+    res108_refund(released,held,producer_charge)
+// Caller must compose refund with res108_released, not supply a timeout bit.
+
+// Current exact receipt fields, not guest names/digests. Apply field equality
+// to all frozen inputs and owner/attempt; output fields are bound explicitly.
+define pub108_receipt(object : BitVec64, receipt_object : BitVec64,
+    generation : BitVec64, receipt_generation : BitVec64,
+    used : BitVec64, receipt_length : BitVec64,
+    role : BitVec8, receipt_role : BitVec8, abi : BitVec64,
+    source_offset : BitVec64, all_bindings_exact : Bool) =
+    bvugt(object,pub108_z()) ∧ (object=receipt_object) ∧
+    bvugt(generation,pub108_z()) ∧ (generation=receipt_generation) ∧
+    (used=receipt_length) ∧ (role=receipt_role) ∧
+    ((role=bvconst(1,8)) ∨ (role=bvconst(2,8))) ∧
+    (abi=bvconst(2,64)) ∧ (source_offset=pub108_z()) ∧ all_bindings_exact
+
+// Fresh exact-length immutable object is in separate custody from all producer
+// regions and the staging buffer. prior_visible means the candidate key already
+// exists: never replace an older record. No fallible step after pair insertion.
+define pub108_publish(phase : BitVec8, expected_epoch : BitVec64, epoch : BitVec64,
+    used : BitVec64, copied : BitVec64, logical : BitVec64, rights : BitVec64,
+    admitted : Bool, bindings : Bool, authority : Bool, fresh : Bool,
+    disjoint : Bool, sealed : Bool, charged : Bool, owner_released : Bool,
+    receipt : Bool, private_ready : Bool, prior_visible : Bool,
+    serialized : Bool) =
+    (phase=bvconst(3,8)) ∧ (expected_epoch=epoch) ∧
+    bvuge(used,bvconst(112,64)) ∧ bvule(used,heap108_signed_max()) ∧
+    (rights=pub108_one()) ∧ disjoint ∧ sealed ∧ receipt ∧
+    ¬prior_visible ∧ serialized ∧
+    res108_publish(admitted,bindings,authority,used,copied,logical,
+        (rights=pub108_one()),fresh,charged,owner_released,epoch,private_ready)
+define pub108_phase(commit : Bool, target : BitVec8, old : BitVec8) =
+    if commit then target else old
+// Artifact+receipt live in ONE immutable record. Both observations project
+// this same insertion; there is no separately writable receipt visibility bit.
+define pub108_record(commit : Bool, key : BitVec64, query : BitVec64,
+    before : BitVec64, candidate_record : BitVec64) =
+    res108_receipt(commit,key,query,before,candidate_record)
+
+// WITNESSES follow. Successes and independent hostile counterclaims exercise
+// guards; universal laws establish transition arithmetic and pointwise framing.
+// GENERATED WITNESSES
+
+example "binding accepts" {
+    assert(pub108_binding(bvconst(7,64),bvconst(7,64),res108_true()))
+}
+
+example "binding rejects substitution" {
+    assert(¬(pub108_binding(bvconst(8,64),bvconst(7,64),res108_true())))
+}
+
+example "binding rejects stale record" {
+    assert(¬(pub108_binding(bvconst(7,64),bvconst(7,64),res108_false())))
+}
+
+example "binding rejects absent identity" {
+    assert(¬(pub108_binding(bvconst(0,64),bvconst(7,64),res108_true())))
+}
+
+example "owner accepts" {
+    assert(pub108_owner(bvconst(71,64),bvconst(3,64),bvconst(9,64),bvconst(71,64),bvconst(3,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),res108_true()))
+}
+
+example "owner rejects job substitution" {
+    assert(¬(pub108_owner(bvconst(72,64),bvconst(3,64),bvconst(9,64),bvconst(71,64),bvconst(3,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),res108_true())))
+}
+
+example "owner rejects old attempt" {
+    assert(¬(pub108_owner(bvconst(71,64),bvconst(2,64),bvconst(9,64),bvconst(71,64),bvconst(3,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),res108_true())))
+}
+
+example "owner rejects foreign owner" {
+    assert(¬(pub108_owner(bvconst(71,64),bvconst(3,64),bvconst(8,64),bvconst(71,64),bvconst(3,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),res108_true())))
+}
+
+example "owner rejects restarted process" {
+    assert(¬(pub108_owner(bvconst(71,64),bvconst(3,64),bvconst(9,64),bvconst(71,64),bvconst(3,64),bvconst(9,64),bvconst(5,64),bvconst(4,64),res108_true())))
+}
+
+example "owner rejects retired owner" {
+    assert(¬(pub108_owner(bvconst(71,64),bvconst(3,64),bvconst(9,64),bvconst(71,64),bvconst(3,64),bvconst(9,64),bvconst(4,64),bvconst(4,64),res108_false())))
+}
+
+example "metadata accepts" {
+    assert(pub108_metadata(bvconst(0,64),bvconst(8872,64),bvconst(65536,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(449,64),bvconst(449,64),res108_true()))
+}
+
+example "metadata rejects NeedCapacity" {
+    assert(¬(pub108_metadata(bvconst(1,64),bvconst(8872,64),bvconst(65536,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(449,64),bvconst(449,64),res108_true())))
+}
+
+example "metadata rejects source rejection" {
+    assert(¬(pub108_metadata(bvconst(2,64),bvconst(8872,64),bvconst(65536,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(449,64),bvconst(449,64),res108_true())))
+}
+
+example "metadata rejects partial consumption" {
+    assert(¬(pub108_metadata(bvconst(0,64),bvconst(8872,64),bvconst(65536,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(448,64),bvconst(449,64),res108_true())))
+}
+
+example "metadata rejects excess length" {
+    assert(¬(pub108_metadata(bvconst(0,64),bvconst(65544,64),bvconst(65536,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(449,64),bvconst(449,64),res108_true())))
+}
+
+example "metadata rejects short AOM" {
+    assert(¬(pub108_metadata(bvconst(0,64),bvconst(104,64),bvconst(65536,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(449,64),bvconst(449,64),res108_true())))
+}
+
+example "metadata rejects unaligned length" {
+    assert(¬(pub108_metadata(bvconst(0,64),bvconst(8873,64),bvconst(65536,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(449,64),bvconst(449,64),res108_true())))
+}
+
+example "metadata rejects nonzero minimum" {
+    assert(¬(pub108_metadata(bvconst(0,64),bvconst(8872,64),bvconst(65536,64),bvconst(0,64),bvconst(8192,64),bvconst(0,64),bvconst(449,64),bvconst(449,64),res108_true())))
+}
+
+example "metadata rejects untrusted report" {
+    assert(¬(pub108_metadata(bvconst(0,64),bvconst(8872,64),bvconst(65536,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(449,64),bvconst(449,64),res108_false())))
+}
+
+example "freeze accepts" {
+    assert(pub108_freeze(bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true()))
+}
+
+example "freeze rejects replayed freeze" {
+    assert(¬(pub108_freeze(bvconst(1,8),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "freeze rejects invalid metadata" {
+    assert(¬(pub108_freeze(bvconst(0,8),res108_false(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "freeze rejects foreign owner" {
+    assert(¬(pub108_freeze(bvconst(0,8),res108_true(),res108_false(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "freeze rejects changed binding" {
+    assert(¬(pub108_freeze(bvconst(0,8),res108_true(),res108_true(),res108_false(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "freeze rejects timeout mistaken for exit" {
+    assert(¬(pub108_freeze(bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_false(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "freeze rejects failed exit" {
+    assert(¬(pub108_freeze(bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(1,64),res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "freeze rejects changed controls" {
+    assert(¬(pub108_freeze(bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_false(),res108_true(),res108_true(),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "freeze rejects schedulable producer" {
+    assert(¬(pub108_freeze(bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_false(),res108_true(),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "freeze rejects writer alias" {
+    assert(¬(pub108_freeze(bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_false(),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "freeze rejects CPU work" {
+    assert(¬(pub108_freeze(bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(0,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "freeze rejects DMA work" {
+    assert(¬(pub108_freeze(bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(1,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "freeze rejects stale census" {
+    assert(¬(pub108_freeze(bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(0,64),res108_false(),res108_true(),res108_true())))
+}
+
+example "freeze rejects already retired heap" {
+    assert(¬(pub108_freeze(bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(0,64),res108_true(),res108_false(),res108_true())))
+}
+
+example "freeze rejects uncharged stage" {
+    assert(¬(pub108_freeze(bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_false())))
+}
+
+example "snapshot accepts" {
+    assert(pub108_snapshot(res108_true(),bvconst(11,64),bvconst(11,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(65536,64),bvconst(65536,64),res108_true(),res108_true(),res108_true()))
+}
+
+example "snapshot rejects owner mismatch" {
+    assert(¬(pub108_snapshot(res108_false(),bvconst(11,64),bvconst(11,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(65536,64),bvconst(65536,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "snapshot rejects object substitution" {
+    assert(¬(pub108_snapshot(res108_true(),bvconst(12,64),bvconst(11,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(65536,64),bvconst(65536,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "snapshot rejects reused backing generation" {
+    assert(¬(pub108_snapshot(res108_true(),bvconst(11,64),bvconst(11,64),bvconst(3,64),bvconst(2,64),bvconst(0,64),bvconst(65536,64),bvconst(65536,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "snapshot rejects interior token" {
+    assert(¬(pub108_snapshot(res108_true(),bvconst(11,64),bvconst(11,64),bvconst(2,64),bvconst(2,64),bvconst(8,64),bvconst(65536,64),bvconst(65536,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "snapshot rejects capacity mismatch" {
+    assert(¬(pub108_snapshot(res108_true(),bvconst(11,64),bvconst(11,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(131072,64),bvconst(65536,64),res108_true(),res108_true(),res108_true())))
+}
+
+example "snapshot rejects scalar forged pointer" {
+    assert(¬(pub108_snapshot(res108_true(),bvconst(11,64),bvconst(11,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(65536,64),bvconst(65536,64),res108_false(),res108_true(),res108_true())))
+}
+
+example "snapshot rejects retired lifetime" {
+    assert(¬(pub108_snapshot(res108_true(),bvconst(11,64),bvconst(11,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(65536,64),bvconst(65536,64),res108_true(),res108_false(),res108_true())))
+}
+
+example "snapshot rejects lost custody" {
+    assert(¬(pub108_snapshot(res108_true(),bvconst(11,64),bvconst(11,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(65536,64),bvconst(65536,64),res108_true(),res108_true(),res108_false())))
+}
+
+example "copy accepts" {
+    assert(pub108_copy(bvconst(1,8),bvconst(8872,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "copy rejects wrong phase" {
+    assert(¬(pub108_copy(bvconst(2,8),bvconst(8872,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "copy rejects gap" {
+    assert(¬(pub108_copy(bvconst(1,8),bvconst(8872,64),bvconst(4096,64),bvconst(4104,64),bvconst(4096,64),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "copy rejects repeated prefix" {
+    assert(¬(pub108_copy(bvconst(1,8),bvconst(8872,64),bvconst(4096,64),bvconst(0,64),bvconst(4096,64),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "copy rejects oversized read" {
+    assert(¬(pub108_copy(bvconst(1,8),bvconst(8872,64),bvconst(4096,64),bvconst(4096,64),bvconst(4097,64),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "copy rejects empty read" {
+    assert(¬(pub108_copy(bvconst(1,8),bvconst(8872,64),bvconst(4096,64),bvconst(4096,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "copy rejects short read" {
+    assert(¬(pub108_copy(bvconst(1,8),bvconst(8872,64),bvconst(4096,64),bvconst(4096,64),bvconst(4095,64),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "copy rejects stale snapshot" {
+    assert(¬(pub108_copy(bvconst(1,8),bvconst(8872,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),res108_false(),res108_true(),res108_true(),res108_true())))
+}
+
+example "copy rejects writer resumed" {
+    assert(¬(pub108_copy(bvconst(1,8),bvconst(8872,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),res108_true(),res108_false(),res108_true(),res108_true())))
+}
+
+example "copy rejects uncharged copy" {
+    assert(¬(pub108_copy(bvconst(1,8),bvconst(8872,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "copy rejects read failure" {
+    assert(¬(pub108_copy(bvconst(1,8),bvconst(8872,64),bvconst(4096,64),bvconst(4096,64),bvconst(4096,64),res108_true(),res108_true(),res108_true(),res108_false())))
+}
+
+example "copy exact final 680 bytes" {
+    assert(pub108_copy(bvconst(1,8),bvconst(8872,64),bvconst(8192,64),bvconst(8192,64),bvconst(680,64),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "copy after completion rejected" {
+    assert(¬pub108_copy(bvconst(1,8),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "admit accepts" {
+    assert(pub108_admit(bvconst(1,8),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),res108_true(),res108_true(),bvconst(1,8),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "admit rejects missing suffix" {
+    assert(¬(pub108_admit(bvconst(1,8),bvconst(8872,64),bvconst(8192,64),bvconst(8872,64),res108_true(),res108_true(),bvconst(1,8),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "admit rejects trailing bytes" {
+    assert(¬(pub108_admit(bvconst(1,8),bvconst(8872,64),bvconst(8872,64),bvconst(8864,64),res108_true(),res108_true(),bvconst(1,8),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "admit rejects malformed AOM" {
+    assert(¬(pub108_admit(bvconst(1,8),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),res108_false(),res108_true(),bvconst(1,8),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "admit rejects invalid frames" {
+    assert(¬(pub108_admit(bvconst(1,8),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),res108_true(),res108_false(),bvconst(1,8),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "admit rejects linked image role" {
+    assert(¬(pub108_admit(bvconst(1,8),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),res108_true(),res108_true(),bvconst(3,8),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "admit rejects unresolved closed imports" {
+    assert(¬(pub108_admit(bvconst(1,8),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),res108_true(),res108_true(),bvconst(1,8),bvconst(1,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "admit rejects closed relocations" {
+    assert(¬(pub108_admit(bvconst(1,8),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),res108_true(),res108_true(),bvconst(1,8),bvconst(0,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "admit rejects invalid closed image" {
+    assert(¬(pub108_admit(bvconst(1,8),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),res108_true(),res108_true(),bvconst(1,8),bvconst(0,64),bvconst(0,64),res108_true(),res108_false(),res108_true(),res108_true())))
+}
+
+example "admit rejects changed lineage" {
+    assert(¬(pub108_admit(bvconst(1,8),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),res108_true(),res108_true(),bvconst(1,8),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "admit rejects mutable stage" {
+    assert(¬(pub108_admit(bvconst(1,8),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),res108_true(),res108_true(),bvconst(1,8),bvconst(0,64),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_false())))
+}
+
+example "relocatable imports and relocations admitted" {
+    assert(pub108_admit(bvconst(1,8),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),res108_true(),res108_true(),bvconst(2,8),bvconst(2,64),bvconst(3,64),res108_true(),res108_false(),res108_true(),res108_true()))
+}
+
+example "invalid relocatable manifest rejected" {
+    assert(¬pub108_admit(bvconst(1,8),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),res108_true(),res108_true(),bvconst(2,8),bvconst(2,64),bvconst(3,64),res108_false(),res108_true(),res108_true(),res108_true()))
+}
+
+example "cleanup accepts" {
+    assert(pub108_queue_cleanup(bvconst(2,8),res108_false(),res108_true(),res108_true()))
+}
+
+example "cleanup rejects capture incomplete" {
+    assert(¬(pub108_queue_cleanup(bvconst(1,8),res108_false(),res108_true(),res108_true())))
+}
+
+example "cleanup rejects candidate aliases producer backing" {
+    assert(¬(pub108_queue_cleanup(bvconst(2,8),res108_false(),res108_false(),res108_true())))
+}
+
+example "cleanup rejects no central fence" {
+    assert(¬(pub108_queue_cleanup(bvconst(2,8),res108_false(),res108_true(),res108_false())))
+}
+
+example "cleanup rejects already published" {
+    assert(¬(pub108_queue_cleanup(bvconst(4,8),res108_false(),res108_true(),res108_true())))
+}
+
+example "abort permits cleanup of partial capture" {
+    assert(pub108_queue_cleanup(bvconst(1,8),res108_true(),res108_false(),res108_true()))
+}
+
+example "ready accepts" {
+    assert(pub108_ready(bvconst(2,8),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "ready rejects early release" {
+    assert(¬(pub108_ready(bvconst(1,8),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "ready rejects unvalidated bytes" {
+    assert(¬(pub108_ready(bvconst(2,8),res108_false(),res108_true(),res108_true(),res108_true())))
+}
+
+example "ready rejects lost candidate" {
+    assert(¬(pub108_ready(bvconst(2,8),res108_true(),res108_false(),res108_true(),res108_true())))
+}
+
+example "ready rejects cleanup pending" {
+    assert(¬(pub108_ready(bvconst(2,8),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "ready rejects foreign release receipt" {
+    assert(¬(pub108_ready(bvconst(2,8),res108_true(),res108_true(),res108_true(),res108_false())))
+}
+
+example "peak reservation accepts" {
+    assert(pub108_reserve(bvconst(32768,64),bvconst(12288,64),bvconst(12288,64),bvconst(1024,64),bvconst(8872,64),bvconst(65536,64)))
+}
+
+example "peak reservation rejects temporary stage omitted" {
+    assert(¬(pub108_reserve(bvconst(32768,64),bvconst(0,64),bvconst(12288,64),bvconst(1024,64),bvconst(8872,64),bvconst(65536,64))))
+}
+
+example "peak reservation rejects artifact charge omitted" {
+    assert(¬(pub108_reserve(bvconst(32768,64),bvconst(12288,64),bvconst(0,64),bvconst(1024,64),bvconst(8872,64),bvconst(65536,64))))
+}
+
+example "peak reservation rejects receipt charge omitted" {
+    assert(¬(pub108_reserve(bvconst(32768,64),bvconst(12288,64),bvconst(12288,64),bvconst(0,64),bvconst(8872,64),bvconst(65536,64))))
+}
+
+example "peak reservation rejects insufficient quota" {
+    assert(¬(pub108_reserve(bvconst(32768,64),bvconst(12288,64),bvconst(12288,64),bvconst(1024,64),bvconst(8872,64),bvconst(57344,64))))
+}
+
+example "peak reservation rejects wraparound" {
+    assert(¬(pub108_reserve(ptr107_max(),bvconst(12288,64),bvconst(12288,64),bvconst(1024,64),bvconst(8872,64),bvconst(65536,64))))
+}
+
+example "receipt accepts" {
+    assert(pub108_receipt(bvconst(19,64),bvconst(19,64),bvconst(3,64),bvconst(3,64),bvconst(8872,64),bvconst(8872,64),bvconst(2,8),bvconst(2,8),bvconst(2,64),bvconst(0,64),res108_true()))
+}
+
+example "receipt rejects wrong output" {
+    assert(¬(pub108_receipt(bvconst(19,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(8872,64),bvconst(8872,64),bvconst(2,8),bvconst(2,8),bvconst(2,64),bvconst(0,64),res108_true())))
+}
+
+example "receipt rejects wrong generation" {
+    assert(¬(pub108_receipt(bvconst(19,64),bvconst(19,64),bvconst(3,64),bvconst(4,64),bvconst(8872,64),bvconst(8872,64),bvconst(2,8),bvconst(2,8),bvconst(2,64),bvconst(0,64),res108_true())))
+}
+
+example "receipt rejects wrong length" {
+    assert(¬(pub108_receipt(bvconst(19,64),bvconst(19,64),bvconst(3,64),bvconst(3,64),bvconst(8872,64),bvconst(8880,64),bvconst(2,8),bvconst(2,8),bvconst(2,64),bvconst(0,64),res108_true())))
+}
+
+example "receipt rejects role substitution" {
+    assert(¬(pub108_receipt(bvconst(19,64),bvconst(19,64),bvconst(3,64),bvconst(3,64),bvconst(8872,64),bvconst(8872,64),bvconst(2,8),bvconst(1,8),bvconst(2,64),bvconst(0,64),res108_true())))
+}
+
+example "receipt rejects old ABI" {
+    assert(¬(pub108_receipt(bvconst(19,64),bvconst(19,64),bvconst(3,64),bvconst(3,64),bvconst(8872,64),bvconst(8872,64),bvconst(2,8),bvconst(2,8),bvconst(1,64),bvconst(0,64),res108_true())))
+}
+
+example "receipt rejects old source envelope offset" {
+    assert(¬(pub108_receipt(bvconst(19,64),bvconst(19,64),bvconst(3,64),bvconst(3,64),bvconst(8872,64),bvconst(8872,64),bvconst(2,8),bvconst(2,8),bvconst(2,64),bvconst(8,64),res108_true())))
+}
+
+example "receipt rejects changed dependency" {
+    assert(¬(pub108_receipt(bvconst(19,64),bvconst(19,64),bvconst(3,64),bvconst(3,64),bvconst(8872,64),bvconst(8872,64),bvconst(2,8),bvconst(2,8),bvconst(2,64),bvconst(0,64),res108_false())))
+}
+
+example "publication accepts" {
+    assert(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))
+}
+
+example "publication rejects incomplete capture phase" {
+    assert(¬(pub108_publish(bvconst(1,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "publication rejects stale concurrent epoch" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(6,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "publication rejects epoch exhaustion" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(7,64),ptr107_max(),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "publication rejects missing bytes" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8192,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "publication rejects capacity exposed as size" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(65536,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "publication rejects write authority" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "publication rejects missing admission" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "publication rejects changed input binding" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "publication rejects execution-only authority" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "publication rejects reused object" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "publication rejects producer backing alias" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "publication rejects unsealed object" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "publication rejects uncharged artifact" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "publication rejects producer not released" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "publication rejects receipt mismatch" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_false(),res108_true())))
+}
+
+example "publication rejects fallible preparation incomplete" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_false(),res108_true())))
+}
+
+example "publication rejects overwrite old record" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "publication rejects concurrent unsynchronized commit" {
+    assert(¬(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_false())))
+}
+
+example "metadata permits output above legacy 256 KiB" {
+    assert(pub108_metadata(bvconst(0,64),bvconst(300000,64),bvconst(1048576,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(449,64),bvconst(449,64),res108_true()))
+}
+
+example "large artifact last chunk is 992 bytes" {
+    assert(pub108_copy(bvconst(1,8),bvconst(300000,64),bvconst(299008,64),bvconst(299008,64),bvconst(992,64),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "publication above legacy 256 KiB" {
+    assert(pub108_publish(bvconst(3,8),bvconst(7,64),bvconst(7,64),bvconst(300000,64),bvconst(300000,64),bvconst(300000,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))
+}
+
+example "publication exhausted matching epoch rejected" {
+    assert(¬pub108_publish(bvconst(3,8),ptr107_max(),ptr107_max(),bvconst(8872,64),bvconst(8872,64),bvconst(8872,64),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))
+}
+
+example "law: bounded chunk advances without overflow" {
+    assert(∀(u : BitVec64). ∀(c : BitVec64). ∀(n : BitVec64). (pub108_copy(bvconst(1,8),u,c,c,n,res108_true(),res108_true(),res108_true(),res108_true()) → (bvugt(bvadd(c,n),c) ∧ bvule(bvadd(c,n),u) ∧ bvule(n,bvconst(4096,64)))))
+}
+
+example "law: remaining byte measure strictly decreases" {
+    assert(∀(u : BitVec64). ∀(c : BitVec64). ∀(n : BitVec64). (pub108_copy(bvconst(1,8),u,c,c,n,res108_true(),res108_true(),res108_true(),res108_true()) → bvult(bvsub(u,bvadd(c,n)),bvsub(u,c))))
+}
+
+example "law: selected chunk always has legal geometry" {
+    assert(∀(u : BitVec64). ∀(c : BitVec64). ((bvuge(u,bvconst(112,64)) ∧ bvule(u,heap108_signed_max()) ∧ bvult(c,u)) → pub108_copy(bvconst(1,8),u,c,c,pub108_chunk(u,c),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "law: first chunk exact pointwise bytes" {
+    assert(∀(q : BitVec64). ∀(s : BitVec8). ∀(b : BitVec8). (bvult(q,bvconst(4096,64)) → (pub108_byte(res108_true(),bvconst(0,64),bvconst(4096,64),q,s,b)=s)))
+}
+
+example "law: three chunk composition copies exact used prefix" {
+    assert(∀(q : BitVec64). ∀(s : BitVec8). ∀(b : BitVec8). (bvult(q,bvconst(8872,64)) → (pub108_byte(res108_true(),bvconst(8192,64),bvconst(680,64),q,s,pub108_byte(res108_true(),bvconst(4096,64),bvconst(4096,64),q,s,pub108_byte(res108_true(),bvconst(0,64),bvconst(4096,64),q,s,b)))=s)))
+}
+
+example "law: unused output tail is not copied" {
+    assert(∀(q : BitVec64). ∀(s : BitVec8). ∀(b : BitVec8). (bvuge(q,bvconst(8872,64)) → (pub108_byte(res108_true(),bvconst(8192,64),bvconst(680,64),q,s,b)=b)))
+}
+
+example "law: failed read preserves byte and cursor" {
+    assert(∀(q : BitVec64). ∀(s : BitVec8). ∀(b : BitVec8). ∀(c : BitVec64). ((pub108_byte(res108_false(),c,bvconst(4096,64),q,s,b)=b) ∧ (pub108_cursor(res108_false(),c,bvconst(4096,64))=c)))
+}
+
+example "law: checked allocation bounds next subtotal without wrap" {
+    assert(∀(h : BitVec64). ∀(n : BitVec64). ∀(l : BitVec64). (res108_add(h,n,l) → (bvule(bvadd(h,n),l) ∧ bvuge(bvadd(h,n),h))))
+}
+
+example "law: peak reservation checks stage subtotal" {
+    assert(∀(h : BitVec64). ∀(s : BitVec64). ∀(a : BitVec64). ∀(m : BitVec64). ∀(l : BitVec64). (pub108_reserve(h,s,a,m,bvconst(8872,64),l) → res108_add(h,s,l)))
+}
+
+example "law: peak reservation checks artifact subtotal" {
+    assert(∀(h : BitVec64). ∀(s : BitVec64). ∀(a : BitVec64). ∀(m : BitVec64). ∀(l : BitVec64). (pub108_reserve(h,s,a,m,bvconst(8872,64),l) → res108_add(bvadd(h,s),a,l)))
+}
+
+example "law: peak reservation checks metadata subtotal" {
+    assert(∀(h : BitVec64). ∀(s : BitVec64). ∀(a : BitVec64). ∀(m : BitVec64). ∀(l : BitVec64). (pub108_reserve(h,s,a,m,bvconst(8872,64),l) → res108_add(bvadd(bvadd(h,s),a),m,l)))
+}
+
+example "law: producer release preserves independent candidate charge" {
+    assert(∀(p : BitVec64). ∀(candidate : BitVec64). (res108_add(p,candidate,heap108_signed_max()) → (pub108_retained(res108_true(),bvadd(p,candidate),p)=candidate)))
+}
+
+example "law: pending cleanup refunds nothing" {
+    assert(∀(h : BitVec64). ∀(p : BitVec64). (pub108_retained(res108_false(),h,p)=h))
+}
+
+example "law: other client publication unchanged" {
+    assert(∀(key : BitVec64). ∀(q : BitVec64). ∀(old : BitVec64). ∀(candidate : BitVec64). (¬(key=q) → (pub108_record(res108_true(),key,q,old,candidate)=old)))
+}
+
+example "law: failed publication preserves every record and epoch" {
+    assert(∀(key : BitVec64). ∀(q : BitVec64). ∀(old : BitVec64). ∀(candidate : BitVec64). ∀(epoch : BitVec64). ((pub108_record(res108_false(),key,q,old,candidate)=old) ∧ (res108_epoch(res108_false(),epoch)=epoch)))
+}
+
+example "law: successful insertion exposes complete record" {
+    assert(∀(key : BitVec64). ∀(old : BitVec64). ∀(candidate : BitVec64). (pub108_record(res108_true(),key,key,old,candidate)=candidate))
+}
+
+example "law: failed transition preserves phase" {
+    assert(∀(old : BitVec8). ∀(target : BitVec8). (pub108_phase(res108_false(),target,old)=old))
+}
+
+example "law: old process incarnation cannot capture" {
+    assert(∀(i : BitVec64). ∀(j : BitVec64). (¬(i=j) → ¬pub108_owner(bvconst(71,64),bvconst(3,64),bvconst(9,64),bvconst(71,64),bvconst(3,64),bvconst(9,64),i,j,res108_true())))
+}
+
+// C2.5c: another client may publish while this candidate is being compiled.
+// Refresh changes only the candidate's expected epoch, never visible records.
+// It requires current exact candidate/custodian/charge/producer-release and
+// full provenance revalidation plus authority under the same exclusive Kernel.
+define pub108_refresh(old : BitVec64, current : BitVec64, ready : Bool,
+    custody : Bool, charged : Bool, released : Bool, bindings : Bool,
+    authority : Bool, serialized : Bool) =
+    bvule(old,current) ∧ bvult(current,ptr107_max()) ∧ ready ∧ custody ∧
+    charged ∧ released ∧ bindings ∧ authority ∧ serialized
+define pub108_expected(refresh : Bool, old : BitVec64, current : BitVec64) =
+    if refresh then current else old
+
+example "law: rejected refresh preserves expectation" {
+    assert(∀(old : BitVec64). ∀(current : BitVec64). (pub108_expected(res108_false(),old,current)=old))
+}
+example "law: accepted refresh selects observed current epoch" {
+    assert(∀(old : BitVec64). ∀(current : BitVec64). (pub108_expected(res108_true(),old,current)=current))
+}
+
+example "refresh after peer commit" {
+    assert(pub108_refresh(bvconst(7,64),bvconst(8,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "refresh unchanged epoch" {
+    assert(pub108_refresh(bvconst(7,64),bvconst(7,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "refresh backwards" {
+    assert(¬pub108_refresh(bvconst(8,64),bvconst(7,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "refresh exhausted" {
+    assert(¬pub108_refresh(bvconst(7,64),ptr107_max(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "refresh requires ready" {
+    assert(¬pub108_refresh(bvconst(7,64),bvconst(8,64),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "refresh requires custody" {
+    assert(¬pub108_refresh(bvconst(7,64),bvconst(8,64),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "refresh requires charged" {
+    assert(¬pub108_refresh(bvconst(7,64),bvconst(8,64),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "refresh requires released" {
+    assert(¬pub108_refresh(bvconst(7,64),bvconst(8,64),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))
+}
+
+example "refresh requires bindings" {
+    assert(¬pub108_refresh(bvconst(7,64),bvconst(8,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))
+}
+
+example "refresh requires authority" {
+    assert(¬pub108_refresh(bvconst(7,64),bvconst(8,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))
+}
+
+example "refresh requires serialized" {
+    assert(¬pub108_refresh(bvconst(7,64),bvconst(8,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))
+}

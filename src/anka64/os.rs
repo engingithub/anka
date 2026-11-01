@@ -1054,6 +1054,8 @@ impl DeviceRegistry {
 }
 
 pub struct Kernel {
+    compiler_candidates: compiler_retry::retained::CompilerCandidates,
+    compiler_publications: compiler_retry::publication::CompilerPublications,
     heap_service: Option<HeapService>,
     pub fabric: Fabric,
     pub processes: Vec<Process>,
@@ -1102,6 +1104,8 @@ pub struct Kernel {
 impl Kernel {
     pub fn new(fabric: Fabric) -> Self {
         Self {
+            compiler_candidates: Default::default(),
+            compiler_publications: Default::default(),
             heap_service: None,
             fabric,
             processes: Vec::new(),

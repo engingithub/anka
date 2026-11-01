@@ -52,6 +52,8 @@ def main():
                            help='run the concrete malloc/free runtime and ABI refinement')
     selection.add_argument('--only-compiler-resources', action='store_true',
                            help='run only the C1 shared compiler resource/ABI gate pair')
+    selection.add_argument('--only-publication', action='store_true',
+                           help='run only the C2.5 ABI-2 artifact capture/publication gate pair')
     parser.add_argument('--timeout', type=int, default=120,
                         help='wall-clock seconds per command (default: 120)')
     args = parser.parse_args()
@@ -74,7 +76,8 @@ def main():
             or args.only_modules or args.only_allocation or args.only_initialization
             or args.only_reclamation or args.only_undertaker or args.only_a22 or args.only_a23
             or args.only_workers or args.only_cleanup or args.only_malloc
-            or args.only_local_initialization or args.only_compiler_resources):
+            or args.only_local_initialization or args.only_compiler_resources
+            or args.only_publication):
         try:
             previous = subprocess.run(
                 [sys.executable, str(root / 'scripts/check-anka107-gates.py'),
@@ -86,7 +89,9 @@ def main():
         if previous.returncode:
             return 1
     all_ok = True
-    if args.only_compiler_resources:
+    if args.only_publication:
+        stems = ('anka108_artifact_publication',)
+    elif args.only_compiler_resources:
         stems = ('anka108_compiler_resources',)
     elif args.only_local_initialization:
         stems = ('anka108_local_initialization',)
@@ -128,7 +133,8 @@ def main():
                  'anka108_allocation_reclamation', 'anka108_async_reclamation',
                  'anka108_allocation_placement', 'anka108_allocation_fabric',
                  'anka108_cleanup_workers', 'anka108_cleanup_reuse', 'anka108_malloc_runtime',
-                 'anka108_local_initialization', 'anka108_compiler_resources')
+                 'anka108_local_initialization', 'anka108_compiler_resources',
+                 'anka108_artifact_publication')
     for stem in stems:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')

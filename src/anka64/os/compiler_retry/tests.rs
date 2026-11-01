@@ -42,7 +42,7 @@ pub(super) fn machine() -> Kernel {
     k
 }
 
-fn budget(job: u64, capacity: u64) -> OutputRetryBudget {
+pub(super) fn budget(job: u64, capacity: u64) -> OutputRetryBudget {
     let c = CompilerReplyContext::new(
         job,
         1,
@@ -106,7 +106,7 @@ fn alloc_code(a: &mut Asm64, n: u64) {
 
 /// This is a real Anka ISA transport producer, not a C compiler. It allocates
 /// both buffers via guest SYS_MALLOC and writes the report via protected PWRITE.
-fn client(k: &mut Kernel, capacity: u64, report: [u64; 16], exit: u64, syscall: u64) -> ProcessKey {
+pub(super) fn client(k: &mut Kernel, capacity: u64, report: [u64; 16], exit: u64, syscall: u64) -> ProcessKey {
     let mut a = Asm64::new();
     a.pframe(0);
     alloc_code(&mut a, capacity);

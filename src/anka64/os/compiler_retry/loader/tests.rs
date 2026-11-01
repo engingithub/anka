@@ -6,7 +6,7 @@ use crate::anka64::compiler_adapter::resources::{
 use crate::anka64::guest_compiler::{install_trap_handler, seal_code_object};
 use crate::anka64::pointer_frames::{FrameManifest, ValidatedPointerProgram};
 
-fn budget(job: u64, capacity: u64, length: u64) -> OutputRetryBudget {
+pub(crate) fn budget(job: u64, capacity: u64, length: u64) -> OutputRetryBudget {
     OutputRetryPolicy::new(1024 * 1024, 3, 10000)
         .unwrap()
         .start(
@@ -32,6 +32,11 @@ fn budget(job: u64, capacity: u64, length: u64) -> OutputRetryBudget {
 /// An admitted ISA transport probe, NOT a migrated CC2 compiler. Entry is
 /// deliberately not executed before the loader installs its protected pairs.
 fn client(k: &mut Kernel, job: u64, attempt: u64, capacity: u64) -> ProcessKey {
+    client_report(k, job, attempt, capacity, None)
+}
+
+pub(crate) fn client_report(k: &mut Kernel, job: u64, attempt: u64, capacity: u64,
+    supplied: Option<[u64;16]>) -> ProcessKey {
     let mut a = Asm64::new();
     a.pframe(0);
     a.pload(R4, R0, 160); // source pointer in immutable request
@@ -40,7 +45,7 @@ fn client(k: &mut Kernel, job: u64, attempt: u64, capacity: u64) -> ProcessKey {
     a.pwrite(R12, R8, 8); // observe actual source bytes, including zero padding
     a.pload(R4, R0, 544); // request's authentic self-reference
     a.pload(R6, R4, 672); // reply through that self-reference
-    let report = [
+    let report = supplied.unwrap_or([
         COMPILER_RESOURCE_MAGIC,
         2,
         job,
@@ -57,7 +62,7 @@ fn client(k: &mut Kernel, job: u64, attempt: u64, capacity: u64) -> ProcessKey {
         24,
         25,
         0,
-    ];
+    ]);
     for (i, word) in report.into_iter().enumerate() {
         imm(&mut a, R12, word);
         a.pwrite(R12, R6, 8);

@@ -471,6 +471,15 @@ impl Anka64Core {
                 && s.pending_entry == Some(self.pc) && self.pc == s.code_base)
     }
 
+    /// Borrow actual admitted code/manifest at the unstarted compiler entry.
+    pub(crate) fn compiler_publication_entry(&self, fabric: &Fabric) -> Option<
+        (&super::pointer_frames::ValidatedPointerProgram, ObjectId, Generation, u64, u64)>
+    {
+        if !self.compiler_entry_ready(fabric) { return None; }
+        let s = self.frame_current(fabric).ok()?;
+        Some((&s.program, s.code_object, s.code_generation, s.code_offset, s.code_base))
+    }
+
     fn frame_current(&self,fabric:&Fabric) -> Result<&super::pointer_frames::FrameState,PointerMachineError> {
         use super::pointer_frames::FrameError;
         let state=self.pointer_frames.as_ref().ok_or(PointerMachineError::ContextMode)?;
