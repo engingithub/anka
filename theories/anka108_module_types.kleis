@@ -1,0 +1,230 @@
+// C3/C4 local admission/refinement contracts. No new axioms.
+// These guards do not constitute a proof of the Rust parser or guest compiler.
+import "anka108_compiler_resources.kleis"
+
+// A type key is its full canonical tag bytes, never a hash or a local ordinal.
+// name_equal/layout_equal below are bounded exact byte/field comparisons.
+define ty108_complete(a : Bool,b : Bool,layout_equal : Bool) = ¬(a ∧ b) ∨ layout_equal
+define ty108_match(name_equal : Bool,a : Bool,b : Bool,layout_equal : Bool) =
+    name_equal ∧ ty108_complete(a,b,layout_equal)
+// Every complete pair for a key is checked, even when opaque records intervene.
+define ty108_three(ab : Bool,ac : Bool,bc : Bool) = ab ∧ ac ∧ bc
+define ty108_rank(pointer : Bool,child : BitVec64,parent : BitVec64) =
+    pointer ∨ bvult(child,parent)
+define ty108_access(complete : Bool,size : BitVec64) = complete ∧ bvugt(size,bvconst(0,64))
+define ty108_lanes(lane : BitVec64,pointer : Bool) =
+    if pointer then bvadd(bvand(bvadd(lane,bvconst(1,64)),bvnot(bvconst(1,64))),bvconst(2,64))
+    else bvadd(lane,bvconst(1,64))
+define ty108_lane_ok(lane : BitVec64,pointer : Bool) =
+    bvule(lane,bvconst(4,64)) ∧ bvule(ty108_lanes(lane,pointer),bvconst(4,64))
+define ty108_read(type_ok : Bool,live : Bool,rights : Bool,bounds : Bool,kind : Bool) =
+    type_ok ∧ live ∧ rights ∧ bounds ∧ kind
+define ty108_commit(types : Bool,exact_bytes : Bool,current_dependencies : Bool,authority : Bool) =
+    types ∧ exact_bytes ∧ current_dependencies ∧ authority
+define ty108_epoch(commit : Bool,old : BitVec64,next : BitVec64) = if commit then next else old
+define ty108_step(fuel : BitVec64) = bvugt(fuel,bvconst(0,64))
+
+example "same complete" { assert(ty108_match(res108_true(),res108_true(),res108_true(),res108_true())) }
+example "different local ordinals irrelevant" { assert(ty108_match(res108_true(),res108_true(),res108_true(),res108_true())) }
+example "opaque to complete" { assert(ty108_match(res108_true(),res108_false(),res108_true(),res108_false())) }
+example "complete to opaque" { assert(ty108_match(res108_true(),res108_true(),res108_false(),res108_false())) }
+example "opaque transport" { assert(ty108_match(res108_true(),res108_false(),res108_false(),res108_false())) }
+example "same tag incompatible layout" { assert(¬(ty108_match(res108_true(),res108_true(),res108_true(),res108_false()))) }
+example "different tags same layout" { assert(¬(ty108_match(res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "opaque bridge cannot hide conflicting definitions" { assert(¬(ty108_three(res108_true(),res108_false(),res108_true()))) }
+example "all complete pairs compatible" { assert(ty108_three(res108_true(),res108_true(),res108_true())) }
+example "pointer self recursion" { assert(ty108_rank(res108_true(),bvconst(2,64),bvconst(2,64))) }
+example "by value self cycle" { assert(¬(ty108_rank(res108_false(),bvconst(2,64),bvconst(2,64)))) }
+example "by value back edge" { assert(¬(ty108_rank(res108_false(),bvconst(3,64),bvconst(2,64)))) }
+example "by value finite rank" { assert(ty108_rank(res108_false(),bvconst(1,64),bvconst(2,64))) }
+example "opaque arithmetic" { assert(¬(ty108_access(res108_false(),bvconst(8,64)))) }
+example "zero sized arithmetic" { assert(¬(ty108_access(res108_true(),bvconst(0,64)))) }
+example "known object stride" { assert(ty108_access(res108_true(),bvconst(24,64))) }
+example "lane 0 pointer False" { assert(ty108_lane_ok(bvconst(0,64),res108_false())) }
+example "lane 0 pointer True" { assert(ty108_lane_ok(bvconst(0,64),res108_true())) }
+example "lane 1 pointer False" { assert(ty108_lane_ok(bvconst(1,64),res108_false())) }
+example "lane 1 pointer True" { assert(ty108_lane_ok(bvconst(1,64),res108_true())) }
+example "lane 2 pointer False" { assert(ty108_lane_ok(bvconst(2,64),res108_false())) }
+example "lane 2 pointer True" { assert(ty108_lane_ok(bvconst(2,64),res108_true())) }
+example "lane 3 pointer False" { assert(ty108_lane_ok(bvconst(3,64),res108_false())) }
+example "lane 3 pointer True" { assert(¬(ty108_lane_ok(bvconst(3,64),res108_true()))) }
+example "lane 4 pointer False" { assert(¬(ty108_lane_ok(bvconst(4,64),res108_false()))) }
+example "lane 4 pointer True" { assert(¬(ty108_lane_ok(bvconst(4,64),res108_true()))) }
+example "missing type rejects access" { assert(¬(ty108_read(res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "missing lifetime rejects access" { assert(¬(ty108_read(res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "missing rights rejects access" { assert(¬(ty108_read(res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "missing bounds rejects access" { assert(¬(ty108_read(res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "missing kind rejects access" { assert(¬(ty108_read(res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))) }
+example "all access guards" { assert(ty108_read(res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "publication missing types" { assert(¬(ty108_commit(res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "publication missing bytes" { assert(¬(ty108_commit(res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "publication missing dependencies" { assert(¬(ty108_commit(res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "publication missing authority" { assert(¬(ty108_commit(res108_true(),res108_true(),res108_true(),res108_false()))) }
+example "exhausted traversal fuel" { assert(¬(ty108_step(bvconst(0,64)))) }
+example "bounded traversal step" { assert(ty108_step(bvconst(1,64))) }
+example "law: failure preserves epoch" { assert(∀(old : BitVec64). ∀(next : BitVec64). (ty108_epoch(res108_false(),old,next)=old)) }
+example "law: opaque cannot authorize arithmetic" { assert(∀(n : BitVec64). (¬ty108_access(res108_false(),n))) }
+example "law: pointer recursion needs no decreasing rank" { assert(∀(n : BitVec64). (ty108_rank(res108_true(),n,n))) }
+example "law: by value two node cycle is impossible" {
+    assert(∀(a : BitVec64). ∀(b : BitVec64). (¬(ty108_rank(res108_false(),a,b) ∧ ty108_rank(res108_false(),b,a))))
+}
+example "law: opaque bridge still requires direct complete comparison" {
+    assert(∀(ab : Bool). ∀(bc : Bool). (¬ty108_three(ab,res108_false(),bc)))
+}
+example "law: declaration never revives stale pointer" {
+    assert(∀(t : Bool). ∀(r : Bool). ∀(b : Bool). ∀(k : Bool). (¬ty108_read(t,res108_false(),r,b,k)))
+}
+
+// C3.3 guest declaration refinement: identity is reserved before its fields.
+// A definition under construction is not a complete object layout.
+define ty108_reserve(found : Bool,count : BitVec64,limit : BitVec64) =
+    found ∨ bvult(count,limit)
+define ty108_layout_ready(complete : Bool,building : Bool) = complete ∧ ¬building
+define ty108_member(pointer : Bool,complete : Bool,building : Bool) =
+    pointer ∨ ty108_layout_ready(complete,building)
+define ty108_define(fields : BitVec64,building : Bool) =
+    (fields=bvconst(0,64)) ∧ ¬building
+define ty108_field_start(defining : Bool,old : BitVec64,current : BitVec64) =
+    if defining then current else old
+example "C3.3 reuse at full table" { assert(ty108_reserve(res108_true(),bvconst(16,64),bvconst(16,64))) }
+example "C3.3 new at full table" { assert(¬ty108_reserve(res108_false(),bvconst(16,64),bvconst(16,64))) }
+example "C3.3 reserve last tag" { assert(ty108_reserve(res108_false(),bvconst(15,64),bvconst(16,64))) }
+example "C3.3 self pointer while building" { assert(ty108_member(res108_true(),res108_false(),res108_true())) }
+example "C3.3 mutual incomplete pointer" { assert(ty108_member(res108_true(),res108_false(),res108_false())) }
+example "C3.3 incomplete value denied" { assert(¬ty108_member(res108_false(),res108_false(),res108_false())) }
+example "C3.3 partial self value denied" { assert(¬ty108_member(res108_false(),res108_true(),res108_true())) }
+example "C3.3 completed value allowed" { assert(ty108_member(res108_false(),res108_true(),res108_false())) }
+example "C3.3 define forward tag" { assert(ty108_define(bvconst(0,64),res108_false())) }
+example "C3.3 duplicate complete denied" { assert(¬ty108_define(bvconst(1,64),res108_false())) }
+example "C3.3 nested definition denied" { assert(¬ty108_define(bvconst(0,64),res108_true())) }
+example "C3.3 deferred fields rebase" { assert(ty108_field_start(res108_true(),bvconst(0,64),bvconst(3,64))=bvconst(3,64)) }
+example "C3.3 forward declaration preserves fields" { assert(ty108_field_start(res108_false(),bvconst(0,64),bvconst(3,64))=bvconst(0,64)) }
+
+// C3.4 private 32-bit local type: low16 base, high16 pointer depth.
+// Public scalar AOM types retain depth*1000+base; struct exports stay gated.
+define ty108_base(t : BitVec64) = bvand(t,bvconst(65535,64))
+define ty108_depth(t : BitVec64) = bvlshr(t,bvconst(16,64))
+define ty108_code(base : BitVec64,depth : BitVec64) = bvadd(base,bvshl(depth,bvconst(16,64)))
+define ty108_local(base : BitVec64,depth : BitVec64) =
+    ((bvuge(base,bvconst(1,64)) ∧ bvule(base,bvconst(3,64))) ∨
+     (bvuge(base,bvconst(100,64)) ∧ bvult(base,bvconst(4196,64)))) ∧ bvule(depth,bvconst(65535,64))
+define ty108_wire(t : BitVec64) = bvadd(bvmul(ty108_depth(t),bvconst(1000,64)),ty108_base(t))
+define ty108_more(t : BitVec64) = bvult(t,bvconst(4294901760,64))
+example "local base round trip" { assert(∀(b : BitVec64). ∀(d : BitVec64). (ty108_local(b,d) → ty108_base(ty108_code(b,d))=b)) }
+example "local depth round trip" { assert(∀(b : BitVec64). ∀(d : BitVec64). (ty108_local(b,d) → ty108_depth(ty108_code(b,d))=d)) }
+example "C3.4 struct ordinal 900 distinct from int pointer" { assert(ty108_code(bvconst(1000,64),bvconst(0,64))≠ty108_code(bvconst(1,64),bvconst(1,64))) }
+example "C3.4 last struct supported" { assert(ty108_local(bvconst(4195,64),bvconst(0,64))) }
+example "C3.4 one past struct denied" { assert(¬ty108_local(bvconst(4196,64),bvconst(0,64))) }
+example "C3.4 depth max" { assert(ty108_local(bvconst(1,64),bvconst(65535,64))) }
+example "C3.4 depth overflow denied" { assert(¬ty108_local(bvconst(1,64),bvconst(65536,64))) }
+example "C3.4 pointer overflow denied" { assert(¬ty108_more(ty108_code(bvconst(1,64),bvconst(65535,64)))) }
+example "C3.4 one more pointer safe" { assert(ty108_more(ty108_code(bvconst(4195,64),bvconst(65534,64)))) }
+example "C3.4 legacy int pointer" { assert(ty108_wire(ty108_code(bvconst(1,64),bvconst(1,64)))=bvconst(1001,64)) }
+example "C3.4 legacy void pointer" { assert(ty108_wire(ty108_code(bvconst(3,64),bvconst(1,64)))=bvconst(1003,64)) }
+example "C3.4 legacy pointer pointer" { assert(ty108_wire(ty108_code(bvconst(2,64),bvconst(2,64)))=bvconst(2002,64)) }
+
+// AOM v2: exact ATY1 trailer starts at the end of relocations. The function
+// evidence count/order and normalized public signatures match the AOM table.
+define ty108_trailer(version : BitVec64,end : BitVec64,total : BitVec64,size : BitVec64) =
+    ((version=bvconst(1,64)) ∧ (end=total) ∧ (size=bvconst(0,64))) ∨
+    ((version=bvconst(2,64)) ∧ bvule(end,total) ∧ bvuge(size,bvconst(40,64)) ∧
+     (bvsub(total,end)=size))
+define ty108_symbol(name : Bool,binding : Bool,count : Bool,refs : Bool) = name ∧ binding ∧ count ∧ refs
+define ty108_public(base : BitVec64,depth : BitVec64,typed : Bool) =
+    bvule(depth,bvconst(63,64)) ∧ ((bvuge(base,bvconst(1,64)) ∧ bvule(base,bvconst(3,64))) ∨
+    (typed ∧ (base=bvconst(4,64)) ∧ bvugt(depth,bvconst(0,64))))
+define ty108_reachable(old : Bool,edge : Bool) = old ∨ edge
+example "AOM2 legacy exact" { assert(ty108_trailer(bvconst(1,64),bvconst(400,64),bvconst(400,64),bvconst(0,64))) }
+example "AOM2 legacy hidden trailer" { assert(¬ty108_trailer(bvconst(1,64),bvconst(400,64),bvconst(440,64),bvconst(40,64))) }
+example "AOM2 typed exact" { assert(ty108_trailer(bvconst(2,64),bvconst(400,64),bvconst(440,64),bvconst(40,64))) }
+example "AOM2 typed overlap" { assert(¬ty108_trailer(bvconst(2,64),bvconst(440,64),bvconst(400,64),bvconst(40,64))) }
+example "AOM2 typed short" { assert(¬ty108_trailer(bvconst(2,64),bvconst(400,64),bvconst(432,64),bvconst(32,64))) }
+example "AOM2 typed tail" { assert(¬ty108_trailer(bvconst(2,64),bvconst(400,64),bvconst(448,64),bvconst(40,64))) }
+example "AOM2 symbol exact" { assert(ty108_symbol(res108_true(),res108_true(),res108_true(),res108_true())) }
+example "AOM2 symbol substituted type" { assert(¬ty108_symbol(res108_true(),res108_true(),res108_true(),res108_false())) }
+example "AOM2 symbol substituted name" { assert(¬ty108_symbol(res108_false(),res108_true(),res108_true(),res108_true())) }
+example "AOM2 struct pointer typed" { assert(ty108_public(bvconst(4,64),bvconst(1,64),res108_true())) }
+example "AOM2 struct pointer legacy" { assert(¬ty108_public(bvconst(4,64),bvconst(1,64),res108_false())) }
+example "AOM2 struct by value" { assert(¬ty108_public(bvconst(4,64),bvconst(0,64),res108_true())) }
+example "AOM2 public depth limit" { assert(¬ty108_public(bvconst(4,64),bvconst(64,64),res108_true())) }
+example "AOM2 private tag not exported" { assert(¬ty108_reachable(res108_false(),res108_false())) }
+example "AOM2 reachable monotonic" { assert(ty108_reachable(res108_true(),res108_false())) }
+
+// Protected member lowering: offsets derive only from a completed local layout.
+// PADD derives an alias; PREAD/PWRITE/PLOAD/PSTORE still authenticate each use.
+define ty108_field(complete : Bool,found : Bool,offset : BitVec64,width : BitVec64,size : BitVec64) =
+    complete ∧ found ∧ bvugt(width,bvconst(0,64)) ∧ bvule(offset,size) ∧ bvule(width,bvsub(size,offset))
+define ty108_field_use(layout : Bool,live : Bool,rights : Bool,bounds : Bool,kind : Bool) =
+    layout ∧ live ∧ rights ∧ bounds ∧ kind
+example "member value" { assert(ty108_field(res108_true(),res108_true(),bvconst(0,64),bvconst(8,64),bvconst(32,64))) }
+example "member pointer aligned tail" { assert(ty108_field(res108_true(),res108_true(),bvconst(16,64),bvconst(16,64),bvconst(32,64))) }
+example "member opaque" { assert(¬(ty108_field(res108_false(),res108_true(),bvconst(0,64),bvconst(8,64),bvconst(32,64)))) }
+example "member absent" { assert(¬(ty108_field(res108_true(),res108_false(),bvconst(0,64),bvconst(8,64),bvconst(32,64)))) }
+example "member offset past end" { assert(¬(ty108_field(res108_true(),res108_true(),bvconst(40,64),bvconst(8,64),bvconst(32,64)))) }
+example "member span past end" { assert(¬(ty108_field(res108_true(),res108_true(),bvconst(24,64),bvconst(16,64),bvconst(32,64)))) }
+example "member wrap rejected" { assert(¬(ty108_field(res108_true(),res108_true(),bvnot(bvconst(7,64)),bvconst(16,64),bvconst(32,64)))) }
+example "member usable" { assert(ty108_field_use(res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "member missing layout" { assert(¬(ty108_field_use(res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "member missing lifetime" { assert(¬(ty108_field_use(res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "member missing rights" { assert(¬(ty108_field_use(res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "member missing bounds" { assert(¬(ty108_field_use(res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "member missing kind" { assert(¬(ty108_field_use(res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))) }
+
+// Separate trusted large-application policy; producer and legacy profiles are
+// unchanged. No wire object selects its own transport capacity or grants EXEC.
+define ty108_large_link(selected : Bool,module_bytes : BitVec64,code : BitVec64,metadata : BitVec64) =
+    selected ∧ bvule(module_bytes,bvconst(2097152,64)) ∧ bvugt(code,bvconst(0,64)) ∧
+    bvule(code,bvconst(2097152,64)) ∧ bvule(metadata,bvsub(bvconst(2097152,64),code))
+example "large explicit" { assert(ty108_large_link(res108_true(),bvconst(1100000,64),bvconst(1099000,64),bvconst(1000,64))) }
+example "large unselected" { assert(¬(ty108_large_link(res108_false(),bvconst(1100000,64),bvconst(1099000,64),bvconst(1000,64)))) }
+example "large module excess" { assert(¬(ty108_large_link(res108_true(),bvconst(2097153,64),bvconst(8,64),bvconst(64,64)))) }
+example "large aggregate overflow" { assert(¬(ty108_large_link(res108_true(),bvconst(1000000,64),bvconst(2097100,64),bvconst(64,64)))) }
+example "large code past end" { assert(¬(ty108_large_link(res108_true(),bvconst(1000000,64),bvnot(bvconst(7,64)),bvconst(64,64)))) }
+
+// C4 receipt-bound application policy. This is coordinator policy, never an
+// AOM-selected field. Producer ABI 2 is excluded from application publication.
+define ty108_app_profile(p : BitVec64) = (p=bvconst(0,64)) ∨ (p=bvconst(3,64))
+define ty108_bound_profile(frozen : BitVec64,executed : BitVec64,receipt : BitVec64) =
+    ty108_app_profile(frozen) ∧ (frozen=executed) ∧ (frozen=receipt)
+define ty108_profile_module(p : BitVec64,n : BitVec64) =
+    ty108_app_profile(p) ∧ bvugt(n,bvconst(0,64)) ∧
+    (if p=bvconst(3,64) then bvule(n,bvconst(2097152,64)) else bvule(n,bvconst(262144,64)))
+define ty108_profile_publish(frozen : BitVec64,executed : BitVec64,receipt : BitVec64,
+    dependencies : Bool,bytes : Bool,authority : Bool) =
+    ty108_bound_profile(frozen,executed,receipt) ∧ dependencies ∧ bytes ∧ authority
+example "C4 standard profile binding" { assert(ty108_bound_profile(bvconst(0,64),bvconst(0,64),bvconst(0,64))) }
+example "C4 large profile binding" { assert(ty108_bound_profile(bvconst(3,64),bvconst(3,64),bvconst(3,64))) }
+example "C4 producer cannot select application" { assert(¬ty108_bound_profile(bvconst(2,64),bvconst(2,64),bvconst(2,64))) }
+example "C4 executed policy substitution" { assert(¬ty108_bound_profile(bvconst(0,64),bvconst(3,64),bvconst(0,64))) }
+example "C4 receipt policy substitution" { assert(¬ty108_bound_profile(bvconst(3,64),bvconst(3,64),bvconst(0,64))) }
+example "C4 standard exact module limit" { assert(ty108_profile_module(bvconst(0,64),bvconst(262144,64))) }
+example "C4 standard cannot inherit large bound" { assert(¬ty108_profile_module(bvconst(0,64),bvconst(262145,64))) }
+example "C4 large exact module limit" { assert(ty108_profile_module(bvconst(3,64),bvconst(2097152,64))) }
+example "C4 large excess module" { assert(¬ty108_profile_module(bvconst(3,64),bvconst(2097153,64))) }
+example "C4 large publication" { assert(ty108_profile_publish(bvconst(3,64),bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_true())) }
+example "C4 publication missing dependencies" { assert(¬ty108_profile_publish(bvconst(3,64),bvconst(3,64),bvconst(3,64),res108_false(),res108_true(),res108_true())) }
+example "C4 publication missing bytes" { assert(¬ty108_profile_publish(bvconst(3,64),bvconst(3,64),bvconst(3,64),res108_true(),res108_false(),res108_true())) }
+example "C4 publication missing authority" { assert(¬ty108_profile_publish(bvconst(3,64),bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_false())) }
+example "C4 law: mismatched execution can never publish" {
+ assert(∀(a : BitVec64). ∀(b : BitVec64). ∀(r : BitVec64). ∀(d : Bool). ∀(e : Bool). ∀(p : Bool).
+ ((a≠b) → ¬ty108_profile_publish(a,b,r,d,e,p)))
+}
+
+// Extended CC_B must not patch an instruction slot that failed to emit.
+// The immutable canonical fixed-point source is not modified by this refinement.
+define ty108_boot_patch(failed : Bool,pos : BitVec64,emitted : BitVec64,frontier : BitVec64) =
+    ¬failed ∧ (bvand(pos,bvconst(7,64))=bvconst(0,64)) ∧
+    bvuge(emitted,bvconst(8,64)) ∧ bvule(emitted,frontier) ∧
+    bvule(pos,bvsub(emitted,bvconst(8,64)))
+example "bootstrap patch emitted first slot" { assert(ty108_boot_patch(res108_false(),bvconst(0,64),bvconst(8,64),bvconst(81920,64))) }
+example "bootstrap patch last full slot" { assert(ty108_boot_patch(res108_false(),bvconst(81912,64),bvconst(81920,64),bvconst(81920,64))) }
+example "bootstrap patch capacity failure" { assert(¬(ty108_boot_patch(res108_true(),bvconst(81920,64),bvconst(81920,64),bvconst(81920,64)))) }
+example "bootstrap patch one past even without error" { assert(¬(ty108_boot_patch(res108_false(),bvconst(81920,64),bvconst(81920,64),bvconst(81920,64)))) }
+example "bootstrap patch empty output" { assert(¬(ty108_boot_patch(res108_false(),bvconst(0,64),bvconst(0,64),bvconst(81920,64)))) }
+example "bootstrap patch partial slot" { assert(¬(ty108_boot_patch(res108_false(),bvconst(0,64),bvconst(7,64),bvconst(81920,64)))) }
+example "bootstrap patch unaligned slot" { assert(¬(ty108_boot_patch(res108_false(),bvconst(1,64),bvconst(16,64),bvconst(81920,64)))) }
+example "bootstrap patch overlapping literal frontier" { assert(¬(ty108_boot_patch(res108_false(),bvconst(0,64),bvconst(16,64),bvconst(8,64)))) }
+example "bootstrap patch law: complete slot stays inside frontier" {
+ assert(∀(p : BitVec64). ∀(n : BitVec64). ∀(l : BitVec64).
+ (ty108_boot_patch(res108_false(),p,n,l) → bvule(bvadd(p,bvconst(8,64)),l)))
+}

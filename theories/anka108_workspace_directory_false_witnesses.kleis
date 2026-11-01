@@ -1,0 +1,53 @@
+import "anka108_workspace_directory.kleis"
+example "hostile: count 1 structures False" { assert(¬(wd108_count(bvconst(1,64),res108_false()))) }
+example "hostile: count 128 structures False" { assert(¬(wd108_count(bvconst(128,64),res108_false()))) }
+example "hostile: count 4096 structures False" { assert(¬(wd108_count(bvconst(4096,64),res108_false()))) }
+example "hostile: count 4097 structures False" { assert(¬(¬(wd108_count(bvconst(4097,64),res108_false())))) }
+example "hostile: count 0 structures False" { assert(¬(¬(wd108_count(bvconst(0,64),res108_false())))) }
+example "hostile: count 16 structures True" { assert(¬(wd108_count(bvconst(16,64),res108_true()))) }
+example "hostile: count 17 structures True" { assert(¬(wd108_count(bvconst(17,64),res108_true()))) }
+example "hostile: valid table" { assert(¬(wd108_record(bvconst(24576,64),bvconst(24576,64),bvconst(128,64),bvconst(80,64),bvconst(80,64),bvconst(0,64),bvconst(65536,64)))) }
+example "hostile: overlap" { assert(¬(¬(wd108_record(bvconst(24568,64),bvconst(24576,64),bvconst(128,64),bvconst(80,64),bvconst(80,64),bvconst(0,64),bvconst(65536,64))))) }
+example "hostile: wrong stride" { assert(¬(¬(wd108_record(bvconst(24576,64),bvconst(24576,64),bvconst(128,64),bvconst(8,64),bvconst(80,64),bvconst(0,64),bvconst(65536,64))))) }
+example "hostile: reserved data" { assert(¬(¬(wd108_record(bvconst(24576,64),bvconst(24576,64),bvconst(128,64),bvconst(80,64),bvconst(80,64),bvconst(1,64),bvconst(65536,64))))) }
+example "hostile: short workspace" { assert(¬(¬(wd108_record(bvconst(24576,64),bvconst(24576,64),bvconst(128,64),bvconst(80,64),bvconst(80,64),bvconst(0,64),bvconst(32768,64))))) }
+example "hostile: overflow count" { assert(¬(¬(wd108_record(bvconst(24576,64),bvconst(24576,64),ptr107_max(),bvconst(80,64),bvconst(80,64),bvconst(0,64),bvconst(65536,64))))) }
+example "hostile: frames 128 128" { assert(¬(wd108_frames(bvconst(128,64),bvconst(128,64)))) }
+example "hostile: frames 128 64" { assert(¬(¬(wd108_frames(bvconst(128,64),bvconst(64,64))))) }
+example "hostile: frames 64 128" { assert(¬(¬(wd108_frames(bvconst(64,64),bvconst(128,64))))) }
+example "hostile: profile 0 length 768" { assert(¬(wd108_request(bvconst(0,64),bvconst(768,64)))) }
+example "hostile: profile 1 length 1024" { assert(¬(wd108_request(bvconst(1,64),bvconst(1024,64)))) }
+example "hostile: profile 1 length 768" { assert(¬(¬(wd108_request(bvconst(1,64),bvconst(768,64))))) }
+example "hostile: profile 0 length 1024" { assert(¬(¬(wd108_request(bvconst(0,64),bvconst(1024,64))))) }
+example "hostile: profile 2 length 1024" { assert(¬(¬(wd108_request(bvconst(2,64),bvconst(1024,64))))) }
+example "hostile: bound publication" { assert(¬(wd108_publish(res108_true(),res108_true(),res108_true()))) }
+example "hostile: changed directory" { assert(¬(¬(wd108_publish(res108_true(),res108_false(),res108_true())))) }
+example "hostile: stale binding" { assert(¬(¬(wd108_publish(res108_true(),res108_true(),res108_false())))) }
+example "hostile workspace retry: table role 32" { assert(¬(wd108_need(bvconst(1,64),bvconst(32,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64)))) }
+example "hostile workspace retry: table role 33" { assert(¬(wd108_need(bvconst(1,64),bvconst(33,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64)))) }
+example "hostile workspace retry: table role 34" { assert(¬(wd108_need(bvconst(1,64),bvconst(34,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64)))) }
+example "hostile workspace retry: table role 35" { assert(¬(wd108_need(bvconst(1,64),bvconst(35,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64)))) }
+example "hostile workspace retry: table role 36" { assert(¬(wd108_need(bvconst(1,64),bvconst(36,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64)))) }
+example "hostile workspace retry: table role 37" { assert(¬(wd108_need(bvconst(1,64),bvconst(37,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64)))) }
+example "hostile workspace retry: table role 38" { assert(¬(wd108_need(bvconst(1,64),bvconst(38,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64)))) }
+example "hostile workspace retry: legacy" { assert(¬(¬(wd108_need(bvconst(0,64),bvconst(32,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64))))) }
+example "hostile workspace retry: foreign role" { assert(¬(¬(wd108_need(bvconst(1,64),bvconst(31,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64))))) }
+example "hostile workspace retry: foreign upper role" { assert(¬(¬(wd108_need(bvconst(1,64),bvconst(39,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64))))) }
+example "hostile workspace retry: same count" { assert(¬(¬(wd108_need(bvconst(1,64),bvconst(32,64),bvconst(64,64),bvconst(64,64),bvconst(0,64),bvconst(0,64))))) }
+example "hostile workspace retry: excess count" { assert(¬(¬(wd108_need(bvconst(1,64),bvconst(32,64),bvconst(4096,64),bvconst(4097,64),bvconst(0,64),bvconst(0,64))))) }
+example "hostile workspace retry: partial artifact" { assert(¬(¬(wd108_need(bvconst(1,64),bvconst(32,64),bvconst(64,64),bvconst(65,64),bvconst(8,64),bvconst(0,64))))) }
+example "hostile workspace retry: diagnostic impostor" { assert(¬(¬(wd108_need(bvconst(1,64),bvconst(32,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(8,64))))) }
+example "hostile workspace retry: complete cleanup" { assert(¬(wd108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(10,64),bvconst(0,64),bvconst(100,64),bvconst(3,64)))) }
+example "hostile workspace retry: not executed" { assert(¬(¬(wd108_retry(res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(10,64),bvconst(0,64),bvconst(100,64),bvconst(3,64))))) }
+example "hostile workspace retry: changed bindings" { assert(¬(¬(wd108_retry(res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(10,64),bvconst(0,64),bvconst(100,64),bvconst(3,64))))) }
+example "hostile workspace retry: changed directory" { assert(¬(¬(wd108_retry(res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),bvconst(10,64),bvconst(0,64),bvconst(100,64),bvconst(3,64))))) }
+example "hostile workspace retry: active work" { assert(¬(¬(wd108_retry(res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),bvconst(10,64),bvconst(0,64),bvconst(100,64),bvconst(3,64))))) }
+example "hostile workspace retry: unreleased owner" { assert(¬(¬(wd108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),bvconst(10,64),bvconst(0,64),bvconst(100,64),bvconst(3,64))))) }
+example "hostile workspace retry: invalid geometry" { assert(¬(¬(wd108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),bvconst(10,64),bvconst(0,64),bvconst(100,64),bvconst(3,64))))) }
+example "hostile workspace retry: no work" { assert(¬(¬(wd108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(0,64),bvconst(100,64),bvconst(3,64))))) }
+example "hostile workspace retry: spent work limit" { assert(¬(¬(wd108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(100,64),bvconst(0,64),bvconst(100,64),bvconst(3,64))))) }
+example "hostile workspace retry: no retries" { assert(¬(¬(wd108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(10,64),bvconst(0,64),bvconst(100,64),bvconst(0,64))))) }
+example "hostile workspace retry: carry budgets" { assert(¬(wd108_carry(bvconst(10,64),bvconst(10,64),bvconst(3,64),bvconst(2,64),bvconst(4096,64),bvconst(4096,64)))) }
+example "hostile workspace retry: reset spent" { assert(¬(¬(wd108_carry(bvconst(10,64),bvconst(0,64),bvconst(3,64),bvconst(2,64),bvconst(4096,64),bvconst(4096,64))))) }
+example "hostile workspace retry: reset retries" { assert(¬(¬(wd108_carry(bvconst(10,64),bvconst(10,64),bvconst(3,64),bvconst(3,64),bvconst(4096,64),bvconst(4096,64))))) }
+example "hostile workspace retry: output substitution" { assert(¬(¬(wd108_carry(bvconst(10,64),bvconst(10,64),bvconst(3,64),bvconst(2,64),bvconst(4096,64),bvconst(8192,64))))) }

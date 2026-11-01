@@ -1,0 +1,103 @@
+// C3.2 bounded effective-source admission and include-preprocessor retries.
+// Scalar refinement only. Runtime must establish exit, immutable inputs and
+// disposal of the isolated attempt; these predicates do not prove guest code.
+import "anka108_workspace_directory.kleis"
+define sg108_page(n : BitVec64) = bvugt(n,bvconst(0,64)) ∧ (bvand(n,bvconst(4095,64))=bvconst(0,64))
+define sg108_source(profile : BitVec64,n : BitVec64,extent : BitVec64) =
+    bvule(n,extent) ∧ bvuge(extent,bvconst(8,64)) ∧
+    (bvand(extent,bvconst(7,64))=bvconst(0,64)) ∧
+    (((profile=bvconst(0,64)) ∧ bvule(n,bvconst(65528,64))) ∨
+     ((profile=bvconst(1,64)) ∧ bvule(n,bvconst(1048568,64))))
+define sg108_retry(exit : BitVec64,status : BitVec64,used : BitVec64,capacity : BitVec64,ordinary : Bool,unchanged : Bool,destroyed : Bool) =
+    (exit=bvconst(7,64)) ∧ (status=bvconst(7,64)) ∧ (used=capacity) ∧ ordinary ∧ unchanged ∧ destroyed
+// Counts are charged before dispatch; unused quantum is conservatively spent.
+define sg108_dispatch(remaining : BitVec64,quantum : BitVec64) =
+    bvugt(quantum,bvconst(0,64)) ∧ bvule(quantum,bvconst(100000,64)) ∧ bvule(quantum,remaining)
+define sg108_grow(old : BitVec64,next : BitVec64,limit : BitVec64,attempt : BitVec64,max_attempts : BitVec64,remaining : BitVec64) =
+    sg108_page(old) ∧ sg108_page(next) ∧ sg108_page(limit) ∧
+    bvule(limit,bvconst(1048576,64)) ∧ bvugt(next,old) ∧ bvule(next,limit) ∧
+    bvult(attempt,max_attempts) ∧ bvule(max_attempts,bvconst(16,64)) ∧ bvugt(remaining,bvconst(0,64))
+example "source 0 65528 65528" { assert(sg108_source(bvconst(0,64),bvconst(65528,64),bvconst(65528,64))) }
+example "source 0 65529 65536" { assert(¬(sg108_source(bvconst(0,64),bvconst(65529,64),bvconst(65536,64)))) }
+example "source 1 65529 65536" { assert(sg108_source(bvconst(1,64),bvconst(65529,64),bvconst(65536,64))) }
+example "source 1 70001 70008" { assert(sg108_source(bvconst(1,64),bvconst(70001,64),bvconst(70008,64))) }
+example "source 1 1048568 1048568" { assert(sg108_source(bvconst(1,64),bvconst(1048568,64),bvconst(1048568,64))) }
+example "source 1 1048569 1048576" { assert(¬(sg108_source(bvconst(1,64),bvconst(1048569,64),bvconst(1048576,64)))) }
+example "source 1 70001 70000" { assert(¬(sg108_source(bvconst(1,64),bvconst(70001,64),bvconst(70000,64)))) }
+example "source 2 1 8" { assert(¬(sg108_source(bvconst(2,64),bvconst(1,64),bvconst(8,64)))) }
+example "source 1 0 8" { assert(sg108_source(bvconst(1,64),bvconst(0,64),bvconst(8,64))) }
+example "source overflow" { assert(¬(sg108_source(bvconst(1,64),ptr107_max(),ptr107_max()))) }
+example "capacity retry after disposal" { assert(sg108_retry(bvconst(7,64),bvconst(7,64),bvconst(4096,64),bvconst(4096,64),res108_true(),res108_true(),res108_true())) }
+example "retry guard 0 0" { assert(¬(sg108_retry(bvconst(0,64),bvconst(7,64),bvconst(4096,64),bvconst(4096,64),res108_true(),res108_true(),res108_true()))) }
+example "retry guard 0 9" { assert(¬(sg108_retry(bvconst(9,64),bvconst(7,64),bvconst(4096,64),bvconst(4096,64),res108_true(),res108_true(),res108_true()))) }
+example "retry guard 1 0" { assert(¬(sg108_retry(bvconst(7,64),bvconst(0,64),bvconst(4096,64),bvconst(4096,64),res108_true(),res108_true(),res108_true()))) }
+example "retry guard 1 8" { assert(¬(sg108_retry(bvconst(7,64),bvconst(8,64),bvconst(4096,64),bvconst(4096,64),res108_true(),res108_true(),res108_true()))) }
+example "retry guard 2 4095" { assert(¬(sg108_retry(bvconst(7,64),bvconst(7,64),bvconst(4095,64),bvconst(4096,64),res108_true(),res108_true(),res108_true()))) }
+example "retry guard 2 4097" { assert(¬(sg108_retry(bvconst(7,64),bvconst(7,64),bvconst(4097,64),bvconst(4096,64),res108_true(),res108_true(),res108_true()))) }
+example "retry guard 4 res108_false()" { assert(¬(sg108_retry(bvconst(7,64),bvconst(7,64),bvconst(4096,64),bvconst(4096,64),res108_false(),res108_true(),res108_true()))) }
+example "retry guard 5 res108_false()" { assert(¬(sg108_retry(bvconst(7,64),bvconst(7,64),bvconst(4096,64),bvconst(4096,64),res108_true(),res108_false(),res108_true()))) }
+example "retry guard 6 res108_false()" { assert(¬(sg108_retry(bvconst(7,64),bvconst(7,64),bvconst(4096,64),bvconst(4096,64),res108_true(),res108_true(),res108_false()))) }
+example "dispatch 100000 100000" { assert(sg108_dispatch(bvconst(100000,64),bvconst(100000,64))) }
+example "dispatch 17 17" { assert(sg108_dispatch(bvconst(17,64),bvconst(17,64))) }
+example "dispatch 0 0" { assert(¬(sg108_dispatch(bvconst(0,64),bvconst(0,64)))) }
+example "dispatch 16 17" { assert(¬(sg108_dispatch(bvconst(16,64),bvconst(17,64)))) }
+example "dispatch 200000 100001" { assert(¬(sg108_dispatch(bvconst(200000,64),bvconst(100001,64)))) }
+example "strict capacity growth" { assert(sg108_grow(bvconst(4096,64),bvconst(8192,64),bvconst(131072,64),bvconst(1,64),bvconst(6,64),bvconst(100000,64))) }
+example "growth guard 0 0" { assert(¬(sg108_grow(bvconst(0,64),bvconst(8192,64),bvconst(131072,64),bvconst(1,64),bvconst(6,64),bvconst(100000,64)))) }
+example "growth guard 1 4096" { assert(¬(sg108_grow(bvconst(4096,64),bvconst(4096,64),bvconst(131072,64),bvconst(1,64),bvconst(6,64),bvconst(100000,64)))) }
+example "growth guard 1 4097" { assert(¬(sg108_grow(bvconst(4096,64),bvconst(4097,64),bvconst(131072,64),bvconst(1,64),bvconst(6,64),bvconst(100000,64)))) }
+example "growth guard 1 262144" { assert(¬(sg108_grow(bvconst(4096,64),bvconst(262144,64),bvconst(131072,64),bvconst(1,64),bvconst(6,64),bvconst(100000,64)))) }
+example "growth guard 2 2097152" { assert(¬(sg108_grow(bvconst(4096,64),bvconst(8192,64),bvconst(2097152,64),bvconst(1,64),bvconst(6,64),bvconst(100000,64)))) }
+example "growth guard 3 6" { assert(¬(sg108_grow(bvconst(4096,64),bvconst(8192,64),bvconst(131072,64),bvconst(6,64),bvconst(6,64),bvconst(100000,64)))) }
+example "growth guard 4 17" { assert(¬(sg108_grow(bvconst(4096,64),bvconst(8192,64),bvconst(131072,64),bvconst(1,64),bvconst(17,64),bvconst(100000,64)))) }
+example "growth guard 5 0" { assert(¬(sg108_grow(bvconst(4096,64),bvconst(8192,64),bvconst(131072,64),bvconst(1,64),bvconst(6,64),bvconst(0,64)))) }
+example "law: no source fetch extent widening" {
+    assert(∀(p : BitVec64). ∀(n : BitVec64). ∀(e : BitVec64). (sg108_source(p,n,e) → bvule(n,e)))
+}
+example "law: dispatch charge cannot wrap or increase remaining work" {
+    assert(∀(r : BitVec64). ∀(q : BitVec64). (sg108_dispatch(r,q) → bvult(bvsub(r,q),r)))
+}
+example "law: stale transport never authorizes retry" {
+    assert(∀(e : BitVec64). ∀(s : BitVec64). ∀(u : BitVec64). ∀(c : BitVec64).
+        (¬sg108_retry(e,s,u,c,res108_true(),res108_false(),res108_true())))
+}
+example "source extent must cover a whole final word" { assert(¬sg108_source(bvconst(1,64),bvconst(65529,64),bvconst(65529,64))) }
+example "law: bounded character read fits its aligned word" {
+    assert(∀(p : BitVec64). ∀(n : BitVec64). ∀(e : BitVec64). ∀(c : BitVec64).
+        ((sg108_source(p,n,e) ∧ bvult(c,n)) →
+         bvule(bvadd(bvand(c,bvsub(bvconst(0,64),bvconst(8,64))),bvconst(8,64)),e)))
+}
+
+// C3.2 scanner refinement: eight literal spaces may be consumed together;
+// otherwise exactly one non-NUL byte in 1..32 is consumed. No host pre-scan.
+define sg108_scan_step(c : BitVec64,n : BitVec64,step : BitVec64) =
+    bvule(n,bvconst(1048568,64)) ∧ bvule(c,n) ∧
+    ((step=bvconst(1,64)) ∨ (step=bvconst(8,64))) ∧ bvule(step,bvsub(n,c))
+define sg108_spaces(c : BitVec64,n : BitVec64,word : BitVec64) =
+    sg108_scan_step(c,n,bvconst(8,64)) ∧
+    (bvand(c,bvconst(7,64))=bvconst(0,64)) ∧
+    (word=bvconst(2314885530818453536,64))
+define sg108_whitespace(byte : BitVec64) = bvugt(byte,bvconst(0,64)) ∧ bvule(byte,bvconst(32,64))
+example "scan law: every accepted step strictly reduces remaining source" {
+    assert(∀(c : BitVec64). ∀(n : BitVec64). ∀(s : BitVec64).
+        (sg108_scan_step(c,n,s) → bvult(bvsub(n,bvadd(c,s)),bvsub(n,c))))
+}
+example "scan law: every fast word is contained in effective source" {
+    assert(∀(c : BitVec64). ∀(n : BitVec64). ∀(w : BitVec64).
+        (sg108_spaces(c,n,w) → bvule(bvadd(c,bvconst(8,64)),n)))
+}
+example "fast spaces 0 8 2314885530818453536" { assert(sg108_spaces(bvconst(0,64),bvconst(8,64),bvconst(2314885530818453536,64))) }
+example "fast spaces 65536 70024 2314885530818453536" { assert(sg108_spaces(bvconst(65536,64),bvconst(70024,64),bvconst(2314885530818453536,64))) }
+example "fast spaces 1 16 2314885530818453536" { assert(¬(sg108_spaces(bvconst(1,64),bvconst(16,64),bvconst(2314885530818453536,64)))) }
+example "fast spaces 0 7 2314885530818453536" { assert(¬(sg108_spaces(bvconst(0,64),bvconst(7,64),bvconst(2314885530818453536,64)))) }
+example "fast spaces 8 8 2314885530818453536" { assert(¬(sg108_spaces(bvconst(8,64),bvconst(8,64),bvconst(2314885530818453536,64)))) }
+example "fast spaces 0 8 0" { assert(¬(sg108_spaces(bvconst(0,64),bvconst(8,64),bvconst(0,64)))) }
+example "fast spaces 0 8 2314885530818453601" { assert(¬(sg108_spaces(bvconst(0,64),bvconst(8,64),bvconst(2314885530818453601,64)))) }
+example "scanner byte 0" { assert(¬(sg108_whitespace(bvconst(0,64)))) }
+example "scanner byte 1" { assert(sg108_whitespace(bvconst(1,64))) }
+example "scanner byte 9" { assert(sg108_whitespace(bvconst(9,64))) }
+example "scanner byte 10" { assert(sg108_whitespace(bvconst(10,64))) }
+example "scanner byte 13" { assert(sg108_whitespace(bvconst(13,64))) }
+example "scanner byte 32" { assert(sg108_whitespace(bvconst(32,64))) }
+example "scanner byte 33" { assert(¬(sg108_whitespace(bvconst(33,64)))) }
+example "scanner byte 255" { assert(¬(sg108_whitespace(bvconst(255,64)))) }

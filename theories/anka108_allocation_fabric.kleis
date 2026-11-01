@@ -1017,3 +1017,19 @@ example "law: typed heap store cannot contain fallible host work" {
     assert(∀(cell : Bool). ∀(source : Bool). ∀(coherent : BitVec8). ∀(locked : BitVec8). (¬(a23_store(cell,source,coherent,a23_false(),locked))))
 }
 
+
+// Lookup acceleration: a prefix boundary, never cached authorization. Every
+// occupied row lies below end; unused suffix capacity remains allocated/charged.
+define a23_prefix_row(index : BitVec64,end : BitVec64,capacity : BitVec64) = bvult(index,end) ∧ bvule(end,capacity)
+define a23_prefix_attach(old : BitVec64,slot : BitVec64,next : BitVec64,capacity : BitVec64) =
+    bvule(old,capacity) ∧ bvult(slot,capacity) ∧
+    ((bvult(slot,old) ∧ next=old) ∨ (bvuge(slot,old) ∧ next=bvadd(slot,a23_o())))
+example "prefix attachment includes new row" { assert(∀(e : BitVec64,s : BitVec64,n : BitVec64,c : BitVec64). a23_prefix_attach(e,s,n,c) → a23_prefix_row(s,n,c)) }
+example "prefix attachment preserves previous occupied rows" { assert(∀(i : BitVec64,e : BitVec64,s : BitVec64,n : BitVec64,c : BitVec64). (a23_prefix_row(i,e,c) ∧ a23_prefix_attach(e,s,n,c)) → a23_prefix_row(i,n,c)) }
+example "empty suffix cannot contain a matching row" { assert(∀(i : BitVec64,e : BitVec64,c : BitVec64). a23_prefix_row(i,e,c) → ¬bvuge(i,e)) }
+example "sparse high slot grows prefix" { assert(a23_prefix_attach(bvconst(5,64),bvconst(7000,64),bvconst(7001,64),bvconst(36864,64))) }
+example "hole reuse retains prefix" { assert(a23_prefix_attach(bvconst(7001,64),bvconst(2,64),bvconst(7001,64),bvconst(36864,64))) }
+// Shrinking is permitted only after proving every removed suffix row empty;
+// the runtime tests each trailing Option, not process-death or ownership flags.
+define a23_prefix_trim(old : BitVec64,next : BitVec64,capacity : BitVec64,suffix_empty : Bool) = bvule(next,old) ∧ bvule(old,capacity) ∧ suffix_empty
+example "trim empty suffix" { assert(a23_prefix_trim(bvconst(7001,64),bvconst(5,64),bvconst(36864,64),a23_true())) }

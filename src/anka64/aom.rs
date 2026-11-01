@@ -1,4 +1,4 @@
-//! Anka Object Module (AOM) v1 parser and structural validator.
+//! Anka Object Module (AOM) v1/v2 parser and structural validator.
 //!
 //! Phase 10.3 freezes the first byte-level object format.  AOM is deliberately
 //! small: one code section, an optional read-only-data section, a fixed-width
@@ -7,6 +7,7 @@
 
 pub const AOM_MAGIC: [u8; 8] = *b"ANKAOM1\0";
 pub const AOM_VERSION: u64 = 1;
+pub const AOM_TYPED_VERSION: u64 = 2;
 pub const AOM_HEADER_SIZE: u64 = 112;
 pub const AOM_SYMBOL_SIZE: u64 = 160;
 pub const AOM_RELOCATION_SIZE: u64 = 48;
@@ -67,6 +68,8 @@ pub struct AomRelocation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AomModule {
+    /// Exact ATY1 trailer for v2; empty for v1. No execution authority.
+    pub interface: Vec<u8>,
     pub header: AomHeader,
     pub code: Vec<u8>,
     pub rodata: Vec<u8>,
@@ -87,6 +90,7 @@ pub enum AomError {
     BadSymbol,
     DuplicateSymbol,
     BadRelocation,
+    BadInterface,
 }
 
 fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, AomError> {
@@ -123,7 +127,7 @@ impl AomModule {
             return Err(AomError::BadMagic);
         }
         let version = read_u64(bytes, 8)?;
-        if version != AOM_VERSION {
+        if version != AOM_VERSION && version != AOM_TYPED_VERSION {
             return Err(AomError::UnsupportedVersion(version));
         }
         let header_size = read_u64(bytes, 16)?;
@@ -182,10 +186,19 @@ impl AomModule {
             .ok_or(AomError::BadTableGeometry)?;
         let expected_total = header.relocation_offset.checked_add(relocation_bytes)
             .ok_or(AomError::BadTableGeometry)?;
-        if expected_total != header.total_size {
+        if (version == AOM_VERSION && expected_total != header.total_size)
+            || expected_total > header.total_size {
             return Err(AomError::BadTableGeometry);
         }
 
+        let interface = if version == AOM_TYPED_VERSION {
+            let offset=usize::try_from(expected_total).map_err(|_|AomError::BadInterface)?;
+            let trailer=bytes.get(offset..).ok_or(AomError::BadInterface)?;
+            if read_u64(trailer,24).map_err(|_|AomError::BadInterface)?==0 {return Err(AomError::BadInterface);}
+            trailer
+        } else { &[] };
+        let public_type = |t:u64| portable_public_type(t)
+            || (version==AOM_TYPED_VERSION && t%1000==4 && t/1000>0 && t/1000<=63);
         let mut symbols = Vec::new();
         for index in 0..header.symbol_count {
             let base_u64 = header.symbol_offset + index * AOM_SYMBOL_SIZE;
@@ -219,7 +232,7 @@ impl AomModule {
             let size = read_u64(bytes, base + 104)?;
             let return_type = read_u64(bytes, base + 112)?;
             let argc = read_u64(bytes, base + 120)?;
-            if kind != AOM_SYMBOL_FUNCTION || argc > 4 || !portable_public_type(return_type) {
+            if kind != AOM_SYMBOL_FUNCTION || argc > 4 || !public_type(return_type) {
                 return Err(AomError::BadSymbol);
             }
             match binding {
@@ -238,7 +251,7 @@ impl AomModule {
             let mut parameter_types = Vec::new();
             for p in 0..argc as usize {
                 let parameter_type = read_u64(bytes, base + 128 + p * 8)?;
-                if parameter_type == 3 || !portable_public_type(parameter_type) {
+                if parameter_type == 3 || !public_type(parameter_type) {
                     return Err(AomError::BadSymbol);
                 }
                 parameter_types.push(parameter_type);
@@ -288,7 +301,16 @@ impl AomModule {
             relocations.push(relocation);
         }
 
+        if version==AOM_TYPED_VERSION {
+            use super::compiler_adapter::interfaces::{TypeEvidence,TypeLimits,TypeWork};
+            let mut work=TypeWork::new(100_000_000);
+            let types=TypeEvidence::parse(interface,TypeLimits {bytes:bytes.len() as u64,
+                declarations:4096,fields:4096,functions:4096},&mut work)
+                .map_err(|_|AomError::BadInterface)?;
+            types.check_symbols(&symbols,&mut work).map_err(|_|AomError::BadInterface)?;
+        }
         Ok(Self {
+            interface: interface.to_vec(),
             header,
             code: bytes[code_range].to_vec(),
             rodata: bytes[rodata_range].to_vec(),

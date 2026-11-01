@@ -1,282 +1,111 @@
-# /system/compiler
+# Anka64 guest toolchain
 
-Logical home for Anka64 compiler/toolchain components.
+These are executable Anka64 userspace tools. The host transports and validates
+artifacts; it does not replace guest C preprocessing, compilation or linking.
 
-Phase 9.3h.2 introduced the supervised CC_B compile-only path.  Phase 10 keeps
-that bootstrap compiler intact and begins the second-generation toolchain here.
+| Source | Current role |
+|---|---|
+| `ankacc2_stage1.c` | Preserved Phase 10.1 bootstrap checkpoint |
+| `ankacc2_stage2.c` | Preserved Phase 10.2 declarations/type/ABI checkpoint |
+| `ankacc2_stage3.c` | Accepted self-hosting compiler lineage and AOM producer |
+| `ankacc2_abi2.c` | Protected producer with admitted source/workspace/output regions and checked growth replies |
+| `ankapp.c` | Explicit-bundle, include-only guest preprocessor |
+| `ankald.c` | Guest static linker, including protected frame and typed-module evidence |
 
-## Phase 10.1: AnkaCC2 stage 1
+## Lineage and ordinary invocation
 
-`ankacc2_stage1.c` is real Anka userspace C and is deliberately compilable by
-CC_B.  It reuses the already-audited compiler process ABI (source, workspace,
-output, compile-only mode) while replacing the old lexer/parser boundary with
-the first AC2 slice.  The bootstrap source must itself remain inside CC_B's
-frozen grammar; in particular CC_B admits `syscall(...)` as an expression, not
-as a bare call statement.
+Phase 10.6 established the concrete `CC2_0 → CC2_1 → CC2_2` fixed-point witness.
+The protected ABI-2 producer is built from the accepted lineage; it is not itself
+asserted byte-identical to the legacy compiler. `ankapp` and `ankald` retain their
+explicit bootstrap/tool bindings. The old Stage 1/2 grammar and resource limits
+are historical checkpoints, not the current protected language specification.
 
-The stage-1 front end accepts:
-
-```text
-identifier := [A-Za-z_][A-Za-z0-9_]{0,62}
-integer    := decimal-u64 | 0[xX]hex-u64
-function   := int identifier() { return expression; }
-expression := integer | identifier()
-program    := function+
+```sh
+cargo run --release -- rebuild --include shared.h --run main.c helper.c
 ```
 
-Integer width is a magnitude property: leading zeroes do not consume the
-64-bit magnitude budget.  Decimal and hexadecimal spellings above `u64` are
-rejected.
+The service freezes source/tool/plan provenance before execution. Checked output
+and workspace retries retain source identity and cumulative work, wait for actual
+cleanup and admit a fresh producer. Successful compilation yields an exact,
+READ-only relocatable artifact/receipt; guest linking and separately authorized
+execution follow. A failed attempt cannot overwrite an earlier publication.
 
-The parser envelope is intentionally narrow.  Parameters, declarations,
-prototypes, pointers, arrays, structs, typedefs, enums, headers, separate
-translation units, and richer expressions remain later Phase 10 work.
+The ordinary coordinator supports two independent active jobs. Its acceptance
+passed with A exhausted, B still correct, C reusing released backing, and stale A
+aliases rejected. The command currently compiles module roots sequentially and
+links in argument order. It accepts up to eight roots and 256 bundle members;
+canonical bundle size is at most 1 MiB. These and the finite work/quota limits
+are stated service policies. Resource growth is checked, not unlimited.
 
-Stage 1 emits the existing direct executable image, not AOM.  AOM first appears
-in Phase 10.3 and linking in Phase 10.4.
+## Supported language and module boundary
 
-Stable stage-1 diagnostic codes in the shared compiler workspace are:
+The current protected subset includes functions/prototypes, scalar types,
+protected pointers, fixed local arrays, supported structs and member operations,
+forward/self/mutual struct-pointer declarations, typed byte I/O and supported
+`malloc/free`. Protected pointer pairs carry authenticated kind/lifetime state;
+integer bit patterns cannot mint them. Frame and heap retirement reject stale
+aliases. No host-native C ABI is assumed.
 
-```text
-1  invalid lexical byte/token
-2  identifier exceeds 63 bytes
-3  integer magnitude exceeds 64 bits or malformed hex token
-4  token is outside the stage-1 parser grammar
-5  duplicate function definition
-6  missing main
-7  unresolved function call
-8  compiler table/output resource bound exceeded
+Separate protected modules carry complete/opaque type evidence. Compatible
+struct-pointer interfaces can link; conflicting definitions/signatures reject.
+Module-local numeric tag indices are not cross-module type identity. By-value
+recursive/incomplete layouts remain invalid. This is a C subset, not a claim of
+full ISO C, a GCC-compatible object format, aggregate-by-value ABI, arbitrary
+mutable globals or a complete libc. Consult current compiler code and DN-71 for
+profile-specific limits instead of extrapolating Stage 1/2 limits.
+
+## Source bundles and preprocessing
+
+`ankapp` supports exact quoted inclusion from an explicit immutable bundle.
+There is no ambient `-I` search, host fallback, macro expansion, conditional
+preprocessing, token pasting or stringizing. Active include cycles and depth
+beyond 32 reject. The CLI names members by basename; the source-bundle API can
+supply other exact logical names. Missing includes fail before compilation.
+
+Preprocessor codes retain these meanings:
+
+| Code | Meaning |
+|---|---|
+| 1 | Invalid manifest/root |
+| 2 | Missing include target |
+| 3 | Duplicate/ambiguous target |
+| 4 | Active include cycle |
+| 5 | Include-depth bound |
+| 6 | Unsupported directive/profile |
+| 7 | Output capacity exhausted; retry only after validated normal completion |
+| 8 | Malformed include directive |
+
+Source growth beyond 64 KiB and real preprocessor capacity retry are accepted.
+The original fixed `SOURCE_SIZE - 8` transport remains a legacy entry point; it
+is not the ordinary protected service's universal source limit.
+
+## AOM, linking and authority
+
+AOM v1's base geometry remains a 112-byte header, 160-byte function symbols,
+48-byte relocations and eight-byte code alignment. Protected/typed profiles add
+validated frame and type evidence. Unsupported profile mixing and malformed
+metadata reject before execution. Current emitters can carry literal data;
+mutable data is not silently placed into executable storage.
+
+Guest `ankald` resolves ordered inputs and applies validated relocations. The
+host validates exact output and publishes its receipt; it does not substitute a
+host linker. Publication is READ-only. Code loading and C startup require
+separate execution authority and the charged isolated-run profile.
+
+## Acceptance and remaining closure
+
+Latest ordinary-service evidence: Kleis **29 positive / 21 hostile**, six focused
+tests, **154 runtime tests with ten ignored**, and the explicit real concurrent
+compiler test **75.79s**. These overlapping groups are not a complete regression
+run. The new HTTP/input packet is pending its own Rust acceptance.
+
+```sh
+bash scripts/check-anka108-rebuild-service.sh --real
+bash scripts/check-anka108-http-application.sh --real
 ```
 
-Compilation still creates no execution authority.  The produced executable is
-sealed in compile-only mode and must later pass the ordinary Anka execution
-admission path before it can run.
-
-## Phase 10.1 closure
-
-Phase 10.1 is closed with the complete regression suite green:
-
-```text
-932 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
-```
-
-The corresponding Kleis refinement gate remains 15/15 positive with 0/8 hostile
-witnesses accepted and no new axioms.  This establishes the real bootstrap edge
-`CC_B -> AnkaCC2-stage1` before Phase 10.2 expands declarations, types, and ABI
-semantics.
-
-
-## Phase 10.2: AnkaCC2 stage 2
-
-`ankacc2_stage2.c` keeps the same CC_B-buildable, supervised compile-only
-bootstrap path while adding the first explicit AC2 type and function ABI layer.
-Stage 1 remains unchanged as the closed 10.1 checkpoint.
-
-Stage 2 adds compatible prototypes, up to four scalar/pointer parameters in
-`R0..R3`, scalar/pointer return in `R0`, `int`, byte-sized `char`, `void`, nested
-pointers, fixed local arrays, declaration-order/aligned structs, typedef aliases,
-named enums/enumerator constants, array-parameter decay, and `sizeof(type)` /
-`sizeof(type[extent])`.
-Byte-sized `char` values undergo the Stage-2 integer promotion to `int` when used by the supported `+`/`-` arithmetic operators; storage remains one byte while the arithmetic/result representation is one word.  Scalar value compatibility also admits `char`→`int` and `int`→`char`; the narrowing direction stores the low byte and byte loads zero-extend into the word-register ABI.
-
-Typed local objects are stack-resident.  Fixed extents are bounded to 1024
-elements and the typed local-object portion of a frame is bounded to 8192 bytes.
-Aggregate-by-value parameters/returns are deliberately rejected while no
-aggregate ABI has been earned.
-
-The direct Stage-2 backend still emits code-only sealed executables.  Mutable
-file-scope data is therefore rejected instead of being placed into executable
-memory.  Writable globals remain deferred until an explicit writable-data section
-and loader mapping are specified; AOM v1 in Phase 10.3 does not add them merely by
-introducing an object container.
-
-Stage-2 diagnostics extend the stable Stage-1 set:
-
-```text
-9   type/object mismatch
-10  declaration/tag/alias error
-11  prototype/definition signature mismatch
-12  direct ABI limit / aggregate-by-value rejection
-13  layout/extent/frame bound violation
-14  mutable file-scope data unsupported by direct backend
-```
-
-Formal gate: 23/23 positive Kleis examples, 0/14 hostile examples accepted, no
-new axioms.  The complete runtime suite is also closed at 944/944.
-
-The Stage-2 source is constrained by CC_B while it bootstraps its successor.
-CC_B has one flat local-symbol scope per function, so Stage-2 bootstrap source
-must not redeclare the same local name in disjoint C blocks even though AC2
-itself may later support ordinary nested scopes.  The first runtime attempt
-exposed exactly this boundary in `primary`, `unary`, and `topitem`; those locals
-now have unique bootstrap names.
-
-`ankacc2_stage2.c` is intentionally formatted as compact multiline C rather
-than as one minified line or conventionally indented source.  Conventional
-pretty-printing would exceed CC_B's 20,472-byte source arena.  The compact form
-keeps statements readable while remaining a valid bootstrap input.
-
-## Phase 10.2 closure
-
-Phase 10.2 is closed with the complete regression suite green:
-
-```text
-944 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
-```
-
-The corresponding formal refinement remains 23/23 positive with 0/14 hostile
-witnesses accepted and no new axioms.
-
-## Phase 10.3: AnkaCC2 stage 3 / AOM v1
-
-`ankacc2_stage3.c` remains a real Anka userspace compiler source accepted by
-CC_B, but it no longer emits the direct executable format.  Its compile-only
-output is **AOM v1**, a sealed relocatable object module.
-
-AOM v1 uses this fixed byte geometry:
-
-```text
-header             112 bytes
-function symbol    160 bytes
-relocation          48 bytes
-code alignment       8 bytes
-CALL_PC20 width       8 bytes
-```
-
-The header magic is `ANKAOM1\0`, version 1.  Code begins at byte 112.  The
-format reserves an optional read-only-data section; Stage 3 currently emits no
-rodata and continues to reject mutable file-scope data.
-
-A Stage-3 translation unit does **not** require `main`.  Function definitions
-are strong code exports.  A called prototype with no same-module definition is
-a required import.  Uncalled prototypes are omitted.  Calls to later
-same-module definitions are patched locally; calls that remain external become
-8-byte `CALL_PC20` relocations against the import symbol.
-
-AOM function records preserve return and parameter type metadata.  Phase 10.3
-only publishes signatures whose identity is stable across translation units:
-`int`, `char`, `void` return, and pointer chains rooted in those scalar types.
-Raw translation-unit-local struct-tag indices are not exported as public type
-identity; attempting to do so is diagnostic 16.
-
-Stage 3 adds:
-
-```text
-15  AOM module cannot be published (for example, empty code section)
-16  public AOM signature uses translation-unit-local/nonportable type identity
-```
-
-AOM emission remains compile-only:
-
-```text
-valid AOM != linked executable != execution authority
-```
-
-The Rust development harness contains an AOM parser/structural validator, but it
-does not resolve imports or apply relocations.  Those operations first belong
-to Phase 10.4 `ankald`.
-
-The Stage-3 bootstrap source is deliberately close to the CC_B envelope:
-20,416/20,472 source bytes, 64/64 bootstrap functions, at most four parameters,
-17/32 flat symbols in a function, no duplicate flat locals, and approximately
-383/512 call sites.  This is only a preflight check; CC_B actually building the
-compiler is the runtime authority for closure.
-
-Formal gate: 22/22 positive Kleis examples, 0/15 hostile examples accepted, no
-new axioms.  Eleven `p103_` runtime witnesses are added on top of the 944-test
-baseline; a fully green branch should therefore report 955 tests.  Phase 10.3
-remains open until that Cargo result is observed.
-
-## Phase 10.4 bootstrap linker (`ankald`)
-
-`ankald.c` is the first static Anka linker and is intentionally an ordinary
-Anka userspace program.  It consumes the exact ordered AOM v1 byte objects
-emitted by Stage 3, resolves required imports against unique signature-compatible
-exports, performs the zero-addend `CALL_PC20` relocations currently emitted by
-Stage 3, lays code/read-only data out deterministically, and reports the linked
-image geometry plus explicit entry offset.
-
-The Phase-10.4 bootstrap linker itself is compiled by the existing authoritative
-CC_B.  Stage 2 is a deliberately narrow declarations/types/ABI compiler and is
-not a general systems-C implementation; using it to build `ankald` would confuse
-the staged AC2 language milestones with the bootstrap compiler lineage.  CC_B
-therefore remains the bootstrap producer for `ankald` until the AnkaCC2
-self-host/fixed-point closure in Phase 10.6 makes CC2 authoritative.  Large
-control/range constants in `ankald.c` are consequently written as equivalent
-CC_B-representable expressions rather than source integer tokens above CC_B's
-131071 literal ceiling.
-
-The bootstrap process ABI is formalized in
-`theories/anka104_ankald_process_abi.kleis`.  AOM inputs are mapped read-only.
-The linker receives a distinct Active scratch object with RW only, plus a
-non-authoritative control/result object.  In particular, `ankald` is not given
-SEAL or EXECUTE authority over its output: the current `SYS_SEAL` transition
-also grants RX to its caller, which would make successful linking create
-execution authority.  After `ankald` exits successfully, transport/publication
-plumbing copies exactly the reported `image_size` bytes into a fresh exact-size
-object and seals that object without performing symbol resolution or relocation.
-A failed link therefore mutates no caller-owned publication state.
-
-This preserves the Phase-10 authority boundary:
-
-```text
-AOM bytes -> ankald inside Anka -> completed linked bytes
-                                      |
-                                      v
-                          exact-size publication + seal
-
-successful link != execution authority
-```
-
-## Phase 10.5: explicit source bundles + include-only preprocessing
-
-`ankapp.c` is the first source-composition tool.  Like `ankald`, it is an
-ordinary Anka userspace program bootstrapped by canonical CC_B; the host does
-not execute C preprocessing semantics.
-
-The host-side `SourceBundle` transport contains exact immutable member bytes,
-one exact root logical name, and unique exact logical-name keys.  Host paths may
-be consumed while ingesting development files, but are discarded before bundle
-identity exists.  Logical names are opaque bundle keys rather than filesystem
-paths: no cwd, path normalization, `-I`, system directory, or host fallback is
-part of resolution.
-
-The first preprocessing profile supports only exact quoted inclusion:
-
-```c
-#include "/include/anka/example.h"
-```
-
-The operand is resolved by exact name against the supplied bundle.  Member
-objects and the bundle manifest are sealed/read-only in the `ankapp` process.
-Only the output, recursion workspace, and result transport are writable.
-Active include cycles and include depth beyond 32 are rejected.  Macros,
-conditionals, token pasting, stringizing, line directives, and ambient include
-search remain deliberately unsupported.
-
-`ankapp` result codes are:
-
-```text
-1  invalid source-bundle manifest/root
-2  missing include target
-3  ambiguous/duplicate include target
-4  active include cycle
-5  include depth bound exceeded
-6  unsupported preprocessing directive/profile
-7  effective-source output bound exceeded
-8  malformed include directive
-```
-
-A successful expansion produces one effective translation unit of at most the
-existing AnkaCC2 source payload (`SOURCE_SIZE - 8`, reserving the compiler's length word).  The development helper then
-passes those exact bytes to the existing Stage-3 compiler.  A preprocessing
-failure returns before Stage 3 is invoked, so it cannot emit or publish an AOM.
-
-The corresponding formal gates are:
-
-```text
-anka105_source_bundle.kleis                         20/20
-anka105_source_bundle_false_witnesses.kleis           0/16 hostile accepted
-anka105_include_preprocessing.kleis                 21/21
-anka105_include_preprocessing_false_witnesses.kleis    0/17 hostile accepted
-```
+Use focused checks during development; run required ignored real witnesses
+explicitly and the complete single-threaded regression at the final checkpoint.
+Phase 10.8 still requires protected socket/NIC integration and the end-to-end
+service rebuild. [DN-71](../../../DESIGN_NOTES.md#dn-71) is the authoritative
+closure checklist; historical test totals in older notes do not close this gate.

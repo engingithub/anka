@@ -397,6 +397,8 @@ impl Kernel {
         };
         // Destroy any host candidate payload before closing its custodian's
         // account. Producer death does not match these independent owners.
+        self.discard_compiler_jobs_owned_by(owner);
+        self.discard_compiler_inputs_owned_by(owner);
         self.discard_compiler_candidates_owned_by(owner);
         self.discard_compiler_publications_owned_by(owner);
         if let Some(account) = self.fabric.scoped_pointers.heap_account(owner) {
@@ -406,6 +408,8 @@ impl Kernel {
     pub(super) fn stop_heap_service(&mut self) {
         // One-shot teardown discards retained candidates before dismantling the
         // custodian. Failed refunds remain charged/quarantined, never forgotten.
+        if !self.discard_all_compiler_jobs() { return; }
+        if !self.discard_all_compiler_inputs() { return; }
         if !self.discard_all_compiler_candidates() { return; }
         if !self.discard_all_compiler_publications() { return; }
         // A one-shot runtime must not abandon the work it can finish. Each call

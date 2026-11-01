@@ -4,9 +4,11 @@ use super::*;
 use crate::anka64::fabric::HeapInitialization;
 use crate::anka64::scoped_pointers::heap::OwnerAccount;
 
+use crate::anka64::compiler_adapter::resources::growth::workspace::{WorkspaceDirectory,WORKSPACE_REQUEST_BYTES};
+
 const WORKSPACE: u64 = 0x6000;
 const REQUEST: u64 = 768;
-const SOURCE_LIMIT: usize = 65528;
+pub(super) const SOURCE_LIMIT: usize = 65528;
 
 impl Kernel {
     fn compiler_region_storage(
@@ -57,11 +59,34 @@ impl Kernel {
         budget: OutputRetryBudget,
         source: &[u8],
     ) -> Result<CompilerOutputAttempt, CompilerRuntimeError> {
+        self.load_compiler_request_layout(key,budget,source,None)
+    }
+
+    pub(crate) fn load_compiler_request_with_workspace(
+        &mut self,key: ProcessKey,budget: OutputRetryBudget,source: &[u8],directory: WorkspaceDirectory,
+    ) -> Result<CompilerOutputAttempt,CompilerRuntimeError> {
+        self.load_compiler_request_layout(key,budget,source,Some(directory))
+    }
+
+    pub(super) fn load_compiler_request_layout(
+        &mut self,key: ProcessKey,mut budget: OutputRetryBudget,source: &[u8],directory: Option<WorkspaceDirectory>,
+    ) -> Result<CompilerOutputAttempt,CompilerRuntimeError> {
+        let directory=match (budget.workspace_directory(),directory) {
+            (Some(bound),Some(selected)) if bound!=selected => return Err(
+                CompilerResourceError::ReplyBindings.into()),
+            (Some(bound),_)=>Some(bound),
+            (None,selected)=>selected,
+        };
+        budget.bind_workspace(directory)?;
+        let workspace_bytes=directory.map_or(WORKSPACE,|d|d.capacity());
+        let request_bytes=if directory.is_some() {WORKSPACE_REQUEST_BYTES as u64} else {REQUEST};
         let owner = self.compiler_owner(key)?;
         let core = &self.processes[key.slot].core;
         if !core.compiler_entry_ready(&self.fabric)
             || !self.processes[key.slot].is_schedulable()
-            || source.len() > SOURCE_LIMIT
+            || source.len() > (if directory.is_some() {
+                crate::anka64::compiler_adapter::resources::growth::workspace::DIRECTORY_SOURCE_LIMIT
+            } else { SOURCE_LIMIT })
             || source.len() as u64 != budget.context().source_length()
             || self.fabric.scoped_pointers.heap_account(owner).is_some()
         {
@@ -72,10 +97,10 @@ impl Kernel {
         let loaded = (|| -> Result<_, CompilerRuntimeError> {
             let source_size = ((source.len() as u64 + 7) & !7).max(8);
             let s = self.compiler_region_storage(owner, account, source_size)?;
-            let w = self.compiler_region_storage(owner, account, WORKSPACE)?;
+            let w = self.compiler_region_storage(owner, account, workspace_bytes)?;
             let o =
                 self.compiler_region_storage(owner, account, budget.context().output_capacity())?;
-            let q = self.compiler_region_storage(owner, account, REQUEST)?;
+            let q = self.compiler_region_storage(owner, account, request_bytes)?;
             let r = self.compiler_region_storage(owner, account, 128)?;
             let current = CurrentHeapProcess::from_processes(&self.processes, key)
                 .ok_or(CompilerRuntimeError::Process)?;
@@ -94,9 +119,9 @@ impl Kernel {
                 .publish_compiler_region(&current, r, 16, &[], &[])?;
             let request = self
                 .fabric
-                .describe_compiler_region(&current, q, 15, REQUEST)?;
+                .describe_compiler_region(&current, q, 15, request_bytes)?;
             let regions = [source, workspace, output, request, reply];
-            let mut bytes = [0u8; REQUEST as usize];
+            let mut bytes = [0u8; WORKSPACE_REQUEST_BYTES];
             for (word, dest) in budget
                 .context()
                 .request_header(account.serial())
@@ -114,11 +139,16 @@ impl Kernel {
                     dest.copy_from_slice(&word.to_le_bytes());
                 }
             }
+            if let Some(d)=directory {
+                bytes[13*8..14*8].copy_from_slice(&request_bytes.to_le_bytes());
+                bytes[15*8..16*8].copy_from_slice(&1u64.to_le_bytes());
+                bytes[768..1024].copy_from_slice(&d.bytes());
+            }
             let cells =
                 std::array::from_fn::<_, 5, _>(|i| (160 + i as u64 * 128, regions[i].pointer));
             let request = self
                 .fabric
-                .publish_compiler_region(&current, q, 15, &bytes, &cells)?;
+                .publish_compiler_region(&current, q, 15, &bytes[..request_bytes as usize], &cells)?;
             // All fallible storage work has finished before entry installation.
             // Readiness cannot change during this exclusive Kernel call.
             let core = &mut self.processes[key.slot].core;
@@ -133,6 +163,7 @@ impl Kernel {
                 reply: reply.pointer,
                 budget: Some(budget),
                 loaded_source: Some(source.pointer),
+                workspace_directory: directory,
                 publication: None,
             })
         })();

@@ -47,6 +47,8 @@ and forced the abstractions beneath it to become more precise.
 | Networking | Ethernet, ARP, IPv4/ICMP, UDP, TCP, sockets, and an HTTP service that has demonstrated the original CPU-to-HTTP `/alive` path |
 | Toolchain | Guest preprocessing, AOM object emission, guest static linking, and a concrete `CC2_0 → CC2_1 → CC2_2` byte-identical fixed point |
 | Protected applications | Typed byte/word access, checked pointer arithmetic, local-frame lifetimes, protected calls and spills, typed console input/output |
+| Protected allocation | Shared allocation/free service, supported C `malloc/free`, initialized heap/local storage, cleanup and independent-client reuse with stale-alias rejection |
+| Compiler resources | Charged source/tool custody, protected ABI-2 producer, bounded output retry, retained artifacts and atomic publication; described workspace tables exercised by real guest CC2 |
 | Module composition | Separately compiled protected C modules, merged frame metadata, ordered dependency receipts, publication and ordinary process execution |
 | Formal development | Kleis/Z3 contracts, positive witnesses, and deliberately false claims that must be explicitly disproved |
 
@@ -54,30 +56,46 @@ The original MC68000 implementation remains in the repository as the project's
 experimental foundation. Active architecture and toolchain development targets
 Anka64.
 
-## Current checkpoint — 2026-10-17
+## Current checkpoint — Phase 10.8
 
 Phase 10.6 self-hosting and Phase 10.7 protected local applications are complete.
-Phase 10.8 has working typed I/O, compiler-adapter publication, and protected
-module composition; the broader userspace rebuild remains in progress.
+Phase 10.8 has accepted typed I/O, protected module composition, C `malloc/free`,
+independent-client allocation/reuse and compiler artifact publication. The
+required post-malloc whole-stack review is recorded in
+[DESIGN_NOTES.md, DN-71](DESIGN_NOTES.md#dn-71).
 
-The latest protected-module acceptance passed in **249.49 seconds** on the
-developer's machine. It reproduced `CC2_1 == CC2_2` at **168,888 bytes**, linked
-two modules with four protected frames, executed the published artifact, and
-emitted exactly `[65, 0, 255, 66]`. Escaped-local and one-past accesses produced
-the required protection faults.
+| Closure area | Verified progress |
+|---|---|
+| C2 resources | Shared allocation, charged preprocessing/admission/link/run, retained provenance, checked retries and actual cleanup |
+| C3 language/growth | Source beyond 64 KiB, table growth, recursive declarations, typed heap lists, automatic directory retry with exact AOM parity |
+| C4 linking/execution | Typed guest linking, persistent receipts, large-image load, explicit C startup and separately charged execution |
+| C5 ordinary service | Normal rebuild coordinator, actual concurrent compiler jobs, A exhaustion, C reuse, unaffected B and stale-alias rejection |
 
-Regression evidence is **1,093 passing tests from the full run, followed by a
-passing rerun of its one failed test after a probe-exit correction**. All 1,094
-library tests therefore have passing evidence across those runs; a fresh full
-suite on the corrected tree has not been reported. The protected-module Kleis
-gate has **217 positive witnesses and 168 explicitly disproved hostile
-witnesses**. Details and the original failure remain in
-[DESIGN_NOTES.md, DN-69](DESIGN_NOTES.md#dn-69).
+Latest supplied ordinary-service evidence: **6 focused tests**, **154 runtime
+tests with 10 ignored**, and the explicit real concurrent test in **75.79s**.
+The associated Kleis gate passed **29 positive / 21 explicitly disproved hostile
+witnesses**. These groups overlap and are not a fresh complete regression run.
+The last full-suite result supplied in this development history was 1,406 tests
+in 589.71s, before the subsequent compiler-service changes.
 
-The next end-to-end objective is stronger than the earlier HTTP demonstration:
-rebuild the real socket/HTTP service path from source with AnkaCC2 and guest
-tools, boot those exact artifacts through ordinary Anka mechanisms, and return
-**`Anka64 is alive.`** Phase 10 closes on that rebuild chain.
+**Implemented; real guest acceptance pending:** `httpd_protected.c` rebuilds the `/alive` HTTP
+application with protected byte pointers, typed input/output and private request
+storage. The ordinary command now accepts `--input FILE --run`; input authority,
+copy accounting and cleanup are explicit. The new gate passes **27 positive /
+18 hostile witnesses**. A native diagnostic checks response bytes and boundaries;
+it does not substitute for guest acceptance. The latest log passed nine focused tests and 160
+compiler-runtime tests. The first real HTTP compile hit pointer-registry
+exhaustion. The larger charged frame budget passed focused checks, but the
+next HTTP run reached its 1200-second diagnostic timeout. The current patch
+removes a full reserved-heap-table scan from ordinary address translation and
+adds authenticated source-cursor diagnostics. Real HTTP acceptance is pending;
+no new complete regression pass is claimed.
+
+**Phase 10.8 remains open.** The next closure evidence is the protected HTTP
+application run, followed by actual socket/NIC integration and the end-to-end
+service rebuild, then final regressions. The original network stack already
+responds to `/alive`, but its CC_B/shared-buffer execution is not silently
+reclassified as the new protected rebuild. No additional project phase is added.
 
 ## Build and explore
 
@@ -100,26 +118,35 @@ The shell's basic compile path lazily bootstraps CC_B. The CC2 rebuild and
 protected-module path has separate acceptance tests; a shell hello program is
 not its completion gate. See [the userspace guide](userspace/README.md).
 
-Run the focused protected-module execution checks:
+The ordinary protected path is available separately:
 
 ```sh
-cargo test --lib p108_module_execution -- --test-threads=1
+cargo run --release -- rebuild --include shared.h --run main.c helper.c
 ```
 
-The full suite currently runs single-threaded:
+For the current HTTP application packet:
 
 ```sh
-cargo test -- --test-threads=1
+bash scripts/check-anka108-http-application.sh --real
 ```
 
-Formal gates additionally require Python 3, Kleis with its Z3 support, and the
-matching Kleis standard library. For the module gate only:
+That script runs focused formal/runtime checks and the explicit real guest HTTP
+witness. Long real witnesses are deliberately ignored by the ordinary test
+runner and must be selected explicitly. At the final integration checkpoint:
+
+```sh
+bash scripts/check-anka108-closure.sh --real
+cargo test --release -- --test-threads=1
+```
+
+Formal gates require Python 3, Kleis with Z3 support, and the matching standard
+library. Override `KLEIS_BIN` and `KLEIS_ROOT` for the scripts, or run one gate:
 
 ```sh
 python3 scripts/check-anka108-gates.py \
   --kleis "$HOME/.cargo/bin/kleis" \
   --kleis-root /path/to/kleis \
-  --only-modules
+  --only-http-application
 ```
 
 The root must contain `stdlib/prelude.kleis`. Hostile gates succeed on explicit
@@ -141,9 +168,11 @@ witnesses, pass the relevant Kleis gates, implement a bounded piece, then demand
 concrete execution evidence. A fixed point proves reproducible bootstrap
 closure; it does not by itself prove every compiler transformation correct.
 
-The current reference runtime depends on a trusted host. Native FPGA realization
-is a deferred direction and requires substantial new timing/cache refinement
-before implementation. The active work is the software rebuild milestone.
+The current reference runtime depends on a trusted host. FPGA realization
+and an Apple Silicon/Metal execution prototype are planned directions, not
+implemented backends. They require refinement against the reference machine,
+including authority, synchronization, memory ordering and observable timing.
+The active closure work remains the software rebuild milestone.
 
 ## License
 

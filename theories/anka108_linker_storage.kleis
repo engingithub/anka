@@ -1,0 +1,47 @@
+// Shared-service guest linker transport; scalar refinement obligations.
+import "anka108_preprocessor_storage.kleis"
+define ls108_start(authority : Bool,current_custodian : Bool,reserved : Bool,bounded_geometry : Bool,input_charged : Bool,exit_only : Bool) = authority ∧ current_custodian ∧ reserved ∧ bounded_geometry ∧ input_charged ∧ exit_only
+example "start accepted" { assert(ls108_start(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "start requires authority" { assert(¬(ls108_start(res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "start requires current_custodian" { assert(¬(ls108_start(res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "start requires reserved" { assert(¬(ls108_start(res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "start requires bounded_geometry" { assert(¬(ls108_start(res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "start requires input_charged" { assert(¬(ls108_start(res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "start requires exit_only" { assert(¬(ls108_start(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))) }
+define ls108_retain(exact_guest_image : Bool,image_charged : Bool,dependencies_current : Bool,machine_destroyed : Bool) = exact_guest_image ∧ image_charged ∧ dependencies_current ∧ machine_destroyed
+example "retain accepted" { assert(ls108_retain(res108_true(),res108_true(),res108_true(),res108_true())) }
+example "retain requires exact_guest_image" { assert(¬(ls108_retain(res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "retain requires image_charged" { assert(¬(ls108_retain(res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "retain requires dependencies_current" { assert(¬(ls108_retain(res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "retain requires machine_destroyed" { assert(¬(ls108_retain(res108_true(),res108_true(),res108_true(),res108_false()))) }
+define ls108_refund(machine_destroyed : Bool,temporary_copies_destroyed : Bool) = machine_destroyed ∧ temporary_copies_destroyed
+example "refund accepted" { assert(ls108_refund(res108_true(),res108_true())) }
+example "refund requires machine_destroyed" { assert(¬(ls108_refund(res108_false(),res108_true()))) }
+example "refund requires temporary_copies_destroyed" { assert(¬(ls108_refund(res108_true(),res108_false()))) }
+define ls108_shape(modules : BitVec64, tool : BitVec64, total : BitVec64) =
+    bvugt(modules,bvconst(0,64)) ∧ bvule(modules,bvconst(4096,64)) ∧
+    bvugt(tool,bvconst(0,64)) ∧ bvule(tool,bvconst(131072,64)) ∧
+    bvugt(total,bvconst(0,64)) ∧ bvule(total,bvconst(7340032,64))
+// Subtract only after admission. Each dispatch consumes the same total budget;
+// slice boundaries cannot reset it. Allocation-quota arithmetic is checked Rust.
+define ls108_spend(left : BitVec64, slice : BitVec64, after : BitVec64) =
+    bvugt(slice,bvconst(0,64)) ∧ bvule(slice,bvconst(256,64)) ∧
+    bvule(slice,left) ∧ (after=bvsub(left,slice))
+example "shape 1 1 8" { assert(ls108_shape(bvconst(1,64),bvconst(1,64),bvconst(8,64))) }
+example "shape 4096 131072 7340032" { assert(ls108_shape(bvconst(4096,64),bvconst(131072,64),bvconst(7340032,64))) }
+example "shape 0 1 8" { assert(¬(ls108_shape(bvconst(0,64),bvconst(1,64),bvconst(8,64)))) }
+example "shape 4097 1 8" { assert(¬(ls108_shape(bvconst(4097,64),bvconst(1,64),bvconst(8,64)))) }
+example "shape 1 0 8" { assert(¬(ls108_shape(bvconst(1,64),bvconst(0,64),bvconst(8,64)))) }
+example "shape 1 131073 8" { assert(¬(ls108_shape(bvconst(1,64),bvconst(131073,64),bvconst(8,64)))) }
+example "shape 1 1 0" { assert(¬(ls108_shape(bvconst(1,64),bvconst(1,64),bvconst(0,64)))) }
+example "shape 1 1 7340033" { assert(¬(ls108_shape(bvconst(1,64),bvconst(1,64),bvconst(7340033,64)))) }
+example "work 256 256 0" { assert(ls108_spend(bvconst(256,64),bvconst(256,64),bvconst(0,64))) }
+example "work 1 1 0" { assert(ls108_spend(bvconst(1,64),bvconst(1,64),bvconst(0,64))) }
+example "work 1000 256 744" { assert(ls108_spend(bvconst(1000,64),bvconst(256,64),bvconst(744,64))) }
+example "work 0 1 18446744073709551615" { assert(¬(ls108_spend(bvconst(0,64),bvconst(1,64),bvsub(bvconst(0,64),bvconst(1,64))))) }
+example "work 1 0 1" { assert(¬(ls108_spend(bvconst(1,64),bvconst(0,64),bvconst(1,64)))) }
+example "work 300 257 43" { assert(¬(ls108_spend(bvconst(300,64),bvconst(257,64),bvconst(43,64)))) }
+example "work 256 256 256" { assert(¬(ls108_spend(bvconst(256,64),bvconst(256,64),bvconst(256,64)))) }
+example "work 1 2 18446744073709551615" { assert(¬(ls108_spend(bvconst(1,64),bvconst(2,64),bvsub(bvconst(0,64),bvconst(1,64))))) }
+example "no live machine refund" { assert(∀(copies : Bool). ¬ls108_refund(res108_false(),copies)) }
+example "spent work strictly decreases" { assert(∀(left : BitVec64,slice : BitVec64,after : BitVec64). ls108_spend(left,slice,after) → bvult(after,left)) }

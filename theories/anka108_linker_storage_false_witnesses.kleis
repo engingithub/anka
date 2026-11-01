@@ -1,0 +1,24 @@
+import "anka108_linker_storage.kleis"
+example "hostile start skips authority" { assert(ls108_start(res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile start skips current_custodian" { assert(ls108_start(res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile start skips reserved" { assert(ls108_start(res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile start skips bounded_geometry" { assert(ls108_start(res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile start skips input_charged" { assert(ls108_start(res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile start skips exit_only" { assert(ls108_start(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile retain skips exact_guest_image" { assert(ls108_retain(res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile retain skips image_charged" { assert(ls108_retain(res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile retain skips dependencies_current" { assert(ls108_retain(res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile retain skips machine_destroyed" { assert(ls108_retain(res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile refund skips machine_destroyed" { assert(ls108_refund(res108_false(),res108_true())) }
+example "hostile refund skips temporary_copies_destroyed" { assert(ls108_refund(res108_true(),res108_false())) }
+example "hostile shape 0 1 8" { assert(ls108_shape(bvconst(0,64),bvconst(1,64),bvconst(8,64))) }
+example "hostile shape 4097 1 8" { assert(ls108_shape(bvconst(4097,64),bvconst(1,64),bvconst(8,64))) }
+example "hostile shape 1 0 8" { assert(ls108_shape(bvconst(1,64),bvconst(0,64),bvconst(8,64))) }
+example "hostile shape 1 131073 8" { assert(ls108_shape(bvconst(1,64),bvconst(131073,64),bvconst(8,64))) }
+example "hostile shape 1 1 0" { assert(ls108_shape(bvconst(1,64),bvconst(1,64),bvconst(0,64))) }
+example "hostile shape 1 1 7340033" { assert(ls108_shape(bvconst(1,64),bvconst(1,64),bvconst(7340033,64))) }
+example "hostile work 0 1 18446744073709551615" { assert(ls108_spend(bvconst(0,64),bvconst(1,64),bvsub(bvconst(0,64),bvconst(1,64)))) }
+example "hostile work 1 0 1" { assert(ls108_spend(bvconst(1,64),bvconst(0,64),bvconst(1,64))) }
+example "hostile work 300 257 43" { assert(ls108_spend(bvconst(300,64),bvconst(257,64),bvconst(43,64))) }
+example "hostile work 256 256 256" { assert(ls108_spend(bvconst(256,64),bvconst(256,64),bvconst(256,64))) }
+example "hostile work 1 2 18446744073709551615" { assert(ls108_spend(bvconst(1,64),bvconst(2,64),bvsub(bvconst(0,64),bvconst(1,64)))) }

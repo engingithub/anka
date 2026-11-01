@@ -516,3 +516,343 @@ example "refresh requires authority (hostile claim)" {
 example "refresh requires serialized (hostile claim)" {
     assert(¬(¬pub108_refresh(bvconst(7,64),bvconst(8,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false())))
 }
+
+example "capture budget: legacy boundary (hostile claim)" {
+    assert(¬(pub108_capture_budget(bvconst(262144,64),bvconst(262144,64),bvconst(0,64),bvconst(16777216,64))))
+}
+
+example "capture budget: beyond legacy boundary (hostile claim)" {
+    assert(¬(pub108_capture_budget(bvconst(262152,64),bvconst(524288,64),bvconst(0,64),bvconst(16777216,64))))
+}
+
+example "capture budget: larger adequate arena (hostile claim)" {
+    assert(¬(pub108_capture_budget(bvconst(262152,64),bvconst(1048576,64),bvconst(0,64),bvconst(16777216,64))))
+}
+
+example "capture budget: exact staging budget (hostile claim)" {
+    assert(¬(pub108_capture_budget(bvconst(262152,64),bvconst(524288,64),bvconst(1024,64),bvconst(8393984,64))))
+}
+
+example "capture budget: staging budget short (hostile claim)" {
+    assert(¬(¬pub108_capture_budget(bvconst(262152,64),bvconst(524288,64),bvconst(1024,64),bvconst(8393983,64))))
+}
+
+example "capture budget: used above actual capacity (hostile claim)" {
+    assert(¬(¬pub108_capture_budget(bvconst(262152,64),bvconst(262144,64),bvconst(0,64),bvconst(16777216,64))))
+}
+
+example "capture budget: unaligned used (hostile claim)" {
+    assert(¬(¬pub108_capture_budget(bvconst(262153,64),bvconst(524288,64),bvconst(0,64),bvconst(16777216,64))))
+}
+
+example "capture budget: short header (hostile claim)" {
+    assert(¬(¬pub108_capture_budget(bvconst(104,64),bvconst(4096,64),bvconst(0,64),bvconst(16777216,64))))
+}
+
+example "capture budget: multiplication overflow (hostile claim)" {
+    assert(¬(¬pub108_capture_budget(bvconst(576460752303423488,64),bvconst(576460752303423488,64),bvconst(0,64),bvconst(9223372036854775807,64))))
+}
+
+example "capture budget: peer charge denies stage (hostile claim)" {
+    assert(¬(¬pub108_capture_budget(bvconst(262152,64),bvconst(524288,64),bvconst(16777216,64),bvconst(16777216,64))))
+}
+
+example "link consumer: current protected module (hostile claim)" {
+    assert(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: closed role (hostile claim)" {
+    assert(¬(¬(pub108_link_input(bvconst(1,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "link consumer: linked image role (hostile claim)" {
+    assert(¬(¬(pub108_link_input(bvconst(3,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "link consumer: old ABI (hostile claim)" {
+    assert(¬(¬(pub108_link_input(bvconst(2,8),bvconst(1,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "link consumer: interior source (hostile claim)" {
+    assert(¬(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(8,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "link consumer: short header (hostile claim)" {
+    assert(¬(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(104,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "link consumer: over profile (hostile claim)" {
+    assert(¬(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(1032,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "link consumer: stale receipt (hostile claim)" {
+    assert(¬(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "link consumer: changed provenance (hostile claim)" {
+    assert(¬(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "link consumer: writable grant (hostile claim)" {
+    assert(¬(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "link consumer: changed bytes (hostile claim)" {
+    assert(¬(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))))
+}
+
+example "link consumer: bad module (hostile claim)" {
+    assert(¬(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))))
+}
+
+example "link consumer: different linker (hostile claim)" {
+    assert(¬(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))))
+}
+
+example "link consumer: order exact (hostile claim)" {
+    assert(¬(pub108_link_order(bvconst(0,64),bvconst(0,64),bvconst(2,64),bvconst(2,64))))
+}
+
+example "link consumer: order swapped (hostile claim)" {
+    assert(¬(¬(pub108_link_order(bvconst(1,64),bvconst(0,64),bvconst(2,64),bvconst(2,64)))))
+}
+
+example "link consumer: epoch changed (hostile claim)" {
+    assert(¬(¬(pub108_link_order(bvconst(0,64),bvconst(0,64),bvconst(3,64),bvconst(2,64)))))
+}
+
+example "link consumer: zero epoch (hostile claim)" {
+    assert(¬(¬(pub108_link_order(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)))))
+}
+
+example "link consumer: dispatch standard (hostile claim)" {
+    assert(¬(pub108_link_dispatch(bvconst(2,64),bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: dispatch large (hostile claim)" {
+    assert(¬(pub108_link_dispatch(bvconst(2,64),bvconst(3,8),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: producer profile denied (hostile claim)" {
+    assert(¬(¬(pub108_link_dispatch(bvconst(2,64),bvconst(2,8),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "link consumer: empty list (hostile claim)" {
+    assert(¬(¬(pub108_link_dispatch(bvconst(0,64),bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "link consumer: oversized list (hostile claim)" {
+    assert(¬(¬(pub108_link_dispatch(bvconst(4097,64),bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "link consumer: no execution authority (hostile claim)" {
+    assert(¬(¬(pub108_link_dispatch(bvconst(2,64),bvconst(0,8),res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "link consumer: unvalidated input (hostile claim)" {
+    assert(¬(¬(pub108_link_dispatch(bvconst(2,64),bvconst(0,8),res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "link consumer: reordered input (hostile claim)" {
+    assert(¬(¬(pub108_link_dispatch(bvconst(2,64),bvconst(0,8),res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))))
+}
+
+example "link consumer: unreserved stage (hostile claim)" {
+    assert(¬(¬(pub108_link_dispatch(bvconst(2,64),bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))))
+}
+
+example "link consumer: lost custody (hostile claim)" {
+    assert(¬(¬(pub108_link_dispatch(bvconst(2,64),bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))))
+}
+
+example "link consumer: retain exact image (hostile claim)" {
+    assert(¬(pub108_link_retain(res108_true(),res108_true(),res108_true(),res108_true(),bvconst(3,8),bvconst(3,8),bvconst(4096,64),bvconst(8192,64))))
+}
+
+example "link consumer: failed dispatch (hostile claim)" {
+    assert(¬(¬(pub108_link_retain(res108_false(),res108_true(),res108_true(),res108_true(),bvconst(3,8),bvconst(3,8),bvconst(4096,64),bvconst(8192,64)))))
+}
+
+example "link consumer: guest failure (hostile claim)" {
+    assert(¬(¬(pub108_link_retain(res108_true(),res108_false(),res108_true(),res108_true(),bvconst(3,8),bvconst(3,8),bvconst(4096,64),bvconst(8192,64)))))
+}
+
+example "link consumer: modified image (hostile claim)" {
+    assert(¬(¬(pub108_link_retain(res108_true(),res108_true(),res108_false(),res108_true(),bvconst(3,8),bvconst(3,8),bvconst(4096,64),bvconst(8192,64)))))
+}
+
+example "link consumer: revoked after link (hostile claim)" {
+    assert(¬(¬(pub108_link_retain(res108_true(),res108_true(),res108_true(),res108_false(),bvconst(3,8),bvconst(3,8),bvconst(4096,64),bvconst(8192,64)))))
+}
+
+example "link consumer: profile substitution (hostile claim)" {
+    assert(¬(¬(pub108_link_retain(res108_true(),res108_true(),res108_true(),res108_true(),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(8192,64)))))
+}
+
+example "link consumer: image exceeds charge (hostile claim)" {
+    assert(¬(¬(pub108_link_retain(res108_true(),res108_true(),res108_true(),res108_true(),bvconst(3,8),bvconst(3,8),bvconst(8193,64),bvconst(8192,64)))))
+}
+
+example "linked publication: commit charged read-only result (hostile claim)" {
+ assert(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "linked publication: stale epoch (hostile claim)" {
+ assert(¬(¬(pub108_link_commit(bvconst(2,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "linked publication: authority absent (hostile claim)" {
+ assert(¬(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "linked publication: dead custodian (hostile claim)" {
+ assert(¬(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "linked publication: changed dependency (hostile claim)" {
+ assert(¬(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "linked publication: unvalidated result (hostile claim)" {
+ assert(¬(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "linked publication: writable artifact (hostile claim)" {
+ assert(¬(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "linked publication: missing host charge (hostile claim)" {
+ assert(¬(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "linked publication: missing heap charge (hostile claim)" {
+ assert(¬(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))))
+}
+
+example "linked publication: reused object (hostile claim)" {
+ assert(¬(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))))
+}
+
+example "linked publication: already visible (hostile claim)" {
+ assert(¬(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))))
+}
+
+example "linked publication: epoch exhausted (hostile claim)" {
+ assert(¬(¬(pub108_link_commit(bvsub(pub108_z(),pub108_one()),bvsub(pub108_z(),pub108_one()),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "linked publication: read rejects custodian (hostile claim)" {
+ assert(¬(¬(pub108_link_access(res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "linked publication: read rejects host charge (hostile claim)" {
+ assert(¬(¬(pub108_link_access(res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "linked publication: read rejects heap authority (hostile claim)" {
+ assert(¬(¬(pub108_link_access(res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))))
+}
+
+example "linked publication: read rejects dependency (hostile claim)" {
+ assert(¬(¬(pub108_link_access(res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))))
+}
+
+example "linked publication: read rejects bytes (hostile claim)" {
+ assert(¬(¬(pub108_link_access(res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))))
+}
+
+example "linked publication: read rejects profile (hostile claim)" {
+ assert(¬(¬(pub108_link_access(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))))
+}
+
+example "linked publication: read current exact record (hostile claim)" {
+ assert(¬(pub108_link_access(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+// Execution admission hostile witnesses.
+
+example "execution admission: valid (hostile claim)" {
+ assert(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64))))
+}
+
+example "execution admission: stale receipt (hostile claim)" {
+ assert(¬(¬(pub108_execute(res108_false(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64)))))
+}
+
+example "execution admission: absent authority (hostile claim)" {
+ assert(¬(¬(pub108_execute(res108_true(),res108_false(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64)))))
+}
+
+example "execution admission: profile substitution (hostile claim)" {
+ assert(¬(¬(pub108_execute(res108_true(),res108_true(),res108_false(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64)))))
+}
+
+example "execution admission: nonzero entry (hostile claim)" {
+ assert(¬(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(8,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64)))))
+}
+
+example "execution admission: empty code (hostile claim)" {
+ assert(¬(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(0,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64)))))
+}
+
+example "execution admission: metadata gap (hostile claim)" {
+ assert(¬(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(40,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64)))))
+}
+
+example "execution admission: no metadata (hostile claim)" {
+ assert(¬(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(32,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64)))))
+}
+
+example "execution admission: over profile limit (hostile claim)" {
+ assert(¬(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(64,64),bvconst(1000,64),bvconst(100,64)))))
+}
+
+example "execution admission: zero quantum (hostile claim)" {
+ assert(¬(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(0,64),bvconst(100,64)))))
+}
+
+example "execution admission: zero rounds (hostile claim)" {
+ assert(¬(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(0,64)))))
+}
+
+example "execution admission: excess quantum (hostile claim)" {
+ assert(¬(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(200001,64),bvconst(100,64)))))
+}
+
+example "execution admission: excess rounds (hostile claim)" {
+ assert(¬(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(10001,64)))))
+}
+
+// Exact C entry launcher hostile claims.
+
+example "startup: exact binding hostile" { assert(¬(pub108_startup_binding(res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(0,64),bvconst(0,64)))) }
+
+example "startup: absent selection hostile" { assert(¬(¬(pub108_startup_binding(res108_false(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(0,64),bvconst(0,64))))) }
+
+example "startup: unsealed hostile" { assert(¬(¬(pub108_startup_binding(res108_true(),res108_false(),res108_true(),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(0,64),bvconst(0,64))))) }
+
+example "startup: legacy image hostile" { assert(¬(¬(pub108_startup_binding(res108_true(),res108_true(),res108_false(),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(0,64),bvconst(0,64))))) }
+
+example "startup: wrong object hostile" { assert(¬(¬(pub108_startup_binding(res108_true(),res108_true(),res108_true(),bvconst(8,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(0,64),bvconst(0,64))))) }
+
+example "startup: stale generation hostile" { assert(¬(¬(pub108_startup_binding(res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(0,64),bvconst(0,64))))) }
+
+example "startup: changed code hostile" { assert(¬(¬(pub108_startup_binding(res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(72,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(0,64),bvconst(0,64))))) }
+
+example "startup: changed image hostile" { assert(¬(¬(pub108_startup_binding(res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(136,64),bvconst(128,64),bvconst(0,64),bvconst(0,64))))) }
+
+example "startup: interior offset hostile" { assert(¬(¬(pub108_startup_binding(res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(8,64),bvconst(0,64))))) }
+
+example "startup: nonzero entry hostile" { assert(¬(¬(pub108_startup_binding(res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(0,64),bvconst(8,64))))) }
+
+example "startup return: all return guards hostile" { assert(¬(pub108_startup_return(res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+
+example "startup return: binding hostile" { assert(¬(¬(pub108_startup_return(res108_false(),res108_true(),res108_true(),res108_true(),res108_true())))) }
+
+example "startup return: actual CALL hostile" { assert(¬(¬(pub108_startup_return(res108_true(),res108_false(),res108_true(),res108_true(),res108_true())))) }
+
+example "startup return: launcher generation hostile" { assert(¬(¬(pub108_startup_return(res108_true(),res108_true(),res108_false(),res108_true(),res108_true())))) }
+
+example "startup return: frame retirement hostile" { assert(¬(¬(pub108_startup_return(res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))) }
+
+example "startup return: return target hostile" { assert(¬(¬(pub108_startup_return(res108_true(),res108_true(),res108_true(),res108_true(),res108_false())))) }

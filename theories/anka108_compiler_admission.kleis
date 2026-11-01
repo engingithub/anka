@@ -1,0 +1,68 @@
+import "anka108_compiler_storage.kleis"
+define ca108_configure(authority : Bool,quota : Bool,geometry : Bool,vacant : Bool,sealed_code : Bool) = authority ∧ quota ∧ geometry ∧ vacant ∧ sealed_code
+example "ca108_configure accepted" { assert(ca108_configure(res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "ca108_configure requires authority" { assert(¬(ca108_configure(res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "ca108_configure requires quota" { assert(¬(ca108_configure(res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "ca108_configure requires geometry" { assert(¬(ca108_configure(res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "ca108_configure requires vacant" { assert(¬(ca108_configure(res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "ca108_configure requires sealed_code" { assert(¬(ca108_configure(res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))) }
+define ca108_enter(current_custodian : Bool,charged : Bool,free_slot : Bool,zero_stack : Bool,fresh_identity : Bool) = current_custodian ∧ charged ∧ free_slot ∧ zero_stack ∧ fresh_identity
+example "ca108_enter accepted" { assert(ca108_enter(res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "ca108_enter requires current_custodian" { assert(¬(ca108_enter(res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "ca108_enter requires charged" { assert(¬(ca108_enter(res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "ca108_enter requires free_slot" { assert(¬(ca108_enter(res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "ca108_enter requires zero_stack" { assert(¬(ca108_enter(res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "ca108_enter requires fresh_identity" { assert(¬(ca108_enter(res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))) }
+define ca108_recycle(terminated : Bool,owner_released : Bool,terminal_work : Bool,frames_retired : Bool) = terminated ∧ owner_released ∧ terminal_work ∧ frames_retired
+example "ca108_recycle accepted" { assert(ca108_recycle(res108_true(),res108_true(),res108_true(),res108_true())) }
+example "ca108_recycle requires terminated" { assert(¬(ca108_recycle(res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "ca108_recycle requires owner_released" { assert(¬(ca108_recycle(res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "ca108_recycle requires terminal_work" { assert(¬(ca108_recycle(res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "ca108_recycle requires frames_retired" { assert(¬(ca108_recycle(res108_true(),res108_true(),res108_true(),res108_false()))) }
+define ca108_release(machine_destroyed : Bool,metadata_destroyed : Bool,receipts_destroyed : Bool) = machine_destroyed ∧ metadata_destroyed ∧ receipts_destroyed
+example "ca108_release accepted" { assert(ca108_release(res108_true(),res108_true(),res108_true())) }
+example "ca108_release requires machine_destroyed" { assert(¬(ca108_release(res108_false(),res108_true(),res108_true()))) }
+example "ca108_release requires metadata_destroyed" { assert(¬(ca108_release(res108_true(),res108_false(),res108_true()))) }
+example "ca108_release requires receipts_destroyed" { assert(¬(ca108_release(res108_true(),res108_true(),res108_false()))) }
+define ca108_slots(n : BitVec64) = bvugt(n,bvconst(0,64)) ∧ bvule(n,bvconst(8,64))
+example "bounded slots" { assert(ca108_slots(bvconst(8,64))) }
+example "zero slots refused" { assert(¬ca108_slots(bvconst(0,64))) }
+example "excess slots refused" { assert(¬ca108_slots(bvconst(9,64))) }
+example "live retained metadata prevents refund" { assert(∀(dead : Bool, receipts : Bool). ¬ca108_release(dead,res108_false(),receipts)) }
+
+// Concrete bounded CPU service. Slot-count policy does not bound recursion.
+define ca108_step(depth : BitVec64, frames : BitVec64, events : BitVec64, locals : BitVec64, quantum : BitVec64, cpu_only : Bool) =
+    bvult(depth,bvconst(128,64)) ∧ bvult(frames,bvconst(128,64)) ∧
+    bvule(events,bvconst(1,64)) ∧ bvule(locals,bvconst(4096,64)) ∧
+    bvugt(quantum,bvconst(0,64)) ∧ bvule(quantum,bvconst(256,64)) ∧ cpu_only
+example "bounded compiler step" { assert(ca108_step(bvconst(127,64),bvconst(127,64),bvconst(1,64),bvconst(4096,64),bvconst(256,64),res108_true())) }
+example "bounded step rejects 0 128" { assert(¬(ca108_step(bvconst(128,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),res108_true()))) }
+example "bounded step rejects 1 128" { assert(¬(ca108_step(bvconst(0,64),bvconst(128,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),res108_true()))) }
+example "bounded step rejects 2 2" { assert(¬(ca108_step(bvconst(0,64),bvconst(0,64),bvconst(2,64),bvconst(0,64),bvconst(1,64),res108_true()))) }
+example "bounded step rejects 3 4097" { assert(¬(ca108_step(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4097,64),bvconst(1,64),res108_true()))) }
+example "bounded step rejects 4 0" { assert(¬(ca108_step(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),res108_true()))) }
+example "bounded step rejects 4 257" { assert(¬(ca108_step(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(257,64),res108_true()))) }
+
+// Expanded ordinary compiler profile. The old 4096-local application envelope
+// above remains unchanged. Registry storage is charged by RegistryLimits.
+define ca108_frame(used : BitVec64,incoming : BitVec64,limit : BitVec64) = bvule(used,limit) ∧ bvule(incoming,bvsub(limit,used))
+define ca108_compiler_step(depth : BitVec64,frames : BitVec64,events : BitVec64,locals : BitVec64,quantum : BitVec64,cpu_only : Bool) =
+    bvult(depth,bvconst(128,64)) ∧ bvult(frames,bvconst(128,64)) ∧ bvule(events,bvconst(1,64)) ∧
+    bvule(locals,bvconst(16384,64)) ∧ bvugt(quantum,bvconst(0,64)) ∧ bvule(quantum,bvconst(256,64)) ∧ cpu_only
+define ca108_pool(a : BitVec64,b : BitVec64,other : BitVec64,charged : Bool) = bvule(a,bvconst(16384,64)) ∧ bvule(b,bvconst(16384,64)) ∧ bvule(other,bvconst(4096,64)) ∧ charged
+example "frame admission cannot wrap" { assert(∀(u : BitVec64,n : BitVec64,l : BitVec64). ca108_frame(u,n,l) → (bvuge(bvadd(u,n),u) ∧ bvule(bvadd(u,n),l))) }
+example "two compilers and headroom fit charged registry" { assert(∀(a : BitVec64,b : BitVec64,h : BitVec64). ca108_pool(a,b,h,res108_true()) → bvule(bvadd(bvadd(a,b),h),bvconst(36864,64))) }
+example "pending frame fits" { assert(ca108_frame(bvconst(15000,64),bvconst(663,64),bvconst(16384,64))) }
+example "pending frame exceeds" { assert(¬(ca108_frame(bvconst(16000,64),bvconst(663,64),bvconst(16384,64)))) }
+example "old profile exceeds" { assert(¬(ca108_frame(bvconst(3800,64),bvconst(663,64),bvconst(4096,64)))) }
+example "frame wrap" { assert(¬(ca108_frame(bvsub(bvconst(0,64),bvconst(1,64)),bvconst(1,64),bvconst(16384,64)))) }
+example "pool full" { assert(ca108_pool(bvconst(16384,64),bvconst(16384,64),bvconst(4096,64),res108_true())) }
+example "pool uncharged" { assert(¬(ca108_pool(bvconst(1,64),bvconst(1,64),bvconst(0,64),res108_false()))) }
+example "compiler envelope 0" { assert(ca108_compiler_step(bvconst(127,64),bvconst(127,64),bvconst(1,64),bvconst(16384,64),bvconst(256,64),res108_true())) }
+example "compiler envelope 1" { assert(¬(ca108_compiler_step(bvconst(128,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),res108_true()))) }
+example "compiler envelope 2" { assert(¬(ca108_compiler_step(bvconst(0,64),bvconst(128,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),res108_true()))) }
+example "compiler envelope 3" { assert(¬(ca108_compiler_step(bvconst(0,64),bvconst(0,64),bvconst(2,64),bvconst(0,64),bvconst(1,64),res108_true()))) }
+example "compiler envelope 4" { assert(¬(ca108_compiler_step(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(16385,64),bvconst(1,64),res108_true()))) }
+example "compiler envelope 5" { assert(¬(ca108_compiler_step(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),res108_true()))) }
+example "compiler envelope 6" { assert(¬(ca108_compiler_step(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(257,64),res108_true()))) }
+example "compiler envelope 7" { assert(¬(ca108_compiler_step(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),res108_false()))) }

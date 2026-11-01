@@ -181,7 +181,10 @@ impl ValidatedPointerModule {
         Self::from_aom_with_limit(bytes, 1024 * 1024)
     }
 
-    fn from_aom_with_limit(bytes: &[u8], limit: u64) -> Result<Self, PointerModuleError> {
+    // The caller supplies an admitted policy bound and reserves parser storage
+    // before using this on untrusted output. A limit is not execution authority.
+    // ABI-1 and producer-bootstrap entry points retain their separate policies.
+    pub(crate) fn from_aom_with_limit(bytes: &[u8], limit: u64) -> Result<Self, PointerModuleError> {
         use super::aom::AOM_HEADER_SIZE;
         use super::desc::Sem;
         use super::isa::decode;
@@ -351,6 +354,7 @@ mod tests {
             value, size: 0, return_type: 1, parameter_types,
         };
         let module = AomModule {
+            interface: Vec::new(),
             // encode_module derives geometry from the fixture's sections.
             header: AomHeader { total_size: 0, code_offset: 0, code_size: 0,
                 code_align: 8, rodata_offset: 0, rodata_size: 0, rodata_align: 8,

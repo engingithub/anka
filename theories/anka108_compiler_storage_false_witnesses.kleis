@@ -1,0 +1,115 @@
+// Every hostile claim must be explicitly disproved.
+import "anka108_compiler_storage.kleis"
+example "hostile: exact rounded budget" {
+    assert(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64))))
+}
+example "hostile: closed owner" {
+    assert(¬(¬(hs108_admit(res108_false(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64)))))
+}
+example "hostile: stale ledger" {
+    assert(¬(¬(hs108_admit(res108_true(),res108_false(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64)))))
+}
+example "hostile: full storage directory" {
+    assert(¬(¬(hs108_admit(res108_true(),res108_true(),res108_false(),bvconst(1,64),bvconst(1,64),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64)))))
+}
+example "hostile: revision exhausted" {
+    assert(¬(¬(hs108_admit(res108_true(),res108_true(),res108_true(),ptr107_max(),bvconst(1,64),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64)))))
+}
+example "hostile: identity exhausted" {
+    assert(¬(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),ptr107_max(),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64)))))
+}
+example "hostile: zero identity" {
+    assert(¬(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(0,64),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64)))))
+}
+example "hostile: zero bytes" {
+    assert(¬(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64)))))
+}
+example "hostile: signed size overflow" {
+    assert(¬(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvadd(heap108_signed_max(),bvconst(1,64)),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64)))))
+}
+example "hostile: owner quota short" {
+    assert(¬(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4097,64),bvconst(0,64),bvconst(8191,64),bvconst(1000,64),bvconst(9192,64)))))
+}
+example "hostile: global quota short" {
+    assert(¬(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9191,64)))))
+}
+example "hostile: owner census inconsistent" {
+    assert(¬(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4097,64),bvconst(1001,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64)))))
+}
+example "hostile: rounding 1" {
+    assert(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64))))
+}
+example "hostile: rounding 4095" {
+    assert(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4095,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64))))
+}
+example "hostile: rounding 4096" {
+    assert(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4096,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64))))
+}
+example "hostile: rounding 4097" {
+    assert(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64))))
+}
+example "hostile: rounding 8192" {
+    assert(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(8192,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64))))
+}
+example "hostile: real release" {
+    assert(¬(hs108_release(res108_true(),res108_true(),bvconst(4097,64),bvconst(8192,64),bvconst(12288,64))))
+}
+example "hostile: stale release" {
+    assert(¬(¬(hs108_release(res108_false(),res108_true(),bvconst(4097,64),bvconst(8192,64),bvconst(12288,64)))))
+}
+example "hostile: live payload" {
+    assert(¬(¬(hs108_release(res108_true(),res108_false(),bvconst(4097,64),bvconst(8192,64),bvconst(12288,64)))))
+}
+example "hostile: owner underflow" {
+    assert(¬(¬(hs108_release(res108_true(),res108_true(),bvconst(4097,64),bvconst(8191,64),bvconst(12288,64)))))
+}
+example "hostile: global underflow" {
+    assert(¬(¬(hs108_release(res108_true(),res108_true(),bvconst(4097,64),bvconst(8192,64),bvconst(4096,64)))))
+}
+example "hostile: zero release" {
+    assert(¬(¬(hs108_release(res108_true(),res108_true(),bvconst(0,64),bvconst(8192,64),bvconst(12288,64)))))
+}
+
+example "hostile ingress: empty source" { assert(¬(ing108_shape(bvconst(1,8),bvconst(0,64)))) }
+
+example "hostile ingress: source limit" { assert(¬(ing108_shape(bvconst(1,8),bvconst(65528,64)))) }
+
+example "hostile ingress: source exceeds C3 boundary" { assert(¬(¬(ing108_shape(bvconst(1,8),bvconst(65529,64))))) }
+
+example "hostile ingress: tool bytes" { assert(¬(ing108_shape(bvconst(2,8),bvconst(8,64)))) }
+
+example "hostile ingress: empty tool" { assert(¬(¬(ing108_shape(bvconst(2,8),bvconst(0,64))))) }
+
+example "hostile ingress: tool limit" { assert(¬(ing108_shape(bvconst(2,8),bvconst(1048576,64)))) }
+
+example "hostile ingress: tool too large" { assert(¬(¬(ing108_shape(bvconst(2,8),bvconst(1048577,64))))) }
+
+example "hostile ingress: unknown role" { assert(¬(¬(ing108_shape(bvconst(3,8),bvconst(8,64))))) }
+
+example "hostile ingress: complete charge" { assert(¬(ing108_charge(bvconst(8,64),bvconst(4096,64),bvconst(4104,64)))) }
+
+example "hostile ingress: missing metadata charge" { assert(¬(¬(ing108_charge(bvconst(8,64),bvconst(0,64),bvconst(8,64))))) }
+
+example "hostile ingress: payload only charge" { assert(¬(¬(ing108_charge(bvconst(8,64),bvconst(4096,64),bvconst(8,64))))) }
+
+example "hostile ingress: current immutable input" { assert(¬(ing108_read(res108_true(),res108_true(),res108_true(),res108_false(),bvconst(8,64),bvconst(8,64)))) }
+
+example "hostile ingress: foreign token" { assert(¬(¬(ing108_read(res108_false(),res108_true(),res108_true(),res108_false(),bvconst(8,64),bvconst(8,64))))) }
+
+example "hostile ingress: dead custodian" { assert(¬(¬(ing108_read(res108_true(),res108_false(),res108_true(),res108_false(),bvconst(8,64),bvconst(8,64))))) }
+
+example "hostile ingress: missing reservation" { assert(¬(¬(ing108_read(res108_true(),res108_true(),res108_false(),res108_false(),bvconst(8,64),bvconst(8,64))))) }
+
+example "hostile ingress: discarded input" { assert(¬(¬(ing108_read(res108_true(),res108_true(),res108_true(),res108_true(),bvconst(8,64),bvconst(8,64))))) }
+
+example "hostile ingress: changed payload length" { assert(¬(¬(ing108_read(res108_true(),res108_true(),res108_true(),res108_false(),bvconst(7,64),bvconst(8,64))))) }
+
+example "hostile ingress: owned source load" { assert(¬(ing108_load(bvconst(1,8),res108_true(),res108_true(),bvconst(8,64),bvconst(8,64)))) }
+
+example "hostile ingress: tool as source" { assert(¬(¬(ing108_load(bvconst(2,8),res108_true(),res108_true(),bvconst(8,64),bvconst(8,64))))) }
+
+example "hostile ingress: unreadable source" { assert(¬(¬(ing108_load(bvconst(1,8),res108_false(),res108_true(),bvconst(8,64),bvconst(8,64))))) }
+
+example "hostile ingress: custodian as producer" { assert(¬(¬(ing108_load(bvconst(1,8),res108_true(),res108_false(),bvconst(8,64),bvconst(8,64))))) }
+
+example "hostile ingress: source length substitution" { assert(¬(¬(ing108_load(bvconst(1,8),res108_true(),res108_true(),bvconst(8,64),bvconst(9,64))))) }

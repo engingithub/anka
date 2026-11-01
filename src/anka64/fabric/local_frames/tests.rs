@@ -227,3 +227,55 @@ fn r1_exhausted_descriptor_or_scope_admission_cannot_clear_bytes() {
     f.scoped_pointers.enter_scope_for(8).unwrap();
     denied(&mut f, r, vec![]);
 }
+
+#[test]
+fn c5_http_frame_order_fast_path_preserves_index_and_overlap_rejection() {
+    let (mut f,r)=fixture();
+    let (_,p)=f.issue_pointer_frame(7,r,VA,
+        vec![local(r,32,8),local(r,0,8),local(r,16,8)]).unwrap();
+    for (pointer,offset) in p.into_iter().zip([32,0,16]) {
+        assert_eq!(f.scoped_pointer_backing(pointer,r.context.domain).unwrap(),(r.object,r.offset+offset));
+    }
+    let (mut f,r)=fixture();
+    denied(&mut f,r,vec![local(r,0,24),local(r,16,8)]);
+    denied(&mut f,r,vec![local(r,32,8),local(r,0,24),local(r,16,8)]);
+}
+
+#[test]
+fn c5_http_frame_two_compilers_exceed_old_pool_retire_and_reuse() {
+    use crate::anka64::scoped_pointers::heap::RegistryLimits;
+    let mut f=Fabric::new(0x100000);
+    f.scoped_pointers=ScopedPointers::with_limits(RegistryLimits {
+        slots:36864,scopes:4096,owners:0,cleanup:0,global_bytes:0x4000000
+    }).unwrap();
+    let held=f.scoped_pointers.total_reserved_bytes();
+    let mut owners=Vec::new();
+    for owner in [7u64,8] {
+        let object=f.alloc_object("nested-compiler-stack",0x30000,ObjectKind::Memory);
+        assert!(f.place_object(object,0x10000+(owner-7)*0x30000));
+        let domain=f.create_domain();f.grant(domain,object,0,0x30000,Permissions::RW).unwrap();
+        let agent=AgentId(owner);f.register_agent(agent,AgentKind::Cpu(CoreId(owner)),domain);
+        assert!(f.protect_pointer_stack(object,owner,domain));
+        let mut frames=Vec::new();
+        for depth in 0..7 {
+            let offset=depth*10608; // 663 disjoint 16-byte compiler locals.
+            let address=0x100000+offset;
+            let mut r=request(agent,domain,object,offset,Width::Byte,AccessKind::Read);r.length=10608;
+            let locals=(0..663).map(|i| {
+                let mut l=r;l.offset+=i*16;l.length=16;(l,address+i*16,true)
+            }).collect();
+            frames.push(f.issue_pointer_frame(owner,r,address,locals).unwrap());
+        }
+        owners.push((domain,frames));
+    }
+    let a=owners[0].1[0].1[0];let b=owners[1].1[0].1[0];
+    for (scope,pointers) in owners[0].1.iter().rev() {f.retire_pointer_frame(*scope,pointers).unwrap();}
+    assert!(f.scoped_pointer_backing(a,owners[0].0).is_err());
+    assert!(f.scoped_pointer_backing(b,owners[1].0).is_ok());
+    let scope=f.scoped_pointers.enter_scope_for(9).unwrap();
+    let c=f.scoped_pointers.register(scope,9,0x900000,16,true).unwrap();
+    assert_ne!(a.words(),c.words());
+    assert!(f.scoped_pointer_backing(a,owners[0].0).is_err());
+    assert!(f.scoped_pointer_backing(b,owners[1].0).is_ok());
+    assert_eq!(f.scoped_pointers.total_reserved_bytes(),held);
+}

@@ -1,0 +1,60 @@
+// Accounted isolated preprocessing. Runtime certificates refer to measured
+// registry custody and fixed execution restrictions, never guest assertions.
+import "anka108_compiler_storage.kleis"
+define ps108_shape(m : BitVec64, image : BitVec64, output : BitVec64) =
+    bvugt(m,bvconst(0,64)) ∧ bvule(m,bvconst(256,64)) ∧
+    bvugt(image,bvconst(0,64)) ∧ bvule(image,bvconst(131072,64)) ∧
+    bvugt(output,bvconst(0,64)) ∧ bvule(output,bvconst(1048576,64))
+define ps108_start(current : Bool,reserved : Bool,bounded_layout : Bool,one_process : Bool,no_devices : Bool,exit_only : Bool) =
+    current ∧ reserved ∧ bounded_layout ∧ one_process ∧ no_devices ∧ exit_only
+define ps108_step(quantum : BitVec64,depth : BitVec64,events : BitVec64,terminal_trace : Bool) =
+    bvugt(quantum,bvconst(0,64)) ∧ bvule(quantum,bvconst(256,64)) ∧
+    bvult(depth,bvconst(1024,64)) ∧ (events=bvconst(0,64)) ∧ terminal_trace
+define ps108_transfer(success : Bool,exact : Bool,source_charged : Bool,machine_destroyed : Bool) =
+    success ∧ exact ∧ source_charged ∧ machine_destroyed
+define ps108_refund(machine_destroyed : Bool,output_destroyed : Bool) = machine_destroyed ∧ output_destroyed
+example "start accepted" { assert(ps108_start(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "start denies missing guard 0" { assert(¬(ps108_start(res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "start denies missing guard 1" { assert(¬(ps108_start(res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "start denies missing guard 2" { assert(¬(ps108_start(res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "start denies missing guard 3" { assert(¬(ps108_start(res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "start denies missing guard 4" { assert(¬(ps108_start(res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "start denies missing guard 5" { assert(¬(ps108_start(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))) }
+example "transfer accepted" { assert(ps108_transfer(res108_true(),res108_true(),res108_true(),res108_true())) }
+example "transfer denies missing guard 0" { assert(¬(ps108_transfer(res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "transfer denies missing guard 1" { assert(¬(ps108_transfer(res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "transfer denies missing guard 2" { assert(¬(ps108_transfer(res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "transfer denies missing guard 3" { assert(¬(ps108_transfer(res108_true(),res108_true(),res108_true(),res108_false()))) }
+example "refund accepted" { assert(ps108_refund(res108_true(),res108_true())) }
+example "refund denies missing guard 0" { assert(¬(ps108_refund(res108_false(),res108_true()))) }
+example "refund denies missing guard 1" { assert(¬(ps108_refund(res108_true(),res108_false()))) }
+example "shape 1 1 4096" { assert(ps108_shape(bvconst(1,64),bvconst(1,64),bvconst(4096,64))) }
+example "shape 256 131072 1048576" { assert(ps108_shape(bvconst(256,64),bvconst(131072,64),bvconst(1048576,64))) }
+example "shape 0 1 4096" { assert(¬(ps108_shape(bvconst(0,64),bvconst(1,64),bvconst(4096,64)))) }
+example "shape 257 1 4096" { assert(¬(ps108_shape(bvconst(257,64),bvconst(1,64),bvconst(4096,64)))) }
+example "shape 1 0 4096" { assert(¬(ps108_shape(bvconst(1,64),bvconst(0,64),bvconst(4096,64)))) }
+example "shape 1 131073 4096" { assert(¬(ps108_shape(bvconst(1,64),bvconst(131073,64),bvconst(4096,64)))) }
+example "shape 1 1 0" { assert(¬(ps108_shape(bvconst(1,64),bvconst(1,64),bvconst(0,64)))) }
+example "shape 1 1 1048577" { assert(¬(ps108_shape(bvconst(1,64),bvconst(1,64),bvconst(1048577,64)))) }
+example "step 1 0 0 True" { assert(ps108_step(bvconst(1,64),bvconst(0,64),bvconst(0,64),res108_true())) }
+example "step 256 1023 0 True" { assert(ps108_step(bvconst(256,64),bvconst(1023,64),bvconst(0,64),res108_true())) }
+example "step 0 0 0 True" { assert(¬(ps108_step(bvconst(0,64),bvconst(0,64),bvconst(0,64),res108_true()))) }
+example "step 257 0 0 True" { assert(¬(ps108_step(bvconst(257,64),bvconst(0,64),bvconst(0,64),res108_true()))) }
+example "step 1 1024 0 True" { assert(¬(ps108_step(bvconst(1,64),bvconst(1024,64),bvconst(0,64),res108_true()))) }
+example "step 1 0 1 True" { assert(¬(ps108_step(bvconst(1,64),bvconst(0,64),bvconst(1,64),res108_true()))) }
+example "step 1 0 0 False" { assert(¬(ps108_step(bvconst(1,64),bvconst(0,64),bvconst(0,64),res108_false()))) }
+example "law no premature refund" { assert(∀(output : Bool). ¬ps108_refund(res108_false(),output)) }
+
+// TRAP and the supervisor trap-gate HALT are separate machine steps.
+// The ordinary ps108_step predicate describes user execution only.
+define ps108_exit_gate(supervisor : Bool,at_gate : Bool,events : BitVec64,syscall : Bool,from_user : Bool,masked : Bool,is_exit : Bool) =
+    supervisor ∧ at_gate ∧ (events=bvconst(1,64)) ∧ syscall ∧ from_user ∧ masked ∧ is_exit
+example "exit trap pending gate accepted" { assert(ps108_exit_gate(res108_true(),res108_true(),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "exit gate guard 0 required" { assert(¬(ps108_exit_gate(res108_false(),res108_true(),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "exit gate guard 1 required" { assert(¬(ps108_exit_gate(res108_true(),res108_false(),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "exit gate guard 2 required" { assert(¬(ps108_exit_gate(res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "exit gate guard 3 required" { assert(¬(ps108_exit_gate(res108_true(),res108_true(),bvconst(1,64),res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "exit gate guard 4 required" { assert(¬(ps108_exit_gate(res108_true(),res108_true(),bvconst(1,64),res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "exit gate guard 5 required" { assert(¬(ps108_exit_gate(res108_true(),res108_true(),bvconst(1,64),res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "exit gate guard 6 required" { assert(¬(ps108_exit_gate(res108_true(),res108_true(),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_false()))) }
+example "nested exit event rejected" { assert(¬(ps108_exit_gate(res108_true(),res108_true(),bvconst(2,64),res108_true(),res108_true(),res108_true(),res108_true()))) }

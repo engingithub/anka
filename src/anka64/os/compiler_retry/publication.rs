@@ -1,10 +1,11 @@
 //! ABI-2 publication: freeze actual loader provenance BEFORE execution, retain
 //! charges, recheck current sealed inputs, and insert artifact+receipt together.
 use super::*;
+pub(crate) mod consumer;
 use super::retained::{CompilerCandidateError, CompilerCandidateHandle};
 use crate::anka64::ankald::LinkedArtifactKey;
 use crate::anka64::compiler_adapter::{RebuildAdmissionRole, RebuildPublicationAuthority};
-use crate::anka64::scoped_pointers::heap::HeapReservation;
+use crate::anka64::scoped_pointers::heap::{HeapReservation, HostStorageReservation};
 use std::collections::BTreeMap;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -34,7 +35,7 @@ impl PublicationInputs {
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PublicationKey { reservation: HeapReservation, custodian: AllocationOwner }
+pub(crate) struct PublicationKey { reservation: HostStorageReservation, custodian: AllocationOwner }
 
 pub(crate) struct FrozenInput {
     pub(crate) key: LinkedArtifactKey,
@@ -72,6 +73,7 @@ pub(crate) struct CompilerPublications {
     fail_before_commit: bool,
     jobs: BTreeMap<u64, FrozenJob>,
     records: BTreeMap<u64, Published>,
+    links: BTreeMap<u64, consumer::PublishedCompilerLink>,
 }
 
 /// Borrowed receipt: exact immutable evidence, not execution authority. The heap
@@ -154,8 +156,11 @@ impl Kernel {
         if attempt.publication.is_some() || inputs.dependencies.len() > 4096
             || role == RebuildAdmissionRole::LinkedImage { return Err(PublicationError::Binding); }
         let budget = attempt.budget.as_ref().ok_or(PublicationError::Binding)?;
+        if budget.workspace_directory()!=attempt.workspace_directory {return Err(PublicationError::Binding);}
         let context = budget.context();
         let plan_words = budget.publication_plan_words();
+        let workspace_words=attempt.workspace_directory.map(|d|d.binding_words());
+        let plan_length=22*8+if workspace_words.is_some() {35*8} else {0};
         let source = attempt.loaded_source.ok_or(PublicationError::Binding)?;
         if self.compiler_owner(attempt.owner.process).ok() != Some(attempt.owner) {
             return Err(PublicationError::Binding);
@@ -176,7 +181,7 @@ impl Kernel {
             .and_then(|n| n.checked_mul(2))
             .and_then(|n| n.checked_add((inputs.dependencies.len() as u64 + 7)*128 + 8192))
             .ok_or(PublicationError::Storage)?;
-        let reservation = self.fabric.scoped_pointers.reserve_heap(account, charge, self.fabric.scoped_pointers.revision())?;
+        let reservation = self.fabric.scoped_pointers.reserve_host_storage(account, charge, self.fabric.scoped_pointers.revision())?;
         let key = PublicationKey { reservation, custodian };
         // Install the charged obligation before fallible reads/allocations.
         self.compiler_publications.jobs.insert(reservation.incarnation(), FrozenJob {
@@ -198,8 +203,8 @@ impl Kernel {
             }
             if job.inputs[1].bytes.len() as u64 != context.source_length()
                 || job.inputs[5].bytes != publication_profile()
-                || !job.inputs[6].bytes.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).eq(plan_words)
-                || job.inputs[6].bytes.len() != 22*8 { return Err(PublicationError::Binding); }
+                || !job.inputs[6].bytes.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).eq(plan_words.into_iter().chain(workspace_words.into_iter().flatten()))
+                || job.inputs[6].bytes.len() != plan_length { return Err(PublicationError::Binding); }
             for (i, expected) in job.inputs[1].bytes.chunks(4096).enumerate() {
                 let token = self.fabric.scoped_pointers.add_heap_pointer(source, attempt.owner, (i*4096) as i64)?;
                 let mut bytes = [0u8;4096];
@@ -230,9 +235,33 @@ impl Kernel {
         let job = self.compiler_publications.jobs.get_mut(&key.reservation.incarnation())
             .filter(|j| j.key == key).ok_or(PublicationError::Binding)?;
         job.discard_bytes();
-        self.fabric.scoped_pointers.abort_heap(key.reservation)?;
+        self.fabric.scoped_pointers.release_host_storage(key.reservation)?;
         self.compiler_publications.jobs.remove(&key.reservation.incarnation());
         Ok(())
+    }
+
+    // A job keeps this exact charged snapshot across cleanup/re-admission.
+    // Rechecking it prevents replacing source/tools between successful attempts.
+    pub(super) fn recheck_compiler_job_pin(&mut self, key:PublicationKey,
+        source:Option<&[u8]>) -> Result<(),PublicationError> {
+        let job=self.compiler_publications.jobs.get(&key.reservation.incarnation())
+            .filter(|j|j.key==key && !j.discarding).ok_or(PublicationError::Binding)?;
+        if self.compiler_candidate_custodian()?!=key.custodian
+            || self.fabric.scoped_pointers.check_host_storage(key.reservation,key.custodian,
+                self.fabric.scoped_pointers.revision())?!=job.charge
+            || source.is_some_and(|s|job.inputs.get(1).is_none_or(|i|i.bytes!=s)) {
+            return Err(PublicationError::Binding);
+        }
+        let agent=self.processes[key.custodian.process.slot].core.agent;
+        recheck(&mut self.fabric,key.custodian,agent,&job.inputs)
+    }
+
+    pub(super) fn discard_compiler_job_pin(&mut self,key:PublicationKey)
+        -> Result<(),PublicationError> {
+        // A failed flow may already have cancelled this pin. Published records
+        // are a separate table and must never be removed by job cancellation.
+        if !self.compiler_publications.jobs.contains_key(&key.reservation.incarnation()) {return Ok(());}
+        self.cancel_compiler_publication(key)
     }
 
     /// pub108_refresh: reauthorize a ready candidate after another client has
@@ -251,9 +280,9 @@ impl Kernel {
                 && j.context==view.context && j.role==view.role && j.expected_epoch==expected_old)
             .ok_or(PublicationError::Binding)?;
         if self.compiler_candidate_custodian()?!=key.custodian {return Err(PublicationError::Binding);}
-        let plan=self.fabric.scoped_pointers.prepare_heap_attachment(key.reservation,key.custodian,
+        let charge=self.fabric.scoped_pointers.check_host_storage(key.reservation,key.custodian,
             self.fabric.scoped_pointers.revision())?;
-        if plan.logical()!=job.charge {return Err(PublicationError::Binding);}
+        if charge!=job.charge {return Err(PublicationError::Binding);}
         let agent=self.processes[key.custodian.process.slot].core.agent;
         recheck(&mut self.fabric,key.custodian,agent,&job.inputs)?;
         self.compiler_publications.jobs.get_mut(&key.reservation.incarnation()).unwrap().expected_epoch=epoch;
@@ -274,9 +303,9 @@ impl Kernel {
                 && j.context == view.context && j.role == view.role && j.expected_epoch == expected_epoch)
             .ok_or(PublicationError::Binding)?;
         if self.compiler_candidate_custodian()? != key.custodian { return Err(PublicationError::Binding); }
-        let plan = self.fabric.scoped_pointers.prepare_heap_attachment(key.reservation, key.custodian,
+        let charge = self.fabric.scoped_pointers.check_host_storage(key.reservation, key.custodian,
             self.fabric.scoped_pointers.revision())?;
-        if plan.logical() != job.charge { return Err(PublicationError::Binding); }
+        if charge != job.charge { return Err(PublicationError::Binding); }
         let agent = self.processes[key.custodian.process.slot].core.agent;
         recheck(&mut self.fabric, key.custodian, agent, &job.inputs)?;
         let (_, account) = self.compiler_candidate_account()?;
@@ -320,7 +349,7 @@ impl Kernel {
         if r.job.discarding || self.compiler_candidate_custodian().ok()? != r.job.key.custodian { return None; }
         let agent = self.processes[r.job.key.custodian.process.slot].core.agent;
         self.fabric.authenticate_heap_token(r.job.key.custodian, agent, r.pointer).ok()?;
-        self.fabric.scoped_pointers.prepare_heap_attachment(r.job.key.reservation, r.job.key.custodian,
+        self.fabric.scoped_pointers.check_host_storage(r.job.key.reservation, r.job.key.custodian,
             self.fabric.scoped_pointers.revision()).ok()?;
         Some(CompilerPublicationReceipt { epoch, abi:2, source_offset:0, role:r.job.role,
             producer:r.job.producer, custodian:r.job.key.custodian, context:r.job.context,
@@ -344,18 +373,19 @@ impl Kernel {
     }
 
     fn discard_publication_storage(&mut self, owner: Option<AllocationOwner>) -> bool {
+        let links_empty=self.discard_compiler_links_owned_by(owner);
         let fabric = &mut self.fabric;
         self.compiler_publications.jobs.retain(|_, j| {
             if owner.is_some_and(|o|o!=j.key.custodian) { return true; }
-            j.discard_bytes(); fabric.scoped_pointers.abort_heap(j.key.reservation).is_err()
+            j.discard_bytes(); fabric.scoped_pointers.release_host_storage(j.key.reservation).is_err()
         });
         self.compiler_publications.records.retain(|_, r| {
             if owner.is_some_and(|o|o!=r.job.key.custodian) { return true; }
             r.job.discard_bytes();
             if fabric.close_attached_heap(r.reservation,r.job.key.custodian,r.object).is_err() { return true; }
-            fabric.scoped_pointers.abort_heap(r.job.key.reservation).is_err()
+            fabric.scoped_pointers.release_host_storage(r.job.key.reservation).is_err()
         });
-        self.compiler_publications.jobs.is_empty() && self.compiler_publications.records.is_empty()
+        links_empty && self.compiler_publications.jobs.is_empty() && self.compiler_publications.records.is_empty()
     }
     pub(crate) fn discard_compiler_publications_owned_by(&mut self, owner: AllocationOwner) {
         self.discard_publication_storage(Some(owner));

@@ -112,6 +112,7 @@ pub enum DevelopmentRunError {
     InputTooLarge,
     InputProvisionRejected,
     HeapServiceUnavailable,
+    ResourceEnvelope,
     Artifact(DevelopmentShellError),
     InvalidArtifactGeometry,
     ArtifactPlacementMissing,
@@ -186,7 +187,40 @@ pub fn run_registered_artifact_with_config(
     let prepared = prepare_run(
         registry, authority, fabric, placement, selector, config,
     )?;
-    execute_prepared_run(fabric, placement, prepared, config, None)
+    execute_prepared_run(fabric, placement, prepared, config, None, false, false)
+}
+
+/// Explicit C-function entry, selected only after execution authority and
+/// exact artifact validation. Direct bytecode/process-entry APIs stay unchanged.
+pub(crate) fn run_registered_c_application_with_config(
+    registry:&DevelopmentArtifactRegistry,authority:Option<&DeveloperExecutionAuthority>,
+    fabric:&mut Fabric,placement:&mut PhysicalPlacementManager,selector:&str,
+    config:DevelopmentRunConfig)->Result<DevelopmentRunReport,DevelopmentRunError> {
+    let authority=authority.ok_or(DevelopmentRunError::DeveloperExecutionAuthorityRequired)?;
+    let prepared=prepare_run(registry,authority,fabric,placement,selector,config)?;
+    execute_prepared_run(fabric,placement,prepared,config,None,true,false)
+}
+
+/// Shared-service runner, selected only after parent-ledger admission.
+pub(crate) fn run_accounted_c_application(
+    registry:&DevelopmentArtifactRegistry,authority:&DeveloperExecutionAuthority,
+    fabric:&mut Fabric,placement:&mut PhysicalPlacementManager,
+    config:DevelopmentRunConfig)->Result<DevelopmentRunReport,DevelopmentRunError> {
+    let prepared=prepare_run(registry,authority,fabric,placement,"rebuilt-application",config)?;
+    execute_prepared_run(fabric,placement,prepared,config,None,true,true)
+}
+
+/// Explicit input image for the charged C realm. Separate authority and limits
+/// precede loading; the actual child receives it before executing an instruction.
+pub(crate) fn run_accounted_c_application_with_input(
+    registry:&DevelopmentArtifactRegistry,authority:&DeveloperExecutionAuthority,
+    input_authority:Option<&DeveloperInputAuthority>,
+    fabric:&mut Fabric,placement:&mut PhysicalPlacementManager,
+    config:DevelopmentRunConfig,input:&[u8])->Result<DevelopmentRunReport,DevelopmentRunError> {
+    input_authority.ok_or(DevelopmentRunError::DeveloperInputAuthorityRequired)?;
+    if input.len()>super::os::application_run::INPUT_BYTES {return Err(DevelopmentRunError::InputTooLarge);}
+    let prepared=prepare_run(registry,authority,fabric,placement,"rebuilt-application",config)?;
+    execute_prepared_run(fabric,placement,prepared,config,Some(input),true,true)
 }
 
 /// Run the exact registered artifact with an explicitly authorized input image.
@@ -206,7 +240,7 @@ pub fn run_registered_artifact_with_input(
     if input.len() > super::os::MAX_PROCESS_INPUT { return Err(DevelopmentRunError::InputTooLarge); }
     let config = DevelopmentRunConfig::default();
     let prepared = prepare_run(registry, authority, fabric, placement, selector, config)?;
-    execute_prepared_run(fabric, placement, prepared, config, Some(input))
+    execute_prepared_run(fabric, placement, prepared, config, Some(input), false, false)
 }
 
 fn resolve_artifact<'a>(
@@ -479,6 +513,8 @@ fn execute_prepared_run(
     prepared: PreparedRun,
     config: DevelopmentRunConfig,
     input: Option<&[u8]>,
+    callable_entry: bool,
+    bounded: bool,
 ) -> Result<DevelopmentRunReport, DevelopmentRunError> {
     let PreparedRun {
         artifact,
@@ -497,6 +533,15 @@ fn execute_prepared_run(
     let owned_fabric = std::mem::replace(fabric, Fabric::new(0));
     let mut kernel = Kernel::new(owned_fabric);
     kernel.next_phys = kernel_phys_base;
+
+    if callable_entry && (artifact.lit_start!=artifact.code_size ||
+        kernel.select_callable_application_entry(artifact.key.object,artifact.key.generation,
+            artifact.code_size,artifact.logical_size).is_err()) {
+        teardown_sealed_transient(&mut kernel.fabric,placement,control_obj);
+        teardown_sealed_transient(&mut kernel.fabric,placement,supervisor_obj);
+        *fabric=kernel.into_fabric();
+        return Err(DevelopmentRunError::InvalidArtifactGeometry);
+    }
 
     if let Err(err) = kernel.boot(&boot_info) {
         teardown_sealed_transient(&mut kernel.fabric, placement, control_obj);
@@ -517,6 +562,11 @@ fn execute_prepared_run(
         }
     }
 
+    if bounded && kernel.prepare_application_run().is_err() {
+        *fabric=kernel.into_fabric();
+        return Err(DevelopmentRunError::ResourceEnvelope);
+    }
+    let mut input_rounds=0usize;
     if let Some(bytes) = input {
         // One-instruction rounds until ordinary SYS_SPAWN publishes the child.
         // The scheduler captures its process range before running the parent;
@@ -533,6 +583,7 @@ fn execute_prepared_run(
             }
             if kernel.processes[0].exited() { break; }
             kernel.run(1, 1);
+            input_rounds+=1;
         }
         if target.is_none_or(|key| kernel.provision_process_input(key, bytes).is_err()) {
             kernel.finish_process(0, ProcessResult::ProtectionFault);
@@ -545,7 +596,16 @@ fn execute_prepared_run(
         }
     }
 
-    kernel.run(config.quantum, config.max_rounds);
+    if bounded {
+        // Preserve a finite aggregate dispatch ceiling. Every scheduler round
+        // includes ordinary wake/wait/cleanup; no device can outlive the realm.
+        let rounds=config.quantum.checked_mul(config.max_rounds)
+            .ok_or(DevelopmentRunError::ResourceEnvelope)?;
+        for _ in input_rounds..rounds {
+            if kernel.processes[0].exited() {break;}
+            kernel.run(1,1);
+        }
+    } else {kernel.run(config.quantum, config.max_rounds);}
 
     if kernel.processes.is_empty() || !kernel.processes[0].exited() {
         if !kernel.processes.is_empty() {

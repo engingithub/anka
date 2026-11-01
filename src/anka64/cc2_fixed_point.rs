@@ -78,9 +78,11 @@ pub fn witness_cc2_fixed_point(
     let seed = compile_c_with_extended_ccb(&ccb, compiler_source)
         .map_err(Cc2FixedPointError::Bootstrap)?;
     eprintln!("CC2 fixed-point: CC2_0 ready (code={} backing={})", seed.code_size, seed.bytes.len());
+    eprintln!("CC2 fixed-point: compiling preprocessor with CC_B");
     let preprocessor = compile_c_with_ccb(&ccb, preprocessor_source)
         .map_err(Cc2FixedPointError::Bootstrap)?;
-    let linker = compile_c_with_ccb(&ccb, linker_source)
+    eprintln!("CC2 fixed-point: compiling linker with extended CC_B arena");
+    let linker = compile_c_with_extended_ccb(&ccb, linker_source)
         .map_err(Cc2FixedPointError::Bootstrap)?;
 
     let effective_1 = super::source_bundle::run_ankapp_with_capacity(&preprocessor.bytes, &bundle,super::dev_compiler::DEVELOPMENT_COMPILER_SOURCE_SIZE-8)

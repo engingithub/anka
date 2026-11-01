@@ -71,8 +71,8 @@ fn ankapp_image() -> &'static CompiledCImage {
 fn ankald_image() -> &'static CompiledCImage {
     static IMAGE: OnceLock<CompiledCImage> = OnceLock::new();
     IMAGE.get_or_init(|| {
-        compile_c_with_ccb(canonical_ccb(), ankald_source())
-            .expect("canonical CC_B must compile the real userspace ankald")
+        compile_c_with_extended_ccb(extended_ccb(), ankald_source())
+            .expect("extended CC_B must compile the real userspace ankald")
     })
 }
 

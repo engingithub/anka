@@ -1,0 +1,41 @@
+// C3/C4 local admission/refinement contracts. No new axioms.
+// These guards do not constitute a proof of the Rust parser or guest compiler.
+import "anka108_compiler_resources.kleis"
+
+// Nonnegative signed AC2 address space; division guard precedes multiplication.
+define gr108_product(n : BitVec64,stride : BitVec64,cap : BitVec64) =
+    bvugt(stride,bvconst(0,64)) ∧ bvule(cap,heap108_signed_max()) ∧ bvule(n,bvudiv(cap,stride))
+define gr108_append(offset : BitVec64,n : BitVec64,cap : BitVec64) =
+    bvule(cap,heap108_signed_max()) ∧ bvule(offset,cap) ∧ bvule(n,bvsub(cap,offset))
+define gr108_used(used : BitVec64,capacity : BitVec64) = bvule(used,capacity)
+define gr108_grow(current : BitVec64,required : BitVec64,limit : BitVec64) =
+    bvugt(required,current) ∧ bvule(required,limit) ∧ bvule(limit,heap108_signed_max())
+define gr108_retry(capacity_reason : Bool,cleanup : Bool,current_owner : Bool,budget : Bool) =
+    capacity_reason ∧ cleanup ∧ current_owner ∧ budget
+define gr108_payload(used : BitVec64,capacity : BitVec64) = used
+
+example "functions past 64" { assert(gr108_product(bvconst(129,64),bvconst(80,64),bvconst(10320,64))) }
+example "fields past 64" { assert(gr108_product(bvconst(200,64),bvconst(160,64),bvconst(32000,64))) }
+example "structs past 16" { assert(gr108_product(bvconst(128,64),bvconst(112,64),bvconst(14336,64))) }
+example "short table" { assert(¬(gr108_product(bvconst(129,64),bvconst(80,64),bvconst(10319,64)))) }
+example "zero stride" { assert(¬(gr108_product(bvconst(1,64),bvconst(0,64),bvconst(4096,64)))) }
+example "empty table" { assert(gr108_product(bvconst(0,64),bvconst(80,64),bvconst(0,64))) }
+example "multiplication wrap" { assert(¬(gr108_product(ptr107_max(),bvconst(80,64),bvconst(4096,64)))) }
+example "source over 64KiB" { assert(gr108_append(bvconst(65536,64),bvconst(8192,64),bvconst(73728,64))) }
+example "linked image over 1MiB" { assert(gr108_append(bvconst(1048576,64),bvconst(4096,64),bvconst(1052672,64))) }
+example "exact output end" { assert(gr108_append(bvconst(1052672,64),bvconst(0,64),bvconst(1052672,64))) }
+example "link capacity short" { assert(¬(gr108_append(bvconst(1048576,64),bvconst(4097,64),bvconst(1052672,64)))) }
+example "offset beyond capacity" { assert(¬(gr108_append(bvconst(1052673,64),bvconst(0,64),bvconst(1052672,64)))) }
+example "append wrap" { assert(¬(gr108_append(ptr107_max(),bvconst(1,64),bvconst(4096,64)))) }
+example "larger requested capacity" { assert(gr108_grow(bvconst(65536,64),bvconst(131072,64),bvconst(262144,64))) }
+example "unchanged growth" { assert(¬(gr108_grow(bvconst(65536,64),bvconst(65536,64),bvconst(262144,64)))) }
+example "growth over policy" { assert(¬(gr108_grow(bvconst(65536,64),bvconst(524288,64),bvconst(262144,64)))) }
+example "exact prefix" { assert(gr108_used(bvconst(123,64),bvconst(4096,64))) }
+example "oversized used prefix" { assert(¬(gr108_used(bvconst(4097,64),bvconst(4096,64)))) }
+example "retry missing capacity reason" { assert(¬(gr108_retry(res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "retry missing cleanup" { assert(¬(gr108_retry(res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "retry missing owner" { assert(¬(gr108_retry(res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "retry missing budget" { assert(¬(gr108_retry(res108_true(),res108_true(),res108_true(),res108_false()))) }
+example "retry with all guards" { assert(gr108_retry(res108_true(),res108_true(),res108_true(),res108_true())) }
+example "law: capacity independent payload" { assert(∀(u : BitVec64). ∀(a : BitVec64). ∀(b : BitVec64). (gr108_payload(u,a)=gr108_payload(u,b))) }
+example "law: append fits without wrap" { assert(∀(a : BitVec64). ∀(b : BitVec64). ∀(c : BitVec64). (gr108_append(a,b,c) → bvule(bvadd(a,b),c))) }

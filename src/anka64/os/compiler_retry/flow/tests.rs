@@ -141,3 +141,47 @@ fn c25_flow_capacity_reply_returns_original_budget_only_after_real_cleanup() {
     assert_eq!(k.compiler_publication_epoch(),0);
     assert!(matches!(k.advance_compiler_publication_flow(&mut flow,2000,Some(&auth)),Err(CompilerFlowError::Completed)));
 }
+
+#[test]
+fn c3_workspace_retry_publication_flow_freezes_directory_then_releases_budget() {
+    use super::super::loader::tests::{budget,client_report};
+    use crate::anka64::compiler_adapter::resources::COMPILER_RESOURCE_MAGIC;
+    use crate::anka64::compiler_adapter::resources::growth::workspace::WorkspaceDirectory;
+    use crate::anka64::ankald::LinkedArtifactKey;
+    use crate::anka64::aom::AOM_MAGIC;
+    let mut k=machine();let(unused,mut inputs,_)=setup(&mut k);
+    k.finish_process(unused.owner.process.slot,ProcessResult::Exited(0));quiet(&mut k);
+    let words=[COMPILER_RESOURCE_MAGIC,2,10,1,1,32,2,0,8,0,21,22,23,24,25,0];
+    let key=client_report(&mut k,10,1,16384,Some(words));
+    let d=WorkspaceDirectory::new([1,16,16,16,16,16,16],1<<20).unwrap();
+    let b=budget(10,16384,8);
+    let plan:Vec<u8>=b.publication_plan_words().into_iter().chain(d.binding_words())
+        .flat_map(u64::to_le_bytes).collect();
+    let a=k.load_compiler_request_with_workspace(key,b,&AOM_MAGIC,d).unwrap();
+    let owner=a.owner;
+    let(_,object,generation,_,_)=k.processes[key.slot].core.compiler_publication_entry(&k.fabric).unwrap();
+    inputs.compiler=LinkedArtifactKey{object,generation};
+    let custodian=k.compiler_candidate_custodian().unwrap();
+    k.fabric.grant(custodian.domain,object,0,k.fabric.objects[&object].size,Permissions::READ).unwrap();
+    let plan_obj=k.fabric.alloc_object("workspace-retry-plan",plan.len() as u64,ObjectKind::Memory);
+    k.fabric.place_object(plan_obj,0x80000);
+    assert!(k.fabric.initialize_object(plan_obj,0,&plan));assert!(k.fabric.seal_object(plan_obj));
+    k.fabric.grant(custodian.domain,plan_obj,0,plan.len() as u64,Permissions::READ).unwrap();
+    inputs.plan=LinkedArtifactKey{object:plan_obj,generation:k.fabric.objects[&plan_obj].generation};
+    let auth=RebuildPublicationAuthority::provision();
+    let mut f=k.begin_compiler_publication_flow(a,&inputs,RebuildAdmissionRole::RelocatableModule,0,Some(&auth)).unwrap();
+    for _ in 0..2000 {
+        match k.advance_compiler_publication_flow(&mut f,2000,Some(&auth)).unwrap() {
+            CompilerFlowProgress::Pending=>{},
+            CompilerFlowProgress::Published(_)=>panic!("capacity metadata cannot publish"),
+            CompilerFlowProgress::Retry(next)=>{
+                assert!(k.fabric.compiler_heap_owner_released(owner));
+                assert_eq!(next.workspace_directory().unwrap().words()[1],2);
+                assert_eq!(next.context().output_capacity(),16384);
+                assert_eq!(next.spent_work(),2000);assert_eq!(k.compiler_publication_epoch(),0);
+                return;
+            },
+        }
+    }
+    panic!("exact cleanup must release the carried directory");
+}

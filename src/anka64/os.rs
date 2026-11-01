@@ -25,7 +25,10 @@ mod heap_cleanup;
 mod heap_application;
 use heap_application::{HeapService, HeapFreeWait};
 mod heap_work;
+mod application_entry;
 pub(crate) mod compiler_retry;
+pub(crate) mod preprocessor_transport;
+pub(crate) mod application_run;
 pub(crate) use compiler_retry::CompilerRetryRelease;
 pub(crate) use heap_context::{CurrentHeapProcess, CurrentHeapRetirement};
 
@@ -1054,6 +1057,10 @@ impl DeviceRegistry {
 }
 
 pub struct Kernel {
+    callable_application_entry: Option<application_entry::CallableApplicationEntry>,
+    compiler_jobs: compiler_retry::jobs::CompilerJobs,
+    compiler_admission: Option<compiler_retry::admission::CompilerAdmission>,
+    compiler_inputs: compiler_retry::inputs::CompilerInputs,
     compiler_candidates: compiler_retry::retained::CompilerCandidates,
     compiler_publications: compiler_retry::publication::CompilerPublications,
     heap_service: Option<HeapService>,
@@ -1062,6 +1069,7 @@ pub struct Kernel {
     /// Byte output buffer.  SYS_WRITE appends here on success.
     /// Output-atomic: a failed SYS_WRITE leaves this unchanged.
     pub byte_output: Vec<u8>,
+    application_run: Option<application_run::ApplicationRunEnvelope>,
     pub(crate) mailboxes: Vec<Vec<Message>>,
     current: usize,
     input_streams: std::collections::BTreeMap<usize, ProcessInput>,
@@ -1104,12 +1112,17 @@ pub struct Kernel {
 impl Kernel {
     pub fn new(fabric: Fabric) -> Self {
         Self {
+            callable_application_entry: None,
+            compiler_jobs: Default::default(),
+            compiler_admission: None,
+            compiler_inputs: Default::default(),
             compiler_candidates: Default::default(),
             compiler_publications: Default::default(),
             heap_service: None,
             fabric,
             processes: Vec::new(),
             byte_output: Vec::new(),
+            application_run: None,
             mailboxes: Vec::new(),
             current: 0,
             input_streams: Default::default(),
@@ -1136,12 +1149,16 @@ impl Kernel {
             p.generation == key.generation && p.state == ProcessState::Running)
             .ok_or(InputProvisionError::StaleProcess)?;
         if self.input_streams.contains_key(&key.slot) { return Err(InputProvisionError::AlreadyProvisioned); }
-        if bytes.len() > MAX_PROCESS_INPUT { return Err(InputProvisionError::TooLarge); }
+        let input_limit=if self.application_run.is_some() {application_run::INPUT_BYTES}else{MAX_PROCESS_INPUT};
+        if bytes.len() > input_limit { return Err(InputProvisionError::TooLarge); }
         let generation = self.next_input_generation.ok_or(InputProvisionError::Exhausted)?;
         let id = u64::try_from(key.slot).ok().and_then(|n| n.checked_add(1))
             .ok_or(InputProvisionError::Exhausted)?;
         let mut image = Vec::new();
         image.try_reserve_exact(bytes.len()).map_err(|_| InputProvisionError::AllocationFailed)?;
+        if self.application_run.is_some() && image.capacity()>input_limit {
+            return Err(InputProvisionError::AllocationFailed);
+        }
         image.extend_from_slice(bytes);
         let input = ProcessInput { owner: key, context: proc.core.context_identity(),
             domain: proc.core.domain, id, generation, bytes: image.into_boxed_slice(), cursor: 0 };
@@ -1305,6 +1322,7 @@ impl Kernel {
         layout: &ProcessLayout,
         initial_maps: &[InitialMap],
     ) -> ProcessKey {
+        let startup=self.callable_application_startup(desc,layout);
         // --- Stack: alloc extent (recycled or bump), create object ---
         let stack_extent = self.alloc_stack_extent(layout.stack_size);
         let stack_obj = self.fabric.alloc_object(
@@ -1320,6 +1338,14 @@ impl Kernel {
 
         let mut handler = Asm64::new();
         handler.halt();
+        if let Ok(Some((_,bytes)))=&startup {
+            // Trap vector remains HALT. The separately selected C entry starts
+            // at +16 and mints return authority by executing an ordinary CALL.
+            handler.nop();handler.nop();handler.nop();
+            for word in bytes.chunks_exact(4) {
+                handler.words_mut().push(u32::from_le_bytes(word.try_into().unwrap()));
+            }
+        }
         self.fabric.initialize_object(trap_obj, 0, &handler.to_bytes());
         self.fabric.seal_object(trap_obj);
         self.fabric.grant(dom, trap_obj, 0, trap_size, Permissions::RX);
@@ -1351,6 +1377,7 @@ impl Kernel {
         // Protected profile is derived from the exact sealed artifact metadata,
         // never a friendly name or an application-controlled register.
         let protected=(|| {
+            if startup.is_err() {return Err(());}
             let object=self.fabric.objects.get(&desc.code_obj).ok_or(())?;
             if object.state!=ObjectState::Sealed {return Err(());}
             if desc.code_offset.checked_add(desc.image_size).is_none_or(|n| n>object.size) {return Err(());}
@@ -1363,6 +1390,9 @@ impl Kernel {
                 self.fabric.register_agent(agent,AgentKind::Cpu(CoreId(agent.0)),dom);
                 core.admit_pointer_program(&mut self.fabric,program,layout.code_vaddr,
                     layout.stack_vaddr,layout.stack_vaddr+layout.stack_size).map_err(|_| ())?;
+                if let Ok(Some((pc,_)))=&startup {core.pc=*pc;}
+            } else if startup.as_ref().ok().is_some_and(|s|s.is_some()) {
+                return Err(());
             }
             Ok(())
         })();
@@ -2404,6 +2434,12 @@ impl Kernel {
     }
 
     fn run_process_with_exit_stop(&mut self, idx: usize, quantum: usize, compiler: bool) -> bool {
+        let admission=self.compiler_admission_contains(ProcessKey{slot:idx,generation:self.processes[idx].generation});
+        if admission && (!compiler || quantum>256 || self.fabric.timer.is_some()
+            || !self.device_registry.devices.is_empty()) {
+            self.finish_process(idx,ProcessResult::ProtectionFault);return false;
+        }
+
         // Machine event sequence (Phase 9.0d):
         //
         //   Before any instruction fetch, if P ∧ ¬M, delivery gets
@@ -2418,6 +2454,14 @@ impl Kernel {
         for _ in 0..quantum {
             if self.processes[idx].exited() {
                 return false;
+            }
+
+            if self.application_run.is_some() && !self.application_run_step_ok(idx) {
+                self.finish_process(idx,ProcessResult::ProtectionFault);return false;
+            }
+
+            if admission && !self.processes[idx].core.protected_execution_depth_ok(compiler_retry::admission::COMPILER_LOCAL_LIMIT) {
+                self.finish_process(idx,ProcessResult::ProtectionFault);return false;
             }
 
             // ── Pre-fetch delivery check ──────────────────────────
@@ -2690,6 +2734,9 @@ impl Kernel {
     }
 
     fn handle_syscall(&mut self, idx: usize) {
+        if self.application_run.is_some() && !self.application_run_syscall_allowed(idx) {
+            self.finish_process(idx,ProcessResult::ProtectionFault);return;
+        }
         if self.processes[idx].core.protected_application() {
             let Some((words, kinds)) = self.processes[idx].core.protected_syscall_image() else {
                 self.finish_process(idx, ProcessResult::ProtectionFault); return;
@@ -2836,6 +2883,7 @@ impl Kernel {
             let capacity = words[4];
             if words[0] != SYS_READ_BYTES || words[1] != 0 || words[5] != 0
                 || kinds[0].is_some() || kinds[2].is_some() || capacity > MAX_WRITE { return None; }
+            if self.application_run.is_some() && capacity>application_run::IO_CHUNK as u64 {return None;}
             let pointer = kinds[1]?;
             if pointer.words() != [words[2], words[3]] { return None; }
             let proc = &self.processes[idx];
@@ -2884,6 +2932,7 @@ impl Kernel {
         let staged = (|| -> Option<Vec<u8>> {
             if words[1] != 0 || words[5] != 0 || kinds[0].is_some()
                 || kinds[2].is_some() || length > MAX_WRITE { return None; }
+            if self.application_run.is_some() && !application_run::output_fits(self.byte_output.len(),length) {return None;}
             let pointer = kinds[1]?;
             if pointer.words() != [words[2], words[3]] { return None; }
             let core = &self.processes[idx].core;
@@ -5868,6 +5917,22 @@ mod tests {
         assert_eq!(kernel.provision_process_input(old, &[99]), Err(InputProvisionError::StaleProcess));
         kernel.provision_process_input(fresh, &[99]).unwrap();
         assert_eq!(kernel.input_streams[&fresh.slot].owner, fresh);
+    }
+
+    #[test]
+    fn c2_run_typed_output_limit_is_atomic_and_preserves_pointer() {
+        for (used,expected) in [(65535usize,1u64),(65536,u64::MAX)] {
+            let (mut kernel, _)=typed_output_fixture(1,0);
+            kernel.byte_output=Vec::with_capacity(application_run::OUTPUT_BYTES);
+            kernel.byte_output.resize(used,90);
+            kernel.application_run=Some(application_run::ApplicationRunEnvelope{spawned:true});
+            kernel.handle_syscall(0);
+            assert_eq!(kernel.processes[0].core.r[0],expected);
+            assert_eq!(kernel.byte_output.len(),if expected==1 {used+1}else{used});
+            assert_eq!(kernel.byte_output.capacity(),application_run::OUTPUT_BYTES);
+            assert!(kernel.byte_output[..used].iter().all(|&v|v==90));
+            assert_eq!(kernel.processes[0].core.pointer_read(&mut kernel.fabric,R2,Width::Byte).unwrap(),[65]);
+        }
     }
 
     #[test]

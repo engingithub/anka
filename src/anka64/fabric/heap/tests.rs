@@ -615,3 +615,47 @@ fn a231_legacy_profile_keeps_bootstrap_access_and_checked_identity_failure() {
     );
     assert_eq!(f.next_object_id, u64::MAX);
 }
+
+#[test]
+fn c5_http_lookup_large_empty_registry_scans_no_rows() {
+    let mut l=limits();l.slots=36864;l.global_bytes=64*1024*1024;
+    let mut f=Fabric::with_private_heap(0x10000,l,profile()).unwrap();
+    let heap=f.private_heap.as_ref().unwrap();
+    assert_eq!(heap.rows.len(),36864);assert_eq!(heap.rows_end,0);
+    assert!(!heap.contains_object(ObjectId(0)));
+    let code=f.alloc_object("ordinary-code",16,ObjectKind::Memory);
+    assert!(f.place_object(code,0x1000));assert_eq!(f.translate(code,0),Some(0x1000));
+    let (owner,account)=add_owner(&mut f,0);
+    let r=reserve(&mut f,account,1);let id=attach(&mut f,owner,r);
+    let heap=f.private_heap.as_ref().unwrap();
+    assert_eq!(heap.rows_end,1);assert!(heap.contains_object(id));
+    assert!(!heap.contains_object(code));assert_eq!(f.translate(code,0),Some(0x1000));
+    assert_eq!(f.translate(id,0),None); // search optimization confers no access
+}
+
+#[test]
+fn c5_http_lookup_sparse_attach_holes_removal_and_reuse_match_full_scan() {
+    let mut l=limits();l.slots=512;l.global_bytes=4*1024*1024;
+    let mut f=Fabric::with_private_heap(0x10000,l,profile()).unwrap();
+    let (owner,account)=add_owner(&mut f,0);
+    let first=reserve(&mut f,account,1);let a=attach(&mut f,owner,first);
+    let scope=f.scoped_pointers.enter_scope_for(123).unwrap();
+    for i in 0..300 {f.scoped_pointers.register(scope,123,0x800000+i*16,16,true).unwrap();}
+    let second=reserve(&mut f,account,1);let b=attach(&mut f,owner,second);
+    let slot=f.scoped_pointers.prepare_heap_attachment(second,owner,f.scoped_pointers.revision());
+    assert!(slot.is_err()); // already attached; no second admission
+    let h=f.private_heap.as_mut().unwrap();
+    assert_eq!(h.rows_end,302);let kept=h.rows[301].unwrap();
+    let equivalent=|h:&HeapFabric| {
+        assert!(h.rows[h.rows_end..].iter().all(Option::is_none));
+        for id in [a,b,ObjectId(u64::MAX)] {
+            assert_eq!(h.contains_object(id),h.rows.iter().flatten().any(|r|r.object==id));
+        }
+    };
+    equivalent(h);
+    // Exercise the lookup bookkeeping alone. Production removal is reachable
+    // only after authenticated cleanup; existing cleanup tests exercise it.
+    h.remove_row(0);assert_eq!(h.rows_end,302);equivalent(h);
+    h.remove_row(301);assert_eq!(h.rows_end,0);equivalent(h);
+    h.set_row(301,kept);assert_eq!(h.rows_end,302);equivalent(h);
+}

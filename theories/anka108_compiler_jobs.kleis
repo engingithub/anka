@@ -1,0 +1,58 @@
+// C5 compiler-job custody and retry composition. State: 0 running, 1 awaiting
+// fresh admission, 2 published, 3 closed. Certificates are trusted observations
+// of existing loader/flow/storage gates, not guest flags or a Rust proof.
+import "anka108_workspace_directory.kleis"
+define cj108_live(s : BitVec64) = bvule(s,bvconst(2,64))
+define cj108_access(exact : Bool,current : Bool,charged : Bool,s : BitVec64) =
+    exact ∧ current ∧ charged ∧ cj108_live(s)
+define cj108_retry(s : BitVec64,executed : Bool,released : Bool,pin : Bool,carried : Bool) =
+    (s=bvconst(0,64)) ∧ executed ∧ released ∧ pin ∧ carried
+define cj108_resume(s : BitVec64,current : Bool,authority : Bool,pin : Bool,fresh : Bool,source : Bool,plan : Bool) =
+    (s=bvconst(1,64)) ∧ current ∧ authority ∧ pin ∧ fresh ∧ source ∧ plan
+define cj108_commit(s : BitVec64,flow_commit : Bool) = (s=bvconst(0,64)) ∧ flow_commit
+define cj108_refund(closed : Bool,flow_done : Bool,source_gone : Bool,pin_gone : Bool,descriptors_gone : Bool) =
+    closed ∧ flow_done ∧ source_gone ∧ pin_gone ∧ descriptors_gone
+define cj108_peer(q : BitVec64,selected : BitVec64,old : BitVec64,next : BitVec64) =
+    if q=selected then next else old
+// Keep the old charged provenance snapshot through cleanup and next admission;
+// discard it only after the new snapshot is successfully frozen or cancellation.
+define cj108_drop_pin(new_frozen : Bool,cancelled : Bool) = new_frozen ∨ cancelled
+example "access accepted" { assert(cj108_access(res108_true(),res108_true(),res108_true(),bvconst(0,64))) }
+example "access rejects missing guard 0" { assert(¬(cj108_access(res108_false(),res108_true(),res108_true(),bvconst(0,64)))) }
+example "access rejects missing guard 1" { assert(¬(cj108_access(res108_true(),res108_false(),res108_true(),bvconst(0,64)))) }
+example "access rejects missing guard 2" { assert(¬(cj108_access(res108_true(),res108_true(),res108_false(),bvconst(0,64)))) }
+example "retry accepted" { assert(cj108_retry(bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "retry rejects missing guard 1" { assert(¬(cj108_retry(bvconst(0,64),res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "retry rejects missing guard 2" { assert(¬(cj108_retry(bvconst(0,64),res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "retry rejects missing guard 3" { assert(¬(cj108_retry(bvconst(0,64),res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "retry rejects missing guard 4" { assert(¬(cj108_retry(bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_false()))) }
+example "resume accepted" { assert(cj108_resume(bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "resume rejects missing guard 1" { assert(¬(cj108_resume(bvconst(1,64),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "resume rejects missing guard 2" { assert(¬(cj108_resume(bvconst(1,64),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "resume rejects missing guard 3" { assert(¬(cj108_resume(bvconst(1,64),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "resume rejects missing guard 4" { assert(¬(cj108_resume(bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "resume rejects missing guard 5" { assert(¬(cj108_resume(bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "resume rejects missing guard 6" { assert(¬(cj108_resume(bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))) }
+example "commit accepted" { assert(cj108_commit(bvconst(0,64),res108_true())) }
+example "commit rejects missing guard 1" { assert(¬(cj108_commit(bvconst(0,64),res108_false()))) }
+example "refund accepted" { assert(cj108_refund(res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "refund rejects missing guard 0" { assert(¬(cj108_refund(res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "refund rejects missing guard 1" { assert(¬(cj108_refund(res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "refund rejects missing guard 2" { assert(¬(cj108_refund(res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "refund rejects missing guard 3" { assert(¬(cj108_refund(res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "refund rejects missing guard 4" { assert(¬(cj108_refund(res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))) }
+example "retry rejects state 1" { assert(¬(cj108_retry(bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "retry rejects state 2" { assert(¬(cj108_retry(bvconst(2,64),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "retry rejects state 3" { assert(¬(cj108_retry(bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "resume rejects state 0" { assert(¬(cj108_resume(bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "resume rejects state 2" { assert(¬(cj108_resume(bvconst(2,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "resume rejects state 3" { assert(¬(cj108_resume(bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "commit rejects state 1" { assert(¬(cj108_commit(bvconst(1,64),res108_true()))) }
+example "commit rejects state 2" { assert(¬(cj108_commit(bvconst(2,64),res108_true()))) }
+example "commit rejects state 3" { assert(¬(cj108_commit(bvconst(3,64),res108_true()))) }
+example "closed job denied" { assert(¬cj108_access(res108_true(),res108_true(),res108_true(),bvconst(3,64))) }
+example "old pin retained during retry wait" { assert(¬cj108_drop_pin(res108_false(),res108_false())) }
+example "new freeze permits old pin disposal" { assert(cj108_drop_pin(res108_true(),res108_false())) }
+example "cancellation permits pin disposal" { assert(cj108_drop_pin(res108_false(),res108_true())) }
+example "law peer state unchanged" { assert(∀(q : BitVec64). ∀(s : BitVec64). ∀(o : BitVec64). ∀(n : BitVec64). ((q≠s) → (cj108_peer(q,s,o,n)=o))) }
+example "law no resume before cleanup state" { assert(∀(s : BitVec64). ((s≠bvconst(1,64)) → ¬cj108_resume(s,res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))) }

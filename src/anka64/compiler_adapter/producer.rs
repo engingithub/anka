@@ -53,3 +53,18 @@ pub(crate) fn build(
     }
     Ok(image)
 }
+
+#[cfg(test)]
+mod bootstrap_limits {
+    #[test]
+    fn c3_workspace_retry_producer_fits_bootstrap_function_directory() {
+        // The checked-in source has one top-level definition header per line.
+        // This is a cheap source-shape regression guard, not a general C parser
+        // or a substitute for guest compilation/accepted lineage.
+        let source=std::str::from_utf8(super::SOURCE).unwrap();
+        let definitions=source.lines().filter(|line|
+            line.starts_with("int ") && line.contains('(') && line.ends_with('{')).count();
+        assert!(definitions>0 && definitions<=64,
+            "ABI-2 producer has {definitions} definitions; the accepted bootstrap CC2 has 64 function slots");
+    }
+}

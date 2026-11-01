@@ -81,10 +81,10 @@ impl Fabric {
             self.describe_compiler_region(current, snapshot, role, payload.len() as u64)?;
         let mut plan =
             self.check_initialization_snapshot(snapshot, owner, self.scoped_pointers.revision())?;
-        if payload.len() > 65528
+        if payload.len() > crate::anka64::compiler_adapter::resources::growth::workspace::DIRECTORY_SOURCE_LIMIT
             || cells.len() > 5
             || (role != 15 && !cells.is_empty())
-            || (role == 15 && (payload.len() != 768 || cells.len() != 5))
+            || (role == 15 && (!matches!(payload.len(),768|1024) || cells.len() != 5))
             || (matches!(role, 2 | 3 | 16) && !payload.is_empty())
             || !self.agents.get(&current.agent()).is_some_and(|a| {
                 a.domain == owner.domain
@@ -92,6 +92,14 @@ impl Fabric {
             })
         {
             return Err(HeapError::Configuration);
+        }
+        if role==15 && payload.len()==1024 {
+            let word=|i:usize| u64::from_le_bytes(payload[i*8..i*8+8].try_into().unwrap());
+            if word(13)!=1024 || word(15)!=1 || word(70)!=1024 || plan.row.logical!=1024
+                || crate::anka64::compiler_adapter::resources::growth::workspace::WorkspaceDirectory::decode(
+                    &payload[768..],word(38)).is_err() {
+                return Err(HeapError::Configuration);
+            }
         }
         let closure = self
             .scoped_pointers
@@ -144,7 +152,7 @@ impl Fabric {
         for (i, &(_, pointer)) in cells.iter().enumerate() {
             heap.shadow[shadow[i]] = Some(pointer);
         }
-        heap.rows[slot] = Some(plan.row);
+        heap.set_row(slot,plan.row);
         let pointer = self
             .scoped_pointers
             .commit_heap_image_publication(plan.registry, rights == Permissions::RW);
@@ -157,6 +165,9 @@ impl Fabric {
     /// Dedicated final artifact seal: exact initialized logical length, no typed
     /// cells, READ-only first publication. The returned kind stays Kernel-private
     /// until the complete artifact/receipt record is committed. No RW interval.
+    /// Size is bounded by the exact quota-reserved, initialized allocation below,
+    /// not the legacy ABI-1 compiler envelope. The coordinator already admitted
+    /// the exact AOM under its authentic ABI-2 attempt capacity.
     pub(crate) fn publish_compiler_artifact(
         &mut self, current: &CurrentHeapProcess<'_>, snapshot: HeapInitialization,
         payload: &[u8],
@@ -165,7 +176,6 @@ impl Fabric {
         let mut plan = self.check_initialization_snapshot(snapshot, owner, self.scoped_pointers.revision())?;
         if !snapshot.is_complete() || snapshot.version() == 0 || payload.is_empty()
             || payload.len() as u64 != plan.row.logical
-            || payload.len() as u64 > crate::anka64::dev_compiler::DEVELOPMENT_COMPILER_OUTPUT_SIZE
             || !self.agents.get(&current.agent()).is_some_and(|a| a.domain == owner.domain
                 && matches!(a.kind, crate::anka64::state::AgentKind::Cpu(_))) {
             return Err(HeapError::Configuration);
@@ -179,7 +189,7 @@ impl Fabric {
         let object = plan.row.object;
         let start = plan.row.extents.physical.base as usize;
         self.memory[start..start+payload.len()].copy_from_slice(payload);
-        self.private_heap.as_mut().unwrap().rows[slot] = Some(plan.row);
+        self.private_heap.as_mut().unwrap().set_row(slot,plan.row);
         let pointer = self.scoped_pointers.commit_heap_image_publication(plan.registry, false);
         Ok((object, pointer))
     }

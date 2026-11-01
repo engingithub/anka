@@ -36,7 +36,7 @@ pub(crate) fn aom(import: bool, slots: usize) -> Vec<u8> {
             bytes.extend(word.to_le_bytes());
         }
     }
-    ValidatedPointerModule::from_aom(&bytes).unwrap();
+    ValidatedPointerModule::from_aom_with_limit(&bytes, bytes.len() as u64).unwrap();
     bytes
 }
 
@@ -214,4 +214,77 @@ fn c25_capture_preflight_bounds_repeated_frame_scan_before_parsing() {
     hostile[metadata + 40..metadata + 48].copy_from_slice(&u64::MAX.to_le_bytes());
     assert!(bounded_manifest(&hostile).is_none());
     assert!(bounded_manifest(&bytes).is_some());
+}
+
+#[test]
+fn c26_capture_budget_rejects_geometry_and_arithmetic_overflow() {
+    assert_eq!(capture_charge(262152, 524288), Some(8392960));
+    assert_eq!(capture_charge(262152, 1048576), Some(8392960));
+    for (used, capacity) in [(104,4096), (262153,524288), (262152,262144),
+        (1u64 << 59,1u64 << 59), (112,u64::MAX)] {
+        assert_eq!(capture_charge(used,capacity), None);
+    }
+}
+
+#[test]
+fn c27_capture_full_guest_pool_still_allows_charged_host_capture_and_preserves_peer() {
+    let mut k=machine();let bytes=aom(false,1100);
+    let mut a=prepared(&mut k,&bytes,report(0),0);
+    let b=prepared(&mut k,&bytes,report(0),0);
+    let ba=k.fabric.scoped_pointers.heap_account(b.owner).unwrap();
+    let b_before=k.fabric.scoped_pointers.account_reserved_bytes(ba).unwrap();
+    let (_,ca)=k.compiler_candidate_account().unwrap();
+    let a_account=k.fabric.scoped_pointers.heap_account(a.owner).unwrap();
+    let a_before=k.fabric.scoped_pointers.account_reserved_bytes(a_account).unwrap();
+    assert_eq!(a_before,20480);assert_eq!(b_before,20480);
+    // Occupy every remaining guest page with unrelated exact reservations.
+    let n=1024*1024-20480;
+    let bp=k.fabric.scoped_pointers.reserve_heap(ba,n,k.fabric.scoped_pointers.revision()).unwrap();
+    let cp=k.fabric.scoped_pointers.reserve_heap(ca,n,k.fabric.scoped_pointers.revision()).unwrap();
+    let b_extent=k.fabric.scoped_pointers.reserved_extents(bp).unwrap();
+    let output=captured(&mut k,&mut a,RebuildAdmissionRole::ClosedTranslationUnit);
+    assert_eq!(output.bytes(),bytes);
+    assert!(output.kernel.fabric.scoped_pointers.account_reserved_bytes(a_account).unwrap()>a_before);
+    assert_eq!(output.kernel.fabric.scoped_pointers.reserved_extents(bp).unwrap(),b_extent);
+    drop(output);
+    assert_eq!(k.fabric.scoped_pointers.account_reserved_bytes(a_account).unwrap(),a_before);
+    k.fabric.scoped_pointers.abort_heap(bp).unwrap();k.fabric.scoped_pointers.abort_heap(cp).unwrap();
+    let mut actual=vec![0;bytes.len()];
+    for (i,chunk) in actual.chunks_mut(4096).enumerate() {
+        let p=k.fabric.scoped_pointers.add_heap_pointer(b.output,b.owner,(i*4096) as i64).unwrap();
+        k.fabric.read_heap_bytes(b.owner,b.agent,p,chunk).unwrap();
+    }
+    assert_eq!(actual,bytes);assert_eq!(k.fabric.scoped_pointers.account_reserved_bytes(ba).unwrap(),b_before);
+    assert_eq!(k.processes[b.owner.process.slot].state,ProcessState::Running);
+    quiet(&mut k);assert!(k.fabric.compiler_heap_owner_released(a.owner));
+}
+
+pub(crate) fn typed_aom() -> Vec<u8> {
+    fn word(v:&mut Vec<u8>,x:u64){v.extend(x.to_le_bytes());}
+    fn name(v:&mut Vec<u8>,s:&str){let mut b=[0;64];b[..s.len()].copy_from_slice(s.as_bytes());v.extend(b);}
+    let mut bytes=aom(true,1);let parsed=AomModule::parse(&bytes).unwrap();
+    let mut tail=b"ANKATY1\0".to_vec();for n in [1,0,1,2]{word(&mut tail,n);}
+    name(&mut tail,"Node");for _ in 0..6{word(&mut tail,0);}
+    for (name_text,binding,kind,depth,tag) in [("main",1,1,0,""),("help",2,4,1,"Node")] {
+        name(&mut tail,name_text);word(&mut tail,binding);word(&mut tail,0);
+        word(&mut tail,kind);word(&mut tail,depth);name(&mut tail,tag);tail.extend([0;320]);
+    }
+    let n=tail.len() as u64;tail[16..24].copy_from_slice(&n.to_le_bytes());
+    let at=parsed.header.symbol_offset as usize+160+112;
+    bytes[at..at+8].copy_from_slice(&1004u64.to_le_bytes());bytes.extend(tail);
+    let n=bytes.len() as u64;bytes[8..16].copy_from_slice(&2u64.to_le_bytes());bytes[24..32].copy_from_slice(&n.to_le_bytes());
+    ValidatedPointerModule::from_aom(&bytes).unwrap();bytes
+}
+
+#[test]
+fn c35_capture_charges_and_retains_the_exact_typed_trailer() {
+    let mut k=machine();let bytes=typed_aom();
+    let mut a=prepared(&mut k,&bytes,report(0),0);
+    let account=k.fabric.scoped_pointers.heap_account(a.owner).unwrap();
+    let before=k.fabric.scoped_pointers.account_reserved_bytes(account).unwrap();
+    let output=captured(&mut k,&mut a,RebuildAdmissionRole::RelocatableModule);
+    assert_eq!(output.bytes(),bytes);
+    assert!(output.kernel.fabric.scoped_pointers.account_reserved_bytes(account).unwrap()>before);
+    assert!(!AomModule::parse(output.bytes()).unwrap().interface.is_empty());
+    drop(output);assert_eq!(k.fabric.scoped_pointers.account_reserved_bytes(account).unwrap(),before);
 }

@@ -1,0 +1,42 @@
+import "anka108_application_run.kleis"
+define rs108_submit(authority : Bool,slot_free : Bool,current_tools : Bool,charged_ingress : Bool,exact_bundle : Bool) = authority ∧ slot_free ∧ current_tools ∧ charged_ingress ∧ exact_bundle
+example "submit accepted" { assert(rs108_submit(res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "submit requires authority" { assert(¬(rs108_submit(res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "submit requires slot_free" { assert(¬(rs108_submit(res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "submit requires current_tools" { assert(¬(rs108_submit(res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "submit requires charged_ingress" { assert(¬(rs108_submit(res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "submit requires exact_bundle" { assert(¬(rs108_submit(res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))) }
+define rs108_retry(retained_job : Bool,old_owner_released : Bool,fresh_process : Bool,carried_plan : Bool,same_source : Bool) = retained_job ∧ old_owner_released ∧ fresh_process ∧ carried_plan ∧ same_source
+example "retry accepted" { assert(rs108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "retry requires retained_job" { assert(¬(rs108_retry(res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "retry requires old_owner_released" { assert(¬(rs108_retry(res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "retry requires fresh_process" { assert(¬(rs108_retry(res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "retry requires carried_plan" { assert(¬(rs108_retry(res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "retry requires same_source" { assert(¬(rs108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))) }
+define rs108_publish(current_provenance : Bool,real_guest_success : Bool,exact_artifact : Bool) = current_provenance ∧ real_guest_success ∧ exact_artifact
+example "publish accepted" { assert(rs108_publish(res108_true(),res108_true(),res108_true())) }
+example "publish requires current_provenance" { assert(¬(rs108_publish(res108_false(),res108_true(),res108_true()))) }
+example "publish requires real_guest_success" { assert(¬(rs108_publish(res108_true(),res108_false(),res108_true()))) }
+example "publish requires exact_artifact" { assert(¬(rs108_publish(res108_true(),res108_true(),res108_false()))) }
+define rs108_cancel(only_selected_job : Bool,actual_cleanup : Bool,peer_unchanged : Bool) = only_selected_job ∧ actual_cleanup ∧ peer_unchanged
+example "cancel accepted" { assert(rs108_cancel(res108_true(),res108_true(),res108_true())) }
+example "cancel requires only_selected_job" { assert(¬(rs108_cancel(res108_false(),res108_true(),res108_true()))) }
+example "cancel requires actual_cleanup" { assert(¬(rs108_cancel(res108_true(),res108_false(),res108_true()))) }
+example "cancel requires peer_unchanged" { assert(¬(rs108_cancel(res108_true(),res108_true(),res108_false()))) }
+define rs108_handle(slot : BitVec64, stored : BitVec64, supplied : BitVec64) =
+    bvult(slot,bvconst(2,64)) ∧ bvugt(stored,bvconst(0,64)) ∧ (stored=supplied)
+define rs108_arena(cursor : BitVec64,size : BitVec64,objects : BitVec64) =
+    bvuge(cursor,bvconst(4194304,64)) ∧ bvule(cursor,bvconst(16777216,64)) ∧
+    bvugt(size,bvconst(0,64)) ∧ bvule(size,bvconst(1048576,64)) ∧
+    bvult(objects,bvconst(256,64)) ∧ bvule(size,bvsub(bvconst(16777216,64),cursor))
+example "handle 0 1 1" { assert(rs108_handle(bvconst(0,64),bvconst(1,64),bvconst(1,64))) }
+example "handle 1 2 2" { assert(rs108_handle(bvconst(1,64),bvconst(2,64),bvconst(2,64))) }
+example "handle 2 1 1" { assert(¬(rs108_handle(bvconst(2,64),bvconst(1,64),bvconst(1,64)))) }
+example "handle 0 0 0" { assert(¬(rs108_handle(bvconst(0,64),bvconst(0,64),bvconst(0,64)))) }
+example "handle 0 2 1" { assert(¬(rs108_handle(bvconst(0,64),bvconst(2,64),bvconst(1,64)))) }
+example "arena cannot wrap" { assert(∀(c : BitVec64,n : BitVec64,k : BitVec64). rs108_arena(c,n,k) → (bvuge(bvadd(c,n),c) ∧ bvule(bvadd(c,n),bvconst(16777216,64)))) }
+
+define rs108_realm(current : BitVec64,supplied : BitVec64) = bvugt(current,bvconst(0,64)) ∧ (current=supplied)
+example "current realm" { assert(rs108_realm(bvconst(7,64),bvconst(7,64))) }
+example "cross realm rejected" { assert(¬(rs108_realm(bvconst(7,64),bvconst(8,64)))) }
+example "zero realm rejected" { assert(¬(rs108_realm(bvconst(0,64),bvconst(0,64)))) }

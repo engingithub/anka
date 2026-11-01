@@ -160,11 +160,11 @@ impl ScopedPointers {
     }
 
     pub(super) fn live_frame_backings(&self) -> impl Iterator<Item = LocalFrameBacking> + '_ {
-        self.scopes.iter().flatten().filter_map(|s| s.frame)
+        self.scopes[..self.active_scopes_end].iter().flatten().filter_map(|s| s.frame)
     }
 
     pub(super) fn live_local_backings(&self) -> impl Iterator<Item = LocalFrameBacking> + '_ {
-        self.slots.iter().filter_map(|slot| {
+        self.slots[..self.active_slots_end].iter().filter_map(|slot| {
             if slot.state != SlotState::Live { return None; }
             let Record::Local(local) = slot.record else { return None; };
             Some(LocalFrameBacking { backing: local.backing?, length: local.length })
@@ -210,6 +210,9 @@ impl ScopedPointers {
                 .and_then(|n| self.heap.revision.checked_add(n))
                 .is_none()
         {
+            eprintln!("protected frame capacity: requested={} slots={} available={} scopes={} next_scope={} revision={}",
+                locals,self.slots.len(),self.slots.iter().filter(|s|s.state==SlotState::Free && s.generation<u32::MAX).count(),
+                self.scopes.iter().filter(|s|s.is_none()).count(),self.next_scope,self.heap.revision);
             return Err(PointerError::Exhausted);
         }
         Ok(())

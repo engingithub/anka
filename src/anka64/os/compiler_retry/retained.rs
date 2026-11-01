@@ -2,7 +2,7 @@
 //! artifacts or receipts. Final current-provenance/authority/epoch commit follows.
 use super::*;
 use crate::anka64::compiler_adapter::RebuildAdmissionRole;
-use crate::anka64::scoped_pointers::heap::HeapReservation;
+use crate::anka64::scoped_pointers::heap::HostStorageReservation;
 use std::collections::BTreeMap;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -21,12 +21,12 @@ impl From<HeapError> for CompilerCandidateError {
 /// custodian context distinguishes independent Kernel/Fabric instances.
 #[derive(Debug)]
 pub(crate) struct CompilerCandidateHandle {
-    reservation: HeapReservation,
+    reservation: HostStorageReservation,
     custodian: AllocationOwner,
 }
 
 pub(super) struct Candidate {
-    reservation: HeapReservation,
+    reservation: HostStorageReservation,
     custodian: AllocationOwner,
     producer: AllocationOwner,
     context: CompilerReplyContext,
@@ -79,13 +79,13 @@ impl Kernel {
         let charge = u64::try_from(bytes.capacity()).ok()
             .and_then(|n| n.checked_add(std::mem::size_of::<Candidate>() as u64))
             .and_then(|n| n.checked_add(4096)).ok_or(CompilerCandidateError::Storage)?;
-        let reservation = self.fabric.scoped_pointers.reserve_heap(
+        let reservation = self.fabric.scoped_pointers.reserve_host_storage(
             account, charge, self.fabric.scoped_pointers.revision())?;
         let id = reservation.incarnation();
         // Registry incarnations are injective; do not replace an old record if
         // that invariant is ever broken. No byte ownership moves on failure.
         if self.compiler_candidates.records.contains_key(&id) {
-            self.fabric.scoped_pointers.abort_heap(reservation)?;
+            self.fabric.scoped_pointers.release_host_storage(reservation)?;
             return Err(CompilerCandidateError::Storage);
         }
         self.compiler_candidates.records.insert(id, Candidate {
@@ -103,11 +103,11 @@ impl Kernel {
         if self.compiler_candidate_custodian()? != record.custodian {
             return Err(CompilerCandidateError::Custodian);
         }
-        // Existing exact, read-only reservation preflight: owner, generation,
-        // incarnation, current revision, unclosed account, and reserved state.
-        let plan = self.fabric.scoped_pointers.prepare_heap_attachment(
+        // Exact host-storage preflight: owner, incarnation, current revision,
+        // unclosed account and retained charge; never guest-memory authority.
+        let charge = self.fabric.scoped_pointers.check_host_storage(
             record.reservation, record.custodian, self.fabric.scoped_pointers.revision())?;
-        if plan.logical() != record.charge { return Err(CompilerCandidateError::Storage); }
+        if charge != record.charge { return Err(CompilerCandidateError::Storage); }
         Ok(record)
     }
 
@@ -148,13 +148,13 @@ impl Kernel {
         let record = self.compiler_candidates.records.get_mut(&id).unwrap();
         record.discarding = true;
         drop(std::mem::take(&mut record.bytes));
-        self.fabric.scoped_pointers.abort_heap(record.reservation)?;
+        self.fabric.scoped_pointers.release_host_storage(record.reservation)?;
         self.compiler_candidates.records.remove(&id);
         Ok(())
     }
 
     pub(crate) fn discard_compiler_candidates_owned_by(&mut self, owner: AllocationOwner) {
-        // Account closure may subsequently refund never-attached reservations.
+        // Account closure alone cannot refund host storage.
         // Drop every payload first, even if one reservation cannot be cancelled.
         for record in self.compiler_candidates.records.values_mut().filter(|r| r.custodian == owner) {
             record.discarding = true;
@@ -163,7 +163,7 @@ impl Kernel {
         // retain() here is BTreeMap's in-place traversal, not a candidate handoff.
         let registry = &mut self.fabric.scoped_pointers;
         self.compiler_candidates.records.retain(|_, r|
-            r.custodian != owner || registry.abort_heap(r.reservation).is_err());
+            r.custodian != owner || registry.release_host_storage(r.reservation).is_err());
     }
 
     pub(crate) fn discard_all_compiler_candidates(&mut self) -> bool {
@@ -172,7 +172,7 @@ impl Kernel {
             drop(std::mem::take(&mut record.bytes));
         }
         let registry = &mut self.fabric.scoped_pointers;
-        self.compiler_candidates.records.retain(|_, r| registry.abort_heap(r.reservation).is_err());
+        self.compiler_candidates.records.retain(|_, r| registry.release_host_storage(r.reservation).is_err());
         self.compiler_candidates.records.is_empty()
     }
 }

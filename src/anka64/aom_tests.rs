@@ -187,8 +187,8 @@ fn p103_parser_rejects_unknown_version_and_bad_relocation_bounds() {
     ).expect("valid object before mutation");
 
     let mut bad_version = object.bytes.clone();
-    bad_version[8..16].copy_from_slice(&2u64.to_le_bytes());
-    assert_eq!(AomModule::parse(&bad_version), Err(AomError::UnsupportedVersion(2)));
+    bad_version[8..16].copy_from_slice(&3u64.to_le_bytes());
+    assert_eq!(AomModule::parse(&bad_version), Err(AomError::UnsupportedVersion(3)));
 
     let parsed = AomModule::parse(&object.bytes).expect("valid object");
     let mut bad_relocation = object.bytes.clone();

@@ -1,0 +1,25 @@
+import "anka108_compiler_growth.kleis"
+// Each hostile claim must be explicitly disproved; unknown fails closed.
+example "hostile: functions past 64" { assert(¬(gr108_product(bvconst(129,64),bvconst(80,64),bvconst(10320,64)))) }
+example "hostile: fields past 64" { assert(¬(gr108_product(bvconst(200,64),bvconst(160,64),bvconst(32000,64)))) }
+example "hostile: structs past 16" { assert(¬(gr108_product(bvconst(128,64),bvconst(112,64),bvconst(14336,64)))) }
+example "hostile: short table" { assert(¬(¬(gr108_product(bvconst(129,64),bvconst(80,64),bvconst(10319,64))))) }
+example "hostile: zero stride" { assert(¬(¬(gr108_product(bvconst(1,64),bvconst(0,64),bvconst(4096,64))))) }
+example "hostile: empty table" { assert(¬(gr108_product(bvconst(0,64),bvconst(80,64),bvconst(0,64)))) }
+example "hostile: multiplication wrap" { assert(¬(¬(gr108_product(ptr107_max(),bvconst(80,64),bvconst(4096,64))))) }
+example "hostile: source over 64KiB" { assert(¬(gr108_append(bvconst(65536,64),bvconst(8192,64),bvconst(73728,64)))) }
+example "hostile: linked image over 1MiB" { assert(¬(gr108_append(bvconst(1048576,64),bvconst(4096,64),bvconst(1052672,64)))) }
+example "hostile: exact output end" { assert(¬(gr108_append(bvconst(1052672,64),bvconst(0,64),bvconst(1052672,64)))) }
+example "hostile: link capacity short" { assert(¬(¬(gr108_append(bvconst(1048576,64),bvconst(4097,64),bvconst(1052672,64))))) }
+example "hostile: offset beyond capacity" { assert(¬(¬(gr108_append(bvconst(1052673,64),bvconst(0,64),bvconst(1052672,64))))) }
+example "hostile: append wrap" { assert(¬(¬(gr108_append(ptr107_max(),bvconst(1,64),bvconst(4096,64))))) }
+example "hostile: larger requested capacity" { assert(¬(gr108_grow(bvconst(65536,64),bvconst(131072,64),bvconst(262144,64)))) }
+example "hostile: unchanged growth" { assert(¬(¬(gr108_grow(bvconst(65536,64),bvconst(65536,64),bvconst(262144,64))))) }
+example "hostile: growth over policy" { assert(¬(¬(gr108_grow(bvconst(65536,64),bvconst(524288,64),bvconst(262144,64))))) }
+example "hostile: exact prefix" { assert(¬(gr108_used(bvconst(123,64),bvconst(4096,64)))) }
+example "hostile: oversized used prefix" { assert(¬(¬(gr108_used(bvconst(4097,64),bvconst(4096,64))))) }
+example "hostile: retry missing capacity reason" { assert(¬(¬(gr108_retry(res108_false(),res108_true(),res108_true(),res108_true())))) }
+example "hostile: retry missing cleanup" { assert(¬(¬(gr108_retry(res108_true(),res108_false(),res108_true(),res108_true())))) }
+example "hostile: retry missing owner" { assert(¬(¬(gr108_retry(res108_true(),res108_true(),res108_false(),res108_true())))) }
+example "hostile: retry missing budget" { assert(¬(¬(gr108_retry(res108_true(),res108_true(),res108_true(),res108_false())))) }
+example "hostile: retry with all guards" { assert(¬(gr108_retry(res108_true(),res108_true(),res108_true(),res108_true()))) }

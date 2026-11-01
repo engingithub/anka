@@ -107,7 +107,8 @@ fn a21_fixed_metadata_measures_all_retained_tables_and_survives_release() {
         + t.slots.capacity() * size_of::<Slot>()
         + t.scopes.capacity() * size_of::<Option<super::super::ScopeRecord>>()
         + t.heap.accounts.capacity() * size_of::<Option<Account>>()
-        + t.heap.cleanup.capacity() * size_of::<Option<CleanupRecord>>();
+        + t.heap.cleanup.capacity() * size_of::<Option<CleanupRecord>>()
+        + t.heap.host_storage.capacity() * size_of::<Option<host_storage::HostStorageRecord>>();
     assert_eq!(t.fixed_metadata_bytes(), bytes as u64);
     let a = t.admit_owner(owner(0, 0), 8192).unwrap();
     let r = reserve(&mut t, a, 1);
@@ -118,12 +119,13 @@ fn a21_fixed_metadata_measures_all_retained_tables_and_survives_release() {
     assert_eq!(t.total_reserved_bytes(), bytes as u64);
     census(&t);
     eprintln!(
-        "A2.1 layout: registry={} slot={} scope={} account={} cleanup={}; fixed={}",
+        "A2.1 layout: registry={} slot={} scope={} account={} cleanup={} host_storage={}; fixed={}",
         size_of::<ScopedPointers>(),
         size_of::<Slot>(),
         size_of::<Option<super::super::ScopeRecord>>(),
         size_of::<Option<Account>>(),
         size_of::<Option<CleanupRecord>>(),
+        size_of::<Option<host_storage::HostStorageRecord>>(),
         bytes
     );
 }

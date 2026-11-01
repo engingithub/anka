@@ -1,0 +1,118 @@
+import "anka108_module_types.kleis"
+// Each hostile claim must be explicitly disproved; unknown fails closed.
+example "hostile: same complete" { assert(¬(ty108_match(res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "hostile: different local ordinals irrelevant" { assert(¬(ty108_match(res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "hostile: opaque to complete" { assert(¬(ty108_match(res108_true(),res108_false(),res108_true(),res108_false()))) }
+example "hostile: complete to opaque" { assert(¬(ty108_match(res108_true(),res108_true(),res108_false(),res108_false()))) }
+example "hostile: opaque transport" { assert(¬(ty108_match(res108_true(),res108_false(),res108_false(),res108_false()))) }
+example "hostile: same tag incompatible layout" { assert(¬(¬(ty108_match(res108_true(),res108_true(),res108_true(),res108_false())))) }
+example "hostile: different tags same layout" { assert(¬(¬(ty108_match(res108_false(),res108_true(),res108_true(),res108_true())))) }
+example "hostile: opaque bridge cannot hide conflicting definitions" { assert(¬(¬(ty108_three(res108_true(),res108_false(),res108_true())))) }
+example "hostile: all complete pairs compatible" { assert(¬(ty108_three(res108_true(),res108_true(),res108_true()))) }
+example "hostile: pointer self recursion" { assert(¬(ty108_rank(res108_true(),bvconst(2,64),bvconst(2,64)))) }
+example "hostile: by value self cycle" { assert(¬(¬(ty108_rank(res108_false(),bvconst(2,64),bvconst(2,64))))) }
+example "hostile: by value back edge" { assert(¬(¬(ty108_rank(res108_false(),bvconst(3,64),bvconst(2,64))))) }
+example "hostile: by value finite rank" { assert(¬(ty108_rank(res108_false(),bvconst(1,64),bvconst(2,64)))) }
+example "hostile: opaque arithmetic" { assert(¬(¬(ty108_access(res108_false(),bvconst(8,64))))) }
+example "hostile: zero sized arithmetic" { assert(¬(¬(ty108_access(res108_true(),bvconst(0,64))))) }
+example "hostile: known object stride" { assert(¬(ty108_access(res108_true(),bvconst(24,64)))) }
+example "hostile: lane 0 pointer False" { assert(¬(ty108_lane_ok(bvconst(0,64),res108_false()))) }
+example "hostile: lane 0 pointer True" { assert(¬(ty108_lane_ok(bvconst(0,64),res108_true()))) }
+example "hostile: lane 1 pointer False" { assert(¬(ty108_lane_ok(bvconst(1,64),res108_false()))) }
+example "hostile: lane 1 pointer True" { assert(¬(ty108_lane_ok(bvconst(1,64),res108_true()))) }
+example "hostile: lane 2 pointer False" { assert(¬(ty108_lane_ok(bvconst(2,64),res108_false()))) }
+example "hostile: lane 2 pointer True" { assert(¬(ty108_lane_ok(bvconst(2,64),res108_true()))) }
+example "hostile: lane 3 pointer False" { assert(¬(ty108_lane_ok(bvconst(3,64),res108_false()))) }
+example "hostile: lane 3 pointer True" { assert(¬(¬(ty108_lane_ok(bvconst(3,64),res108_true())))) }
+example "hostile: lane 4 pointer False" { assert(¬(¬(ty108_lane_ok(bvconst(4,64),res108_false())))) }
+example "hostile: lane 4 pointer True" { assert(¬(¬(ty108_lane_ok(bvconst(4,64),res108_true())))) }
+example "hostile: missing type rejects access" { assert(¬(¬(ty108_read(res108_false(),res108_true(),res108_true(),res108_true(),res108_true())))) }
+example "hostile: missing lifetime rejects access" { assert(¬(¬(ty108_read(res108_true(),res108_false(),res108_true(),res108_true(),res108_true())))) }
+example "hostile: missing rights rejects access" { assert(¬(¬(ty108_read(res108_true(),res108_true(),res108_false(),res108_true(),res108_true())))) }
+example "hostile: missing bounds rejects access" { assert(¬(¬(ty108_read(res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))) }
+example "hostile: missing kind rejects access" { assert(¬(¬(ty108_read(res108_true(),res108_true(),res108_true(),res108_true(),res108_false())))) }
+example "hostile: all access guards" { assert(¬(ty108_read(res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "hostile: publication missing types" { assert(¬(¬(ty108_commit(res108_false(),res108_true(),res108_true(),res108_true())))) }
+example "hostile: publication missing bytes" { assert(¬(¬(ty108_commit(res108_true(),res108_false(),res108_true(),res108_true())))) }
+example "hostile: publication missing dependencies" { assert(¬(¬(ty108_commit(res108_true(),res108_true(),res108_false(),res108_true())))) }
+example "hostile: publication missing authority" { assert(¬(¬(ty108_commit(res108_true(),res108_true(),res108_true(),res108_false())))) }
+example "hostile: exhausted traversal fuel" { assert(¬(¬(ty108_step(bvconst(0,64))))) }
+example "hostile: bounded traversal step" { assert(¬(ty108_step(bvconst(1,64)))) }
+example "hostile C3.3 reuse at full table" { assert(¬(ty108_reserve(res108_true(),bvconst(16,64),bvconst(16,64)))) }
+example "hostile C3.3 new at full table" { assert(¬(¬ty108_reserve(res108_false(),bvconst(16,64),bvconst(16,64)))) }
+example "hostile C3.3 reserve last tag" { assert(¬(ty108_reserve(res108_false(),bvconst(15,64),bvconst(16,64)))) }
+example "hostile C3.3 self pointer while building" { assert(¬(ty108_member(res108_true(),res108_false(),res108_true()))) }
+example "hostile C3.3 mutual incomplete pointer" { assert(¬(ty108_member(res108_true(),res108_false(),res108_false()))) }
+example "hostile C3.3 incomplete value denied" { assert(¬(¬ty108_member(res108_false(),res108_false(),res108_false()))) }
+example "hostile C3.3 partial self value denied" { assert(¬(¬ty108_member(res108_false(),res108_true(),res108_true()))) }
+example "hostile C3.3 completed value allowed" { assert(¬(ty108_member(res108_false(),res108_true(),res108_false()))) }
+example "hostile C3.3 define forward tag" { assert(¬(ty108_define(bvconst(0,64),res108_false()))) }
+example "hostile C3.3 duplicate complete denied" { assert(¬(¬ty108_define(bvconst(1,64),res108_false()))) }
+example "hostile C3.3 nested definition denied" { assert(¬(¬ty108_define(bvconst(0,64),res108_true()))) }
+example "hostile C3.3 deferred fields rebase" { assert(¬(ty108_field_start(res108_true(),bvconst(0,64),bvconst(3,64))=bvconst(3,64))) }
+example "hostile C3.3 forward declaration preserves fields" { assert(¬(ty108_field_start(res108_false(),bvconst(0,64),bvconst(3,64))=bvconst(0,64))) }
+example "hostile C3.4 struct ordinal 900 distinct from int pointer" { assert(¬(ty108_code(bvconst(1000,64),bvconst(0,64))≠ty108_code(bvconst(1,64),bvconst(1,64)))) }
+example "hostile C3.4 last struct supported" { assert(¬(ty108_local(bvconst(4195,64),bvconst(0,64)))) }
+example "hostile C3.4 one past struct denied" { assert(¬(¬ty108_local(bvconst(4196,64),bvconst(0,64)))) }
+example "hostile C3.4 depth max" { assert(¬(ty108_local(bvconst(1,64),bvconst(65535,64)))) }
+example "hostile C3.4 depth overflow denied" { assert(¬(¬ty108_local(bvconst(1,64),bvconst(65536,64)))) }
+example "hostile C3.4 pointer overflow denied" { assert(¬(¬ty108_more(ty108_code(bvconst(1,64),bvconst(65535,64))))) }
+example "hostile C3.4 one more pointer safe" { assert(¬(ty108_more(ty108_code(bvconst(4195,64),bvconst(65534,64))))) }
+example "hostile C3.4 legacy int pointer" { assert(¬(ty108_wire(ty108_code(bvconst(1,64),bvconst(1,64)))=bvconst(1001,64))) }
+example "hostile C3.4 legacy void pointer" { assert(¬(ty108_wire(ty108_code(bvconst(3,64),bvconst(1,64)))=bvconst(1003,64))) }
+example "hostile C3.4 legacy pointer pointer" { assert(¬(ty108_wire(ty108_code(bvconst(2,64),bvconst(2,64)))=bvconst(2002,64))) }
+example "hostile AOM2 legacy exact" { assert(¬(ty108_trailer(bvconst(1,64),bvconst(400,64),bvconst(400,64),bvconst(0,64)))) }
+example "hostile AOM2 legacy hidden trailer" { assert(¬(¬ty108_trailer(bvconst(1,64),bvconst(400,64),bvconst(440,64),bvconst(40,64)))) }
+example "hostile AOM2 typed exact" { assert(¬(ty108_trailer(bvconst(2,64),bvconst(400,64),bvconst(440,64),bvconst(40,64)))) }
+example "hostile AOM2 typed overlap" { assert(¬(¬ty108_trailer(bvconst(2,64),bvconst(440,64),bvconst(400,64),bvconst(40,64)))) }
+example "hostile AOM2 typed short" { assert(¬(¬ty108_trailer(bvconst(2,64),bvconst(400,64),bvconst(432,64),bvconst(32,64)))) }
+example "hostile AOM2 typed tail" { assert(¬(¬ty108_trailer(bvconst(2,64),bvconst(400,64),bvconst(448,64),bvconst(40,64)))) }
+example "hostile AOM2 symbol exact" { assert(¬(ty108_symbol(res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "hostile AOM2 symbol substituted type" { assert(¬(¬ty108_symbol(res108_true(),res108_true(),res108_true(),res108_false()))) }
+example "hostile AOM2 symbol substituted name" { assert(¬(¬ty108_symbol(res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "hostile AOM2 struct pointer typed" { assert(¬(ty108_public(bvconst(4,64),bvconst(1,64),res108_true()))) }
+example "hostile AOM2 struct pointer legacy" { assert(¬(¬ty108_public(bvconst(4,64),bvconst(1,64),res108_false()))) }
+example "hostile AOM2 struct by value" { assert(¬(¬ty108_public(bvconst(4,64),bvconst(0,64),res108_true()))) }
+example "hostile AOM2 public depth limit" { assert(¬(¬ty108_public(bvconst(4,64),bvconst(64,64),res108_true()))) }
+example "hostile AOM2 private tag not exported" { assert(¬(¬ty108_reachable(res108_false(),res108_false()))) }
+example "hostile AOM2 reachable monotonic" { assert(¬(ty108_reachable(res108_true(),res108_false()))) }
+
+example "hostile member value" { assert(¬(ty108_field(res108_true(),res108_true(),bvconst(0,64),bvconst(8,64),bvconst(32,64)))) }
+example "hostile member pointer aligned tail" { assert(¬(ty108_field(res108_true(),res108_true(),bvconst(16,64),bvconst(16,64),bvconst(32,64)))) }
+example "hostile member opaque" { assert(ty108_field(res108_false(),res108_true(),bvconst(0,64),bvconst(8,64),bvconst(32,64))) }
+example "hostile member absent" { assert(ty108_field(res108_true(),res108_false(),bvconst(0,64),bvconst(8,64),bvconst(32,64))) }
+example "hostile member offset past end" { assert(ty108_field(res108_true(),res108_true(),bvconst(40,64),bvconst(8,64),bvconst(32,64))) }
+example "hostile member span past end" { assert(ty108_field(res108_true(),res108_true(),bvconst(24,64),bvconst(16,64),bvconst(32,64))) }
+example "hostile member wrap rejected" { assert(ty108_field(res108_true(),res108_true(),bvnot(bvconst(7,64)),bvconst(16,64),bvconst(32,64))) }
+example "hostile member usable" { assert(¬(ty108_field_use(res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "hostile member missing layout" { assert(ty108_field_use(res108_false(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile member missing lifetime" { assert(ty108_field_use(res108_true(),res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile member missing rights" { assert(ty108_field_use(res108_true(),res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile member missing bounds" { assert(ty108_field_use(res108_true(),res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile member missing kind" { assert(ty108_field_use(res108_true(),res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile large explicit" { assert(¬(ty108_large_link(res108_true(),bvconst(1100000,64),bvconst(1099000,64),bvconst(1000,64)))) }
+example "hostile large unselected" { assert(ty108_large_link(res108_false(),bvconst(1100000,64),bvconst(1099000,64),bvconst(1000,64))) }
+example "hostile large module excess" { assert(ty108_large_link(res108_true(),bvconst(2097153,64),bvconst(8,64),bvconst(64,64))) }
+example "hostile large aggregate overflow" { assert(ty108_large_link(res108_true(),bvconst(1000000,64),bvconst(2097100,64),bvconst(64,64))) }
+example "hostile large code past end" { assert(ty108_large_link(res108_true(),bvconst(1000000,64),bvnot(bvconst(7,64)),bvconst(64,64))) }
+example "hostile C4 standard profile binding" { assert(¬(ty108_bound_profile(bvconst(0,64),bvconst(0,64),bvconst(0,64)))) }
+example "hostile C4 large profile binding" { assert(¬(ty108_bound_profile(bvconst(3,64),bvconst(3,64),bvconst(3,64)))) }
+example "hostile C4 producer cannot select application" { assert(¬(¬ty108_bound_profile(bvconst(2,64),bvconst(2,64),bvconst(2,64)))) }
+example "hostile C4 executed policy substitution" { assert(¬(¬ty108_bound_profile(bvconst(0,64),bvconst(3,64),bvconst(0,64)))) }
+example "hostile C4 receipt policy substitution" { assert(¬(¬ty108_bound_profile(bvconst(3,64),bvconst(3,64),bvconst(0,64)))) }
+example "hostile C4 standard exact module limit" { assert(¬(ty108_profile_module(bvconst(0,64),bvconst(262144,64)))) }
+example "hostile C4 standard cannot inherit large bound" { assert(¬(¬ty108_profile_module(bvconst(0,64),bvconst(262145,64)))) }
+example "hostile C4 large exact module limit" { assert(¬(ty108_profile_module(bvconst(3,64),bvconst(2097152,64)))) }
+example "hostile C4 large excess module" { assert(¬(¬ty108_profile_module(bvconst(3,64),bvconst(2097153,64)))) }
+example "hostile C4 large publication" { assert(¬(ty108_profile_publish(bvconst(3,64),bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_true()))) }
+example "hostile C4 publication missing dependencies" { assert(¬(¬ty108_profile_publish(bvconst(3,64),bvconst(3,64),bvconst(3,64),res108_false(),res108_true(),res108_true()))) }
+example "hostile C4 publication missing bytes" { assert(¬(¬ty108_profile_publish(bvconst(3,64),bvconst(3,64),bvconst(3,64),res108_true(),res108_false(),res108_true()))) }
+example "hostile C4 publication missing authority" { assert(¬(¬ty108_profile_publish(bvconst(3,64),bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_false()))) }
+example "hostile bootstrap patch emitted first slot" { assert(¬(ty108_boot_patch(res108_false(),bvconst(0,64),bvconst(8,64),bvconst(81920,64)))) }
+example "hostile bootstrap patch last full slot" { assert(¬(ty108_boot_patch(res108_false(),bvconst(81912,64),bvconst(81920,64),bvconst(81920,64)))) }
+example "hostile bootstrap patch capacity failure" { assert(¬(¬(ty108_boot_patch(res108_true(),bvconst(81920,64),bvconst(81920,64),bvconst(81920,64))))) }
+example "hostile bootstrap patch one past even without error" { assert(¬(¬(ty108_boot_patch(res108_false(),bvconst(81920,64),bvconst(81920,64),bvconst(81920,64))))) }
+example "hostile bootstrap patch empty output" { assert(¬(¬(ty108_boot_patch(res108_false(),bvconst(0,64),bvconst(0,64),bvconst(81920,64))))) }
+example "hostile bootstrap patch partial slot" { assert(¬(¬(ty108_boot_patch(res108_false(),bvconst(0,64),bvconst(7,64),bvconst(81920,64))))) }
+example "hostile bootstrap patch unaligned slot" { assert(¬(¬(ty108_boot_patch(res108_false(),bvconst(1,64),bvconst(16,64),bvconst(81920,64))))) }
+example "hostile bootstrap patch overlapping literal frontier" { assert(¬(¬(ty108_boot_patch(res108_false(),bvconst(0,64),bvconst(16,64),bvconst(8,64))))) }

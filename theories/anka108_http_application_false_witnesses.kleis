@@ -1,0 +1,23 @@
+import "anka108_http_application.kleis"
+example "hostile input without execution" { assert(ha108_input(res108_false(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile input without input_authority" { assert(ha108_input(res108_true(),res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile input without current_receipt" { assert(ha108_input(res108_true(),res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile input without charged_copy" { assert(ha108_input(res108_true(),res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile input without actual_child" { assert(ha108_input(res108_true(),res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile destroy without realm_destroyed" { assert(ha108_destroy(res108_false(),res108_true())) }
+example "hostile destroy without input_destroyed" { assert(ha108_destroy(res108_true(),res108_false())) }
+example "hostile emit without complete_request" { assert(ha108_emit(res108_false(),res108_true(),res108_true())) }
+example "hostile emit without valid_output_span" { assert(ha108_emit(res108_true(),res108_false(),res108_true())) }
+example "hostile emit without output_authority" { assert(ha108_emit(res108_true(),res108_true(),res108_false())) }
+example "hostile input size 65537" { assert(ha108_input_size(bvconst(65537,64))) }
+example "hostile input size 18446744073709551615" { assert(ha108_input_size(bvsub(bvconst(0,64),bvconst(1,64)))) }
+example "hostile request 22 True True" { assert(ha108_request(bvconst(22,64),res108_true(),res108_true())) }
+example "hostile request 1025 True True" { assert(ha108_request(bvconst(1025,64),res108_true(),res108_true())) }
+example "hostile request 23 False True" { assert(ha108_request(bvconst(23,64),res108_false(),res108_true())) }
+example "hostile request 23 True False" { assert(ha108_request(bvconst(23,64),res108_true(),res108_false())) }
+example "hostile incorrect response 74" { assert(ha108_response(res108_true(),bvconst(75,64))) }
+example "hostile incorrect response 64" { assert(ha108_response(res108_false(),bvconst(65,64))) }
+
+example "hostile fresh request skips read loop" { assert(¬ha108_continue(bvconst(0,64),bvconst(0,64))) }
+example "hostile EOF continues read loop" { assert(ha108_continue(bvconst(23,64),bvconst(1,64))) }
+example "hostile full buffer continues read loop" { assert(ha108_continue(bvconst(1024,64),bvconst(0,64))) }

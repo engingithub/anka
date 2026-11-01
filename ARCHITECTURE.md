@@ -4423,10 +4423,10 @@ targeted guest witness passes in 410.74s and the full 1406-test suite passes
 in 589.71s with optimized host execution, assertions and overflow checks.
 
 **C2.5 capture and publication.** The publication contract is developer-accepted:
-136 positive / 118 hostile witnesses. Focused acceptance now includes nine
+149 positive / 129 hostile witnesses for the accepted C2.5c refinement. Earlier focused acceptance includes nine
 capture tests, eight retention tests, all 11 publication tests (0.01s) and
-all 53 compiler-retry bridge tests (0.04s). This does not imply a new full-suite
-or real CC2 publication result.
+all 53 compiler-retry bridge tests (0.04s). Subsequent C2.5c acceptance is
+recorded below; no new complete-suite result is inferred.
 
 Capture uses protected zero exit, quota-reserved staging, bounded authenticated
 reads and exact role-specific AOM admission. Independent custodian storage keeps
@@ -4449,21 +4449,68 @@ once for fresh process admission. Current lineage and process selection remain
 coordinator duties. Concurrent publication uses an explicit guarded epoch refresh:
 ready candidate, actual release, custody, charges, sealed bytes and authority are
 rechecked before updating the expectation; prior records remain untouched. The
-extended Kleis pair passes 149 positive / 129 hostile witnesses locally.
+extended Kleis pair passes 149 positive / 129 hostile witnesses locally and
+on the developer machine.
 
 The updated shared CC2 witness uses actual guest preprocessing and the accepted
 lineage, drives A exhaustion/C retry while B remains independent, verifies backing
 reuse and stale-A rejection, then checks exact published AOMs and receipts across
-peer commits and adequate capacities. All six fast flow tests passed on the
-developer machine. The guest witness reached producer construction but then
-failed at fixture initialization with `Capacity(GlobalBytes)`. Its accounting
-ceiling is corrected from 64 to 128 MiB to include fixed shadow/registry/work
-storage plus payload. Guest RAM remains 64 MiB, the private pool 32 MiB and the
-per-owner quota 16 MiB. A cheap setup test checks actual metadata charges and
-full-pool headroom before the expensive rerun. Runtime acceptance of this fix
-is pending; Rust is unavailable here. Production limits are unchanged. The 256-KiB admission bound, complete
-job accounting and ordinary user-facing rebuild driver remain open. DN-71 records
-the exact acceptance checkpoints. No hardware/DMA synchronization claim is added.
+peer commits and adequate capacities. Developer acceptance includes six flow
+tests, the corrected fixture preflight (0.01s), the real guest integration
+(464.34s) and the affected 60-test bridge (0.04s). The fixture's 128-MiB global
+accounting ceiling covers fixed shadow/registry/work storage and its 32-MiB pool;
+guest RAM is 64 MiB and the owner quota 16 MiB. C2.5c is merged into main.
+
+**C2.6 output boundary (developer-accepted):** ABI-2 capture now uses the authentic attempt
+capacity instead of the legacy 256-KiB application envelope. Checked staging
+reservation precedes allocation/validation; copies remain bounded to 4096-byte
+transactions. A quota denial still preserves prior publications. The shared
+module validator takes the caller's admitted limit; legacy entry points retain
+their own policies. Publication/lifecycle/READ-only guarantees are unchanged.
+The affected Kleis refinement passes 163 positive / 139 hostile witnesses locally
+and on the developer machine. After correcting the missed final-sealing cap,
+all six fast tests passed (0.03s), followed by 66 bridge tests (0.07s). The
+separate real-compiler test then exposed a fixture signature error: struct-pointer
+parameters cannot be serialized by the existing AOM profile. Its correction
+keeps only the pointer local to an ordinary scalar-signature function; the
+large struct is a type declaration. That function is not called by main, and
+this output witness makes no claim about executing null-pointer arithmetic.
+The corrected real-compiler test passed on 2026-10-31: 321336-byte artifact,
+one automatic retry, exact lineage AOM, capacity independence and preserved prior
+receipts; 1 passed / 0 failed in 2174.32s. Do not repeat that expensive test for
+unrelated edits. This does not close complete job accounting, C3 source/workspace
+growth, C4 linking/loading or C5 ordinary rebuild.
+DN-71 contains the single authoritative acceptance table and test commands.
+No hardware/DMA synchronization claim is added.
+
+**C2 host-storage accounting refinement.** Capture/parser staging, candidate
+custody and frozen publication evidence now use a distinct host-storage token in
+the existing allocation ledger. These charges share owner/global ceilings and
+nonwrapping reservation identities with heap allocations, but consume no guest
+physical/virtual extents or pointer slots. A fixed, precharged directory bounds
+host reservations. Closing an owner fences access while retaining charges;
+only trusted payload destruction or independently charged custody transfer can
+precede exact refund. Guest cleanup workers cannot reclaim host storage.
+Published artifact payloads retain ordinary backed heap allocation and cleanup.
+The initial Kleis pair passed locally at 34 positive / 23 hostile. Developer
+acceptance: ten new tests, then 89 heap tests and 67 bridge tests after correcting
+the old metadata census; the long output test remained intentionally ignored. Legacy producer code/stacks,
+source/tool ingestion and preprocessor/job-host resources still require actual
+coordinator admission/lifetime integration before complete C2 accounting closure.
+DN-71 records the precise boundary and focused commands.
+
+**C2 charged immutable ingress (delivered, Rust acceptance pending).** The
+coordinator can now retain source/tool bytes under a current custodian-bound
+host-storage reservation, reserved before copying. Immutable borrows share one
+stored tool; storage alone grants no execution rights or lineage acceptance.
+The new source-handle loader validates role, length and independent producer,
+retains both source and destination charges at the copy peak, and restores input
+custody after a failed load. Cancellation/death destroys payload before refund.
+The real CC2 publication fixture now uses this loader path; twelve fast Rust
+witnesses are supplied and the expanded Kleis pair passes locally at 59 / 45.
+This does not yet account the external caller's original inputs, isolated
+preprocessing machine or legacy producer code/stacks. DN-71 retains those exact
+closure obligations and current validation commands; C2 is not declared closed.
 
 The reclamation refinement requires reusable physical and per-owner virtual
 extents, exact split/coalesce transitions, stable slot/generation history and
@@ -5074,3 +5121,369 @@ The initial profile permits scalar exit and rejects numeric-address syscalls,
 raw memory instructions, DMA export of local stacks and unsupported nested block
 allocations. Legacy compiler and application profiles retain their existing ABI.
 See root DESIGN_NOTES.md, DN-59, for representation, storage and lifetime details.
+
+
+### Phase 10.8 C3/C4: checked geometry and public type evidence foundation
+
+The C3/C4 implementation foundation (2026-11-01) provides checked source,
+workspace-table and link geometry in `compiler_adapter::resources::growth`, and
+bounded, zero-copy ATY1 interface validation in `compiler_adapter::interfaces`.
+The full wire contract, supported type subset and integration order are in
+DN-71 (`DESIGN_NOTES.md`). These components do not yet replace the current guest
+CC2/ankald ABI or raise its effective limits; C3/C4 closure remains pending.
+
+ATY1 uses full public structure tags and exact complete layouts rather than
+module-local ordinals or hashes. Opaque declarations permit pointer transport;
+object-size-dependent operations require a complete local definition. Pointer
+recursion is finite metadata; strictly decreasing embedded-value ranks reject
+recursive value layouts. Every complete definition for a tag is checked across
+the link unit, so opaque declarations cannot conceal conflicting definitions.
+Four argument lanes and existing protected pair alignment remain unchanged.
+
+The parser/resolver borrow immutable bytes, allocate no graph, and consume a
+shared explicit traversal budget. Their backing must be charged and retained by
+the caller. Type compatibility grants no access or executable authority. Future
+guest emission/admission must bind exact evidence to module bytes, profile and
+current sealed dependencies before publication; a separately supplied matching
+sidecar is not sufficient. Runtime kind, rights, bounds, generation and lifetime
+checks remain independent. Current AOM v1 is unchanged and continues to reject
+unsupported struct-pointer interfaces until that integration is complete.
+
+
+The following C3.1 integration adds an explicit workspace-directory profile to
+the protected ABI-2 producer. Profile 1 uses a 1024-byte read-only request and
+eight canonical table descriptors, including a function-frame table coupled to
+the function count. The shared loader allocates and zeroes the described
+workspace. Guest CC2 consumes the directory, relocating its output pseudo-base
+with the workspace boundary. Publication binds the full directory into the
+sealed plan before execution. Profile 0 preserves legacy request geometry.
+
+C3.1 is developer-accepted: seven fast tests, the affected 83-test bridge group,
+and the real guest workspace witness (762.05s). C3.2 extends directory-profile
+source admission to 1 MiB minus 8 bytes, preserving the legacy 65528-byte limit.
+Source/loader storage remains charged, zero-padded, READ-only and bound to exact
+publication provenance. The guest include-preprocessor growth driver has an
+explicit capacity/attempt policy and one cumulative instruction budget. Only a
+verified ordinary capacity exit authorizes a fresh attempt, after the isolated
+software machine has been destroyed; failed output is never returned.
+
+The developer confirmed the expanded source-growth gate at 56 positive / 50
+hostile witnesses, the 87-test compiler bridge, and real C3.2 acceptance in
+110.74 seconds. The corrected >64-KiB scanner stage completed in 28.49 seconds
+with monotonic observed source-cursor progress; its prior run timed out at 900s.
+C3.2 is accepted. This does not account the isolated
+16-MiB preprocessor machine or external ingress buffers in the shared heap, and
+it does not establish hardware/DMA cleanup. C2's complete-accounting gap remains
+open. The private type encoding is widened by C3.4 below; ATY1 emission/guest linker integration,
+automatic table retry and C4 larger-image acceptance remain separate unfinished
+work. DN-71 records exact scope, accepted evidence and the next commands.
+Neither C3 nor C4 is closed by component validation alone.
+
+
+C3.3 adds forward tag registration and self/mutually recursive pointer declarations
+in the protected ABI-2 compiler. Registration preserves local tag identity;
+definition starts at the current field-table tail. Only completed definitions
+provide object size; a definition being built cannot embed itself by value,
+even after earlier fields have accumulated a nonzero provisional size. Repeated
+forward declarations are idempotent; duplicate definitions and empty structures
+are rejected. This remains the explicit file-scope subset: block-scope tag
+shadowing is not introduced. At that delivery the 16-tag bound and exported-signature
+restriction remained; C3.4 below widens the private encoding.
+The extended module-type gates pass 57 positive / 51 hostile witnesses locally;
+real guest C3.3 acceptance subsequently passed in 137.92s. DN-71 tracks the next concrete command.
+
+
+C3.4 separates local struct identity from pointer depth in private compiler
+state: 16 bits for the base and 16 for depth. It supports directory struct counts
+through 4096, still constrained by shared quota and workspace geometry. Legacy
+profile-0 tables retain 16 slots. Pointer construction rejects overflow before
+packing; public primitive/pointer AOM signatures are converted to the unchanged
+legacy representation. Local struct ordinals remain forbidden as public type
+identity. Module-type Kleis gates pass 69 / 61; native diagnostics pass, while
+protected guest C3.4 acceptance passed in 211.55s. ATY1 guest emission/linking,
+complete job charging and the ordinary concurrent rebuild remain required for
+C2–C5 closure. See the consolidated DN-71 closure table.
+
+
+#### C3/C4 typed modules and protected member lowering (acceptance pending)
+
+AOM v2 appends exact ATY1 evidence after relocations while preserving the v1
+section/header layout. Rust admission and guest ankald both validate the evidence
+against actual symbol tables and compare full tag names and complete layouts.
+Struct-pointer signature markers alone are insufficient. Exact AOM capture and
+publication include the trailer; they remain distinct from executable admission.
+
+The protected ABI-2 compiler lowers heap struct-member reads/writes through
+PMOV/PADD and PREAD/PWRITE or PLOAD/PSTORE. Nested pointer members retain protected
+kind; freed aliases fail the same runtime lifetime authentication as other heap
+pointers. Opaque layouts and unknown members reject during compilation.
+A separate trusted large-application link profile admits up to 2 MiB of combined
+code/metadata, still subject to transport placement, frame and output validation.
+It does not widen the legacy or compiler-producer profiles.
+
+The application profile is frozen with ordered module dependencies and retained
+in the linked receipt. Publication checks the executed profile and actual control
+word; loading validates the receipt and image under that same policy. The default
+module-store producer remains bounded to 256 KiB per module. This does not yet
+connect the shared-Kernel ABI-2 job service to the ordinary rebuild command.
+
+Extended CC_B rejects fixups to un-emitted output slots after capacity failure;
+the real fixed-point toolchain uses its extended arena for the typed linker.
+Fabric continues to enforce the original mapping permissions.
+
+Kleis module-type gates pass 125 positive / 115 hostile witnesses. Native compiler
+and linker diagnostics passed. The supplied Rust log confirms the bootstrap
+regression, typed-link component checks and receipt-profile checks passed.
+The parser-dispatch refactor passed the real typed-module heap-list witness
+in 249.11 seconds, including capacity parity and stale/incompatible rejection.
+DN-71 lists the exact tests and remaining C2/C5 accounting/service work. These
+mechanisms alone do not close Phase 10.8 or establish whole-system verification.
+
+
+The shared-Kernel compiler publication consumer now binds the existing protected
+linker directly to current ABI-2 publication records. It accepts an ordered list
+of local publication epochs and a trusted Standard/Large application policy;
+no detached receipt or supplied byte buffer establishes identity. It rechecks
+original sealed provenance and current grants, reads exact lengths in bounded
+chunks, validates protected module evidence, and requires identical linker bytes
+across inputs. The borrowing guard excludes Kernel mutation while inputs are in
+use. Compiler-producer profile 2 is not an application-link option.
+
+Input copies/parser allowance and retained linked bytes use shared host-storage
+reservations before allocation. On success or error they are destroyed before
+refund; input publications are never discarded by this consumer. A failed refund
+retains its charge. The initial linked result is borrowed data with ordered dependencies
+and selected profile. Explicit publication authority can transfer its existing
+charges and payload into a persistent in-memory linked receipt, alongside a
+separately charged READ-only heap artifact. Neither form grants execution
+authority. The shared consumer now separately reserves its bounded isolated linker machine
+before construction, as specified below; payload charges alone do not establish
+that bound.
+
+Kleis consumption/ordering/authority/profile/refund prerequisites pass within the
+publication gate (256 positive / 221 hostile). The developer accepted seven
+consumer tests and seven linked-publication tests. Linked publication uses the existing nonwrapping publication epoch and one
+record insertion. Current source receipts, seals, grants, host reservations, heap
+authority and exact bytes are rechecked on access. Failed commits expose no
+record and preserve prior publications; physical cleanup stays with existing
+workers. Individual discard and custodian shutdown destroy host payload before
+refund and fence the heap artifact before reuse. A current linked receipt has a separately authorized execution bridge to ordinary
+protected SYS_SPAWN/SYS_WAIT. The eight-test direct-exit fixture group passed;
+real CC2 ordinary-main execution exposed the missing C startup contract.
+The explicit C runner now binds the exact sealed object/generation/geometry and
+validates protected metadata. On matching process creation, a sealed launcher in
+the existing owned trap page executes CALL main, moves its R0 result to R1 and
+invokes SYS_EXIT. The real CALL mints ordinary return authority; no loader pushes
+a synthetic return token or weakens RET. The core starts there only after normal
+protected-program admission. Entry/offset and CALL displacement are checked.
+
+Original code/metadata and READ-only receipt bytes stay unchanged. Direct process
+entry APIs keep their behavior, including faulting on a bare unauthorized RET.
+An explicit SYS_EXIT from main remains valid. The launcher and its binding are
+trusted runtime policy, not guest-selectable receipt data. The trap vector still
+starts with HALT; startup is at offset 16. Existing trap-page ownership handles
+reclamation. Startup is covered by the refined publication gate (256 positive /
+221 hostile); the developer subsequently passed four startup tests and nine
+receipt-execution tests. Real-producer and large-image reruns remain unreported.
+
+The isolated runner's full RAM/metadata/trace/output and peak-copy accounting is
+still a C2 obligation. The bridge does not claim a shared-account bound for that
+legacy footprint. C5 still requires ordinary service orchestration; DN-71 retains
+the remaining closure conditions.
+
+
+Directory-profile compiler retries use exact capacity roles 32..38, identifying
+one of the seven workspace tables. Their minimum is a record count. The runtime
+binds the directory before execution and carries its checked geometric growth in
+the non-Clone retry budget; function and frame counts grow together. Counts are
+bounded at 4096 and canonical workspace geometry at 1 MiB. No reply chooses
+addresses or strides. Old ownership must be released before the next budget is
+available; current admission still checks shared quota. Retried directory
+substitution is rejected before allocation, cumulative work is preserved, and
+output-only retries keep the directory. Fixed-profile error 8 remains terminal.
+Workspace Kleis witnesses pass 55/52; new runtime and real-compiler acceptance
+are pending. This mechanism is not a claim of complete job accounting or C5
+user-command integration; see DN-71's unchanged closure checklist.
+
+
+#### Kernel-owned compiler jobs (Phase 10.8 integration)
+
+Compiler jobs now retain effective source, pinned provenance and cumulative retry
+budgets in Kernel custody (`os/compiler_retry/jobs.rs`). Their handles carry an
+exact host-storage reservation and custodian incarnation; integers do not create
+jobs. A retry is observable only after the prior producer's actual cleanup, and
+fresh admission cannot substitute source, tools or retry fuel. The old provenance
+snapshot stays charged until the next snapshot is frozen. Cancellation and
+custodian/service teardown destroy job payload before refund; published artifacts
+and receipts have independent lifetimes.
+
+This internal coordinator does not yet supply ordinary shell/service invocation
+or complete accounting for the isolated preprocessor and legacy process storage.
+Its Kleis job contract passes; new Rust and real-compiler acceptance is pending.
+The current closure evidence and remaining work are recorded in DESIGN_NOTES.md.
+
+
+#### Accounted preprocessing boundary (Phase 10.8)
+
+The compiler-job path now has an explicit shared-quota preprocessing entry:
+`Kernel::preprocess_compiler_source`. It borrows an admitted immutable Tool input,
+reserves bounded isolated-machine storage before allocation, runs real guest
+include expansion with an exit-only syscall profile and bounded stack/trace
+storage, then transfers exact successful output to charged EffectiveSource
+custody before releasing staging. Retry work is cumulative. Other live compiler
+clients remain in the parent Kernel and retain their authority and charges.
+
+This policy bounds retained software-machine payloads, not physical allocator RSS.
+Legacy preprocessing entry points remain separate. Complete compiler admission,
+link/run accounting and ordinary service integration are still required; the
+precise bounds and acceptance status are recorded in DESIGN_NOTES.md.
+
+
+### Compiler-service admission storage (Phase 10.8 refinement)
+
+The compiler job coordinator now has a charged admission arena: a separately
+authorized, sealed producer image and one to eight reusable stack slots. Quota
+precedes construction and remains held for the arena's entire Kernel lifetime,
+even when slots are idle. Code remains retained for publication receipts. This
+is fixed service capacity; dynamic source/workspace/output allocations continue
+to use the shared protected heap and the carried retry budget.
+
+A stack slot is reusable only after the exact producer incarnation exits, all
+of its heap storage is actually released, and Fabric transactions are terminal.
+Retirement removes saved CPU contexts and domain/agent state; the next use gets
+a fresh stack object identity and zeroed backing. Compile-only bounded dispatch
+excludes devices/timers and bounds call/frame/event metadata. These restrictions
+are a current software service profile, not general ISA or future-hardware
+limits. The Kleis compiler-admission gate specifies admission/reuse conditions;
+The developer confirms the focused/runtime and real-toolchain admission checks
+passed. Linker and application-run accounting are now accepted; ordinary
+network-service rebuild integration remains open.
+
+
+The shared compiler publication consumer runs guest ankald under a separately
+charged scalar transport envelope. It reserves RAM, bounded registry/core/trace
+metadata, module/control descriptors and capture allowances before constructing
+the isolated machine. The established exit-only preprocessor transport also
+serves this scalar tool: 256-instruction slices, bounded calls/events, no devices,
+no heap and no dynamic syscalls. Slices consume the existing finite total work.
+Input/parser staging and retained image reservations remain independent. The
+machine is destroyed before its charge is refunded; the exact guest image stays
+charged through publication, and failures preserve prior/peer publications.
+The linker-storage Kleis gate passed 33 positive and 23 disproved hostile
+witnesses; the developer accepted 146 runtime tests and the real C5 job (249.26s). The separately authorized
+application runner now has the enforced and charged envelope described below;
+the developer accepted eight focused tests, 149 runtime tests and the real C5
+run in 247.31s. This
+change does not establish an ordinary network-service rebuild or close 10.8.
+
+
+Receipt-authorized application execution reserves a conservative isolated-machine
+capacity and a separate report-output allowance in the shared custodian ledger
+before constructing the realm. The execution profile permits one scalar
+supervisor, a cleanup worker and one protected child, with one spawn attempt,
+finite dispatch, bounded calls/frames/saved contexts and terminal CPU trace.
+Devices and timers are excluded. Protected typed I/O is limited to 4096 bytes
+per call and 64 KiB captured output. Existing pointer/span authentication and
+heap retirement remain mandatory. These are service-profile limits, not ISA or
+C-language limits.
+
+The machine is destroyed before its reservation is refunded. The borrowed
+`LinkedCompilerRunReport` keeps its output buffer charged until drop and exposes
+execution data by reference. Publication remains READ-only and separate execution
+authority is required. DN-71 records the conservative charge formula, explicit
+test budgets and exact acceptance command. The application-run Kleis gate passes
+29 positive and 19 disproved hostile witnesses; the developer accepted its
+focused/runtime and real C5 results.
+Ordinary command/service integration and concurrent/network rebuild closure
+remain required for Phase 10.8.
+
+
+### Ordinary protected rebuild command
+
+`anka rebuild` composes the admitted source/preprocessor/compiler-job, publication,
+guest-link and charged application-run paths. The reusable runtime coordinator
+has two independent job slots; the command links up to eight module roots in
+argument order and optionally executes the resulting receipt. It freezes exact
+provenance before execution, carries the existing growth budget through retries,
+requires actual owner release before replacement, and never uses a guessed reply.
+Realm/serial-bound handles prevent replay across service instances and slot reuse.
+
+Provisioning accepted tools remains an explicit trusted bootstrap boundary. The
+service's fixed RAM/provenance arena and metadata remain quota charged for its
+lifetime; receipt dependencies are not refunded on producer exit. Dynamic source,
+workspace, output, retained artifacts, link transport and run reports keep their
+existing shared-ledger charges. This CPU-only service profile has bounded quotas,
+work and immutable evidence capacity; it does not claim unlimited compilation.
+
+The composition Kleis gate passes 29 positive / 21 hostile witnesses. Ordinary
+service runtime acceptance passed: six focused tests, 154 runtime tests (ten
+ignored), and actual concurrent A/B/C compiler reuse in 75.79s. DN-71 gives the policy, commands and evidence. Existing socket/HTTP raw
+address sources still require protected-service migration; this command alone
+does not close Phase 10.8 or establish the protected `/alive` rebuild.
+
+
+### Protected HTTP application input
+
+The ordinary rebuild command can now supply an explicit finite input image to a
+linked protected application with `--input FILE --run`. A separate input authority
+is required; execution/publication authority alone cannot supply it. The bounded
+application profile accepts at most 64 KiB, reserves input-copy and conversion
+capacity before construction, attaches the image to the exact child incarnation
+before execution, and destroys it with the isolated realm before refund. Existing
+READ_BYTES span/lifetime checks and no-input behavior remain distinct. Startup
+handoff steps consume the same finite dispatch bound as the application run.
+
+`httpd_protected.c` uses a private 1024-byte buffer and typed byte I/O to implement
+the existing restricted `/alive` response. Oversized/empty input emits nothing;
+other bounded nonmatching requests receive the existing 404. Its ordinary rebuild
+and guest execution witness is supplied but not yet Rust-accepted; Kleis passes
+27 positive / 18 hostile witnesses. This finite input image is not a network
+endpoint, DMA mapping or permission lease. The remaining socket/NIC migration
+must formalize that actual endpoint and buffer-lifetime boundary before changing
+the original shared-memory protocol. DN-71 tracks the exact closure conditions.
+
+
+### Compiler frame capacity and protected network migration
+
+The ordinary two-job rebuild service uses a charged 36864-slot registry, with a
+16384-live-local compiler execution envelope per job and 4096 slots of service/
+heap headroom. Application execution keeps its 4096-local envelope. Pending-frame
+budget checks precede frame initialization; quotas and finite work still bound
+admission. The latest guest HTTP compile completes in 21.83 seconds with the occupied-row
+lookup correction below. Protected HTTP link/run acceptance remains pending.
+DN-71 records evidence and test commands.
+
+The legacy CC_B network stack remains the protocol regression reference during
+migration. The next boundary is a typed socket endpoint copying into private
+protected buffers, with formal RX/TX authority, incarnation, length, short I/O,
+EOF, quota, cancellation and close contracts. NIC buffers stay under driver/
+controller authority and require drain-before-reuse. No SEND implies revocation.
+A legacy transport bridge is an intermediate test configuration, not completion
+of the protected full-stack rebuild.
+
+The existing Metal 4 direction now calls for an early, bounded differential
+CPU/Fabric prototype. Benchmark serial compilation separately from independent
+job throughput, including dispatch and transfer costs. Preserve reference fault,
+ordering, lifetime and pointer-kind semantics; formalize backend refinement
+before broadening execution. Metal 4 compute/barrier facilities enable this work
+but supply no automatic compiler speedup. Its GPU shader compilation features
+are separate from AnkaCC2 compilation. See Apple's
+[Discover Metal 4](https://developer.apple.com/videos/play/wwdc2025/205/).
+
+
+Private heap membership lookup traverses an occupied-row prefix rather than all
+reserved slots. Attachment/initialization/publication maintain its upper bound;
+clean release trims only empty trailing rows. Sparse and retired-but-retained
+rows remain visible. The bound grants no authority and does not cache lifetime
+validation; all existing access checks remain current. Fixed capacity and the
+boundary field remain charged. This removes reserved-table-size work from the
+ordinary translation path, which became costly in the larger compiler profile.
+DN-71 records the HTTP timeout and subsequent successful 21.83-second guest
+compilation. The protected application entry contract still requires exported
+`int main()` at code offset zero: the HTTP source declares helpers, defines main
+first, then defines helpers. The subsequent local run compiled in 22.47 seconds and passed linking. HTTP
+execution acceptance remains pending after correcting its read-loop condition
+to the supported scalar bitwise conjunction of parenthesized comparisons. CC2
+does not yet implement C short-circuit logical operators; native C execution
+alone cannot validate source compatibility with this subset. Neither source
+correction relaxes linker, memory, input authority or resource validation.

@@ -116,3 +116,23 @@ fn r1_stack_generation_change_cannot_rebind_existing_admission() {
     assert_eq!(c.r, words);
     assert_eq!(f.read_physical(base, 4096), [0xa7; 4096]);
 }
+
+#[test]
+fn c5_http_frame_budget_checks_pending_locals_before_entry() {
+    let (mut f,mut c,_)=protected_frame_fixture();
+    c.enter_pointer_frame(&mut f,0).unwrap();
+    let state=c.pointer_frames.as_mut().unwrap();
+    // Synthetic retained frame size exercises the boundary check without a
+    // compiler bootstrap. Actual independent identities are tested in Fabric.
+    let pointer=state.active[0].locals[0];
+    state.active[0].locals.resize(4000,pointer);
+    let mut local=state.program.frames[0].locals[0].clone();local.length=8;
+    state.program.frames[0].locals=vec![local;663];
+    state.pending_entry=Some(c.pc);
+    let before=f.read_physical(stack(&c,&f),4096).to_vec();
+    assert!(!c.compiler_admission_depth_ok());
+    assert!(c.protected_execution_depth_ok(16384));
+    c.pointer_frames.as_mut().unwrap().active[0].locals.resize(16000,pointer);
+    assert!(!c.protected_execution_depth_ok(16384));
+    assert_eq!(f.read_physical(stack(&c,&f),4096),before);
+}

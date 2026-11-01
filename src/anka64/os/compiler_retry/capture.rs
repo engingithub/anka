@@ -5,7 +5,7 @@ use super::*;
 use crate::anka64::aom::AomModule;
 use crate::anka64::compiler_adapter::RebuildAdmissionRole;
 use crate::anka64::pointer_frames::{ValidatedPointerModule, ValidatedPointerProgram};
-use crate::anka64::scoped_pointers::heap::HeapReservation;
+use crate::anka64::scoped_pointers::heap::HostStorageReservation;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CompilerCaptureError {
@@ -32,7 +32,7 @@ pub(crate) enum CompilerCaptureSlice<'k> {
 pub(crate) struct CapturedCompilerOutput<'k> {
     kernel: &'k mut Kernel,
     owner: AllocationOwner,
-    reservation: Option<HeapReservation>,
+    reservation: Option<HostStorageReservation>,
     bytes: Vec<u8>,
     context: CompilerReplyContext,
     role: RebuildAdmissionRole,
@@ -53,12 +53,11 @@ impl CapturedCompilerOutput<'_> {
 }
 impl Drop for CapturedCompilerOutput<'_> {
     fn drop(&mut self) {
-        // Destroy host staging BEFORE refund. Never-attached reservation backing
-        // was never exposed; abort returns its exact extents without a scrub.
+        // Destroy host staging BEFORE refund. This charge owns no guest backing.
         drop(std::mem::take(&mut self.bytes));
         if let Some(reservation) = self.reservation.take() {
-            // If abort is blocked, normal owner closure retains the obligation.
-            let _ = self.kernel.fabric.scoped_pointers.abort_heap(reservation);
+            // A failed release retains the charge; owner death never refunds it.
+            let _ = self.kernel.fabric.scoped_pointers.release_host_storage(reservation);
         }
         self.kernel.finish_process(self.owner.process.slot, ProcessResult::Exited(0));
     }
@@ -77,13 +76,15 @@ impl Kernel {
             attempt.owner, attempt.agent, attempt.output, attempt.reply,
             context.output_capacity(),
         ).map_err(CompilerRuntimeError::from)
-            .and_then(|bytes| context.decode(&bytes).map_err(CompilerRuntimeError::from));
+            .and_then(|bytes| budget.decode(&bytes).map_err(CompilerRuntimeError::from));
         let used = match decoded {
             Ok(CompilerReplyMetadata::SuccessMetadata { used_output }) => used_output,
             other => {
                 let result = match other {
                     Ok(CompilerReplyMetadata::NeedOutputCapacity(need)) =>
                         budget.propose_retry(&need).map_err(CompilerRuntimeError::from),
+                    Ok(CompilerReplyMetadata::NeedWorkspaceCapacity(need)) =>
+                        budget.propose_workspace_retry(&need).map_err(CompilerRuntimeError::from),
                     Ok(metadata) => Err(CompilerRuntimeError::TerminalMetadata(metadata)),
                     Err(error) => Err(error),
                 };
@@ -95,20 +96,19 @@ impl Kernel {
         };
         // The read above checks actual token geometry, live current custody,
         // and drain state. The exclusive borrow fences all emulator writers.
-        // Current application admission limit remains explicit (C3/C4 pending).
+        // The authentic ABI-2 attempt capacity bounds capture (C3/C4 pending).
         let reserve = (|| -> Result<_, CompilerCaptureError> {
-            if role == RebuildAdmissionRole::LinkedImage
-                || used > crate::anka64::dev_compiler::DEVELOPMENT_COMPILER_OUTPUT_SIZE {
+            if role == RebuildAdmissionRole::LinkedImage {
                 return Err(CompilerCaptureError::Admission);
             }
             // Conservative staging + bounded parser-payload allowance; rounded
             // and charged by the existing shared service, not a second ledger.
             // The geometry preflight below prevents repeated-frame scan fanout.
-            let charge = used.checked_mul(32).and_then(|n| n.checked_add(4096))
+            let charge = capture_charge(used, context.output_capacity())
                 .ok_or(CompilerCaptureError::Storage)?;
             let account = self.fabric.scoped_pointers.heap_account(attempt.owner)
                 .ok_or(CompilerRuntimeError::Process)?;
-            Ok(self.fabric.scoped_pointers.reserve_heap(
+            Ok(self.fabric.scoped_pointers.reserve_host_storage(
                 account, charge, self.fabric.scoped_pointers.revision())?)
         })();
         let reservation = match reserve {
@@ -134,15 +134,24 @@ impl Kernel {
                 attempt.output, attempt.owner, offset)?;
             capture.kernel.fabric.read_heap_bytes(attempt.owner, attempt.agent, pointer, chunk)?;
         }
-        admit(&capture.bytes, role)?;
+        admit(&capture.bytes, role, context.output_capacity())?;
         Ok(CompilerCaptureSlice::Captured(capture))
     }
+}
+
+// Mirrors pub108_capture_budget's geometry/arithmetic guards. Shared owner,
+// global and identity reservations are enforced by reserve_host_storage.
+fn capture_charge(used: u64, capacity: u64) -> Option<u64> {
+    if used < 112 || used % 8 != 0 || used > capacity || capacity > i64::MAX as u64 {
+        return None;
+    }
+    used.checked_mul(32)?.checked_add(4096).filter(|n| *n <= i64::MAX as u64)
 }
 
 // Allocation-free preflight: cap the SUM of scanned frame lengths before the
 // existing parser constructs exits for each frame. Full validators still decide
 // format/partition/rights/instructions; this cannot mint admission by itself.
-fn bounded_manifest(bytes: &[u8]) -> Option<()> {
+pub(super) fn bounded_manifest(bytes: &[u8]) -> Option<()> {
     fn word(bytes: &[u8], at: usize) -> Option<u64> {
         Some(u64::from_le_bytes(bytes.get(at..at.checked_add(8)?)?.try_into().ok()?))
     }
@@ -168,7 +177,8 @@ fn bounded_manifest(bytes: &[u8]) -> Option<()> {
     Some(())
 }
 
-fn admit(bytes: &[u8], role: RebuildAdmissionRole) -> Result<(), CompilerCaptureError> {
+fn admit(bytes: &[u8], role: RebuildAdmissionRole, capacity: u64) -> Result<(), CompilerCaptureError> {
+    if bytes.len() as u64 > capacity { return Err(CompilerCaptureError::Admission); }
     bounded_manifest(bytes).ok_or(CompilerCaptureError::Admission)?;
     match role {
         RebuildAdmissionRole::ClosedTranslationUnit => {
@@ -179,7 +189,7 @@ fn admit(bytes: &[u8], role: RebuildAdmissionRole) -> Result<(), CompilerCapture
             }
         }
         RebuildAdmissionRole::RelocatableModule => {
-            ValidatedPointerModule::from_aom(bytes).map_err(|_| CompilerCaptureError::Admission)?;
+            ValidatedPointerModule::from_aom_with_limit(bytes, capacity).map_err(|_| CompilerCaptureError::Admission)?;
         }
         RebuildAdmissionRole::LinkedImage => return Err(CompilerCaptureError::Admission),
     }

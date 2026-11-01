@@ -62,6 +62,92 @@ i=i+1;
 return 1;
 }
 
+int tbase(int b){return b+*(b+96)+*(b+104)*48;}
+int teq(int a,int b,int n){int i=0;while(i<n){if(rb(a+i)!=rb(b+i)){return 0;}i=i+1;}return 1;}
+int tname(int a){if(firstc(rb(a))==0){return 0;}int i=1;while((i<64)&(rb(a+i)!=0)){if(restc(rb(a+i))==0){return 0;}i=i+1;}if(i==64){return 0;}while(i<64){if(rb(a+i)!=0){return 0;}i=i+1;}return 1;}
+int tfind(int b,int tag){int h=tbase(b);int d=h+40;int i=0;while(i<*(h+24)){if(teq(d,tag,64)==1){return d;}d=d+112+*(d+88)*160;i=i+1;}return 0;}
+int tfuns(int b){int h=tbase(b);int d=h+40;int i=0;while(i<*(h+24)){d=d+112+*(d+88)*160;i=i+1;}return d;}
+int trefok(int b,int r){int kind=*r;int depth=*(r+8);if((kind<1)|(4<kind)|(depth<0)|(63<depth)){return 0;}if(kind==4){if(tname(r+16)==0){return 0;}if(tfind(b,r+16)==0){return 0;}}else{int i=0;while(i<64){if(rb(r+16+i)!=0){return 0;}i=i+1;}}return 1;}
+int tproduct(int a,int b,int limit){if((a<0)|(b<0)|(limit<0)){return 0-1;}int total=0;while(b!=0){if((b&1)!=0){if(limit-total<a){return 0-1;}total=total+a;}b=b>>1;if(b!=0){if(limit-a<a){return 0-1;}a=a+a;}}return total;}
+int tvalid(int b,int n){
+int h=0;
+int end=0;
+int dc=0;
+int fc=0;
+int d=0;
+int i=0;
+int total=0;
+int fields=0;
+int complete=0;
+int old=0;
+int j=0;
+int used=0;
+int alignment=0;
+int rank=0;
+int f=0;
+int k=0;
+int size=0;
+int al=0;
+int child=0;
+int c=0;
+int off=0;
+int bytes=0;
+int sym=0;
+int count=0;
+int lane=0;
+int r=0;
+int wire=0;
+int want=0;
+if(*(b+8)==1){return 1;}
+h=tbase(b);end=b+n;
+if(end-h<40){return 0;}
+if(*h!=(20033|(16715<<16)|(22868<<32)|(49<<48))){return 0;}
+if((*(h+8)!=1)|(*(h+16)!=end-h)){return 0;}
+dc=*(h+24);fc=*(h+32);
+if((dc<=0)|(4096<dc)|(fc<0)|(4096<fc)|(fc!=*(b+88))){return 0;}
+d=h+40;i=0;total=0;
+while(i<dc){
+if(end-d<112){return 0;}fields=*(d+88);
+if((fields<0)|(4096-total<fields)){return 0;}total=total+fields;
+if(end-d-112<fields*160){return 0;}
+if((tname(d)==0)|(*(d+104)!=0)){return 0;}
+complete=*(d+64);
+if(complete==0){if((*(d+72)!=0)|(*(d+80)!=0)|(fields!=0)|(*(d+96)!=0)){return 0;}}
+else{if((complete!=1)|(*(d+72)<=0)|(fields==0)|(*(d+96)<=0)|(dc<*(d+96))|(16<*(d+80))|(pow2(*(d+80))==0)){return 0;}}
+old=h+40;j=0;while(j<i){if(teq(d,old,64)==1){return 0;}old=old+112+*(old+88)*160;j=j+1;}
+d=d+112+fields*160;i=i+1;}
+if(end-d!=fc*480){return 0;}
+d=h+40;i=0;
+while(i<dc){used=0;alignment=1;rank=1;j=0;
+while(j<*(d+88)){
+f=d+112+j*160;
+if((tname(f)==0)|(trefok(b,f+64)==0)){return 0;}
+k=0;while(k<j){if(teq(f,d+112+k*160,64)==1){return 0;}k=k+1;}
+size=0;al=1;child=0;
+if(*(f+72)!=0){size=16;al=16;}
+else{if(*(f+64)==1){size=8;al=8;}if(*(f+64)==2){size=1;}
+if(*(f+64)==4){c=tfind(b,f+80);if(*(c+64)!=1){return 0;}size=*(c+72);al=*(c+80);child=*(c+96);}}
+if((size<=0)|(*(d+96)<=child)|(*(f+152)<=0)){return 0;}
+if(rank<child+1){rank=child+1;}
+off=alignup(used,al);if((off<0)|(off!=*(f+144))){return 0;}
+bytes=tproduct(size,*(f+152),((32767<<48)|(65535<<32)|(65535<<16)|65535)-off);if(bytes<0){return 0;}used=off+bytes;
+if(alignment<al){alignment=al;}j=j+1;}
+if(*(d+64)==1){if((alignup(used,alignment)!=*(d+72))|(alignment!=*(d+80))|(rank!=*(d+96))){return 0;}}
+d=d+112+*(d+88)*160;i=i+1;}
+i=0;while(i<fc){f=d+i*480;sym=b+*(b+80)+i*160;
+if((teq(f,sym+8,64)==0)|(*(f+64)!=*(sym+72))|(*(f+72)!=*(sym+120))){return 0;}
+count=*(f+72);if((count<0)|(4<count)){return 0;}
+j=0;lane=0;
+while(j<5){r=f+80+j*80;
+if(count<j){k=0;while(k<80){if(rb(r+k)!=0){return 0;}k=k+1;}}
+else{if(trefok(b,r)==0){return 0;}
+if((*(r+8)==0)&((*r==4)|((0<j)&(*r==3)))){return 0;}
+wire=*(r+8)*1000+*r;want=*(sym+112);if(j!=0){want=*(sym+120+j*8);}
+if(wire!=want){return 0;}
+if(j!=0){if(*(r+8)!=0){lane=alignup(lane,2)+2;}else{lane=lane+1;}if(4<lane){return 0;}}}
+j=j+1;}i=i+1;}
+return 1;}
+
 int modbase(int i){
 int d=*(131000+80);
 return *(d+i*16);
@@ -82,7 +168,7 @@ if(rb(b+4)!=79){return 0;}
 if(rb(b+5)!=77){return 0;}
 if(rb(b+6)!=49){return 0;}
 if(rb(b+7)!=0){return 0;}
-if(*(b+8)!=1){return 0;}
+if((*(b+8)!=1)&(*(b+8)!=2)){return 0;}
 if(*(b+16)!=112){return 0;}
 if(*(b+24)!=n){return 0;}
 int co=*(b+32);
@@ -95,6 +181,7 @@ int so=*(b+80);
 int sc=*(b+88);
 int xo=*(b+96);
 int xc=*(b+104);
+if((co<0)|(ro<0)|(rs<0)|(so<0)|(xo<0)|(sc<0)|(xc<0)|(n<so)|(n<xo)){return 0;}
 if(co!=112){return 0;}
 if(cs<=0){return 0;}
 if((cs&7)!=0){return 0;}
@@ -116,7 +203,9 @@ if(xo!=sx){return 0;}
 if(((n-xo)>>3)<xc){return 0;}
 int xe=xo+xc*48;
 if(xe<xo){return 0;}
-if(xe!=n){return 0;}
+if((n<xe)|(xe<0)){return 0;}
+if((*(b+8)==1)&(xe!=n)){return 0;}
+if((*(b+8)==2)&(n-xe<40)){return 0;}
 return 1;
 }
 
@@ -142,7 +231,7 @@ int rt=*(q+112);
 int ac=*(q+120);
 if(kind!=1){return 0;}
 if(4<ac){return 0;}
-if(pubtype(rt)==0){return 0;}
+if((pubtype(rt)==0)&(*(b+8)!=2)){return 0;}
 if(bind==1){
 if(sec!=1){return 0;}
 if((val<0)|(cs<=val)|((val&7)!=0)){return 0;}
@@ -151,7 +240,7 @@ if(bind!=2){return 0;}
 if((sec!=0)|(val!=0)|(size!=0)){return 0;}
 }
 p=0;
-while(p<ac){int pt=*(q+128+p*8);if((pt==3)|(pubtype(pt)==0)){return 0;}p=p+1;}
+while(p<ac){int pt=*(q+128+p*8);if((pt==3)|((pubtype(pt)==0)&(*(b+8)!=2))){return 0;}p=p+1;}
 while(p<4){if(*(q+128+p*8)!=0){return 0;}p=p+1;}
 int t=s+1;
 while(t<sc){
@@ -194,11 +283,15 @@ int b=*(d+m*16);
 int n=*(d+m*16+8);
 if(vhead(b,n)==0){return 0;}
 if(vsyms(b,n)==0){return 0;}
+if(tvalid(b,n)==0){return 0;}
 if(vreloc(b,n)==0){return 0;}
 return 1;
 }
 
+int tsymbol(int sym){int m=0;while(m<*(131000+72)){int b=modbase(m);int i=0;while(i<*(b+88)){if(symbase(m,i)==sym){if(*(b+8)==1){return 0;}return tfuns(b)+i*480;}i=i+1;}m=m+1;}return 0;}
+int tpairs(){int m=0;while(m<*(131000+72)){int b=modbase(m);if(*(b+8)==2){int d=tbase(b)+40;int i=0;while(i<*(tbase(b)+24)){int n=0;while(n<m){int peer=modbase(n);if(*(peer+8)==2){int other=tfind(peer,d);if(other!=0){if((*(d+64)==1)&(*(other+64)==1)){if(*(d+88)!=*(other+88)){return 0;}if(teq(d,other,112+*(d+88)*160)==0){return 0;}}}}n=n+1;}d=d+112+*(d+88)*160;i=i+1;}}m=m+1;}return 1;}
 int sigsame(int a,int b){
+int ta=tsymbol(a);int tb=tsymbol(b);if((ta!=0)&(tb!=0)){if(teq(ta+72,tb+72,408)==0){return 0;}}
 if(*(a+80)!=*(b+80)){return 0;}
 if(*(a+112)!=*(b+112)){return 0;}
 int ac=*(a+120);
@@ -307,6 +400,7 @@ int cs=*(b+40);
 int rs=*(b+64);
 int limit=1<<18;
 if(*(131000+160)==2){limit=1<<20;}
+if(*(131000+160)==3){limit=1<<21;}
 if((limit<*(b+24))|(rs<64)){return 0;}
 if(*(b+56)!=112+cs){return 0;}
 if(*(b+80)!=*(b+56)+rs){return 0;}
@@ -395,6 +489,8 @@ return 1;
 }
 
 int pprofile(){
+int limit=1<<20;
+if(*(131000+160)==3){limit=1<<21;}
 int mode=pmode(0);
 int mc=*(131000+72);
 int m=0;
@@ -410,12 +506,12 @@ int cs=*(b+40);
 int rs=*(b+64)-32;
 int fc=*(pmeta(m)+24);
 if((code&(*(b+48)-1))!=0){return 0-1;}
-if((((1<<20)-code)<cs)|(((1<<20)-metadata)<rs)|((4096-frames)<fc)){return 0-1;}
+if(((limit-code)<cs)|((limit-metadata)<rs)|((4096-frames)<fc)){return 0-1;}
 code=code+cs;metadata=metadata+rs;frames=frames+fc;
 }
 m=m+1;
 }
-if((1<<20)-code<metadata){return 0-1;}
+if(limit-code<metadata){return 0-1;}
 return frames;
 }
 
@@ -663,7 +759,7 @@ int main(){
 int mc=*(131000+72);
 if(mc<=0){return fail(1);}
 int profile=*(131000+160);
-if((profile!=0)&(profile!=2)){return fail(9);}
+if((profile!=0)&(profile!=2)&(profile!=3)){return fail(9);}
 int d=*(131000+80);
 int out=*(131000+88);
 int cap=*(131000+96);
@@ -677,8 +773,10 @@ while(p<el){if(restc(rb(ep+p))==0){return fail(8);}p=p+1;}
 int m=0;
 while(m<mc){if(validmod(m)==0){return fail(2);}m=m+1;}
 if(profile==2){if((mc!=1)|(pmode(0)!=1)){return fail(9);}}
+if(profile==3){if(pmode(0)!=1){return fail(9);}}
 int pf=pprofile();
 if(pf<0){return fail(9);}
+if(tpairs()==0){return fail(9);}
 if(alldefs()==0){return fail(3);}
 int ir=importsok();
 if(ir!=0){return fail(ir);}

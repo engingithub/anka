@@ -42,6 +42,9 @@ pub(super) struct HeapFabric {
     pool: PhysicalExtent,
     virtual_window: VirtualExtent,
     rows: Vec<Option<PrivateHeapRow>>,
+    // Every occupied row is below this boundary. This is a search bound, not
+    // authority or a row count: holes and retired-but-retained rows stay visible.
+    rows_end: usize,
     // Opaque tokens rather than integers. Checked cell operations authenticate
     // destination and source lifetimes before accessing this fixed array.
     shadow: Vec<Option<ScopedPointer>>,
@@ -100,6 +103,7 @@ impl HeapFabric {
             pool: limits.physical_pool,
             virtual_window: limits.virtual_window,
             rows: table(slots, None)?,
+            rows_end: 0,
             shadow: table(cells, None)?,
             work: None,
             object_id_floor: 0,
@@ -115,7 +119,19 @@ impl HeapFabric {
     }
 
     pub(super) fn contains_object(&self, id: ObjectId) -> bool {
-        self.rows.iter().flatten().any(|r| r.object == id)
+        self.rows[..self.rows_end].iter().flatten().any(|r| r.object == id)
+    }
+
+    fn set_row(&mut self, slot:usize, row:PrivateHeapRow) {
+        self.rows[slot]=Some(row);
+        self.rows_end=self.rows_end.max(slot+1);
+    }
+
+    fn remove_row(&mut self, slot:usize) {
+        self.rows[slot]=None;
+        while self.rows_end>0 && self.rows[self.rows_end-1].is_none() {
+            self.rows_end-=1;
+        }
     }
 
     pub(super) fn end(&self) -> u64 {
@@ -355,7 +371,7 @@ impl Fabric {
         // owns the registry, managers, counter and all fixed storage together.
         self.scoped_pointers.commit_heap_attachment(plan);
         let heap = self.private_heap.as_mut().unwrap();
-        heap.rows[slot] = Some(row);
+        heap.set_row(slot,row);
         heap.object_id_floor = next;
         self.next_object_id = next;
         Ok(object)

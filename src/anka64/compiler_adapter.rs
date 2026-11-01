@@ -21,6 +21,8 @@ pub use protected_modules::{FrozenModuleLink, LinkedModuleDependency, LinkedRebu
 /// ABI-2 wire validation and output-growth planning. The existing runner still
 /// uses ABI 1; a plan from this module is not allocation or execution authority.
 pub mod resources;
+/// C3/C4 bounded interface evidence; guest integration remains explicit in DN-71.
+pub mod interfaces;
 pub(crate) mod producer;
 
 /// Validation role is evidence, never execution or publication authority.

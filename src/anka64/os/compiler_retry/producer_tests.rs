@@ -36,6 +36,8 @@ struct ProducerProgress {
     reported: Duration,
     timeout: Duration,
     dispatched: u64,
+    workspace: Option<(AllocationOwner,AgentId,ScopedPointer)>,
+    source_length: u64,
 }
 
 impl ProducerProgress {
@@ -49,7 +51,17 @@ impl ProducerProgress {
         assert!(seconds > 0, "ANKA_PRODUCER_TIMEOUT_SECS must be positive");
         eprintln!("protected CC2 [{label}]: starting; diagnostic timeout={seconds}s");
         Self { label, started: Instant::now(), reported: Duration::ZERO,
-            timeout: Duration::from_secs(seconds), dispatched: 0 }
+            timeout: Duration::from_secs(seconds), dispatched: 0, workspace: None, source_length: 0 }
+    }
+
+    // Observe the authentic workspace token captured from the loaded request,
+    // not guessed physical memory or whichever register currently holds cx.
+    // Only diagnostic reports read it; no scan on every dispatch slice.
+    fn source_cursor(&self,k:&Kernel) -> Option<u64> {
+        let (owner,agent,pointer)=self.workspace?;
+        let mut bytes=[0u8;8];
+        k.fabric.read_heap_bytes(owner,agent,pointer,&mut bytes).ok()?;
+        Some(u64::from_le_bytes(bytes))
     }
 
     fn check(&mut self, k: &Kernel, key: ProcessKey, quantum: usize) {
@@ -57,15 +69,15 @@ impl ProducerProgress {
         let elapsed = self.started.elapsed();
         let process = &k.processes[key.slot];
         if elapsed.saturating_sub(self.reported) >= Duration::from_secs(5) {
-            eprintln!("protected CC2 [{}]: {:.1}s dispatched_budget={} pc={:#x} state={:?}",
+            eprintln!("protected CC2 [{}]: {:.1}s dispatched_budget={} pc={:#x} state={:?} source_cursor={:?}/{}",
                 self.label, elapsed.as_secs_f64(), self.dispatched,
-                process.core.pc, process.state);
+                process.core.pc, process.state,self.source_cursor(k),self.source_length);
             self.reported = elapsed;
         }
         assert!(elapsed < self.timeout,
-            "protected CC2 [{}] diagnostic timeout after {:.1}s; dispatched_budget={} pc={:#x} state={:?} registers={:x?}. This is not proof of guest nontermination. ANKA_PRODUCER_TIMEOUT_SECS controls the per-stage wall limit.",
+            "protected CC2 [{}] diagnostic timeout after {:.1}s; dispatched_budget={} pc={:#x} state={:?} registers={:x?} source_cursor={:?}/{}. This is not proof of guest nontermination. ANKA_PRODUCER_TIMEOUT_SECS controls the per-stage wall limit.",
             self.label, elapsed.as_secs_f64(), self.dispatched, process.core.pc,
-            process.state, process.core.r);
+            process.state, process.core.r,self.source_cursor(k),self.source_length);
     }
 
     fn done(&self) {
@@ -143,11 +155,30 @@ fn read_producer_output(k: &Kernel, attempt: &CompilerOutputAttempt, used: u64)
 fn observe(label: &'static str, image: &AnkaldLinkedImage, source: &[u8], capacity: u64)
     -> (CompilerReplyMetadata, Vec<u8>)
 {
+    observe_workspace(label,image,source,capacity,None)
+}
+
+fn observe_workspace(label: &'static str,image: &AnkaldLinkedImage,source: &[u8],capacity: u64,
+    directory: Option<crate::anka64::compiler_adapter::resources::growth::workspace::WorkspaceDirectory>)
+    -> (CompilerReplyMetadata,Vec<u8>)
+{
     use super::capture::{CompilerCaptureError, CompilerCaptureSlice};
     use crate::anka64::compiler_adapter::RebuildAdmissionRole;
     let (mut k, key) = machine(image);
-    let mut attempt = k.load_compiler_request(key, budget(source, capacity), source).unwrap();
+    let input=if directory.is_some() { k.ingest_compiler_directory_source(source) }
+        else { k.ingest_compiler_input(super::inputs::CompilerInputRole::EffectiveSource,source) }.unwrap();
+    let loaded=match directory {
+        Some(d)=>k.load_compiler_input_with_workspace(key,budget(source,capacity),&input,d),
+        None=>k.load_compiler_request_from_input(key,budget(source,capacity),&input),
+    };
+    k.discard_compiler_input(&input).unwrap();
+    let mut attempt=loaded.unwrap();
     let mut progress = ProducerProgress::new(label);
+    let request=k.processes[key.slot].core.authenticated_pointer(&k.fabric,R0).unwrap().unwrap();
+    let cell=k.fabric.scoped_pointers.add_heap_pointer(request,attempt.owner,288).unwrap();
+    let workspace=k.fabric.load_heap_pointer_cell(attempt.owner,attempt.agent,cell).unwrap().unwrap();
+    progress.workspace=Some((attempt.owner,attempt.agent,workspace));
+    progress.source_length=source.len() as u64;
     assert!(collect_producer_trace(&mut k));
     for _ in 0..PRODUCER_WORK_LIMIT / PRODUCER_QUANTUM as u64 {
         let result = match k.run_compiler_capture_slice(&mut attempt, PRODUCER_QUANTUM,
@@ -222,3 +253,6 @@ mod entry_tests;
 
 #[path = "producer_publication_tests.rs"]
 mod publication_tests;
+
+#[path = "workspace_producer_tests.rs"]
+mod workspace_tests;

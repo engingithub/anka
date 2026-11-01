@@ -1,0 +1,38 @@
+import "anka108_compiler_admission.kleis"
+define ar108_admit(authority : Bool,current_receipt : Bool,machine_reserved : Bool,report_reserved : Bool,bounded_geometry : Bool) = authority ∧ current_receipt ∧ machine_reserved ∧ report_reserved ∧ bounded_geometry
+example "admit accepted" { assert(ar108_admit(res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "admit requires authority" { assert(¬(ar108_admit(res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "admit requires current_receipt" { assert(¬(ar108_admit(res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "admit requires machine_reserved" { assert(¬(ar108_admit(res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "admit requires report_reserved" { assert(¬(ar108_admit(res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "admit requires bounded_geometry" { assert(¬(ar108_admit(res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))) }
+define ar108_spawn(supervisor : Bool,not_spawned : Bool,slots_available : Bool) = supervisor ∧ not_spawned ∧ slots_available
+example "spawn accepted" { assert(ar108_spawn(res108_true(),res108_true(),res108_true())) }
+example "spawn requires supervisor" { assert(¬(ar108_spawn(res108_false(),res108_true(),res108_true()))) }
+example "spawn requires not_spawned" { assert(¬(ar108_spawn(res108_true(),res108_false(),res108_true()))) }
+example "spawn requires slots_available" { assert(¬(ar108_spawn(res108_true(),res108_true(),res108_false()))) }
+define ar108_refund_machine(machine_destroyed : Bool,temporary_storage_destroyed : Bool) = machine_destroyed ∧ temporary_storage_destroyed
+example "refund_machine accepted" { assert(ar108_refund_machine(res108_true(),res108_true())) }
+example "refund_machine requires machine_destroyed" { assert(¬(ar108_refund_machine(res108_false(),res108_true()))) }
+example "refund_machine requires temporary_storage_destroyed" { assert(¬(ar108_refund_machine(res108_true(),res108_false()))) }
+define ar108_refund_report(report_destroyed : Bool) = report_destroyed
+example "refund_report accepted" { assert(ar108_refund_report(res108_true())) }
+example "refund_report requires report_destroyed" { assert(¬(ar108_refund_report(res108_false()))) }
+define ar108_step(cpu_only : Bool,no_devices : Bool,bounded_frames : Bool,terminal_trace : Bool) = cpu_only ∧ no_devices ∧ bounded_frames ∧ terminal_trace
+example "step accepted" { assert(ar108_step(res108_true(),res108_true(),res108_true(),res108_true())) }
+example "step requires cpu_only" { assert(¬(ar108_step(res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "step requires no_devices" { assert(¬(ar108_step(res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "step requires bounded_frames" { assert(¬(ar108_step(res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "step requires terminal_trace" { assert(¬(ar108_step(res108_true(),res108_true(),res108_true(),res108_false()))) }
+define ar108_output(used : BitVec64,count : BitVec64) =
+    bvule(used,bvconst(65536,64)) ∧ bvule(count,bvconst(4096,64)) ∧
+    bvule(count,bvsub(bvconst(65536,64),used))
+example "output 0 4096" { assert(ar108_output(bvconst(0,64),bvconst(4096,64))) }
+example "output 65536 0" { assert(ar108_output(bvconst(65536,64),bvconst(0,64))) }
+example "output 61440 4096" { assert(ar108_output(bvconst(61440,64),bvconst(4096,64))) }
+example "output 65536 1" { assert(¬(ar108_output(bvconst(65536,64),bvconst(1,64)))) }
+example "output 65537 0" { assert(¬(ar108_output(bvconst(65537,64),bvconst(0,64)))) }
+example "output 0 4097" { assert(¬(ar108_output(bvconst(0,64),bvconst(4097,64)))) }
+example "output 65535 2" { assert(¬(ar108_output(bvconst(65535,64),bvconst(2,64)))) }
+example "accepted output cannot wrap or exceed limit" { assert(∀(used : BitVec64,count : BitVec64). ar108_output(used,count) → (bvuge(bvadd(used,count),used) ∧ bvule(bvadd(used,count),bvconst(65536,64)))) }
+example "retained report prohibits refund" { assert(¬ar108_refund_report(res108_false())) }

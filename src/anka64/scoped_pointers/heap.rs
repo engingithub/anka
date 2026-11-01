@@ -11,6 +11,8 @@ use crate::anka64::placement::{PlacementError, page_ceil};
 use crate::anka64::state::{DomainId, ProcessKey};
 use std::mem::size_of;
 mod application;
+mod host_storage;
+pub(crate) use host_storage::HostStorageReservation;
 pub(crate) use application::HeapJob;
 mod placement;
 mod fabric;
@@ -61,6 +63,7 @@ pub(crate) enum Resource {
     Workers,
     WorkTickets,
     BackendRequests,
+    HostStorage,
     Identity,
 }
 
@@ -145,6 +148,7 @@ pub(super) struct HeapLedger {
     accounts: Vec<Option<Account>>,
     cleanup: Vec<Option<CleanupRecord>>,
     workers: Vec<Option<workers::WorkerRecord>>,
+    host_storage: Vec<Option<host_storage::HostStorageRecord>>,
     next_worker: u64,
     next_owner: u64,
     next_job: u64,
@@ -189,20 +193,21 @@ impl ScopedPointers {
         }
         // Reject impossible budgets before allocating. Recompute with actual
         // retained capacities below (try_reserve_exact may return more).
-        let footprint = |slots, scopes, owners, cleanup| -> Result<u64, HeapError> {
+        let footprint = |slots, scopes, owners, cleanup, host| -> Result<u64, HeapError> {
             [
                 bytes::<Self>(1)?,
                 bytes::<Slot>(slots)?,
                 bytes::<Option<super::ScopeRecord>>(scopes)?,
                 bytes::<Option<Account>>(owners)?,
                 bytes::<Option<CleanupRecord>>(cleanup)?,
+                bytes::<Option<host_storage::HostStorageRecord>>(host)?,
             ]
             .into_iter()
             .try_fold(0u64, |sum, n| {
                 sum.checked_add(n).ok_or(HeapError::Configuration)
             })
         };
-        if footprint(limits.slots, limits.scopes, limits.owners, limits.cleanup)?
+        if footprint(limits.slots, limits.scopes, limits.owners, limits.cleanup, limits.cleanup)?
             > limits.global_bytes
         {
             return Err(HeapError::Capacity(Resource::GlobalBytes));
@@ -211,11 +216,13 @@ impl ScopedPointers {
         let scopes = fixed_table(limits.scopes, None)?;
         let accounts = fixed_table(limits.owners, None)?;
         let cleanup = fixed_table(limits.cleanup, None)?;
+        let host_storage = fixed_table(limits.cleanup, None)?;
         let fixed_bytes = footprint(
             slots.capacity(),
             scopes.capacity(),
             accounts.capacity(),
             cleanup.capacity(),
+            host_storage.capacity(),
         )?;
         if fixed_bytes > limits.global_bytes {
             return Err(HeapError::Capacity(Resource::GlobalBytes));
@@ -230,6 +237,7 @@ impl ScopedPointers {
                 accounts,
                 cleanup,
                 workers: Vec::new(),
+                host_storage,
                 next_worker: 1,
                 next_owner: 1,
                 next_job: 1,

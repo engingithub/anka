@@ -1,0 +1,40 @@
+import "anka108_compiler_admission.kleis"
+example "hostile ca108_configure bypass authority" { assert(ca108_configure(res108_false(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile ca108_configure bypass quota" { assert(ca108_configure(res108_true(),res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile ca108_configure bypass geometry" { assert(ca108_configure(res108_true(),res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile ca108_configure bypass vacant" { assert(ca108_configure(res108_true(),res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile ca108_configure bypass sealed_code" { assert(ca108_configure(res108_true(),res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile ca108_enter bypass current_custodian" { assert(ca108_enter(res108_false(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile ca108_enter bypass charged" { assert(ca108_enter(res108_true(),res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile ca108_enter bypass free_slot" { assert(ca108_enter(res108_true(),res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile ca108_enter bypass zero_stack" { assert(ca108_enter(res108_true(),res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile ca108_enter bypass fresh_identity" { assert(ca108_enter(res108_true(),res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile ca108_recycle bypass terminated" { assert(ca108_recycle(res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile ca108_recycle bypass owner_released" { assert(ca108_recycle(res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile ca108_recycle bypass terminal_work" { assert(ca108_recycle(res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile ca108_recycle bypass frames_retired" { assert(ca108_recycle(res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile ca108_release bypass machine_destroyed" { assert(ca108_release(res108_false(),res108_true(),res108_true())) }
+example "hostile ca108_release bypass metadata_destroyed" { assert(ca108_release(res108_true(),res108_false(),res108_true())) }
+example "hostile ca108_release bypass receipts_destroyed" { assert(ca108_release(res108_true(),res108_true(),res108_false())) }
+example "hostile excess slots" { assert(ca108_slots(bvconst(9,64))) }
+example "hostile step 0 128" { assert(ca108_step(bvconst(128,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),res108_true())) }
+example "hostile step 1 128" { assert(ca108_step(bvconst(0,64),bvconst(128,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),res108_true())) }
+example "hostile step 2 2" { assert(ca108_step(bvconst(0,64),bvconst(0,64),bvconst(2,64),bvconst(0,64),bvconst(1,64),res108_true())) }
+example "hostile step 3 4097" { assert(ca108_step(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(4097,64),bvconst(1,64),res108_true())) }
+example "hostile step 4 0" { assert(ca108_step(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),res108_true())) }
+example "hostile step 4 257" { assert(ca108_step(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(257,64),res108_true())) }
+
+example "hostile pending frame fits" { assert(¬(ca108_frame(bvconst(15000,64),bvconst(663,64),bvconst(16384,64)))) }
+example "hostile pending frame exceeds" { assert(ca108_frame(bvconst(16000,64),bvconst(663,64),bvconst(16384,64))) }
+example "hostile old profile exceeds" { assert(ca108_frame(bvconst(3800,64),bvconst(663,64),bvconst(4096,64))) }
+example "hostile frame wrap" { assert(ca108_frame(bvsub(bvconst(0,64),bvconst(1,64)),bvconst(1,64),bvconst(16384,64))) }
+example "hostile pool full" { assert(¬(ca108_pool(bvconst(16384,64),bvconst(16384,64),bvconst(4096,64),res108_true()))) }
+example "hostile pool uncharged" { assert(ca108_pool(bvconst(1,64),bvconst(1,64),bvconst(0,64),res108_false())) }
+example "hostile compiler envelope 0" { assert(¬(ca108_compiler_step(bvconst(127,64),bvconst(127,64),bvconst(1,64),bvconst(16384,64),bvconst(256,64),res108_true()))) }
+example "hostile compiler envelope 1" { assert(ca108_compiler_step(bvconst(128,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),res108_true())) }
+example "hostile compiler envelope 2" { assert(ca108_compiler_step(bvconst(0,64),bvconst(128,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),res108_true())) }
+example "hostile compiler envelope 3" { assert(ca108_compiler_step(bvconst(0,64),bvconst(0,64),bvconst(2,64),bvconst(0,64),bvconst(1,64),res108_true())) }
+example "hostile compiler envelope 4" { assert(ca108_compiler_step(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(16385,64),bvconst(1,64),res108_true())) }
+example "hostile compiler envelope 5" { assert(ca108_compiler_step(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),res108_true())) }
+example "hostile compiler envelope 6" { assert(ca108_compiler_step(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(257,64),res108_true())) }
+example "hostile compiler envelope 7" { assert(ca108_compiler_step(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),res108_false())) }

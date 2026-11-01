@@ -760,3 +760,506 @@ example "refresh requires authority" {
 example "refresh requires serialized" {
     assert(¬pub108_refresh(bvconst(7,64),bvconst(8,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))
 }
+
+// C2.6: ABI-2 capture uses its authentic attempt capacity, not the legacy
+// 262144-byte ABI-1 envelope. This guard precedes allocation and validation.
+// held/limit are the shared account observations; reservation must ALSO satisfy
+// the existing global/placement/slot guards. No certificate authorizes bytes.
+define pub108_stage_charge(used : BitVec64) =
+    bvadd(bvmul(used,bvconst(32,64)),bvconst(4096,64))
+define pub108_capture_budget(used : BitVec64, capacity : BitVec64,
+    held : BitVec64, limit : BitVec64) =
+    bvuge(used,bvconst(112,64)) ∧ (bvand(used,bvconst(7,64))=pub108_z()) ∧
+    bvule(used,capacity) ∧ bvule(capacity,heap108_signed_max()) ∧
+    bvule(used,bvconst(288230376151711615,64)) ∧
+    bvule(limit,heap108_signed_max()) ∧
+    res108_add(held,pub108_stage_charge(used),limit)
+
+example "law: capture cannot exceed authentic capacity" {
+    assert(∀(u : BitVec64). ∀(c : BitVec64). ∀(h : BitVec64). ∀(l : BitVec64).
+        (pub108_capture_budget(u,c,h,l) → bvule(u,c)))
+}
+example "law: capture staging charge does not wrap" {
+    assert(∀(u : BitVec64). ∀(c : BitVec64). ∀(h : BitVec64). ∀(l : BitVec64).
+        (pub108_capture_budget(u,c,h,l) →
+         (bvuge(pub108_stage_charge(u),u) ∧ bvule(pub108_stage_charge(u),heap108_signed_max()))))
+}
+example "law: capture leaves peers within the shared budget" {
+    assert(∀(u : BitVec64). ∀(c : BitVec64). ∀(h : BitVec64). ∀(l : BitVec64).
+        (pub108_capture_budget(u,c,h,l) →
+         (bvuge(bvadd(h,pub108_stage_charge(u)),h) ∧ bvule(bvadd(h,pub108_stage_charge(u)),l))))
+}
+example "law: larger adequate capacity does not change stage charge" {
+    assert(∀(u : BitVec64). ∀(c : BitVec64). ∀(d : BitVec64). ∀(h : BitVec64). ∀(l : BitVec64).
+        ((pub108_capture_budget(u,c,h,l) ∧ bvuge(d,c) ∧ bvule(d,heap108_signed_max())) →
+         pub108_capture_budget(u,d,h,l)))
+}
+
+example "capture budget: legacy boundary" {
+    assert(pub108_capture_budget(bvconst(262144,64),bvconst(262144,64),bvconst(0,64),bvconst(16777216,64)))
+}
+
+example "capture budget: beyond legacy boundary" {
+    assert(pub108_capture_budget(bvconst(262152,64),bvconst(524288,64),bvconst(0,64),bvconst(16777216,64)))
+}
+
+example "capture budget: larger adequate arena" {
+    assert(pub108_capture_budget(bvconst(262152,64),bvconst(1048576,64),bvconst(0,64),bvconst(16777216,64)))
+}
+
+example "capture budget: exact staging budget" {
+    assert(pub108_capture_budget(bvconst(262152,64),bvconst(524288,64),bvconst(1024,64),bvconst(8393984,64)))
+}
+
+example "capture budget: staging budget short" {
+    assert(¬pub108_capture_budget(bvconst(262152,64),bvconst(524288,64),bvconst(1024,64),bvconst(8393983,64)))
+}
+
+example "capture budget: used above actual capacity" {
+    assert(¬pub108_capture_budget(bvconst(262152,64),bvconst(262144,64),bvconst(0,64),bvconst(16777216,64)))
+}
+
+example "capture budget: unaligned used" {
+    assert(¬pub108_capture_budget(bvconst(262153,64),bvconst(524288,64),bvconst(0,64),bvconst(16777216,64)))
+}
+
+example "capture budget: short header" {
+    assert(¬pub108_capture_budget(bvconst(104,64),bvconst(4096,64),bvconst(0,64),bvconst(16777216,64)))
+}
+
+example "capture budget: multiplication overflow" {
+    assert(¬pub108_capture_budget(bvconst(576460752303423488,64),bvconst(576460752303423488,64),bvconst(0,64),bvconst(9223372036854775807,64)))
+}
+
+example "capture budget: peer charge denies stage" {
+    assert(¬pub108_capture_budget(bvconst(262152,64),bvconst(524288,64),bvconst(16777216,64),bvconst(16777216,64)))
+}
+
+// Published-module consumption is a NEW check at link time. A prior commit
+// does not imply current provenance/read authority. Identity is resolved from
+// this Kernel's records; ordered list positions are compared pointwise. The
+// certificates denote current runtime checks, not caller or guest flags.
+define pub108_link_input(role : BitVec8, abi : BitVec64, offset : BitVec64,
+    length : BitVec64, bound : BitVec64, receipt_current : Bool,
+    provenance_current : Bool, read_only : Bool, exact_copy : Bool,
+    protected_module : Bool, same_linker : Bool) =
+    (role=bvconst(2,8)) ∧ (abi=bvconst(2,64)) ∧ (offset=pub108_z()) ∧
+    bvuge(length,bvconst(112,64)) ∧ bvule(length,bound) ∧
+    bvule(bound,heap108_signed_max()) ∧ receipt_current ∧ provenance_current ∧
+    read_only ∧ exact_copy ∧ protected_module ∧ same_linker
+
+define pub108_link_order(position : BitVec64, frozen_position : BitVec64,
+    epoch : BitVec64, frozen_epoch : BitVec64) =
+    (position=frozen_position) ∧ (epoch=frozen_epoch) ∧ bvugt(epoch,pub108_z())
+
+define pub108_link_dispatch(count : BitVec64, profile : BitVec8,
+    execution_authority : Bool, every_input : Bool, exact_order : Bool,
+    stage_reserved : Bool, exclusive_custody : Bool) =
+    bvugt(count,pub108_z()) ∧ bvule(count,bvconst(4096,64)) ∧
+    ((profile=bvconst(0,8)) ∨ (profile=bvconst(3,8))) ∧ execution_authority ∧
+    every_input ∧ exact_order ∧ stage_reserved ∧ exclusive_custody
+
+// The linked bytes remain borrowed charged data. This guard does not issue
+// EXECUTE rights, publish an artifact, or certify the isolated runner's entire
+// host-memory footprint. C2 whole-machine accounting remains separate.
+define pub108_link_retain(dispatch : Bool, guest_success : Bool,
+    exact_output : Bool, inputs_current : Bool, selected_profile : BitVec8,
+    executed_profile : BitVec8, length : BitVec64, reserved : BitVec64) =
+    dispatch ∧ guest_success ∧ exact_output ∧ inputs_current ∧
+    (selected_profile=executed_profile) ∧ bvugt(length,pub108_z()) ∧
+    bvule(length,reserved)
+
+example "link consumer: current protected module" {
+    assert(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "link consumer: closed role" {
+    assert(¬(pub108_link_input(bvconst(1,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: linked image role" {
+    assert(¬(pub108_link_input(bvconst(3,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: old ABI" {
+    assert(¬(pub108_link_input(bvconst(2,8),bvconst(1,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: interior source" {
+    assert(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(8,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: short header" {
+    assert(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(104,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: over profile" {
+    assert(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(1032,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: stale receipt" {
+    assert(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: changed provenance" {
+    assert(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: writable grant" {
+    assert(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: changed bytes" {
+    assert(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true())))
+}
+
+example "link consumer: bad module" {
+    assert(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "link consumer: different linker" {
+    assert(¬(pub108_link_input(bvconst(2,8),bvconst(2,64),bvconst(0,64),bvconst(512,64),bvconst(1024,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false())))
+}
+
+example "link consumer: order exact" {
+    assert(pub108_link_order(bvconst(0,64),bvconst(0,64),bvconst(2,64),bvconst(2,64)))
+}
+
+example "link consumer: order swapped" {
+    assert(¬(pub108_link_order(bvconst(1,64),bvconst(0,64),bvconst(2,64),bvconst(2,64))))
+}
+
+example "link consumer: epoch changed" {
+    assert(¬(pub108_link_order(bvconst(0,64),bvconst(0,64),bvconst(3,64),bvconst(2,64))))
+}
+
+example "link consumer: zero epoch" {
+    assert(¬(pub108_link_order(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64))))
+}
+
+example "link consumer: dispatch standard" {
+    assert(pub108_link_dispatch(bvconst(2,64),bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "link consumer: dispatch large" {
+    assert(pub108_link_dispatch(bvconst(2,64),bvconst(3,8),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "link consumer: producer profile denied" {
+    assert(¬(pub108_link_dispatch(bvconst(2,64),bvconst(2,8),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: empty list" {
+    assert(¬(pub108_link_dispatch(bvconst(0,64),bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: oversized list" {
+    assert(¬(pub108_link_dispatch(bvconst(4097,64),bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: no execution authority" {
+    assert(¬(pub108_link_dispatch(bvconst(2,64),bvconst(0,8),res108_false(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: unvalidated input" {
+    assert(¬(pub108_link_dispatch(bvconst(2,64),bvconst(0,8),res108_true(),res108_false(),res108_true(),res108_true(),res108_true())))
+}
+
+example "link consumer: reordered input" {
+    assert(¬(pub108_link_dispatch(bvconst(2,64),bvconst(0,8),res108_true(),res108_true(),res108_false(),res108_true(),res108_true())))
+}
+
+example "link consumer: unreserved stage" {
+    assert(¬(pub108_link_dispatch(bvconst(2,64),bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "link consumer: lost custody" {
+    assert(¬(pub108_link_dispatch(bvconst(2,64),bvconst(0,8),res108_true(),res108_true(),res108_true(),res108_true(),res108_false())))
+}
+
+example "link consumer: retain exact image" {
+    assert(pub108_link_retain(res108_true(),res108_true(),res108_true(),res108_true(),bvconst(3,8),bvconst(3,8),bvconst(4096,64),bvconst(8192,64)))
+}
+
+example "link consumer: failed dispatch" {
+    assert(¬(pub108_link_retain(res108_false(),res108_true(),res108_true(),res108_true(),bvconst(3,8),bvconst(3,8),bvconst(4096,64),bvconst(8192,64))))
+}
+
+example "link consumer: guest failure" {
+    assert(¬(pub108_link_retain(res108_true(),res108_false(),res108_true(),res108_true(),bvconst(3,8),bvconst(3,8),bvconst(4096,64),bvconst(8192,64))))
+}
+
+example "link consumer: modified image" {
+    assert(¬(pub108_link_retain(res108_true(),res108_true(),res108_false(),res108_true(),bvconst(3,8),bvconst(3,8),bvconst(4096,64),bvconst(8192,64))))
+}
+
+example "link consumer: revoked after link" {
+    assert(¬(pub108_link_retain(res108_true(),res108_true(),res108_true(),res108_false(),bvconst(3,8),bvconst(3,8),bvconst(4096,64),bvconst(8192,64))))
+}
+
+example "link consumer: profile substitution" {
+    assert(¬(pub108_link_retain(res108_true(),res108_true(),res108_true(),res108_true(),bvconst(3,8),bvconst(0,8),bvconst(4096,64),bvconst(8192,64))))
+}
+
+example "link consumer: image exceeds charge" {
+    assert(¬(pub108_link_retain(res108_true(),res108_true(),res108_true(),res108_true(),bvconst(3,8),bvconst(3,8),bvconst(8193,64),bvconst(8192,64))))
+}
+
+example "law: link order cannot substitute epoch or position" {
+ assert(∀(p : BitVec64). ∀(q : BitVec64). ∀(e : BitVec64). ∀(f : BitVec64).
+   (pub108_link_order(p,q,e,f) → ((p=q) ∧ (e=f) ∧ bvugt(e,pub108_z()))))
+}
+example "law: link dispatch requires execution authority" {
+ assert(∀(n : BitVec64). ∀(p : BitVec8). ∀(a : Bool). ∀(v : Bool).
+   ∀(o : Bool). ∀(s : Bool). ∀(c : Bool).
+   (pub108_link_dispatch(n,p,a,v,o,s,c) → a))
+}
+example "law: link dispatch excludes compiler producer ABI profile" {
+ assert(∀(n : BitVec64). ∀(a : Bool). ∀(v : Bool). ∀(o : Bool). ∀(s : Bool). ∀(c : Bool).
+   ¬pub108_link_dispatch(n,bvconst(2,8),a,v,o,s,c))
+}
+example "law: retained linked output stays inside reserved bytes" {
+ assert(∀(d : Bool). ∀(g : Bool). ∀(e : Bool). ∀(i : Bool).
+   ∀(p : BitVec8). ∀(q : BitVec8). ∀(n : BitVec64). ∀(r : BitVec64).
+   (pub108_link_retain(d,g,e,i,p,q,n,r) → (bvule(n,r) ∧ (p=q) ∧ i)))
+}
+
+// Linked publication transfers already-charged host custody, then adds a
+// separately charged immutable heap artifact. Commit linearizes at one record
+// insertion; source module records are preserved. This is in-memory persistence,
+// not disk durability and not application execution admission.
+define pub108_link_commit(expected : BitVec64, epoch : BitVec64,
+    authority : Bool, live_custodian : Bool, current_inputs : Bool,
+    validated_link : Bool, read_only_artifact : Bool, host_charge : Bool,
+    heap_charge : Bool, fresh_object : Bool, private_result : Bool) =
+    (expected=epoch) ∧ bvult(epoch,bvsub(pub108_z(),pub108_one())) ∧
+    authority ∧ live_custodian ∧ current_inputs ∧ validated_link ∧
+    read_only_artifact ∧ host_charge ∧ heap_charge ∧ fresh_object ∧ private_result
+
+define pub108_link_epoch(commit : Bool, old : BitVec64) =
+    if commit then bvadd(old,pub108_one()) else old
+
+define pub108_link_access(live : Bool, host_charge : Bool, heap_live : Bool,
+    current_inputs : Bool, exact_bytes : Bool, profile_bound : Bool) =
+    live ∧ host_charge ∧ heap_live ∧ current_inputs ∧ exact_bytes ∧ profile_bound
+
+example "law: failed link publication preserves epoch" {
+ assert(∀(e : BitVec64). pub108_link_epoch(res108_false(),e)=e)
+}
+example "law: linked publication cannot wrap epoch" {
+ assert(∀(e : BitVec64). ∀(a : Bool). ∀(l : Bool). ∀(i : Bool).
+   ∀(v : Bool). ∀(r : Bool). ∀(h : Bool). ∀(b : Bool). ∀(f : Bool). ∀(p : Bool).
+   (pub108_link_commit(e,e,a,l,i,v,r,h,b,f,p) →
+    bvugt(pub108_link_epoch(res108_true(),e),e)))
+}
+example "law: revoked dependencies deny linked read" {
+ assert(∀(l : Bool). ∀(h : Bool). ∀(b : Bool). ∀(e : Bool). ∀(p : Bool).
+   ¬pub108_link_access(l,h,b,res108_false(),e,p))
+}
+
+example "linked publication: commit charged read-only result" {
+ assert(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+example "linked publication: stale epoch" {
+ assert(¬(pub108_link_commit(bvconst(2,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "linked publication: authority absent" {
+ assert(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "linked publication: dead custodian" {
+ assert(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "linked publication: changed dependency" {
+ assert(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "linked publication: unvalidated result" {
+ assert(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "linked publication: writable artifact" {
+ assert(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "linked publication: missing host charge" {
+ assert(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true())))
+}
+
+example "linked publication: missing heap charge" {
+ assert(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true())))
+}
+
+example "linked publication: reused object" {
+ assert(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "linked publication: already visible" {
+ assert(¬(pub108_link_commit(bvconst(3,64),bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false())))
+}
+
+example "linked publication: epoch exhausted" {
+ assert(¬(pub108_link_commit(bvsub(pub108_z(),pub108_one()),bvsub(pub108_z(),pub108_one()),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "linked publication: read rejects custodian" {
+ assert(¬(pub108_link_access(res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "linked publication: read rejects host charge" {
+ assert(¬(pub108_link_access(res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true())))
+}
+
+example "linked publication: read rejects heap authority" {
+ assert(¬(pub108_link_access(res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true())))
+}
+
+example "linked publication: read rejects dependency" {
+ assert(¬(pub108_link_access(res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true())))
+}
+
+example "linked publication: read rejects bytes" {
+ assert(¬(pub108_link_access(res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())))
+}
+
+example "linked publication: read rejects profile" {
+ assert(¬(pub108_link_access(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false())))
+}
+
+example "linked publication: read current exact record" {
+ assert(pub108_link_access(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true()))
+}
+
+// Receipt-to-execution refinement. These certificates are checked by the host
+// under one exclusive Kernel borrow, before allocating the isolated runner.
+// Existing publication remains READ-only; execution uses a fresh sealed copy.
+// This contract does not certify isolated-runner whole-machine accounting.
+define pub108_execute(current : Bool, authority : Bool, profile : Bool,
+    entry : BitVec64, code : BitVec64, metadata : BitVec64, length : BitVec64,
+    limit : BitVec64, quantum : BitVec64, rounds : BitVec64) =
+    current ∧ authority ∧ profile ∧ (entry=pub108_z()) ∧
+    bvugt(code,pub108_z()) ∧ (code=metadata) ∧ bvult(metadata,length) ∧
+    bvule(length,limit) ∧ bvugt(quantum,pub108_z()) ∧ bvugt(rounds,pub108_z()) ∧
+    bvule(quantum,bvconst(200000,64)) ∧ bvule(rounds,bvconst(10000,64))
+
+define pub108_execute_epoch(before : BitVec64, admitted : Bool) = before
+
+example "execution never changes publication epoch" {
+ assert(∀(e : BitVec64). ∀(a : Bool). pub108_execute_epoch(e,a)=e)
+}
+example "execution requires current receipt and separate authority" {
+ assert(∀(c : Bool). ∀(a : Bool). ∀(p : Bool).
+   pub108_execute(c,a,p,pub108_z(),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64)) → (c ∧ a ∧ p))
+}
+
+example "execution admission: valid" {
+ assert(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64)))
+}
+
+example "execution admission: stale receipt" {
+ assert(¬(pub108_execute(res108_false(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64))))
+}
+
+example "execution admission: absent authority" {
+ assert(¬(pub108_execute(res108_true(),res108_false(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64))))
+}
+
+example "execution admission: profile substitution" {
+ assert(¬(pub108_execute(res108_true(),res108_true(),res108_false(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64))))
+}
+
+example "execution admission: nonzero entry" {
+ assert(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(8,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64))))
+}
+
+example "execution admission: empty code" {
+ assert(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(0,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64))))
+}
+
+example "execution admission: metadata gap" {
+ assert(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(40,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64))))
+}
+
+example "execution admission: no metadata" {
+ assert(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(32,64),bvconst(1048576,64),bvconst(1000,64),bvconst(100,64))))
+}
+
+example "execution admission: over profile limit" {
+ assert(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(64,64),bvconst(1000,64),bvconst(100,64))))
+}
+
+example "execution admission: zero quantum" {
+ assert(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(0,64),bvconst(100,64))))
+}
+
+example "execution admission: zero rounds" {
+ assert(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(0,64))))
+}
+
+example "execution admission: excess quantum" {
+ assert(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(200001,64),bvconst(100,64))))
+}
+
+example "execution admission: excess rounds" {
+ assert(¬(pub108_execute(res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(32,64),bvconst(32,64),bvconst(96,64),bvconst(1048576,64),bvconst(1000,64),bvconst(10001,64))))
+}
+
+// Explicit C-function process entry: a trusted, exact-image-bound launcher
+// executes a real CALL before main. No loader writes the return-authority stack.
+// The launcher is sealed in the already-owned trap page after its HALT handler.
+// Original application code/metadata and publication bytes remain unchanged.
+define pub108_startup_binding(selected : Bool, sealed : Bool, protected : Bool,
+ actual_object : BitVec64, bound_object : BitVec64,
+ actual_generation : BitVec64, bound_generation : BitVec64,
+ actual_code : BitVec64, bound_code : BitVec64,
+ actual_image : BitVec64, bound_image : BitVec64, offset : BitVec64, entry : BitVec64) =
+ selected ∧ sealed ∧ protected ∧ (actual_object=bound_object) ∧
+ (actual_generation=bound_generation) ∧ (actual_code=bound_code) ∧
+ (actual_image=bound_image) ∧ (offset=pub108_z()) ∧ (entry=pub108_z()) ∧
+ bvugt(actual_code,pub108_z()) ∧ bvult(actual_code,actual_image)
+define pub108_startup_return(bound : Bool, actual_call : Bool, live_launcher : Bool,
+ frames_retired : Bool, target_matches : Bool) =
+ bound ∧ actual_call ∧ live_launcher ∧ frames_retired ∧ target_matches
+example "startup cannot authorize RET without actual CALL" {
+ assert(∀(b : Bool). ∀(l : Bool). ∀(f : Bool). ∀(t : Bool).
+  ¬(pub108_startup_return(b,res108_false(),l,f,t)))
+}
+example "startup requires retired main frame" {
+ assert(∀(b : Bool). ∀(c : Bool). ∀(l : Bool). ∀(t : Bool).
+  ¬(pub108_startup_return(b,c,l,res108_false(),t)))
+}
+
+example "startup: exact binding" { assert(pub108_startup_binding(res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(0,64),bvconst(0,64))) }
+
+example "startup: absent selection" { assert(¬(pub108_startup_binding(res108_false(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(0,64),bvconst(0,64)))) }
+
+example "startup: unsealed" { assert(¬(pub108_startup_binding(res108_true(),res108_false(),res108_true(),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(0,64),bvconst(0,64)))) }
+
+example "startup: legacy image" { assert(¬(pub108_startup_binding(res108_true(),res108_true(),res108_false(),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(0,64),bvconst(0,64)))) }
+
+example "startup: wrong object" { assert(¬(pub108_startup_binding(res108_true(),res108_true(),res108_true(),bvconst(8,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(0,64),bvconst(0,64)))) }
+
+example "startup: stale generation" { assert(¬(pub108_startup_binding(res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),bvconst(3,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(0,64),bvconst(0,64)))) }
+
+example "startup: changed code" { assert(¬(pub108_startup_binding(res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(72,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(0,64),bvconst(0,64)))) }
+
+example "startup: changed image" { assert(¬(pub108_startup_binding(res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(136,64),bvconst(128,64),bvconst(0,64),bvconst(0,64)))) }
+
+example "startup: interior offset" { assert(¬(pub108_startup_binding(res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(8,64),bvconst(0,64)))) }
+
+example "startup: nonzero entry" { assert(¬(pub108_startup_binding(res108_true(),res108_true(),res108_true(),bvconst(7,64),bvconst(7,64),bvconst(2,64),bvconst(2,64),bvconst(64,64),bvconst(64,64),bvconst(128,64),bvconst(128,64),bvconst(0,64),bvconst(8,64)))) }
+
+example "startup return: all return guards" { assert(pub108_startup_return(res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+
+example "startup return: binding" { assert(¬(pub108_startup_return(res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+
+example "startup return: actual CALL" { assert(¬(pub108_startup_return(res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))) }
+
+example "startup return: launcher generation" { assert(¬(pub108_startup_return(res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))) }
+
+example "startup return: frame retirement" { assert(¬(pub108_startup_return(res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))) }
+
+example "startup return: return target" { assert(¬(pub108_startup_return(res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))) }

@@ -48,6 +48,7 @@ pub(crate) struct CompilerOutputAttempt {
     reply: ScopedPointer,
     budget: Option<OutputRetryBudget>,
     loaded_source: Option<ScopedPointer>,
+    workspace_directory: Option<crate::anka64::compiler_adapter::resources::growth::workspace::WorkspaceDirectory>,
     publication: Option<publication::PublicationKey>,
 }
 
@@ -142,6 +143,7 @@ impl Kernel {
             reply,
             budget: Some(budget),
             loaded_source: None,
+            workspace_directory: None,
             publication: None,
         })
     }
@@ -168,8 +170,9 @@ impl Kernel {
                 attempt.reply,
                 budget.context().output_capacity(),
             )?;
-            match budget.context().decode(&bytes)? {
+            match budget.decode(&bytes)? {
                 CompilerReplyMetadata::NeedOutputCapacity(need) => Ok(budget.propose_retry(&need)?),
+                CompilerReplyMetadata::NeedWorkspaceCapacity(need) => Ok(budget.propose_workspace_retry(&need)?),
                 other => Err(CompilerRuntimeError::TerminalMetadata(other)),
             }
         })();
@@ -208,7 +211,17 @@ impl Kernel {
             self.finish_process(key.slot, ProcessResult::ProtectionFault);
             return Err(e.into());
         }
+        let admitted=self.compiler_admission_contains(key);
+        if admitted && (quantum==0 || quantum>256 || self.check_compiler_admission().is_err()
+            || !self.fabric.collect_admitted_compiler_trace()) {
+            attempt.budget=None;self.finish_process(key.slot,ProcessResult::ProtectionFault);
+            return Err(CompilerRuntimeError::ExecutionFailure);
+        }
         let at_exit = self.run_process_with_exit_stop(key.slot, quantum, true);
+        if admitted && !self.fabric.collect_admitted_compiler_trace() {
+            attempt.budget=None;self.finish_process(key.slot,ProcessResult::ProtectionFault);
+            return Err(CompilerRuntimeError::ExecutionFailure);
+        }
         if !at_exit {
             if self.processes[key.slot].state != ProcessState::Running {
                 attempt.budget = None;
@@ -267,10 +280,15 @@ impl Kernel {
 }
 
 pub(super) mod loader;
+pub(crate) mod inputs;
 pub(crate) mod capture;
 pub(crate) mod retained;
 pub(crate) mod publication;
 pub(crate) mod flow;
+pub(crate) mod jobs;
+pub(crate) mod service;
+pub(crate) mod preprocess;
+pub(crate) mod admission;
 
 #[cfg(test)]
 mod tests;

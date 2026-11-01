@@ -1,0 +1,32 @@
+import "anka108_preprocessor_storage.kleis"
+example "hostile start bypass 0" { assert(ps108_start(res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile start bypass 1" { assert(ps108_start(res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile start bypass 2" { assert(ps108_start(res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile start bypass 3" { assert(ps108_start(res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile start bypass 4" { assert(ps108_start(res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile start bypass 5" { assert(ps108_start(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile transfer bypass 0" { assert(ps108_transfer(res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile transfer bypass 1" { assert(ps108_transfer(res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile transfer bypass 2" { assert(ps108_transfer(res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile transfer bypass 3" { assert(ps108_transfer(res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile refund bypass 0" { assert(ps108_refund(res108_false(),res108_true())) }
+example "hostile refund bypass 1" { assert(ps108_refund(res108_true(),res108_false())) }
+example "hostile shape 0 1 4096" { assert(ps108_shape(bvconst(0,64),bvconst(1,64),bvconst(4096,64))) }
+example "hostile shape 257 1 4096" { assert(ps108_shape(bvconst(257,64),bvconst(1,64),bvconst(4096,64))) }
+example "hostile shape 1 0 4096" { assert(ps108_shape(bvconst(1,64),bvconst(0,64),bvconst(4096,64))) }
+example "hostile shape 1 131073 4096" { assert(ps108_shape(bvconst(1,64),bvconst(131073,64),bvconst(4096,64))) }
+example "hostile shape 1 1 0" { assert(ps108_shape(bvconst(1,64),bvconst(1,64),bvconst(0,64))) }
+example "hostile shape 1 1 1048577" { assert(ps108_shape(bvconst(1,64),bvconst(1,64),bvconst(1048577,64))) }
+example "hostile step 0 0 0 True" { assert(ps108_step(bvconst(0,64),bvconst(0,64),bvconst(0,64),res108_true())) }
+example "hostile step 257 0 0 True" { assert(ps108_step(bvconst(257,64),bvconst(0,64),bvconst(0,64),res108_true())) }
+example "hostile step 1 1024 0 True" { assert(ps108_step(bvconst(1,64),bvconst(1024,64),bvconst(0,64),res108_true())) }
+example "hostile step 1 0 1 True" { assert(ps108_step(bvconst(1,64),bvconst(0,64),bvconst(1,64),res108_true())) }
+example "hostile step 1 0 0 False" { assert(ps108_step(bvconst(1,64),bvconst(0,64),bvconst(0,64),res108_false())) }
+example "hostile exit gate bypass 0" { assert(ps108_exit_gate(res108_false(),res108_true(),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile exit gate bypass 1" { assert(ps108_exit_gate(res108_true(),res108_false(),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile exit gate bypass 2" { assert(ps108_exit_gate(res108_true(),res108_true(),bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile exit gate bypass 3" { assert(ps108_exit_gate(res108_true(),res108_true(),bvconst(1,64),res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile exit gate bypass 4" { assert(ps108_exit_gate(res108_true(),res108_true(),bvconst(1,64),res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile exit gate bypass 5" { assert(ps108_exit_gate(res108_true(),res108_true(),bvconst(1,64),res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile exit gate bypass 6" { assert(ps108_exit_gate(res108_true(),res108_true(),bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile nested exit event" { assert(ps108_exit_gate(res108_true(),res108_true(),bvconst(2,64),res108_true(),res108_true(),res108_true(),res108_true())) }

@@ -652,3 +652,9 @@ example "trace: old clean receipt cannot follow mutation" {
     assert(a23_publish(a23_true(),a23_true(),a23_true(),bvconst(1,8),bvconst(1,8),init108_dirty_done(a23_trace_dirty(),a23_trace_done2()),bvconst(4096,64),init108_version(a23_trace_dirty(),a23_trace_version2()),a23_trace_version2(),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(1,8),a23_true(),a23_true(),a23_next(a23_trace_dirty(),a23_trace_revision3()),a23_next(a23_trace_dirty(),a23_trace_revision3()),bvconst(1,8)))
 }
 
+
+example "hostile skip new high row" { assert(a23_prefix_attach(bvconst(5,64),bvconst(7000,64),bvconst(5,64),bvconst(36864,64))) }
+example "hostile erase earlier rows on hole reuse" { assert(a23_prefix_attach(bvconst(7001,64),bvconst(2,64),bvconst(3,64),bvconst(36864,64))) }
+example "hostile prefix exceeds storage" { assert(a23_prefix_row(bvconst(1,64),bvconst(36865,64),bvconst(36864,64))) }
+example "hostile trim occupied suffix" { assert(a23_prefix_trim(bvconst(7001,64),bvconst(5,64),bvconst(36864,64),a23_false())) }
+example "hostile wrap attachment" { assert(a23_prefix_attach(bvconst(0,64),bvsub(a23_z(),a23_o()),a23_z(),bvsub(a23_z(),a23_o()))) }

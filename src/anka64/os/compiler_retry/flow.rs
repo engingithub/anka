@@ -29,6 +29,7 @@ pub(crate) struct CompilerPublicationFlow {
     frozen: PublicationKey,
     role: RebuildAdmissionRole,
     epoch: u64,
+    retain_retry_pin: bool,
 }
 
 pub(crate) enum CompilerFlowProgress {
@@ -37,6 +38,12 @@ pub(crate) enum CompilerFlowProgress {
     /// coordinator admits a fresh process with this budget, never a reset one.
     Retry(OutputRetryBudget),
     Published(u64),
+}
+
+impl CompilerPublicationFlow {
+    pub(super) fn retain_retry_provenance(&mut self) -> PublicationKey {
+        self.retain_retry_pin=true; self.frozen
+    }
 }
 
 impl Kernel {
@@ -53,7 +60,7 @@ impl Kernel {
                 return Err(CompilerFlowError::Publication(error));
             }
         };
-        Ok(CompilerPublicationFlow { stage:Stage::Executing(attempt), frozen, role, epoch })
+        Ok(CompilerPublicationFlow { stage:Stage::Executing(attempt), frozen, role, epoch, retain_retry_pin:false })
     }
 
     /// One execution slice or one cleanup step. Never busy-waits or manufactures
@@ -77,7 +84,7 @@ impl Kernel {
             }
             Stage::Cleaning(pending) => match self.poll_compiler_retry(pending) {
                 Ok(None) => Ok(CompilerFlowProgress::Pending),
-                Ok(Some(budget)) => match self.cancel_compiler_publication(flow.frozen) {
+                Ok(Some(budget)) => match if flow.retain_retry_pin {Ok(())} else {self.cancel_compiler_publication(flow.frozen)} {
                     Ok(()) => {flow.stage=Stage::Finished;Ok(CompilerFlowProgress::Retry(budget))},
                     Err(e) => Err(CompilerFlowError::Publication(e)),
                 },

@@ -54,6 +54,21 @@ def main():
                            help='run only the C1 shared compiler resource/ABI gate pair')
     selection.add_argument('--only-publication', action='store_true',
                            help='run only the C2.5 ABI-2 artifact capture/publication gate pair')
+    selection.add_argument('--only-compiler-storage', action='store_true',
+                           help='run only shared compiler host-storage accounting gates')
+    selection.add_argument('--only-c3-c4', action='store_true',
+                           help='run compiler growth and module type evidence gates')
+    selection.add_argument('--only-http-application', action='store_true', help='run protected HTTP application and accounted input gates')
+    selection.add_argument('--only-rebuild-service', action='store_true', help='run ordinary rebuild service composition gates')
+    selection.add_argument('--only-application-run', action='store_true', help='run charged application execution gates')
+    selection.add_argument('--only-linker-storage', action='store_true', help='run charged bounded guest linker gates')
+    selection.add_argument('--only-compiler-admission', action='store_true', help='run compiler admission arena gates')
+    selection.add_argument('--only-preprocessor-storage', action='store_true', help='run accounted preprocessing gates')
+    selection.add_argument('--only-jobs', action='store_true', help='run compiler job custody and retry gates')
+    selection.add_argument('--only-workspace', action='store_true',
+                           help='run concrete CC2 workspace-directory gates')
+    selection.add_argument('--only-source-growth', action='store_true',
+                           help='run bounded source/preprocessor growth gates')
     parser.add_argument('--timeout', type=int, default=120,
                         help='wall-clock seconds per command (default: 120)')
     args = parser.parse_args()
@@ -77,7 +92,7 @@ def main():
             or args.only_reclamation or args.only_undertaker or args.only_a22 or args.only_a23
             or args.only_workers or args.only_cleanup or args.only_malloc
             or args.only_local_initialization or args.only_compiler_resources
-            or args.only_publication):
+            or args.only_publication or args.only_compiler_storage or args.only_c3_c4 or args.only_workspace or args.only_source_growth or args.only_jobs or args.only_preprocessor_storage or args.only_compiler_admission or args.only_linker_storage or args.only_application_run or args.only_rebuild_service or args.only_http_application):
         try:
             previous = subprocess.run(
                 [sys.executable, str(root / 'scripts/check-anka107-gates.py'),
@@ -89,7 +104,29 @@ def main():
         if previous.returncode:
             return 1
     all_ok = True
-    if args.only_publication:
+    if args.only_http_application:
+        stems = ('anka108_http_application',)
+    elif args.only_rebuild_service:
+        stems = ('anka108_rebuild_service',)
+    elif args.only_application_run:
+        stems = ('anka108_application_run',)
+    elif args.only_linker_storage:
+        stems = ('anka108_linker_storage',)
+    elif args.only_compiler_admission:
+        stems = ('anka108_compiler_admission',)
+    elif args.only_preprocessor_storage:
+        stems = ('anka108_preprocessor_storage',)
+    elif args.only_jobs:
+        stems = ('anka108_compiler_jobs',)
+    elif args.only_source_growth:
+        stems = ('anka108_source_growth',)
+    elif args.only_workspace:
+        stems = ('anka108_workspace_directory',)
+    elif args.only_c3_c4:
+        stems = ('anka108_compiler_growth', 'anka108_module_types', 'anka108_workspace_directory', 'anka108_source_growth')
+    elif args.only_compiler_storage:
+        stems = ('anka108_compiler_storage',)
+    elif args.only_publication:
         stems = ('anka108_artifact_publication',)
     elif args.only_compiler_resources:
         stems = ('anka108_compiler_resources',)
@@ -134,7 +171,8 @@ def main():
                  'anka108_allocation_placement', 'anka108_allocation_fabric',
                  'anka108_cleanup_workers', 'anka108_cleanup_reuse', 'anka108_malloc_runtime',
                  'anka108_local_initialization', 'anka108_compiler_resources',
-                 'anka108_artifact_publication')
+                 'anka108_artifact_publication', 'anka108_compiler_storage',
+                 'anka108_compiler_growth', 'anka108_module_types', 'anka108_workspace_directory', 'anka108_source_growth', 'anka108_compiler_jobs', 'anka108_preprocessor_storage', 'anka108_compiler_admission', 'anka108_linker_storage', 'anka108_application_run', 'anka108_rebuild_service', 'anka108_http_application')
     for stem in stems:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')

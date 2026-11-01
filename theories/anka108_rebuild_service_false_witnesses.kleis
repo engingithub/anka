@@ -1,0 +1,23 @@
+import "anka108_rebuild_service.kleis"
+example "hostile submit without authority" { assert(rs108_submit(res108_false(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile submit without slot_free" { assert(rs108_submit(res108_true(),res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile submit without current_tools" { assert(rs108_submit(res108_true(),res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile submit without charged_ingress" { assert(rs108_submit(res108_true(),res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile submit without exact_bundle" { assert(rs108_submit(res108_true(),res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile retry without retained_job" { assert(rs108_retry(res108_false(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile retry without old_owner_released" { assert(rs108_retry(res108_true(),res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile retry without fresh_process" { assert(rs108_retry(res108_true(),res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile retry without carried_plan" { assert(rs108_retry(res108_true(),res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile retry without same_source" { assert(rs108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile publish without current_provenance" { assert(rs108_publish(res108_false(),res108_true(),res108_true())) }
+example "hostile publish without real_guest_success" { assert(rs108_publish(res108_true(),res108_false(),res108_true())) }
+example "hostile publish without exact_artifact" { assert(rs108_publish(res108_true(),res108_true(),res108_false())) }
+example "hostile cancel without only_selected_job" { assert(rs108_cancel(res108_false(),res108_true(),res108_true())) }
+example "hostile cancel without actual_cleanup" { assert(rs108_cancel(res108_true(),res108_false(),res108_true())) }
+example "hostile cancel without peer_unchanged" { assert(rs108_cancel(res108_true(),res108_true(),res108_false())) }
+example "hostile handle 2 1 1" { assert(rs108_handle(bvconst(2,64),bvconst(1,64),bvconst(1,64))) }
+example "hostile handle 0 0 0" { assert(rs108_handle(bvconst(0,64),bvconst(0,64),bvconst(0,64))) }
+example "hostile handle 0 2 1" { assert(rs108_handle(bvconst(0,64),bvconst(2,64),bvconst(1,64))) }
+
+example "hostile cross realm replay" { assert(rs108_realm(bvconst(7,64),bvconst(8,64))) }
+example "hostile zero realm" { assert(rs108_realm(bvconst(0,64),bvconst(0,64))) }

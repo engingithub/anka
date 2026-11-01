@@ -17,13 +17,26 @@ fn sealed(k: &mut Kernel, bytes: &[u8]) -> LinkedArtifactKey {
 
 // Real loader/ISA transport, not a C compiler or self-host lineage witness.
 pub(crate) fn setup(k: &mut Kernel) -> (CompilerOutputAttempt,PublicationInputs,Vec<u8>) {
-    let bytes = aom(false,1);
+    setup_bytes(k, aom(false,1), 16384)
+}
+pub(super) fn setup_bytes(k: &mut Kernel, bytes: Vec<u8>, capacity: u64)
+    -> (CompilerOutputAttempt,PublicationInputs,Vec<u8>) {
+    setup_bytes_layout(k,bytes,capacity,None)
+}
+fn setup_bytes_layout(k: &mut Kernel,bytes: Vec<u8>,capacity: u64,
+    directory: Option<crate::anka64::compiler_adapter::resources::growth::workspace::WorkspaceDirectory>)
+    -> (CompilerOutputAttempt,PublicationInputs,Vec<u8>) {
     let report = [COMPILER_RESOURCE_MAGIC,2,10,1,0,0,0,bytes.len() as u64,8,0,21,22,23,24,25,0];
-    let key = client_report(k,10,1,16384,Some(report));
-    let b = budget(10,16384,8);
-    let plan: Vec<u8> = b.publication_plan_words().into_iter().flat_map(u64::to_le_bytes).collect();
-    let attempt = k.load_compiler_request(key,b,&AOM_MAGIC).unwrap();
-    k.fabric.write_heap_bytes(attempt.owner,attempt.agent,attempt.output,&bytes).unwrap();
+    let key = client_report(k,10,1,capacity,Some(report));
+    let b = budget(10,capacity,8);
+    let plan: Vec<u8> = b.publication_plan_words().into_iter()
+        .chain(directory.into_iter().flat_map(|d|d.binding_words())).flat_map(u64::to_le_bytes).collect();
+    let attempt = k.load_compiler_request_layout(key,b,&AOM_MAGIC,directory).unwrap();
+    for (i, chunk) in bytes.chunks(4096).enumerate() {
+        let pointer = k.fabric.scoped_pointers.add_heap_pointer(
+            attempt.output, attempt.owner, (i * 4096) as i64).unwrap();
+        k.fabric.write_heap_bytes(attempt.owner, attempt.agent, pointer, chunk).unwrap();
+    }
     let (_,object,generation,_,_) = k.processes[key.slot].core.compiler_publication_entry(&k.fabric).unwrap();
     let compiler = LinkedArtifactKey { object,generation };
     let owner = k.compiler_candidate_custodian().unwrap();
@@ -34,18 +47,18 @@ pub(crate) fn setup(k: &mut Kernel) -> (CompilerOutputAttempt,PublicationInputs,
         dependencies:vec![sealed(k,b"first dependency"),sealed(k,b"second dependency")] };
     (attempt,inputs,bytes)
 }
-fn freeze(k:&mut Kernel, a:&mut CompilerOutputAttempt,i:&PublicationInputs) -> PublicationKey {
+pub(super) fn freeze(k:&mut Kernel, a:&mut CompilerOutputAttempt,i:&PublicationInputs) -> PublicationKey {
     k.freeze_compiler_publication(a,i,RebuildAdmissionRole::RelocatableModule,
         k.compiler_publication_epoch(),Some(&RebuildPublicationAuthority::provision())).unwrap()
 }
-fn retain(k:&mut Kernel,a:&mut CompilerOutputAttempt) -> CompilerCandidateHandle {
+pub(super) fn retain(k:&mut Kernel,a:&mut CompilerOutputAttempt) -> CompilerCandidateHandle {
     captured(k,a,RebuildAdmissionRole::RelocatableModule).retain().unwrap()
 }
-fn ready(k:&mut Kernel,h:&CompilerCandidateHandle) {
+pub(super) fn ready(k:&mut Kernel,h:&CompilerCandidateHandle) {
     for _ in 0..2000 { if k.poll_compiler_candidate(h).unwrap() { return; } }
     panic!("cleanup did not release producer");
 }
-fn publish(k:&mut Kernel,h:&CompilerCandidateHandle) -> Result<u64,PublicationError> {
+pub(super) fn publish(k:&mut Kernel,h:&CompilerCandidateHandle) -> Result<u64,PublicationError> {
     k.publish_compiler_candidate(h,k.compiler_publication_epoch(),Some(&RebuildPublicationAuthority::provision()))
 }
 
@@ -183,4 +196,50 @@ fn c25_publication_shutdown_releases_artifact_and_receipt_charges() {
     k.stop_heap_service();assert!(k.compiler_publications.records.is_empty());
     assert!(k.fabric.scoped_pointers.heap_account(job.custodian).is_none());
     assert!(k.compiler_publication_receipt(1).is_none());
+}
+
+#[path = "oversized_tests.rs"]
+mod oversized_tests;
+
+#[test]
+fn c31_publication_binds_actual_workspace_directory_into_sealed_plan() {
+    use crate::anka64::compiler_adapter::resources::growth::workspace::WorkspaceDirectory;
+    let d=WorkspaceDirectory::new([128,256,64,64,16,128,128],1<<20).unwrap();
+    let mut k=machine();let(mut a,i,expected)=setup_bytes_layout(&mut k,aom(false,1),16384,Some(d));
+    freeze(&mut k,&mut a,&i);let h=retain(&mut k,&mut a);ready(&mut k,&h);assert_eq!(publish(&mut k,&h),Ok(1));
+    let r=k.compiler_publication_receipt(1).unwrap();assert_eq!(r.inputs[6].bytes.len(),(22+35)*8);
+    let actual:Vec<u64>=r.inputs[6].bytes[22*8..].chunks_exact(8).map(|b|u64::from_le_bytes(b.try_into().unwrap())).collect();
+    assert_eq!(actual,d.binding_words());assert_eq!(r.length,expected.len()as u64);
+}
+#[test]
+fn c31_publication_rejects_directory_substitution_even_with_same_base_budget() {
+    use crate::anka64::compiler_adapter::resources::growth::workspace::WorkspaceDirectory;
+    for omit in [true,false] {
+        let d=WorkspaceDirectory::new([128,256,64,64,16,128,128],1<<20).unwrap();
+        let other=WorkspaceDirectory::new([256,256,64,64,16,128,128],1<<20).unwrap();
+        let mut k=machine();let(mut a,mut i,_)=setup_bytes_layout(&mut k,aom(false,1),16384,Some(d));
+        let mut plan:Vec<u8>=a.budget.as_ref().unwrap().publication_plan_words().into_iter().flat_map(u64::to_le_bytes).collect();
+        if !omit {plan.extend(other.binding_words().into_iter().flat_map(u64::to_le_bytes));}
+        i.plan=sealed(&mut k,&plan);
+        assert_eq!(k.freeze_compiler_publication(&mut a,&i,RebuildAdmissionRole::RelocatableModule,0,
+            Some(&RebuildPublicationAuthority::provision())),Err(PublicationError::Binding));
+        assert_eq!(k.compiler_publication_epoch(),0);assert!(a.publication.is_none());
+    }
+}
+
+#[test]
+fn c35_publication_preserves_typed_evidence_through_cleanup_and_sealing() {
+    let mut k=machine();
+    let bytes=super::super::capture::tests::typed_aom();
+    let(mut a,i,bytes)=setup_bytes(&mut k,bytes,16384);
+    freeze(&mut k,&mut a,&i);let h=retain(&mut k,&mut a);ready(&mut k,&h);
+    assert!(k.fabric.compiler_heap_owner_released(a.owner));
+    let epoch=publish(&mut k,&h).unwrap();let receipt=k.compiler_publication_receipt(epoch).unwrap();
+    assert_eq!(receipt.length,bytes.len() as u64);
+    assert_eq!(receipt.permissions,Permissions::READ);
+    assert_eq!(receipt.role,RebuildAdmissionRole::RelocatableModule);
+    let mut actual=vec![0;bytes.len()];k.read_compiler_publication(epoch,0,&mut actual).unwrap();
+    assert_eq!(actual,bytes);
+    assert_eq!(crate::anka64::aom::AomModule::parse(&actual).unwrap().interface,
+        crate::anka64::aom::AomModule::parse(&bytes).unwrap().interface);
 }

@@ -1,0 +1,91 @@
+// Concrete workspace-directory profile 1. Checks concern scalar geometry and
+// binding. The directory is trusted-loader-produced and guest READ-only;
+// these witnesses do not prove the C/Rust implementation.
+import "anka108_compiler_growth.kleis"
+define wd108_count(n : BitVec64,structures : Bool) =
+    bvugt(n,bvconst(0,64)) ∧ bvule(n,bvconst(4096,64))
+define wd108_record(offset : BitVec64,expected : BitVec64,count : BitVec64,stride : BitVec64,wanted : BitVec64,reserved : BitVec64,capacity : BitVec64) =
+    (offset=expected) ∧ (stride=wanted) ∧ (reserved=bvconst(0,64)) ∧
+    wd108_count(count,res108_false()) ∧ gr108_product(count,stride,capacity) ∧
+    gr108_append(offset,bvmul(count,stride),capacity)
+define wd108_frames(functions : BitVec64,frames : BitVec64) = functions=frames
+define wd108_request(profile : BitVec64,length : BitVec64) =
+    ((profile=bvconst(0,64)) ∧ (length=bvconst(768,64))) ∨
+    ((profile=bvconst(1,64)) ∧ (length=bvconst(1024,64)))
+define wd108_publish(base_exact : Bool,directory_exact : Bool,current : Bool) =
+    base_exact ∧ directory_exact ∧ current
+example "count 1 structures False" { assert(wd108_count(bvconst(1,64),res108_false())) }
+example "count 128 structures False" { assert(wd108_count(bvconst(128,64),res108_false())) }
+example "count 4096 structures False" { assert(wd108_count(bvconst(4096,64),res108_false())) }
+example "count 4097 structures False" { assert(¬(wd108_count(bvconst(4097,64),res108_false()))) }
+example "count 0 structures False" { assert(¬(wd108_count(bvconst(0,64),res108_false()))) }
+example "count 16 structures True" { assert(wd108_count(bvconst(16,64),res108_true())) }
+example "count 17 structures True" { assert(wd108_count(bvconst(17,64),res108_true())) }
+example "valid table" { assert(wd108_record(bvconst(24576,64),bvconst(24576,64),bvconst(128,64),bvconst(80,64),bvconst(80,64),bvconst(0,64),bvconst(65536,64))) }
+example "overlap" { assert(¬(wd108_record(bvconst(24568,64),bvconst(24576,64),bvconst(128,64),bvconst(80,64),bvconst(80,64),bvconst(0,64),bvconst(65536,64)))) }
+example "wrong stride" { assert(¬(wd108_record(bvconst(24576,64),bvconst(24576,64),bvconst(128,64),bvconst(8,64),bvconst(80,64),bvconst(0,64),bvconst(65536,64)))) }
+example "reserved data" { assert(¬(wd108_record(bvconst(24576,64),bvconst(24576,64),bvconst(128,64),bvconst(80,64),bvconst(80,64),bvconst(1,64),bvconst(65536,64)))) }
+example "short workspace" { assert(¬(wd108_record(bvconst(24576,64),bvconst(24576,64),bvconst(128,64),bvconst(80,64),bvconst(80,64),bvconst(0,64),bvconst(32768,64)))) }
+example "overflow count" { assert(¬(wd108_record(bvconst(24576,64),bvconst(24576,64),ptr107_max(),bvconst(80,64),bvconst(80,64),bvconst(0,64),bvconst(65536,64)))) }
+example "frames 128 128" { assert(wd108_frames(bvconst(128,64),bvconst(128,64))) }
+example "frames 128 64" { assert(¬(wd108_frames(bvconst(128,64),bvconst(64,64)))) }
+example "frames 64 128" { assert(¬(wd108_frames(bvconst(64,64),bvconst(128,64)))) }
+example "profile 0 length 768" { assert(wd108_request(bvconst(0,64),bvconst(768,64))) }
+example "profile 1 length 1024" { assert(wd108_request(bvconst(1,64),bvconst(1024,64))) }
+example "profile 1 length 768" { assert(¬(wd108_request(bvconst(1,64),bvconst(768,64)))) }
+example "profile 0 length 1024" { assert(¬(wd108_request(bvconst(0,64),bvconst(1024,64)))) }
+example "profile 2 length 1024" { assert(¬(wd108_request(bvconst(2,64),bvconst(1024,64)))) }
+example "bound publication" { assert(wd108_publish(res108_true(),res108_true(),res108_true())) }
+example "changed directory" { assert(¬(wd108_publish(res108_true(),res108_false(),res108_true()))) }
+example "stale binding" { assert(¬(wd108_publish(res108_true(),res108_true(),res108_false()))) }
+example "law: different companion count cannot be accepted" {
+    assert(∀(n : BitVec64). ∀(m : BitVec64). ((n≠m) → ¬wd108_frames(n,m)))
+}
+example "law: unchanged base plan cannot hide substituted directory" {
+    assert(∀(b : Bool). ∀(c : Bool). (¬wd108_publish(b,res108_false(),c)))
+}
+
+// Directory-profile capacity requests use roles 32..38 and COUNT units.
+// Fixed-profile error 8 and the 4096 frame-local encoding bound stay terminal.
+define wd108_need(profile : BitVec64, role : BitVec64, old : BitVec64, need : BitVec64, used : BitVec64, diagnostic : BitVec64) =
+    (profile=bvconst(1,64)) ∧ bvuge(role,bvconst(32,64)) ∧ bvule(role,bvconst(38,64)) ∧
+    wd108_count(old,res108_false()) ∧ bvugt(need,old) ∧ bvule(need,bvconst(4096,64)) ∧
+    (used=bvconst(0,64)) ∧ (diagnostic=bvconst(0,64))
+define wd108_retry(executed : Bool, bindings : Bool, directory : Bool, drained : Bool, released : Bool, geometry : Bool,
+    spent : BitVec64, start : BitVec64, work : BitVec64, retries : BitVec64) =
+    executed ∧ bindings ∧ directory ∧ drained ∧ released ∧ geometry ∧
+    bvugt(spent,start) ∧ bvult(spent,work) ∧ bvugt(retries,bvconst(0,64))
+define wd108_carry(oldspent : BitVec64,newspent : BitVec64,oldretry : BitVec64,newretry : BitVec64,oldout : BitVec64,newout : BitVec64) =
+    (newspent=oldspent) ∧ bvugt(oldretry,bvconst(0,64)) ∧
+    (newretry=bvsub(oldretry,bvconst(1,64))) ∧ (newout=oldout)
+example "workspace retry: table role 32" { assert(wd108_need(bvconst(1,64),bvconst(32,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64))) }
+example "workspace retry: table role 33" { assert(wd108_need(bvconst(1,64),bvconst(33,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64))) }
+example "workspace retry: table role 34" { assert(wd108_need(bvconst(1,64),bvconst(34,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64))) }
+example "workspace retry: table role 35" { assert(wd108_need(bvconst(1,64),bvconst(35,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64))) }
+example "workspace retry: table role 36" { assert(wd108_need(bvconst(1,64),bvconst(36,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64))) }
+example "workspace retry: table role 37" { assert(wd108_need(bvconst(1,64),bvconst(37,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64))) }
+example "workspace retry: table role 38" { assert(wd108_need(bvconst(1,64),bvconst(38,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64))) }
+example "workspace retry: legacy" { assert(¬(wd108_need(bvconst(0,64),bvconst(32,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64)))) }
+example "workspace retry: foreign role" { assert(¬(wd108_need(bvconst(1,64),bvconst(31,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64)))) }
+example "workspace retry: foreign upper role" { assert(¬(wd108_need(bvconst(1,64),bvconst(39,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(0,64)))) }
+example "workspace retry: same count" { assert(¬(wd108_need(bvconst(1,64),bvconst(32,64),bvconst(64,64),bvconst(64,64),bvconst(0,64),bvconst(0,64)))) }
+example "workspace retry: excess count" { assert(¬(wd108_need(bvconst(1,64),bvconst(32,64),bvconst(4096,64),bvconst(4097,64),bvconst(0,64),bvconst(0,64)))) }
+example "workspace retry: partial artifact" { assert(¬(wd108_need(bvconst(1,64),bvconst(32,64),bvconst(64,64),bvconst(65,64),bvconst(8,64),bvconst(0,64)))) }
+example "workspace retry: diagnostic impostor" { assert(¬(wd108_need(bvconst(1,64),bvconst(32,64),bvconst(64,64),bvconst(65,64),bvconst(0,64),bvconst(8,64)))) }
+example "workspace retry: complete cleanup" { assert(wd108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(10,64),bvconst(0,64),bvconst(100,64),bvconst(3,64))) }
+example "workspace retry: not executed" { assert(¬(wd108_retry(res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(10,64),bvconst(0,64),bvconst(100,64),bvconst(3,64)))) }
+example "workspace retry: changed bindings" { assert(¬(wd108_retry(res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(10,64),bvconst(0,64),bvconst(100,64),bvconst(3,64)))) }
+example "workspace retry: changed directory" { assert(¬(wd108_retry(res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),bvconst(10,64),bvconst(0,64),bvconst(100,64),bvconst(3,64)))) }
+example "workspace retry: active work" { assert(¬(wd108_retry(res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),bvconst(10,64),bvconst(0,64),bvconst(100,64),bvconst(3,64)))) }
+example "workspace retry: unreleased owner" { assert(¬(wd108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),bvconst(10,64),bvconst(0,64),bvconst(100,64),bvconst(3,64)))) }
+example "workspace retry: invalid geometry" { assert(¬(wd108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),bvconst(10,64),bvconst(0,64),bvconst(100,64),bvconst(3,64)))) }
+example "workspace retry: no work" { assert(¬(wd108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(0,64),bvconst(0,64),bvconst(100,64),bvconst(3,64)))) }
+example "workspace retry: spent work limit" { assert(¬(wd108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(100,64),bvconst(0,64),bvconst(100,64),bvconst(3,64)))) }
+example "workspace retry: no retries" { assert(¬(wd108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),bvconst(10,64),bvconst(0,64),bvconst(100,64),bvconst(0,64)))) }
+example "workspace retry: carry budgets" { assert(wd108_carry(bvconst(10,64),bvconst(10,64),bvconst(3,64),bvconst(2,64),bvconst(4096,64),bvconst(4096,64))) }
+example "workspace retry: reset spent" { assert(¬(wd108_carry(bvconst(10,64),bvconst(0,64),bvconst(3,64),bvconst(2,64),bvconst(4096,64),bvconst(4096,64)))) }
+example "workspace retry: reset retries" { assert(¬(wd108_carry(bvconst(10,64),bvconst(10,64),bvconst(3,64),bvconst(3,64),bvconst(4096,64),bvconst(4096,64)))) }
+example "workspace retry: output substitution" { assert(¬(wd108_carry(bvconst(10,64),bvconst(10,64),bvconst(3,64),bvconst(2,64),bvconst(4096,64),bvconst(8192,64)))) }
+example "law: unreleased ownership cannot retry a directory" {
+ assert(∀(s : BitVec64). ∀(w : BitVec64). ¬wd108_retry(res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),s,bvconst(0,64),w,bvconst(1,64)))
+}

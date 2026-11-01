@@ -464,7 +464,35 @@ impl Anka64Core {
         Ok(())
     }
 
-    /// A compiler entry can be installed only before the first admitted frame.
+    /// Historical application envelope. Compiler admission uses the explicitly
+    /// charged larger profile; changing it must not widen application authority.
+    pub(crate) fn compiler_admission_depth_ok(&self)->bool {
+        self.protected_execution_depth_ok(4096)
+    }
+    pub(crate) fn protected_execution_depth_ok(&self, local_limit:usize)->bool {
+        let bounded=|s:&super::pointer_frames::FrameState| {
+            s.active.len()<128 && s.active.iter().map(|f|f.locals.len()).sum::<usize>()<=local_limit
+        };
+        let pending_fits=self.pointer_frames.as_ref().is_none_or(|s| {
+            if s.pending_entry!=Some(self.pc) {return true;}
+            let Some(offset)=self.pc.checked_sub(s.code_base) else {return false;};
+            let Some(frame)=s.program.frames.iter().find(|f|f.entry==offset) else {return false;};
+            let used=s.active.iter().map(|f|f.locals.len()).sum::<usize>();
+            // Check before PFRAME writes bytes or issues any local identity.
+            s.active.len()+1<128 && used<=local_limit && frame.locals.len()<=local_limit-used
+        });
+        self.return_stack.len()<128 && self.event_frames.len()<=1
+            && self.saved_event_contexts.len()<=1 && pending_fits
+            && self.pointer_frames.as_ref().is_none_or(bounded)
+            && self.saved_event_contexts.iter().all(|s|s.image.as_ref().is_none_or(|i|
+                i.return_stack.len()<128 && i.frames.as_ref().is_none_or(bounded)))
+    }
+    #[cfg(test)]
+    pub(crate) fn diagnostic_frame_usage(&self)->(usize,usize) {
+        self.pointer_frames.as_ref().map_or((0,0),|s|
+            (s.active.len(),s.active.iter().map(|f|f.locals.len()).sum()))
+    }
+
     pub(crate) fn compiler_entry_ready(&self, fabric: &Fabric) -> bool {
         self.event_frames.is_empty() && self.return_stack.is_empty() && !self.halted
             && self.frame_current(fabric).is_ok_and(|s| s.active.is_empty()

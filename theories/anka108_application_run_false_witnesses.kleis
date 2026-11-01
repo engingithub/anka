@@ -1,0 +1,20 @@
+import "anka108_application_run.kleis"
+example "hostile admit without authority" { assert(ar108_admit(res108_false(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile admit without current_receipt" { assert(ar108_admit(res108_true(),res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile admit without machine_reserved" { assert(ar108_admit(res108_true(),res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile admit without report_reserved" { assert(ar108_admit(res108_true(),res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile admit without bounded_geometry" { assert(ar108_admit(res108_true(),res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile spawn without supervisor" { assert(ar108_spawn(res108_false(),res108_true(),res108_true())) }
+example "hostile spawn without not_spawned" { assert(ar108_spawn(res108_true(),res108_false(),res108_true())) }
+example "hostile spawn without slots_available" { assert(ar108_spawn(res108_true(),res108_true(),res108_false())) }
+example "hostile refund_machine without machine_destroyed" { assert(ar108_refund_machine(res108_false(),res108_true())) }
+example "hostile refund_machine without temporary_storage_destroyed" { assert(ar108_refund_machine(res108_true(),res108_false())) }
+example "hostile refund_report without report_destroyed" { assert(ar108_refund_report(res108_false())) }
+example "hostile step without cpu_only" { assert(ar108_step(res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile step without no_devices" { assert(ar108_step(res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile step without bounded_frames" { assert(ar108_step(res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile step without terminal_trace" { assert(ar108_step(res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile output 65536 1" { assert(ar108_output(bvconst(65536,64),bvconst(1,64))) }
+example "hostile output 65537 0" { assert(ar108_output(bvconst(65537,64),bvconst(0,64))) }
+example "hostile output 0 4097" { assert(ar108_output(bvconst(0,64),bvconst(4097,64))) }
+example "hostile output 65535 2" { assert(ar108_output(bvconst(65535,64),bvconst(2,64))) }

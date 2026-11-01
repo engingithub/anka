@@ -11,6 +11,7 @@ pub const COMPILER_RESOURCE_MAGIC: u64 = 0x4143_5232;
 pub const COMPILER_RESOURCE_ABI: u64 = 2;
 pub const COMPILER_REPLY_BYTES: usize = 128;
 pub const COMPILER_OUTPUT_ROLE: u64 = 3;
+use growth::workspace::WorkspaceDirectory;
 const PAGE: u64 = 4096;
 const AC2_MAX: u64 = i64::MAX as u64;
 
@@ -117,10 +118,7 @@ impl CompilerReplyContext {
         })
     }
 
-    /// Decode the exact 128-byte little-endian reply, checking every word.
-    /// Even SuccessMetadata must pass independent AOM/frame admission later.
-    /// Only role 3 is enabled in C2; other known ABI roles are not retry hints.
-    pub fn decode(&self, bytes: &[u8]) -> Result<CompilerReplyMetadata, CompilerResourceError> {
+    fn checked_reply_words(&self, bytes: &[u8]) -> Result<[u64;16],CompilerResourceError> {
         use CompilerResourceError::*;
         if bytes.len() != COMPILER_REPLY_BYTES {
             return Err(ReplyLength);
@@ -144,10 +142,17 @@ impl CompilerReplyContext {
         if w[15] != 0 {
             return Err(ReplyReserved);
         }
+        if w[8] > self.source_length { return Err(ReplyFields); }
+        Ok(w)
+    }
+
+    /// Decode the exact 128-byte little-endian reply, checking every word.
+    /// Even SuccessMetadata must pass independent AOM/frame admission later.
+    /// Only role 3 is enabled in C2; other known ABI roles are not retry hints.
+    pub fn decode(&self, bytes: &[u8]) -> Result<CompilerReplyMetadata, CompilerResourceError> {
+        use CompilerResourceError::*;
+        let w=self.checked_reply_words(bytes)?;
         let (resource, minimum, used, cursor, diagnostic) = (w[5], w[6], w[7], w[8], w[9]);
-        if cursor > self.source_length {
-            return Err(ReplyFields);
-        }
         match w[4] {
             0 => {
                 if resource != 0
@@ -203,6 +208,7 @@ impl CompilerReplyContext {
 pub enum CompilerReplyMetadata {
     SuccessMetadata { used_output: u64 },
     NeedOutputCapacity(OutputCapacityNeed),
+    NeedWorkspaceCapacity(WorkspaceCapacityNeed),
     SourceRejected { cursor: u64, diagnostic: u64 },
     RepresentationRejected { cursor: u64, diagnostic: u64 },
 }
@@ -219,6 +225,15 @@ impl OutputCapacityNeed {
     pub fn minimum(&self) -> u64 {
         self.minimum
     }
+}
+
+/// Exact profile-1 directory and job binding; only the checked decoder mints it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct WorkspaceCapacityNeed {
+    context: CompilerReplyContext,
+    directory: WorkspaceDirectory,
+    table: usize,
+    minimum: u64,
 }
 
 /// Immutable trusted policy. The byte ceiling is only the output-region limit;
@@ -255,6 +270,7 @@ impl OutputRetryPolicy {
             remaining: self.retries,
             spent: 0,
             attempt_start: 0,
+            workspace: None,
         })
     }
 }
@@ -268,9 +284,61 @@ pub struct OutputRetryBudget {
     remaining: u64,
     spent: u64,
     attempt_start: u64,
+    workspace: Option<WorkspaceDirectory>,
 }
 
 impl OutputRetryBudget {
+    /// Bind once at trusted loader admission, before any guest work. Retried
+    /// budgets already carry their directory; callers cannot substitute it.
+    pub(crate) fn bind_workspace(&mut self, directory: Option<WorkspaceDirectory>)
+        -> Result<(),CompilerResourceError> {
+        if let Some(bound)=self.workspace {
+            if directory!=Some(bound) { return Err(CompilerResourceError::ReplyBindings); }
+        } else if directory.is_some() {
+            if self.spent!=0 || self.remaining!=self.policy.retries {
+                return Err(CompilerResourceError::ReplyBindings);
+            }
+            self.workspace=directory;
+        }
+        Ok(())
+    }
+    pub fn workspace_directory(&self) -> Option<WorkspaceDirectory> { self.workspace }
+
+    /// Profile 0 continues to reject every non-output capacity role. Profile 1
+    /// accepts only roles 32..38, in table-record units, never arbitrary bytes.
+    pub fn decode(&self, bytes:&[u8]) -> Result<CompilerReplyMetadata,CompilerResourceError> {
+        use CompilerResourceError::*;
+        let w=self.context.checked_reply_words(bytes)?;
+        if w[4]!=1 || w[5]==COMPILER_OUTPUT_ROLE { return self.context.decode(bytes); }
+        let directory=self.workspace.ok_or(UnsupportedGrowth)?;
+        if self.context.growth!=OutputGrowthSupport::CompilerOutput || !(32..=38).contains(&w[5]) {
+            return Err(UnsupportedGrowth);
+        }
+        let table=(w[5]-32) as usize;
+        if w[6]<=directory.words()[4*table+1] || w[6]>4096 || w[7]!=0 || w[9]!=0 {
+            return Err(ReplyFields);
+        }
+        Ok(CompilerReplyMetadata::NeedWorkspaceCapacity(WorkspaceCapacityNeed {
+            context:self.context,directory,table,minimum:w[6],
+        }))
+    }
+
+    pub fn propose_workspace_retry(&self, need:&WorkspaceCapacityNeed)
+        -> Result<OutputRetryProposal,CompilerResourceError> {
+        use CompilerResourceError::*;
+        if need.context!=self.context || self.workspace!=Some(need.directory) {return Err(ReplyBindings);}
+        if self.remaining==0 {return Err(RetryBudgetDenied);}
+        if self.spent<=self.attempt_start || self.spent>=self.policy.work_limit {return Err(WorkBudgetDenied);}
+        let directory=need.directory.grow_table(need.table,need.minimum)
+            .map_err(|_|CapacityBudgetDenied)?;
+        let mut context=self.context;
+        context.attempt=context.attempt.checked_add(1).ok_or(AttemptExhausted)?;
+        Ok(OutputRetryProposal {next_budget:OutputRetryBudget {
+            context,policy:self.policy,remaining:self.remaining-1,spent:self.spent,
+            attempt_start:self.spent,workspace:Some(directory),
+        }})
+    }
+
     pub fn context(&self) -> CompilerReplyContext {
         self.context
     }
@@ -347,6 +415,7 @@ impl OutputRetryBudget {
                 remaining: self.remaining - 1,
                 spent: self.spent,
                 attempt_start: self.spent,
+                workspace: self.workspace,
             },
         })
     }
@@ -393,3 +462,6 @@ impl OutputRetryProposal {
 
 #[cfg(test)]
 mod tests;
+
+/// C3/C4 pure checked geometry; not allocation or publication authority.
+pub mod growth;

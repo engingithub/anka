@@ -492,3 +492,79 @@ fn c2_configuration_rejects_invalid_identity_capacity_binding_and_source_span() 
         Err(CompilerResourceError::CapacityBudgetDenied)
     );
 }
+
+fn workspace_budget() -> OutputRetryBudget {
+    let mut b=budget();
+    b.bind_workspace(Some(WorkspaceDirectory::new([1,16,16,16,16,16,16],1<<20).unwrap())).unwrap();
+    b
+}
+fn workspace_need(b:&OutputRetryBudget,table:u64,minimum:u64) -> WorkspaceCapacityNeed {
+    let mut w=reply(b.context(),1);w[5]=32+table;w[6]=minimum;
+    match b.decode(&bytes(w)).unwrap() {
+        CompilerReplyMetadata::NeedWorkspaceCapacity(n)=>n,
+        other=>panic!("unexpected {other:?}"),
+    }
+}
+#[test]
+fn c3_workspace_retry_all_seven_roles_preserve_other_counts_and_function_frames() {
+    for table in 0..7 {
+        let mut b=workspace_budget();let old=b.workspace_directory().unwrap();
+        let minimum=old.words()[4*table+1]+1;
+        let n=workspace_need(&b,table as u64,minimum);b.reserve_work(10).unwrap();
+        let next=b.propose_workspace_retry(&n).unwrap().next_budget;
+        let d=next.workspace_directory().unwrap();
+        assert!(d.words()[4*table+1]>=minimum);
+        assert_eq!(d.words()[29],d.words()[1]);
+        for i in 0..7 {if i!=table {assert_eq!(old.words()[4*i+1],d.words()[4*i+1]);}}
+        assert_eq!(next.context.output_capacity,b.context.output_capacity);
+        assert_eq!(next.spent,10);assert_eq!(next.attempt_start,10);
+        assert_eq!(next.remaining,b.remaining-1);assert_eq!(next.context.attempt,2);
+    }
+}
+#[test]
+fn c3_workspace_retry_count_growth_can_share_the_same_page_capacity() {
+    let b=workspace_budget();let old=b.workspace_directory().unwrap();
+    let next=old.grow_table(0,2).unwrap();
+    assert_ne!(old.words(),next.words());assert_eq!(old.capacity(),next.capacity());
+}
+#[test]
+fn c3_workspace_retry_rejects_legacy_and_forged_reply_fields() {
+    let b=workspace_budget();let mut w=reply(b.context(),1);w[5]=32;w[6]=2;
+    assert_eq!(budget().decode(&bytes(w)),Err(CompilerResourceError::UnsupportedGrowth));
+    for (i,v) in [(0,0),(1,1),(2,12),(3,2),(5,31),(5,39),(6,1),(6,4097),
+        (7,8),(8,74),(9,8),(10,99),(11,99),(12,99),(13,99),(14,99),(15,1)] {
+        let mut bad=w;bad[i]=v;assert!(b.decode(&bytes(bad)).is_err(),"word {i}");
+    }
+}
+#[test]
+fn c3_workspace_retry_requires_work_and_retry_fuel_without_reset() {
+    let mut b=workspace_budget();let n=workspace_need(&b,0,2);
+    assert_eq!(b.propose_workspace_retry(&n),Err(CompilerResourceError::WorkBudgetDenied));
+    b.reserve_work(100).unwrap();
+    assert_eq!(b.propose_workspace_retry(&n),Err(CompilerResourceError::WorkBudgetDenied));
+    let mut b=workspace_budget();b.reserve_work(1).unwrap();b.remaining=0;
+    assert_eq!(b.propose_workspace_retry(&n),Err(CompilerResourceError::RetryBudgetDenied));
+}
+#[test]
+fn c3_workspace_retry_cannot_change_directory_after_admission_or_across_attempts() {
+    let mut b=workspace_budget();let n=workspace_need(&b,0,2);b.reserve_work(1).unwrap();
+    let old=b.workspace_directory().unwrap();
+    let mut next=b.propose_workspace_retry(&n).unwrap().next_budget;
+    assert!(next.bind_workspace(Some(old)).is_err());assert!(next.bind_workspace(None).is_err());
+    assert!(next.propose_workspace_retry(&n).is_err());
+    let mut fixed=budget();fixed.reserve_work(1).unwrap();
+    assert!(fixed.bind_workspace(Some(old)).is_err());
+}
+#[test]
+fn c3_workspace_retry_output_growth_keeps_selected_directory() {
+    let mut b=workspace_budget();let n=need(b.context(),4097);b.reserve_work(1).unwrap();
+    let next=b.propose_retry(&n).unwrap().next_budget;
+    assert_eq!(next.workspace,b.workspace);assert_eq!(next.context.output_capacity,8192);
+    assert_eq!(next.spent,1);assert_eq!(next.remaining,2);
+}
+#[test]
+fn c3_workspace_retry_hard_representation_limit_stays_terminal() {
+    let b=workspace_budget();let mut w=reply(b.context(),3);w[9]=8;
+    assert!(matches!(b.decode(&bytes(w)),Ok(CompilerReplyMetadata::RepresentationRejected{diagnostic:8,..})));
+    assert!(b.workspace_directory().unwrap().grow_table(0,4097).is_err());
+}

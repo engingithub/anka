@@ -2,8 +2,8 @@
 //! The request is frozen by the store; caller-supplied bytes or receipt copies
 //! never establish current identity. All code/manifest construction is guest work.
 use super::*;
-use super::super::ankald::{run_protected_ankald_for_publication,
-    validate_protected_link_result, AnkaldOutput};
+use super::super::ankald::{run_application_ankald_for_publication,
+    validate_application_link_result, ApplicationLinkProfile, AnkaldOutput};
 use super::super::dev_runner::{run_registered_artifact, DevelopmentRunError, DevelopmentRunReport};
 use super::super::dev_shell::DevelopmentArtifactRegistry;
 
@@ -18,11 +18,13 @@ struct FrozenDependency {
 /// the reservation; changing the store requires freezing a new request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrozenModuleLink {
+    profile: ApplicationLinkProfile,
     expected_epoch: u64,
     dependencies: Vec<FrozenDependency>,
     linker: CompiledCImage,
 }
 impl FrozenModuleLink {
+    pub fn profile(&self) -> ApplicationLinkProfile { self.profile }
     pub fn expected_epoch(&self) -> u64 { self.expected_epoch }
     pub fn module_count(&self) -> usize { self.dependencies.len() }
 }
@@ -39,6 +41,7 @@ pub struct LinkedModuleDependency {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkedRebuildReceipt {
+    pub profile: ApplicationLinkProfile,
     pub epoch: u64,
     pub role: RebuildAdmissionRole,
     pub context: u64,
@@ -137,16 +140,24 @@ impl RebuildArtifactStore {
                     != Some(bytes) {
                 return Err(CompilerAdapterError::DependencyChanged);
             }
-            modules.push(ValidatedPointerModule::from_aom(bytes)
+            modules.push(ValidatedPointerModule::from_aom_with_limit(bytes, receipt.profile.module_limit())
                 .map_err(|_| CompilerAdapterError::InvalidProtectedManifest)?);
         }
         // Recompute complete closure and exact guest patch/manifest checks.
         // No cached success flag, supplied byte buffer or receipt clone can
         // bypass admission. No new epoch or publication is created by a run.
-        validate_protected_link_result(&modules, &receipt.image).map_err(CompilerAdapterError::Link)
+        validate_application_link_result(&modules, &receipt.image, receipt.profile).map_err(CompilerAdapterError::Link)
     }
 
     pub fn freeze_modules(&self, epochs: &[u64]) -> Result<FrozenModuleLink, CompilerAdapterError> {
+        self.freeze_modules_with_profile(epochs, ApplicationLinkProfile::Standard)
+    }
+
+    /// Explicit coordinator policy. Guest objects cannot choose their own
+    /// capacity or producer entry ABI. Execution/publication authorities are
+    /// still required when the request is executed.
+    pub fn freeze_modules_with_profile(&self, epochs: &[u64], profile: ApplicationLinkProfile)
+        -> Result<FrozenModuleLink, CompilerAdapterError> {
         self.next_epoch(self.epoch)?;
         if epochs.is_empty() || epochs.len() > 4096 {
             return Err(CompilerAdapterError::InvalidModuleDependency);
@@ -157,7 +168,7 @@ impl RebuildArtifactStore {
             dependencies.push(FrozenDependency { position, receipt: receipt.clone(), bytes: bytes.to_vec() });
         }
         let linker = dependencies[0].receipt.linker_image.clone();
-        let request = FrozenModuleLink { expected_epoch: self.epoch, dependencies, linker };
+        let request = FrozenModuleLink { profile, expected_epoch: self.epoch, dependencies, linker };
         self.validate_dependencies(&request)?;
         Ok(request)
     }
@@ -168,7 +179,7 @@ impl RebuildArtifactStore {
         execution.ok_or(CompilerAdapterError::ExecutionAuthorityRequired)?;
         publication.ok_or(CompilerAdapterError::PublicationAuthorityRequired)?;
         let modules = self.validate_dependencies(request)?;
-        let output = run_protected_ankald_for_publication(&request.linker.bytes, &modules)
+        let output = run_application_ankald_for_publication(&request.linker.bytes, &modules, request.profile)
             .map_err(CompilerAdapterError::Link)?;
         self.publish_link(request, output, publication)
     }
@@ -215,7 +226,7 @@ impl RebuildArtifactStore {
                 || bytes != dependency.bytes || receipt.linker_image != request.linker {
                 return Err(CompilerAdapterError::DependencyChanged);
             }
-            modules.push(ValidatedPointerModule::from_aom(bytes)
+            modules.push(ValidatedPointerModule::from_aom_with_limit(bytes, request.profile.module_limit())
                 .map_err(|_| CompilerAdapterError::InvalidProtectedManifest)?);
         }
         Ok(modules)
@@ -242,7 +253,7 @@ impl RebuildArtifactStore {
                 position: dependency.position, compiler_receipt: dependency.receipt.clone(),
                 aom_bytes: dependency.bytes.clone(), transport_key,
             }).collect();
-        let receipt = LinkedRebuildReceipt { epoch, role: RebuildAdmissionRole::LinkedImage,
+        let receipt = LinkedRebuildReceipt { profile: request.profile, epoch, role: RebuildAdmissionRole::LinkedImage,
             context: output.context, process_slot: output.process_slot,
             process_generation: output.process_generation, producer_domain: output.domain,
             artifact_key, artifact_permissions: Permissions::READ, image: output.image,
@@ -259,7 +270,8 @@ impl RebuildArtifactStore {
 fn validate_link_binding(request: &FrozenModuleLink, modules: &[ValidatedPointerModule],
     output: &AnkaldOutput) -> Result<(), CompilerAdapterError> {
     let reject = || CompilerAdapterError::BindingChanged;
-    if output.context == 0 || output.process_slot != 0 || output.process_generation == 0
+    if output.link_profile != request.profile.wire()
+        || output.context == 0 || output.process_slot != 0 || output.process_generation == 0
         || !output.fabric.domains.contains_key(&output.domain)
         || request.dependencies.iter().any(|d| d.receipt.context == output.context)
         || output.input_keys.len() != request.dependencies.len()
@@ -285,13 +297,19 @@ fn validate_link_binding(request: &FrozenModuleLink, modules: &[ValidatedPointer
             return Err(reject());
         }
     }
+    let control = output.placement.allocated_extent(output.control_key.object).ok_or_else(reject)?;
+    if output.fabric.objects[&output.control_key.object].size < 96
+        || output.fabric.read_physical(control.base + 88, 8)
+            != request.profile.wire().to_le_bytes().as_slice() {
+        return Err(reject());
+    }
     let scratch = &output.fabric.objects[&output.scratch_key.object];
     let extent = output.placement.allocated_extent(output.scratch_key.object).ok_or_else(reject)?;
     if output.image.bytes.len() as u64 > scratch.size
         || output.fabric.read_physical(extent.base, output.image.bytes.len() as u64) != output.image.bytes {
         return Err(reject());
     }
-    validate_protected_link_result(modules, &output.image).map_err(CompilerAdapterError::Link)
+    validate_application_link_result(modules, &output.image, request.profile).map_err(CompilerAdapterError::Link)
 }
 
 #[cfg(test)]
@@ -304,7 +322,7 @@ mod tests {
     // The short ABI producers are publication-boundary fixtures, not CC2
     // lineage substitutes. The long p107 test covers the public compile API
     // using its real fixed-point witness. Linking here executes real ankald.
-    fn modules() -> (RebuildArtifactStore, RebuildPublicationAuthority) {
+    pub(super) fn modules() -> (RebuildArtifactStore, RebuildPublicationAuthority) {
         let authority = RebuildPublicationAuthority::provision();
         let mut store = RebuildArtifactStore::new();
         for module in protected_test_modules() {
@@ -316,13 +334,13 @@ mod tests {
         (store, authority)
     }
 
-    fn output(request: &FrozenModuleLink) -> AnkaldOutput {
+    pub(super) fn output(request: &FrozenModuleLink) -> AnkaldOutput {
         let modules: Vec<_> = request.dependencies.iter()
-            .map(|d| ValidatedPointerModule::from_aom(&d.bytes).unwrap()).collect();
-        run_protected_ankald_for_publication(&request.linker.bytes, &modules).unwrap()
+            .map(|d| ValidatedPointerModule::from_aom_with_limit(&d.bytes, request.profile.module_limit()).unwrap()).collect();
+        run_application_ankald_for_publication(&request.linker.bytes, &modules, request.profile).unwrap()
     }
 
-    fn assert_read_only(fabric: &Fabric, key: LinkedArtifactKey) {
+    pub(super) fn assert_read_only(fabric: &Fabric, key: LinkedArtifactKey) {
         for &domain in fabric.domains.keys() {
             for permission in [Permissions::WRITE, Permissions::EXECUTE, Permissions::SEAL] {
                 assert!(fabric.find_authorizing_cap(domain, key.object, 0, 1, permission).is_none());
@@ -379,7 +397,7 @@ mod tests {
             module(callee, &[("helper",1,0,&[1002])], &[])]
     }
 
-    fn executable_store(escape: bool, one_past: bool) -> (RebuildArtifactStore, LinkedRebuildReceipt) {
+    pub(super) fn executable_store(escape: bool, one_past: bool) -> (RebuildArtifactStore, LinkedRebuildReceipt) {
         let mut store = RebuildArtifactStore::new();
         let publication = RebuildPublicationAuthority::provision();
         for module in executable_modules(escape, one_past) {
@@ -757,5 +775,59 @@ mod tests {
             assert_eq!(run_ankald(&asm.to_bytes(), &[modules[0].bytes()], "main"),
                 Err(AnkaldError::LinkerStateChanged));
         }
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    use super::tests::{modules, output, executable_store, assert_read_only};
+
+    #[test]
+    fn c4_receipt_large_profile_is_frozen_published_and_rechecked_before_execution() {
+        let (mut store, prior) = executable_store(false, false);
+        let execution = DeveloperExecutionAuthority::provision();
+        let publication = RebuildPublicationAuthority::provision();
+        assert_eq!(store.freeze_modules(&[1,2]).unwrap().profile(), ApplicationLinkProfile::Standard);
+        let request = store.freeze_modules_with_profile(&[1,2], ApplicationLinkProfile::Large).unwrap();
+        assert_eq!(request.profile(), ApplicationLinkProfile::Large);
+        assert!(matches!(store.link_modules(&request, None, Some(&publication)),
+            Err(CompilerAdapterError::ExecutionAuthorityRequired)));
+        assert!(matches!(store.link_modules(&request, Some(&execution), None),
+            Err(CompilerAdapterError::PublicationAuthorityRequired)));
+        let epoch = store.link_modules(&request, Some(&execution), Some(&publication)).unwrap();
+        let receipt = store.linked_receipt(epoch).unwrap().clone();
+        assert_eq!(receipt.profile, ApplicationLinkProfile::Large);
+        assert_eq!(receipt.image, prior.image, "policy changes no code or metadata bytes");
+        let mut substituted = receipt.clone();
+        substituted.profile = ApplicationLinkProfile::Standard;
+        assert!(matches!(store.run_linked_application(&substituted, Some(&execution)),
+            Err(CompilerAdapterError::BindingChanged)));
+        let report = store.run_linked_application(&receipt, Some(&execution)).unwrap();
+        assert_eq!(report.child_result, crate::anka64::os::ProcessResult::Exited(42));
+        assert_eq!(report.byte_output, [42]);
+        assert_eq!(store.linked_receipt(prior.epoch), Some(&prior));
+        assert_read_only(&store.linked_records[&epoch].fabric, receipt.artifact_key);
+        assert_eq!(store.freeze_modules(&[1,2]).unwrap().profile(), ApplicationLinkProfile::Standard);
+    }
+
+    #[test]
+    fn c4_receipt_rejects_executed_profile_and_transport_substitution_without_commit() {
+        let (mut store, authority) = modules();
+        let request = store.freeze_modules_with_profile(&[1,2], ApplicationLinkProfile::Large).unwrap();
+        for change_control in [false, true] {
+            let mut completed = output(&request);
+            if change_control {
+                let at = completed.placement.allocated_extent(completed.control_key.object).unwrap().base;
+                completed.fabric.write_physical(at + 88, &0u64.to_le_bytes());
+            } else { completed.link_profile = ApplicationLinkProfile::Standard.wire(); }
+            assert!(matches!(store.publish_link(&request, completed, Some(&authority)),
+                Err(CompilerAdapterError::BindingChanged)));
+            assert_eq!(store.epoch(), 2);
+            assert!(store.linked_receipt(3).is_none());
+            assert!(store.artifact_bytes(1).is_some());
+            assert!(store.artifact_bytes(2).is_some());
+        }
+        assert_eq!(store.publish_link(&request, output(&request), Some(&authority)).unwrap(), 3);
     }
 }

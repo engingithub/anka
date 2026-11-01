@@ -203,6 +203,11 @@ pub enum AnkaPreprocessError {
     InitializationRejected,
     Boot(BootError),
     PreprocessorDidNotExit,
+    GrowthPolicy,
+    GrowthExhausted,
+    WorkExhausted,
+    StoragePolicy,
+    RestrictedTransport,
     PreprocessorRejected(u64),
     InvalidResultGeometry,
     TransportObjectStateChanged,
@@ -286,6 +291,19 @@ pub fn run_ankapp(
 }
 pub(crate) fn run_ankapp_with_capacity(preprocessor_image:&[u8],bundle:&SourceBundle,
     capacity:u64) -> Result<PreprocessedSource,AnkaPreprocessError> {
+    let mut remaining=(ANKAPP_MAX_ROUNDS as u64)*(ANKAPP_QUANTUM as u64);
+    run_ankapp_attempt(preprocessor_image,bundle,capacity,&mut remaining,&mut false)
+}
+
+// Each attempt owns an isolated software machine. Returning destroys its
+// Kernel/Fabric (including partial output) before the growth driver retries.
+fn run_ankapp_attempt(preprocessor_image:&[u8],bundle:&SourceBundle,capacity:u64,
+    remaining:&mut u64,retryable:&mut bool) -> Result<PreprocessedSource,AnkaPreprocessError> {
+    run_ankapp_attempt_profile(preprocessor_image,bundle,capacity,remaining,retryable,false)
+}
+fn run_ankapp_attempt_profile(preprocessor_image:&[u8],bundle:&SourceBundle,capacity:u64,
+    remaining:&mut u64,retryable:&mut bool,bounded:bool) -> Result<PreprocessedSource,AnkaPreprocessError> {
+    *retryable=false;
     if preprocessor_image.is_empty() {
         return Err(AnkaPreprocessError::EmptyPreprocessorImage);
     }
@@ -352,7 +370,8 @@ pub(crate) fn run_ankapp_with_capacity(preprocessor_image:&[u8],bundle:&SourceBu
     put_u64(&mut manifest, MAN_ROOT_NAME_VADDR, root_vaddr);
     put_u64(&mut manifest, MAN_ROOT_NAME_LEN, bundle.root_name().len() as u64);
 
-    let mut fabric = Fabric::new(ANKAPP_RAM_SIZE);
+    let mut fabric = if bounded {Fabric::with_preprocessor_storage(ANKAPP_RAM_SIZE)
+        .map_err(|_|AnkaPreprocessError::StoragePolicy)?} else {Fabric::new(ANKAPP_RAM_SIZE)};
     let mut placement = PhysicalPlacementManager::new(ANKAPP_PM_BASE, ANKAPP_PM_SIZE)
         .map_err(AnkaPreprocessError::Placement)?;
 
@@ -464,10 +483,21 @@ pub(crate) fn run_ankapp_with_capacity(preprocessor_image:&[u8],bundle:&SourceBu
     let mut kernel = Kernel::new(fabric);
     kernel.next_phys = kernel_base;
     kernel.boot(&info).map_err(AnkaPreprocessError::Boot)?;
-    for _ in 0..ANKAPP_MAX_ROUNDS {
-        kernel.run(ANKAPP_QUANTUM,1);
+    if bounded {kernel.prepare_preprocessor_transport().map_err(|_|AnkaPreprocessError::RestrictedTransport)?;}
+    loop {
+        let quantum=growth::take_quantum(remaining)?;
+        if bounded {
+            let mut left=quantum;
+            while left>0 && !kernel.processes[0].exited() {
+                let n=left.min(super::os::preprocessor_transport::PREPROCESS_SLICE);
+                kernel.run_preprocessor_slice(n).map_err(|_|AnkaPreprocessError::RestrictedTransport)?;
+                left-=n;
+            }
+        } else {kernel.run(quantum,1);}
+        if kernel.processes.len()!=1 || !kernel.fabric.discard_completed_compiler_trace() {
+            return Err(AnkaPreprocessError::TransportObjectStateChanged);
+        }
         if kernel.processes.first().is_some_and(|p| p.exited()) {break;}
-        assert!(kernel.fabric.discard_completed_compiler_trace());
     }
 
     let init = kernel.processes.get(0).ok_or(AnkaPreprocessError::PreprocessorDidNotExit)?;
@@ -475,11 +505,9 @@ pub(crate) fn run_ankapp_with_capacity(preprocessor_image:&[u8],bundle:&SourceBu
         return Err(AnkaPreprocessError::PreprocessorDidNotExit);
     }
     let status = read_u64_physical(&kernel.fabric, result_phys, RESULT_STATUS);
-    if init.exit_code != 0 || status != 0 {
-        return Err(AnkaPreprocessError::PreprocessorRejected(
-            if status != 0 { status } else { init.exit_code },
-        ));
-    }
+    let exit_code=init.exit_code;
+    let ordinary=matches!(init.result,Some(super::os::ProcessResult::Exited(_)));
+    if !ordinary {return Err(AnkaPreprocessError::PreprocessorDidNotExit);}
 
     for object in [output_obj, workspace_obj, result_obj] {
         if kernel.fabric.objects.get(&object).map(|o| o.state) != Some(ObjectState::Active) {
@@ -511,6 +539,13 @@ pub(crate) fn run_ankapp_with_capacity(preprocessor_image:&[u8],bundle:&SourceBu
     if output_len > capacity {
         return Err(AnkaPreprocessError::InvalidResultGeometry);
     }
+    if exit_code != 0 || status != 0 {
+        // Only an ordinary matching capacity exit with full output and verified
+        // immutable transport can authorize growth. No fault/syntax retry.
+        *retryable=growth::capacity_reply(ordinary,exit_code,status,output_len,capacity);
+        return Err(AnkaPreprocessError::PreprocessorRejected(
+            if status!=0 {status} else {exit_code}));
+    }
     let bytes = kernel.fabric.read_physical(output_phys, output_len).to_vec();
     Ok(PreprocessedSource {
         bytes,
@@ -531,3 +566,8 @@ pub fn compile_source_bundle_to_aom_stage3(
     compile_c_to_aom_stage3(stage3_compiler_image, &effective.bytes)
         .map_err(SourceBundleCompileError::Compile)
 }
+
+pub(crate) mod storage;
+mod growth;
+pub(crate) use growth::run_ankapp_growing_accounted;
+pub use growth::{PreprocessGrowthPolicy,PreprocessGrowthResult,run_ankapp_growing};

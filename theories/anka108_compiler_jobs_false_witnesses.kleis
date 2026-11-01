@@ -1,0 +1,32 @@
+import "anka108_compiler_jobs.kleis"
+example "hostile access bypass guard 0" { assert(cj108_access(res108_false(),res108_true(),res108_true(),bvconst(0,64))) }
+example "hostile access bypass guard 1" { assert(cj108_access(res108_true(),res108_false(),res108_true(),bvconst(0,64))) }
+example "hostile access bypass guard 2" { assert(cj108_access(res108_true(),res108_true(),res108_false(),bvconst(0,64))) }
+example "hostile retry bypass guard 1" { assert(cj108_retry(bvconst(0,64),res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile retry bypass guard 2" { assert(cj108_retry(bvconst(0,64),res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile retry bypass guard 3" { assert(cj108_retry(bvconst(0,64),res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile retry bypass guard 4" { assert(cj108_retry(bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile resume bypass guard 1" { assert(cj108_resume(bvconst(1,64),res108_false(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile resume bypass guard 2" { assert(cj108_resume(bvconst(1,64),res108_true(),res108_false(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile resume bypass guard 3" { assert(cj108_resume(bvconst(1,64),res108_true(),res108_true(),res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile resume bypass guard 4" { assert(cj108_resume(bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile resume bypass guard 5" { assert(cj108_resume(bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile resume bypass guard 6" { assert(cj108_resume(bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile commit bypass guard 1" { assert(cj108_commit(bvconst(0,64),res108_false())) }
+example "hostile refund bypass guard 0" { assert(cj108_refund(res108_false(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile refund bypass guard 1" { assert(cj108_refund(res108_true(),res108_false(),res108_true(),res108_true(),res108_true())) }
+example "hostile refund bypass guard 2" { assert(cj108_refund(res108_true(),res108_true(),res108_false(),res108_true(),res108_true())) }
+example "hostile refund bypass guard 3" { assert(cj108_refund(res108_true(),res108_true(),res108_true(),res108_false(),res108_true())) }
+example "hostile refund bypass guard 4" { assert(cj108_refund(res108_true(),res108_true(),res108_true(),res108_true(),res108_false())) }
+example "hostile retry from state 1" { assert(cj108_retry(bvconst(1,64),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile retry from state 2" { assert(cj108_retry(bvconst(2,64),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile retry from state 3" { assert(cj108_retry(bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile resume from state 0" { assert(cj108_resume(bvconst(0,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile resume from state 2" { assert(cj108_resume(bvconst(2,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile resume from state 3" { assert(cj108_resume(bvconst(3,64),res108_true(),res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "hostile commit from state 1" { assert(cj108_commit(bvconst(1,64),res108_true())) }
+example "hostile commit from state 2" { assert(cj108_commit(bvconst(2,64),res108_true())) }
+example "hostile commit from state 3" { assert(cj108_commit(bvconst(3,64),res108_true())) }
+example "hostile closed handle" { assert(cj108_access(res108_true(),res108_true(),res108_true(),bvconst(3,64))) }
+example "hostile unpinned retry interval" { assert(cj108_drop_pin(res108_false(),res108_false())) }
+example "hostile peer overwrite" { assert(cj108_peer(bvconst(2,64),bvconst(1,64),bvconst(7,64),bvconst(9,64))=bvconst(9,64)) }

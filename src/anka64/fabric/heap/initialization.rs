@@ -242,7 +242,7 @@ impl Fabric {
         }
         let heap = self.private_heap.as_mut().unwrap();
         heap.shadow[span.shadow].fill(None);
-        heap.rows[plan.registry.slot()] = Some(plan.row);
+        heap.set_row(plan.registry.slot(),plan.row);
         self.scoped_pointers
             .commit_heap_initialization(plan.registry);
         HeapInitialization { row: plan.row }

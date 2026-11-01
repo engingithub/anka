@@ -109,6 +109,18 @@ impl Fabric {
             super::scoped_pointers::ScopedPointers::new(4096), None)
     }
 
+    /// Isolated accounted preprocessing profile: bounded pointer metadata and
+    /// exact RAM capacity. The caller reserves shared quota before this call.
+    pub(crate) fn with_preprocessor_storage(mem_size:usize)->Result<Self,()> {
+        let mut memory=Vec::new();memory.try_reserve_exact(mem_size).map_err(|_|())?;
+        if memory.capacity()>mem_size {return Err(());}
+        memory.resize(mem_size,0);
+        let pointers=super::scoped_pointers::ScopedPointers::with_limits(
+            super::scoped_pointers::heap::RegistryLimits {slots:4096,scopes:4096,owners:0,
+                cleanup:0,global_bytes:2*1024*1024}).map_err(|_|())?;
+        Ok(Self::from_parts(memory,pointers,None))
+    }
+
     fn from_parts(memory: Vec<u8>, scoped_pointers: super::scoped_pointers::ScopedPointers,
         private_heap: Option<heap::HeapFabric>) -> Self {
         Self {
@@ -351,6 +363,12 @@ impl Fabric {
     }
 
     // ───────────────── Domain management ─────────────────────────
+
+    pub(crate) fn try_create_compiler_domain(&mut self)->Option<DomainId> {
+        self.next_domain_id.checked_add(1)?;
+        if self.domains.contains_key(&DomainId(self.next_domain_id)) {return None;}
+        Some(self.create_domain())
+    }
 
     pub fn create_domain(&mut self) -> DomainId {
         let id = DomainId(self.next_domain_id);
@@ -1563,6 +1581,37 @@ impl Fabric {
     pub(crate) fn compiler_trace_safe(&self, output: ObjectId) -> bool {
         self.transactions.iter().all(|tx| tx.state.is_terminal()
             && !(tx.request.object == output && tx.request.kind == AccessKind::Fetch))
+    }
+
+    /// Reserve a terminal CPU-only trace directory before accounted execution.
+    /// The caller separately excludes devices and bounds instructions per slice.
+    pub(crate) fn collect_admitted_compiler_trace(&mut self)->bool {
+        if !self.discard_completed_compiler_trace() {return false;}
+        // Caller excludes devices/non-CPU agents: no controller retains indices.
+        self.fault_log.clear();
+        self.transactions.capacity()<=4096 && self.fault_log.capacity()<=128
+    }
+
+    pub(crate) fn application_run_storage_ok(&self)->bool {
+        self.memory.capacity()<=0x1000000
+            && self.scoped_pointers.fixed_metadata_bytes()<=64*1024*1024
+    }
+    pub(crate) fn collect_application_run_trace(&mut self,capacity:usize)->bool {
+        if !self.discard_completed_compiler_trace() {return false;}
+        self.fault_log.clear();
+        self.transactions.capacity()<=capacity && self.fault_log.capacity()<=1
+    }
+
+    pub(crate) fn prepare_preprocessor_trace(&mut self,capacity:usize)->Result<(),()> {
+        if !self.discard_completed_compiler_trace() || !self.fault_log.is_empty() {return Err(());}
+        self.transactions.try_reserve_exact(capacity).map_err(|_|())?;
+        self.fault_log.try_reserve_exact(1).map_err(|_|())?;
+        if self.transactions.capacity()>capacity || self.fault_log.capacity()>1 {return Err(());}
+        Ok(())
+    }
+    pub(crate) fn preprocessor_trace_within_bounds(&self,capacity:usize)->bool {
+        self.transactions.len()<=capacity && self.transactions.capacity()<=capacity
+            && self.fault_log.capacity()<=1
     }
 
     /// CPU-only transient compiler harness: no device ledger retains vector

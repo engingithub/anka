@@ -21,6 +21,10 @@ const TIMER_BASE: u32 = 0x00F0_0010;
 fn main() {
     let args: Vec<String> = env::args().collect();
 
+    if args.get(1).is_some_and(|s| s == "rebuild") {
+        process::exit(anka::anka64::rebuild::command(&args[2..]));
+    }
+
     // Subcommand: anka asm
     if args.len() > 1 && args[1] == "asm" {
         run_asm(&args[2..]);

@@ -12,8 +12,11 @@ Implemented progression:
 - `tcp.c` — Phase 9.4e: single passive TCP connection with handshake, in-order ACK, and FIN close on development port 49153
 - `socket.c` — Phase 9.4f: process-facing single stream socket over exact IPC + explicitly shared memory
 
-Planned next:
-- HTTP
+- `httpd.c` — Phase 9.4g: implemented `/alive` HTTP service over the original socket IPC/shared-buffer ABI
+- `httpd_protected.c` — protected typed-input/output HTTP application; ordinary rebuild integration implemented, frame-budget checks passed; real compilation then timed out, and the heap-lookup performance correction awaits acceptance
+
+The original stack and its CC_B witnesses are implemented. Phase 10.8 requires
+additional protected rebuild acceptance; these are different claims.
 
 These are real Anka64 system services, not examples. The end-to-end target is:
 
@@ -39,9 +42,10 @@ must be 14..1514 bytes. EtherType is decoded in network byte order from bytes
 Those exit values are an executable Phase 9.4a witness, not the eventual
 inter-service IPC ABI.
 
-CC_B currently has no preprocessor/header inclusion step, so `ethernet.c` is a
-self-contained translation unit. Shared network headers should be introduced
-only when the compiler/source-composition path actually supports them.
+The original CC_B witness has no preprocessor/header inclusion step, so `ethernet.c` is a
+self-contained translation unit. The current protected toolchain now supports explicit source-bundle includes
+and separate modules; migrating these original witnesses requires explicit
+startup/device/IPC contracts as well as recompilation.
 
 The Phase 9.4a Rust witness boots the service with an exact virtual-NIC
 execution environment: a DMA buffer at virtual address `0x10000`, NIC_RX handle
@@ -83,7 +87,7 @@ combined NIC_RX|NIC_TX handle at `0:0` and one RW DMA-buffer handle at `1:0`.
 The buffer remains mapped at virtual `0x10000`.  These are explicit bootstrap
 authorities, not authority derived from `/system/services/net/arp`.
 
-Until Anka has an inter-service IPC/startup protocol, `arp.c` validates the
+In this standalone Phase 9.4b witness, `arp.c` validates the
 small Ethernet envelope it depends on directly.  This does not move Ethernet
 or ARP parsing into Rust and does not establish a second kernel protocol path.
 
@@ -104,8 +108,9 @@ destination, preserves identifier/sequence/payload, recomputes both ICMP and
 IPv4 checksums, and leaves Ethernet padding beyond IPv4 total length untouched.
 Odd-length ICMP payloads are supported by the Internet checksum implementation.
 
-As in 9.4b, this duplicate envelope check is a temporary composition seam while
-CC_B has no linker and Anka has no inter-service network startup/IPC ABI.
+As in 9.4b, this duplicate envelope check is a temporary composition seam in the
+original standalone CC_B profile. The later socket/HTTP service has exact-peer
+IPC; the protected migration must preserve or explicitly refine that contract.
 
 
 ## Phase 9.4d UDP boundary
@@ -125,8 +130,8 @@ padding outside IPv4 total length. Anka emits a real nonzero UDP checksum even
 when the IPv4 request omitted one.
 
 As with ARP and ICMP, `udp.c` independently validates the small Ethernet/IPv4
-envelope because CC_B still has no linker and Anka has no inter-service network
-startup/IPC ABI. The fixed port is configuration for this executable witness;
+envelope under the original standalone CC_B profile. The newer protected toolchain has
+a guest linker; that does not automatically migrate this startup/device ABI. The fixed port is configuration for this executable witness;
 it is not kernel policy and creates no authority.
 
 
@@ -138,8 +143,8 @@ passive connection on development port `49153` and implements
 the strict fixed-header IPv4/TCP subset: data offset 5, mandatory TCP
 pseudo-header checksum, exact saved peer IPv4/port tuple, exact final handshake
 ACK, and in-order payload/FIN sequence numbers. TCP options, retransmission,
-out-of-order queues, multiple connections, congestion control, and sockets are
-deferred.
+out-of-order queues, multiple connections, congestion control, are deferred by this standalone TCP witness; the socket layer is implemented
+separately below.
 
 The executable witness uses deterministic local ISS `0x414e4b41`. SYN and FIN
 each consume one receive sequence number; accepted data advances `RCV.NXT` by
@@ -164,8 +169,7 @@ TCP sequence or acknowledgement numbers.
 The Phase 9.4f witness client is `userspace/bin/socket_echo.c`: it waits for
 CONNECTED, receives four opaque stream bytes (`ping`) via DATA(4), writes
 `pong` into the shared buffer, issues SEND(4), and waits for CLOSED. The socket
-service alone turns those bytes into TCP and advances SND.NXT. This is the seam
-the HTTP service will consume next.
+service alone turns those bytes into TCP and advances SND.NXT. The implemented Phase 9.4g HTTP service consumes this seam.
 
 
 ## Phase 9.4g HTTP boundary
@@ -180,3 +184,44 @@ body is exactly `Anka64 is alive.`. Header bytes are opaque. Other first
 requests receive a bounded 404. Request reassembly across multiple socket DATA
 events, pipelining, request bodies, persistent HTTP connections, TLS, and
 concurrent clients are deferred.
+
+
+## Protected HTTP application and the remaining network boundary
+
+`httpd_protected.c` ports the same bounded `/alive` decision and exact 200/404
+response bytes to authenticated `char *` accesses and typed `read_bytes` /
+`write_bytes`. A private 1024-byte local buffer holds one finite request image.
+Input beyond 1024 bytes is detected with a separate one-byte probe and produces
+no response; empty input also rejects. Other malformed/nonmatching nonempty
+requests receive the existing 404. This is the intentionally narrow original
+HTTP subset, not a complete HTTP parser or TCP reassembly implementation.
+
+From the repository root:
+
+```sh
+printf 'GET /alive HTTP/1.1\r\n\r\n' > /tmp/anka-request.txt
+cargo run --release -- rebuild --run --input /tmp/anka-request.txt userspace/system/services/net/httpd_protected.c
+```
+
+This command runs the real protected guest application through ordinary compiler
+admission, publication, guest linking and C startup. The input file supplies a
+finite private stream, **not a NIC or a socket connection**. The input copy is
+explicitly authorized, charged, attached to the exact child incarnation before
+execution, and destroyed before its machine reservation is refunded.
+
+The original `socket.c`/`httpd.c` handshake retains shared-memory permissions;
+SEND notification is not architectural revocation. The protected socket/NIC
+migration still needs a concrete typed endpoint/buffer ownership contract,
+Kleis gates and actual Ethernet/TCP `/alive` acceptance. Do not treat the new
+application-only witness as that network acceptance. Existing driver/controller
+and stale-generation/DMA drain guarantees must survive the migration.
+
+## Protected migration order
+
+Keep the legacy sources and their protocol tests as the reference. Accept the
+private-input protected HTTP application first, then formalize a typed socket
+endpoint that copies into private protected buffers. Port the Ethernet-to-socket
+services through the protected toolchain with explicit device/IPC authority,
+quotas, cancellation and DMA drainage. Require the rebuilt NIC-to-HTTP-to-NIC
+`/alive` witness before declaring Phase 10.8 complete. A legacy transport bridge
+can exercise a port but cannot stand in for the completed stack rebuild.

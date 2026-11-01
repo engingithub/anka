@@ -463,3 +463,108 @@ fn c23_empty_and_limit_source_preserve_exact_bytes_and_bound() {
         }
     }
 }
+
+#[test]
+fn c31_loader_installs_read_only_directory_and_charges_full_workspace() {
+    use crate::anka64::compiler_adapter::resources::growth::workspace::WorkspaceDirectory;
+    let mut k=machine();let key=client(&mut k,10,1,4096);
+    let directory=WorkspaceDirectory::new([128,256,64,64,16,128,128],1<<20).unwrap();
+    let mut a=k.load_compiler_request_with_workspace(key,budget(10,4096,3),b"abc",directory).unwrap();
+    let q=request(&k,key);let image=bytes(&k,&a,q,1024);
+    let word=|i:usize|u64::from_le_bytes(image[i*8..i*8+8].try_into().unwrap());
+    assert_eq!((word(13),word(15),word(38),word(70)),(1024,1,directory.capacity(),1024));
+    assert_eq!(&image[768..],directory.bytes().as_slice());
+    assert_eq!(a.workspace_directory,Some(directory));
+    let table=k.fabric.scoped_pointers.add_heap_pointer(q,a.owner,768).unwrap();
+    assert!(k.fabric.write_heap_bytes(a.owner,a.agent,table,&[1]).is_err());
+    let workspace=region(&mut k,&a,q,1);
+    let tail=k.fabric.scoped_pointers.add_heap_pointer(workspace,a.owner,(directory.capacity()-8)as i64).unwrap();
+    assert_eq!(bytes(&k,&a,tail,8),vec![0;8]);
+    k.fabric.write_heap_bytes(a.owner,a.agent,tail,&[9;8]).unwrap();
+    let account=k.fabric.scoped_pointers.heap_account(a.owner).unwrap();
+    assert_eq!(k.fabric.scoped_pointers.account_reserved_bytes(account).unwrap(),directory.capacity()+4*4096);
+    let mut pending=run(&mut k,&mut a).unwrap();let _next=release(&mut k,&mut pending);
+    assert!(k.fabric.read_heap_bytes(a.owner,a.agent,workspace,&mut [0;8]).is_err());
+}
+
+#[test]
+fn c31_loader_charged_input_survives_directory_load_and_release() {
+    use crate::anka64::compiler_adapter::resources::growth::workspace::WorkspaceDirectory;
+    use crate::anka64::os::compiler_retry::inputs::CompilerInputRole;
+    let mut k=machine();let input=k.ingest_compiler_input(CompilerInputRole::EffectiveSource,b"abc").unwrap();
+    let key=client(&mut k,10,1,4096);let d=WorkspaceDirectory::new([128,256,64,64,16,128,128],1<<20).unwrap();
+    let mut a=k.load_compiler_input_with_workspace(key,budget(10,4096,3),&input,d).unwrap();
+    assert_eq!(k.compiler_input(&input,CompilerInputRole::EffectiveSource).unwrap(),b"abc");
+    k.discard_compiler_input(&input).unwrap();
+    let mut pending=run(&mut k,&mut a).unwrap();let _next=release(&mut k,&mut pending);
+}
+
+#[test]
+fn c32_directory_source_crosses_old_limit_exactly_and_keeps_padding_zero() {
+    use crate::anka64::compiler_adapter::resources::growth::workspace::WorkspaceDirectory;
+    let mut k=machine();let key=client(&mut k,10,1,4096);
+    let d=WorkspaceDirectory::new([128,256,64,64,16,128,128],1<<20).unwrap();
+    let source:Vec<u8>=(0..70001).map(|i|(i%251)as u8).collect();
+    let mut a=k.load_compiler_request_with_workspace(key,budget(10,4096,source.len()as u64),&source,d).unwrap();
+    let q=request(&k,key);let header=bytes(&k,&a,q,1024);
+    assert_eq!(u64::from_le_bytes(header[23*8..24*8].try_into().unwrap()),70001);
+    let p=region(&mut k,&a,q,0);
+    for offset in (0..source.len()).step_by(4096) {
+        let size=(source.len()-offset).min(4096);
+        assert_eq!(bytes(&k,&a,at(&k,&a,p,offset as u64),size as u64),source[offset..offset+size]);
+    }
+    assert_eq!(bytes(&k,&a,at(&k,&a,p,70001),7),vec![0;7]);
+    assert!(k.fabric.write_heap_bytes(a.owner,a.agent,p,&[9]).is_err());
+    assert!(k.fabric.read_heap_bytes(a.owner,a.agent,at(&k,&a,p,70008),&mut [0;1]).is_err());
+    let account=k.fabric.scoped_pointers.heap_account(a.owner).unwrap();
+    assert_eq!(k.fabric.scoped_pointers.account_reserved_bytes(account).unwrap(),73728+d.capacity()+3*4096);
+    let mut pending=run(&mut k,&mut a).unwrap();let _next=release(&mut k,&mut pending);
+    assert!(k.fabric.read_heap_bytes(a.owner,a.agent,p,&mut [0;1]).is_err());
+}
+
+#[test]
+fn c32_source_profile_denial_precedes_owner_admission_and_preserves_retry() {
+    use crate::anka64::compiler_adapter::resources::growth::workspace::{WorkspaceDirectory,DIRECTORY_SOURCE_LIMIT};
+    let mut k=machine();let key=client(&mut k,10,1,4096);
+    let d=WorkspaceDirectory::new([128,256,64,64,16,128,128],1<<20).unwrap();
+    let large=vec![b' ';70001];let held=k.fabric.scoped_pointers.total_reserved_bytes();
+    assert!(k.load_compiler_request(key,budget(10,4096,large.len()as u64),&large).is_err());
+    assert!(k.load_compiler_request_with_workspace(key,budget(10,4096,(DIRECTORY_SOURCE_LIMIT+1)as u64),
+        &vec![0;DIRECTORY_SOURCE_LIMIT+1],d).is_err());
+    assert_eq!(k.fabric.scoped_pointers.total_reserved_bytes(),held);
+    assert_eq!(k.processes[key.slot].state,ProcessState::Running);
+    assert!(k.load_compiler_request_with_workspace(key,budget(10,4096,large.len()as u64),&large,d).is_ok());
+}
+
+#[test]
+fn c3_workspace_retry_real_reply_requires_cleanup_and_loads_carried_directory() {
+    let mut k=machine();
+    let d=WorkspaceDirectory::new([1,16,16,16,16,16,16],1<<20).unwrap();
+    let words=[COMPILER_RESOURCE_MAGIC,2,71,1,1,32,2,0,3,0,21,22,23,24,25,0];
+    let a=client_report(&mut k,71,1,4096,Some(words));
+    let mut attempt=k.load_compiler_request_with_workspace(a,budget(71,4096,3),b"abc",d).unwrap();
+    let old=attempt.output;let owner=attempt.owner;let agent=attempt.agent;
+    let b=client(&mut k,72,1,4096);
+    let peer=k.load_compiler_request(b,budget(72,4096,3),b"xyz").unwrap();
+    let peer_account=k.fabric.scoped_pointers.heap_account(peer.owner).unwrap();
+    let peer_charge=k.fabric.scoped_pointers.account_reserved_bytes(peer_account).unwrap();
+    let mut pending=loop {
+        match k.run_compiler_retry_slice(&mut attempt,256).unwrap() {
+            CompilerSlice::Running=>{},CompilerSlice::AwaitingCleanup(p)=>break p,
+        }
+    };
+    assert!(k.fabric.authenticate_heap_token(owner,agent,old).is_err());
+    let next=release(&mut k,&mut pending);
+    assert!(k.fabric.compiler_heap_owner_released(owner));
+    assert_eq!(next.workspace_directory().unwrap().words()[1],2);
+    assert_eq!(next.workspace_directory().unwrap().words()[29],2);
+    assert_eq!(next.context().output_capacity(),4096);
+    assert!(next.spent_work()>0);assert_eq!(next.remaining_retries(),2);
+    let c=client(&mut k,71,2,4096);
+    // No supplied directory: the release-bound budget is authoritative.
+    let loaded=k.load_compiler_request(c,next,b"abc").unwrap();
+    assert_eq!(loaded.workspace_directory.unwrap().words()[1],2);
+    assert!(k.fabric.authenticate_heap_token(loaded.owner,loaded.agent,old).is_err());
+    k.fabric.authenticate_heap_token(peer.owner,peer.agent,peer.output).unwrap();
+    assert_eq!(k.fabric.scoped_pointers.account_reserved_bytes(peer_account).unwrap(),peer_charge);
+}

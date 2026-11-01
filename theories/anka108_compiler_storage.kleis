@@ -1,0 +1,212 @@
+// C2 host storage: reserve quota before host allocation, without reserving
+// guest physical/virtual extents. Shared owner/global counters include heaps.
+// Exact token/current ledger and destroyed-storage certificates are trusted
+// runtime observations, never guest Booleans. No new axioms; no Rust proof.
+import "anka108_compiler_resources.kleis"
+
+define hs108_admit(live : Bool, exact_revision : Bool, row_free : Bool,
+    revision : BitVec64, identity : BitVec64, n : BitVec64,
+    owner : BitVec64, owner_limit : BitVec64, total : BitVec64, limit : BitVec64) =
+    live ∧ exact_revision ∧ row_free ∧ bvult(revision,ptr107_max()) ∧
+    bvugt(identity,res108_z()) ∧ bvult(identity,ptr107_max()) ∧ heap108_size(n) ∧
+    bvule(owner,total) ∧ res108_add(owner,res108_round(n),owner_limit) ∧
+    res108_add(total,res108_round(n),limit)
+define hs108_held(commit : Bool, held : BitVec64, n : BitVec64) =
+    if commit then bvadd(held,res108_round(n)) else held
+// Pointwise independent owners. owner_key is the current authenticated account
+// incarnation, not a process slot or guest-supplied name.
+define hs108_owner(commit : Bool, q : BitVec64, owner_key : BitVec64,
+    held : BitVec64, n : BitVec64) =
+    if (q=owner_key) then hs108_held(commit,held,n) else held
+// Host storage cannot be scrubbed/released by the guest-memory cleanup worker.
+// Process death fences use but retains charge until its custodian destroys it.
+define hs108_close(held : BitVec64) = held
+define hs108_release(exact : Bool, destroyed : Bool, n : BitVec64,
+    owner : BitVec64, total : BitVec64) =
+    exact ∧ destroyed ∧ heap108_size(n) ∧ bvule(res108_round(n),owner) ∧ bvule(owner,total)
+define hs108_refund(commit : Bool, held : BitVec64, n : BitVec64) =
+    if commit then bvsub(held,res108_round(n)) else held
+// Guest extent ownership is unchanged by host reserve/refund.
+define hs108_extent(before : BitVec64) = before
+
+example "law: failed admission preserves charge" {
+    assert(∀(h : BitVec64). ∀(n : BitVec64). (hs108_held(res108_false(),h,n)=h))
+}
+example "law: peer charge preserved" {
+    assert(∀(q : BitVec64). ∀(k : BitVec64). ∀(h : BitVec64). ∀(n : BitVec64). ((q≠k) → (hs108_owner(res108_true(),q,k,h,n)=h)))
+}
+example "law: death cannot refund" {
+    assert(∀(h : BitVec64). (hs108_close(h)=h))
+}
+example "law: failed release preserves charge" {
+    assert(∀(h : BitVec64). ∀(n : BitVec64). (hs108_refund(res108_false(),h,n)=h))
+}
+example "law: guest placement unchanged" {
+    assert(∀(p : BitVec64). (hs108_extent(p)=p))
+}
+example "law: release requires destroyed storage" {
+    assert(∀(n : BitVec64). ∀(h : BitVec64). ∀(g : BitVec64). (¬hs108_release(res108_true(),res108_false(),n,h,g)))
+}
+example "law: stale handle cannot refund" {
+    assert(∀(n : BitVec64). ∀(h : BitVec64). ∀(g : BitVec64). (¬hs108_release(res108_false(),res108_true(),n,h,g)))
+}
+example "law: refund cannot underflow" {
+    assert(∀(n : BitVec64). ∀(h : BitVec64). ∀(g : BitVec64). (hs108_release(res108_true(),res108_true(),n,h,g) → bvule(hs108_refund(res108_true(),h,n),h)))
+}
+example "law: reserve and refund conserve charge" {
+    assert(∀(n : BitVec64). ∀(h : BitVec64). (hs108_refund(res108_true(),hs108_held(res108_true(),h,n),n)=h))
+}
+example "exact rounded budget" {
+    assert(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64)))
+}
+example "closed owner" {
+    assert(¬(hs108_admit(res108_false(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64))))
+}
+example "stale ledger" {
+    assert(¬(hs108_admit(res108_true(),res108_false(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64))))
+}
+example "full storage directory" {
+    assert(¬(hs108_admit(res108_true(),res108_true(),res108_false(),bvconst(1,64),bvconst(1,64),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64))))
+}
+example "revision exhausted" {
+    assert(¬(hs108_admit(res108_true(),res108_true(),res108_true(),ptr107_max(),bvconst(1,64),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64))))
+}
+example "identity exhausted" {
+    assert(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),ptr107_max(),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64))))
+}
+example "zero identity" {
+    assert(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(0,64),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64))))
+}
+example "zero bytes" {
+    assert(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64))))
+}
+example "signed size overflow" {
+    assert(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvadd(heap108_signed_max(),bvconst(1,64)),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64))))
+}
+example "owner quota short" {
+    assert(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4097,64),bvconst(0,64),bvconst(8191,64),bvconst(1000,64),bvconst(9192,64))))
+}
+example "global quota short" {
+    assert(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9191,64))))
+}
+example "owner census inconsistent" {
+    assert(¬(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4097,64),bvconst(1001,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64))))
+}
+example "rounding 1" {
+    assert(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(1,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64)))
+}
+example "rounding 4095" {
+    assert(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4095,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64)))
+}
+example "rounding 4096" {
+    assert(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4096,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64)))
+}
+example "rounding 4097" {
+    assert(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(4097,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64)))
+}
+example "rounding 8192" {
+    assert(hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),bvconst(8192,64),bvconst(0,64),bvconst(8192,64),bvconst(1000,64),bvconst(9192,64)))
+}
+example "real release" {
+    assert(hs108_release(res108_true(),res108_true(),bvconst(4097,64),bvconst(8192,64),bvconst(12288,64)))
+}
+example "stale release" {
+    assert(¬(hs108_release(res108_false(),res108_true(),bvconst(4097,64),bvconst(8192,64),bvconst(12288,64))))
+}
+example "live payload" {
+    assert(¬(hs108_release(res108_true(),res108_false(),bvconst(4097,64),bvconst(8192,64),bvconst(12288,64))))
+}
+example "owner underflow" {
+    assert(¬(hs108_release(res108_true(),res108_true(),bvconst(4097,64),bvconst(8191,64),bvconst(12288,64))))
+}
+example "global underflow" {
+    assert(¬(hs108_release(res108_true(),res108_true(),bvconst(4097,64),bvconst(8192,64),bvconst(4096,64))))
+}
+example "zero release" {
+    assert(¬(hs108_release(res108_true(),res108_true(),bvconst(0,64),bvconst(8192,64),bvconst(12288,64))))
+}
+
+example "law: admission bounds shared global sum without wrap" {
+    assert(∀(n : BitVec64). ∀(h : BitVec64). ∀(ol : BitVec64). ∀(g : BitVec64). ∀(gl : BitVec64).
+        (hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),n,h,ol,g,gl) →
+         (bvule(hs108_held(res108_true(),g,n),gl) ∧ bvuge(hs108_held(res108_true(),g,n),g))))
+}
+example "law: admission bounds owner sum without wrap" {
+    assert(∀(n : BitVec64). ∀(h : BitVec64). ∀(ol : BitVec64). ∀(g : BitVec64). ∀(gl : BitVec64).
+        (hs108_admit(res108_true(),res108_true(),res108_true(),bvconst(1,64),bvconst(1,64),n,h,ol,g,gl) →
+         (bvule(hs108_held(res108_true(),h,n),ol) ∧ bvuge(hs108_held(res108_true(),h,n),h))))
+}
+
+// Legacy-profile charged immutable ingress. Roles: 1 effective source; 2 tool bytes.
+// Directory-profile source shape is refined by anka108_source_growth.kleis;
+// retained custody/charging/load predicates below are unchanged.
+// Tool custody alone is NOT executable admission or accepted lineage evidence.
+define ing108_shape(role : BitVec8, n : BitVec64) =
+    ((role=bvconst(1,8)) ∧ bvule(n,bvconst(65528,64))) ∨
+    ((role=bvconst(2,8)) ∧ bvugt(n,res108_z()) ∧ bvule(n,bvconst(1048576,64)))
+define ing108_charge(n : BitVec64, overhead : BitVec64, charged : BitVec64) =
+    bvuge(overhead,bvconst(4096,64)) ∧ res108_add(n,overhead,heap108_signed_max()) ∧
+    (charged=bvadd(n,overhead))
+define ing108_read(exact_token : Bool, live_custodian : Bool, retained_charge : Bool,
+    discarded : Bool, actual : BitVec64, expected : BitVec64) =
+    exact_token ∧ live_custodian ∧ retained_charge ∧ ¬discarded ∧ (actual=expected)
+define ing108_load(role : BitVec8, readable : Bool, independent_producer : Bool,
+    actual : BitVec64, requested : BitVec64) =
+    (role=bvconst(1,8)) ∧ readable ∧ independent_producer ∧
+    (actual=requested) ∧ ing108_shape(role,actual)
+// Borrowing an immutable tool/source does not add another stored payload.
+define ing108_borrow(held : BitVec64) = held
+
+example "ingress: empty source" { assert(ing108_shape(bvconst(1,8),bvconst(0,64))) }
+
+example "ingress: source limit" { assert(ing108_shape(bvconst(1,8),bvconst(65528,64))) }
+
+example "ingress: source exceeds C3 boundary" { assert(¬(ing108_shape(bvconst(1,8),bvconst(65529,64)))) }
+
+example "ingress: tool bytes" { assert(ing108_shape(bvconst(2,8),bvconst(8,64))) }
+
+example "ingress: empty tool" { assert(¬(ing108_shape(bvconst(2,8),bvconst(0,64)))) }
+
+example "ingress: tool limit" { assert(ing108_shape(bvconst(2,8),bvconst(1048576,64))) }
+
+example "ingress: tool too large" { assert(¬(ing108_shape(bvconst(2,8),bvconst(1048577,64)))) }
+
+example "ingress: unknown role" { assert(¬(ing108_shape(bvconst(3,8),bvconst(8,64)))) }
+
+example "ingress: complete charge" { assert(ing108_charge(bvconst(8,64),bvconst(4096,64),bvconst(4104,64))) }
+
+example "ingress: missing metadata charge" { assert(¬(ing108_charge(bvconst(8,64),bvconst(0,64),bvconst(8,64)))) }
+
+example "ingress: payload only charge" { assert(¬(ing108_charge(bvconst(8,64),bvconst(4096,64),bvconst(8,64)))) }
+
+example "ingress: current immutable input" { assert(ing108_read(res108_true(),res108_true(),res108_true(),res108_false(),bvconst(8,64),bvconst(8,64))) }
+
+example "ingress: foreign token" { assert(¬(ing108_read(res108_false(),res108_true(),res108_true(),res108_false(),bvconst(8,64),bvconst(8,64)))) }
+
+example "ingress: dead custodian" { assert(¬(ing108_read(res108_true(),res108_false(),res108_true(),res108_false(),bvconst(8,64),bvconst(8,64)))) }
+
+example "ingress: missing reservation" { assert(¬(ing108_read(res108_true(),res108_true(),res108_false(),res108_false(),bvconst(8,64),bvconst(8,64)))) }
+
+example "ingress: discarded input" { assert(¬(ing108_read(res108_true(),res108_true(),res108_true(),res108_true(),bvconst(8,64),bvconst(8,64)))) }
+
+example "ingress: changed payload length" { assert(¬(ing108_read(res108_true(),res108_true(),res108_true(),res108_false(),bvconst(7,64),bvconst(8,64)))) }
+
+example "ingress: owned source load" { assert(ing108_load(bvconst(1,8),res108_true(),res108_true(),bvconst(8,64),bvconst(8,64))) }
+
+example "ingress: tool as source" { assert(¬(ing108_load(bvconst(2,8),res108_true(),res108_true(),bvconst(8,64),bvconst(8,64)))) }
+
+example "ingress: unreadable source" { assert(¬(ing108_load(bvconst(1,8),res108_false(),res108_true(),bvconst(8,64),bvconst(8,64)))) }
+
+example "ingress: custodian as producer" { assert(¬(ing108_load(bvconst(1,8),res108_true(),res108_false(),bvconst(8,64),bvconst(8,64)))) }
+
+example "ingress: source length substitution" { assert(¬(ing108_load(bvconst(1,8),res108_true(),res108_true(),bvconst(8,64),bvconst(9,64)))) }
+
+example "law: immutable shared borrow preserves charge" {
+    assert(∀(h : BitVec64). (ing108_borrow(h)=h))
+}
+example "law: tools cannot select the source loader" {
+    assert(∀(n : BitVec64). (¬ing108_load(bvconst(2,8),res108_true(),res108_true(),n,n)))
+}
+example "law: closed custody cannot expose immutable bytes" {
+    assert(∀(n : BitVec64). (¬ing108_read(res108_true(),res108_false(),res108_true(),res108_false(),n,n)))
+}

@@ -1,42 +1,53 @@
 # Anka64 userspace source tree
 
-This host-side tree mirrors the logical namespace Anka64 is growing toward.
-It is a development source/artifact store, **not** a host-filesystem mount inside
-Anka and not an authority boundary.
+This directory is a host-side source mirror, not a filesystem mounted into the
+guest. Host paths, logical source names and runtime `(ObjectId, Generation)`
+identities are distinct. A pathname never grants authority.
 
-Current logical roots are intentionally small and earned by real software:
+| Directory | Purpose |
+|---|---|
+| `system/compiler/` | Guest preprocessing, CC2 compilation and static linking |
+| `system/services/` | Operating services, including the implemented network stack |
+| `bin/` | User programs and explicit compiler/runtime acceptance probes |
+| `include/` | Header source supplied as explicit source-bundle members |
+| `lib/` | Reserved guest-library location; no complete libc is installed |
+| `etc/` | Reserved configuration payload location |
 
-- `system/` — operating-environment services and system programs
-- `bin/` — ordinary user-invoked programs
-- `lib/` — guest libraries
-- `include/` — CC_B-visible guest headers
-- `etc/` — future configuration payloads
+## Protected rebuild path
 
-We do not reproduce Unix directory structure wholesale.  New roots are added
-only when Anka64 develops a concrete semantic need for them.
+From the repository root:
 
-For C sources, the development shell maps the host-relative path to the future
-logical install path by removing the `userspace/` prefix and `.c` extension:
+```sh
+cargo run --release -- rebuild --run userspace/bin/protected_pointer_probe.c
+```
 
-`userspace/system/services/net/arp.c` -> `/system/services/net/arp`
+The command builds accepted tool lineage once, runs guest preprocessing and the
+protected ABI-2 compiler, retries admitted resource growth, publishes exact AOM,
+guest-links and optionally executes a current linked receipt. Compilation,
+publication and execution are distinct authority decisions. This is the current
+protected path; it is not full ISO C or a Unix ABI.
 
-The host path, logical path, and runtime `(ObjectId, Generation)` remain three
-distinct identities.  Neither path grants authority.
+`--include FILE` adds an explicit bundle member. The CLI uses **exact basenames**
+for lookup, including the operands of `#include`; it does not search host include
+directories. `--input FILE --run` provides an explicitly authorized bounded input
+image to the spawned child. No input or NIC authority is inherited by name.
 
+The latest ordinary-service acceptance includes actual concurrent compiler jobs,
+A exhaustion, C reuse, stale-alias rejection and unaffected B (75.79s). The new
+protected HTTP application/input packet still requires its own local acceptance.
+See [the root README](../README.md) and [DN-71](../DESIGN_NOTES.md#dn-71).
 
-## Development shell
+## Legacy development monitor
 
-From the project root, `anka dev` starts the Phase 9.3h monitor with this tree
-as its default source mirror.  For example:
+`anka dev` remains the Phase 9 development monitor. Its CC_B bootstrap compile
+route and logical-install-path mapping are separate from `anka rebuild`:
 
 ```text
 anka64> compile bin/hello.c
 anka64> run /bin/hello
 ```
 
-The first compile lazily bootstraps the self-hosted CC_B compiler inside Anka;
-subsequent compiles reuse that compiler image for the session.
-
-Phase 9.4g adds `/system/services/net/httpd`, an ordinary socket client in the
-protection sense even though it is system software in the logical namespace.
-It receives no NIC authority; the socket service owns all transport mechanics.
+The original network services use explicit legacy mappings, device capabilities
+and IPC. They are implemented software, but their original CC_B tests do not
+certify their rebuild as protected CC2 applications. Preserve both boundaries
+until the socket/NIC migration is accepted.

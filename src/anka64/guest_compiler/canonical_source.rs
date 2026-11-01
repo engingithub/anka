@@ -829,7 +829,22 @@ fn extended_stmt_prelude() -> String {
          i = i + 1; }} \
          if (known == 0) {{ addfixup(pos, ns, nl, argc); }} ",
         fc = WS_FUNC_COUNT, ft = WS_FUNC_TABLE, e = WS_ERROR);
-    source.replacen(deferred, &eager, 1)
+    let mut source = source.replacen(deferred, &eager, 1);
+    // A failed emit leaves OUT_POS unchanged. Enclosing parsers may still
+    // unwind through a branch/call fixup; never patch that un-emitted slot.
+    // Keep these guards out of the frozen canonical fixed-point source.
+    let guard = format!(
+        "if (*{e} != 0) {{ return 0; }} \
+         if ((pos < 0) | (*{op} < 8) | (*{lp} < *{op}) | \
+             ((*{op} - 8) < pos) | ((pos & 7) != 0)) {{ \
+         *{e} = 1; return 0; }} ",
+        e = WS_ERROR, op = WS_OUT_POS, lp = WS_LIT_POS);
+    for signature in ["int patchbranch(int pos, int cond, int target) { ",
+                      "int patchcall(int pos, int addr) { "] {
+        assert_eq!(source.matches(signature).count(), 1);
+        source = source.replacen(signature, &format!("{signature}{guard}"), 1);
+    }
+    source
 }
 
 /// CC_B source variant used only when bootstrapping a compiler whose own
@@ -1249,6 +1264,22 @@ mod extended_call_fixup_tests {
         assert!(canonical.contains("if (512 <= cnt)"));
         assert!(extended.contains("if (512 <= cnt)"));
         assert!(extended.len() + 8 <= SOURCE_SIZE as usize);
+    }
+
+    #[test]
+    fn extended_ccb_capacity_rejection_never_patches_unemitted_slots() {
+        // The real typed linker exceeds the old 80-KiB arena. This is the
+        // production failure path: early emit rejection must remain a compiler
+        // rejection, not a write into the following RX compiler mapping.
+        let source = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),
+            "/userspace/system/compiler/ankald.c"));
+        assert!(matches!(crate::anka64::dev_compiler::compile_c_with_ccb(
+            extended_ccb(), source), Err(DevelopmentCompileError::CompilerRejected(1))));
+        let image = compile_c_with_extended_ccb(extended_ccb(), source)
+            .expect("a fresh admitted larger arena must compile the linker");
+        assert!(image.code_size > OUTPUT_SIZE as u64);
+        assert!(image.code_size <= crate::anka64::ankald::ANKALD_CONTROL_VADDR);
+        assert_eq!(image.lit_start, 0);
     }
 
     #[test]

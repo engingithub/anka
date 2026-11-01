@@ -60,6 +60,11 @@ impl Fabric {
         self.scoped_pointers
             .preflight_frame(registrations.len())
             .map_err(E::Pointer)?;
+        // Compiler manifests normally list increasing, disjoint offsets. In
+        // that case adjacent comparisons prove all pairs disjoint in O(n).
+        // Preserve the complete pairwise check for arbitrary manifest order.
+        let ordered_disjoint=registrations.windows(2).all(|w|
+            w[0].1.checked_add(w[0].0.length).is_some_and(|end|end<=w[1].1));
         for (i, (local, at, writable)) in registrations.iter().enumerate() {
             if local.context.agent != frame.context.agent
                 || local.context.domain != frame.context.domain
@@ -76,7 +81,7 @@ impl Fabric {
             if current.generation != backing.generation {
                 return Err(invalid());
             }
-            if registrations[..i]
+            if !ordered_disjoint && registrations[..i]
                 .iter()
                 .any(|(other, prior, _)| overlaps(*at, local.length, *prior, other.length))
             {

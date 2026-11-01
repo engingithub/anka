@@ -8,8 +8,8 @@ use super::ankald::{
     AnkaldError, AnkaldLinkPublishError,
 };
 use super::dev_compiler::{
-    bootstrap_development_ccb, bootstrap_extended_ccb,
-    compile_c_to_aom_stage3, compile_c_with_ccb, compile_c_with_extended_ccb,
+    bootstrap_extended_ccb,
+    compile_c_to_aom_stage3, compile_c_with_extended_ccb,
     CompiledAomModule, CompiledCImage,
 };
 use super::fabric::Fabric;
@@ -30,13 +30,6 @@ fn ankald_source() -> &'static [u8] {
     ))
 }
 
-fn canonical_ccb() -> &'static Vec<u8> {
-    static IMAGE: OnceLock<Vec<u8>> = OnceLock::new();
-    IMAGE.get_or_init(|| {
-        bootstrap_development_ccb().expect("Phase 10.4 must bootstrap canonical CC_B")
-    })
-}
-
 fn extended_ccb() -> &'static Vec<u8> {
     static IMAGE: OnceLock<Vec<u8>> = OnceLock::new();
     IMAGE.get_or_init(|| {
@@ -55,8 +48,11 @@ fn stage3_image() -> &'static CompiledCImage {
 pub(crate) fn ankald_image() -> &'static CompiledCImage {
     static IMAGE: OnceLock<CompiledCImage> = OnceLock::new();
     IMAGE.get_or_init(|| {
-        compile_c_with_ccb(canonical_ccb(), ankald_source())
-            .expect("canonical CC_B must compile the Phase 10.4 bootstrap ankald source")
+        // The typed linker no longer fits canonical CC_B's 80-KiB arena.
+        // Keep the frozen canonical compiler unchanged; use its existing
+        // extended bootstrap, with the same language and bounded placement.
+        compile_c_with_extended_ccb(extended_ccb(), ankald_source())
+            .expect("extended CC_B must compile the current userspace ankald source")
     })
 }
 
@@ -296,6 +292,8 @@ fn p108_protected_link_preserves_legacy_rodata_and_entry_behavior() {
 fn p104_ccb_builds_real_userspace_ankald() {
     let image = ankald_image();
     assert!(image.code_size > 0);
+    assert!(image.code_size <= super::ankald::ANKALD_CONTROL_VADDR,
+        "linker code must remain below its control mapping");
     assert_eq!(image.lit_start, 0, "bootstrap ankald is code-only");
     assert_eq!(image.bytes.len() as u64, image.code_size);
     assert_eq!(image.process_slots_observed, 2,
@@ -509,3 +507,6 @@ fn p108_compiler_producer_link_requires_exact_loader_entry_signature() {
     let bytes = compiler_producer_link_fixture(24, &[]);
     run_ankald(&ankald_image().bytes, &[&bytes], "main").unwrap();
 }
+
+#[path="ankald_tests/typed.rs"]
+mod typed;

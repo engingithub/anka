@@ -32,6 +32,8 @@ const ANKALD_STACK_SIZE: u64 = 0x4000;
 const ANKALD_TRAP_SIZE: u64 = PLACEMENT_PAGE_SIZE;
 const ANKALD_QUANTUM: usize = 100_000;
 const ANKALD_MAX_ROUNDS: usize = 10_000;
+mod storage;
+pub(crate) use storage::linker_storage_charge;
 
 const CTRL_MODULE_COUNT: usize = 0;
 const CTRL_DESCRIPTOR_VADDR: usize = 8;
@@ -49,18 +51,33 @@ const CTRL_LINK_PROFILE: usize = 88;
 const CTRL_PREFIX_SIZE: usize = 128;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum LinkProfile { Application, CompilerAbi2 }
+enum LinkProfile { Application, CompilerAbi2, LargeApplication }
 impl LinkProfile {
-    fn wire(self) -> u64 { match self { Self::Application => 0, Self::CompilerAbi2 => 2 } }
+    fn wire(self) -> u64 { match self { Self::Application => 0, Self::CompilerAbi2 => 2, Self::LargeApplication => 3 } }
     fn module_limit(self) -> u64 {
         match self {
             Self::Application => super::dev_compiler::DEVELOPMENT_COMPILER_OUTPUT_SIZE,
             Self::CompilerAbi2 => 1024 * 1024,
+            Self::LargeApplication => LARGE_APPLICATION_LIMIT,
         }
     }
-    fn entry_parameters(self) -> &'static [u64] {
-        match self { Self::Application => &[], Self::CompilerAbi2 => &[2001, 1001] }
+    fn image_limit(self) -> u64 {
+        if self == Self::LargeApplication { LARGE_APPLICATION_LIMIT } else { PROTECTED_IMAGE_LIMIT }
     }
+    fn entry_parameters(self) -> &'static [u64] {
+        match self { Self::Application | Self::LargeApplication => &[], Self::CompilerAbi2 => &[2001, 1001] }
+    }
+}
+/// Trusted application admission selected before linking, retained in the
+/// publication receipt and checked again before loading. It carries no authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationLinkProfile { Standard, Large }
+impl ApplicationLinkProfile {
+    fn internal(self) -> LinkProfile {
+        match self { Self::Standard => LinkProfile::Application, Self::Large => LinkProfile::LargeApplication }
+    }
+    pub(crate) fn module_limit(self) -> u64 { self.internal().module_limit() }
+    pub(crate) fn wire(self) -> u64 { self.internal().wire() }
 }
 const MODULE_DESCRIPTOR_SIZE: usize = 16;
 
@@ -84,6 +101,7 @@ pub struct LinkedArtifactKey {
 /// out its Fabric drops all runnable process state; no caller supplies a
 /// completion/drain certificate or manufactures this from arbitrary bytes.
 pub(crate) struct AnkaldOutput {
+    pub link_profile: u64,
     pub image: AnkaldLinkedImage,
     pub fabric: Fabric,
     pub placement: PhysicalPlacementManager,
@@ -194,7 +212,7 @@ fn initialize_exact(
 /// Run the real userspace linker against an explicit ordered AOM byte sequence.
 ///
 /// `linker_image` is the direct executable bootstrap image produced by
-/// canonical CC_B from `userspace/system/compiler/ankald.c`.
+/// extended CC_B from `userspace/system/compiler/ankald.c`.
 pub fn run_ankald(
     linker_image: &[u8],
     inputs: &[&[u8]],
@@ -205,6 +223,14 @@ pub fn run_ankald(
 
 fn run_ankald_process(linker_image: &[u8], inputs: &[&[u8]], entry_name: &str, application_heap: bool, profile: LinkProfile)
     -> Result<AnkaldOutput, AnkaldError> {
+    run_ankald_process_profile(linker_image,inputs,entry_name,application_heap,profile,false)
+}
+
+fn run_ankald_process_profile(linker_image:&[u8], inputs:&[&[u8]], entry_name:&str,
+    application_heap:bool, profile:LinkProfile, bounded:bool)->Result<AnkaldOutput,AnkaldError> {
+    if bounded && (application_heap || inputs.len()>4096) {
+        return Err(AnkaldError::InitializationRejected);
+    }
     if linker_image.is_empty() {
         return Err(AnkaldError::EmptyLinkerImage);
     }
@@ -264,7 +290,10 @@ fn run_ankald_process(linker_image: &[u8], inputs: &[&[u8]], entry_name: &str, a
     // The protected publication retains this Fabric for later application
     // execution. Reserve its private heap at construction, outside the link
     // placement pool; code/dependency identity is never replaced to add a heap.
-    let mut fabric = if application_heap {
+    let mut fabric = if bounded {
+        Fabric::with_preprocessor_storage(ANKALD_RAM_SIZE)
+            .map_err(|_|AnkaldError::InitializationRejected)?
+    } else if application_heap {
         Fabric::with_application_heap(ANKALD_RAM_SIZE).map_err(|_| AnkaldError::InitializationRejected)?
     } else { Fabric::new(ANKALD_RAM_SIZE) };
     let mut placement = PhysicalPlacementManager::new(ANKALD_PM_BASE, ANKALD_PM_SIZE)
@@ -414,8 +443,21 @@ fn run_ankald_process(linker_image: &[u8], inputs: &[&[u8]], entry_name: &str, a
     kernel.boot(&info).map_err(AnkaldError::Boot)?;
     let init = &kernel.processes[0];
     let owner = (init.pid, init.generation, init.core.context_identity(), init.core.domain);
+    if bounded {
+        kernel.prepare_preprocessor_transport().map_err(|_|AnkaldError::LinkerStateChanged)?;
+    }
     for _ in 0..ANKALD_MAX_ROUNDS {
-        kernel.run(ANKALD_QUANTUM,1);
+        if bounded {
+            // Same finite total work as the legacy path; splitting a round
+            // never grants a fresh budget. Exit-only scalar transport prevents
+            // guest syscalls from growing process/object/output tables.
+            let mut remaining=ANKALD_QUANTUM;
+            while remaining>0 && !kernel.processes[0].exited() {
+                let slice=remaining.min(super::os::preprocessor_transport::PREPROCESS_SLICE);
+                kernel.run_preprocessor_slice(slice).map_err(|_|AnkaldError::LinkerStateChanged)?;
+                remaining-=slice;
+            }
+        } else {kernel.run(ANKALD_QUANTUM,1);}
         if !kernel.fabric.compiler_trace_safe(scratch_obj) {
             return Err(AnkaldError::LinkerStateChanged);
         }
@@ -474,8 +516,15 @@ fn run_ankald_process(linker_image: &[u8], inputs: &[&[u8]], entry_name: &str, a
         return Err(AnkaldError::InvalidResultGeometry);
     }
 
+    if bounded && image_size>profile.image_limit() {return Err(AnkaldError::InvalidResultGeometry);}
     let image_len = usize::try_from(image_size).map_err(|_| AnkaldError::SizeOverflow)?;
-    let bytes = kernel.fabric.read_physical(scratch_phys, image_len as u64).to_vec();
+    let bytes = if bounded {
+        let mut bytes=Vec::new();
+        bytes.try_reserve_exact(image_len).map_err(|_|AnkaldError::InitializationRejected)?;
+        if bytes.capacity()>image_len {return Err(AnkaldError::InitializationRejected);}
+        bytes.extend_from_slice(kernel.fabric.read_physical(scratch_phys,image_size));
+        bytes
+    } else {kernel.fabric.read_physical(scratch_phys,image_size).to_vec()};
     let image = AnkaldLinkedImage {
         bytes,
         code_size,
@@ -483,11 +532,12 @@ fn run_ankald_process(linker_image: &[u8], inputs: &[&[u8]], entry_name: &str, a
         entry,
         process_slots_observed: kernel.processes.len(),
     };
-    Ok(AnkaldOutput { image, fabric: kernel.fabric, placement, context: owner.2,
+    Ok(AnkaldOutput { link_profile: profile.wire(), image, fabric: kernel.fabric, placement, context: owner.2,
         process_slot: 0, process_generation: u64::from(owner.1) + 1, domain: owner.3,
         linker_key, input_keys, scratch_key, control_key })
 }
 
+pub(crate) const LARGE_APPLICATION_LIMIT: u64 = 2 * 1024 * 1024;
 const PROTECTED_IMAGE_LIMIT: u64 = 1024 * 1024;
 
 fn protected_geometry(inputs: &[ValidatedPointerModule], profile: LinkProfile) -> Result<(u64, u64, usize), AnkaldError> {
@@ -495,6 +545,9 @@ fn protected_geometry(inputs: &[ValidatedPointerModule], profile: LinkProfile) -
     if profile == LinkProfile::CompilerAbi2 && inputs.len() != 1 {
         return Err(AnkaldError::InvalidProtectedLayout);
     }
+    let modules: Vec<_>=inputs.iter().map(|m|m.module()).collect();
+    super::compiler_adapter::interfaces::validate_link_modules(&modules)
+        .map_err(|_|AnkaldError::InvalidProtectedLayout)?;
     let mut code = 0u64;
     let mut metadata = 32u64;
     let mut frames = 0usize;
@@ -509,7 +562,7 @@ fn protected_geometry(inputs: &[ValidatedPointerModule], profile: LinkProfile) -
         metadata = metadata.checked_add(module.rodata.len() as u64 - 32)
             .ok_or(AnkaldError::InvalidProtectedLayout)?;
         frames = frames.checked_add(input.frames().len()).ok_or(AnkaldError::InvalidProtectedLayout)?;
-        if frames > 4096 || code.checked_add(metadata).is_none_or(|n| n > PROTECTED_IMAGE_LIMIT) {
+        if frames > 4096 || code.checked_add(metadata).is_none_or(|n| n > profile.image_limit()) {
             return Err(AnkaldError::InvalidProtectedLayout);
         }
     }
@@ -611,11 +664,52 @@ pub(crate) fn run_protected_ankald(linker_image: &[u8], inputs: &[ValidatedPoint
 
 pub(crate) fn run_protected_ankald_for_publication(linker_image: &[u8], inputs: &[ValidatedPointerModule])
     -> Result<AnkaldOutput, AnkaldError> {
-    protected_geometry(inputs, LinkProfile::Application)?;
+    run_application_ankald_for_publication(linker_image, inputs, ApplicationLinkProfile::Standard)
+}
+
+pub(crate) fn run_application_ankald_for_publication(linker_image: &[u8],
+    inputs: &[ValidatedPointerModule], profile: ApplicationLinkProfile)
+    -> Result<AnkaldOutput, AnkaldError> {
+    protected_geometry(inputs, profile.internal())?;
     let bytes: Vec<_> = inputs.iter().map(ValidatedPointerModule::bytes).collect();
-    let output = run_ankald_process(linker_image, &bytes, "main", true, LinkProfile::Application)?;
-    validate_protected_link_result(inputs, &output.image)?;
+    let output = run_ankald_process(linker_image, &bytes, "main", true, profile.internal())?;
+    validate_application_link_result(inputs, &output.image, profile)?;
     Ok(output)
+}
+
+/// Shared-service path: caller holds staging, image and transient-machine
+/// reservations. Never return the isolated Fabric or its authority to callers.
+/// All machine state is destroyed before this function returns on either path.
+pub(crate) fn run_accounted_application_ankald(linker_image:&[u8],
+    inputs:&[ValidatedPointerModule],profile:ApplicationLinkProfile)
+    ->Result<AnkaldLinkedImage,AnkaldError> {
+    linker_storage_charge(linker_image,inputs,profile)?;
+    protected_geometry(inputs,profile.internal())?;
+    let bytes:Vec<_>=inputs.iter().map(ValidatedPointerModule::bytes).collect();
+    let output=run_ankald_process_profile(linker_image,&bytes,"main",false,profile.internal(),true)?;
+    if output.link_profile!=profile.wire() {return Err(AnkaldError::InvalidProtectedResult);}
+    validate_application_link_result(inputs,&output.image,profile)?;
+    // Partial move drops output.fabric/placement/keys before returning. The
+    // exact image remains covered by the caller's distinct image reservation.
+    Ok(output.image)
+}
+
+pub(crate) fn validate_application_link_result(inputs: &[ValidatedPointerModule],
+    image: &AnkaldLinkedImage, profile: ApplicationLinkProfile) -> Result<(), AnkaldError> {
+    validate_protected_link_profile(inputs, image, profile.internal())
+}
+
+/// Explicit trusted application policy. The wire module cannot select this
+/// profile. Legacy callers and compiler-producer entry ABI stay unchanged.
+/// Placement still reserves all inputs, scratch, stack and trap before dispatch.
+/// Returned bytes carry no execution/publication authority.
+pub(crate) fn run_large_protected_ankald(linker_image: &[u8], inputs: &[ValidatedPointerModule])
+    -> Result<AnkaldLinkedImage, AnkaldError> {
+    protected_geometry(inputs, LinkProfile::LargeApplication)?;
+    let bytes: Vec<_> = inputs.iter().map(ValidatedPointerModule::bytes).collect();
+    let output = run_ankald_process(linker_image, &bytes, "main", false, LinkProfile::LargeApplication)?;
+    validate_protected_link_profile(inputs, &output.image, LinkProfile::LargeApplication)?;
+    Ok(output.image)
 }
 
 /// One protected compiler tool with the loader's exact two-pointer ABI.

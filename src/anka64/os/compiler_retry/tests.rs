@@ -8,7 +8,12 @@ use crate::anka64::placement::{PhysicalExtent, VirtualExtent};
 use crate::anka64::pointer_frames::{FrameManifest, ValidatedPointerProgram};
 use crate::anka64::scoped_pointers::heap::{HeapPlacementLimits, RegistryLimits};
 
-pub(super) fn machine() -> Kernel {
+pub(super) fn machine() -> Kernel { machine_with_owner_limit(1024*1024) }
+
+pub(super) fn machine_with_owner_limit(owner_limit:u64) -> Kernel {
+    machine_with_limits(owner_limit,64*1024*1024)
+}
+pub(super) fn machine_with_limits(owner_limit:u64,global_bytes:u64) -> Kernel {
     let f = Fabric::with_private_heap_cpu_work(
         4 * 1024 * 1024,
         RegistryLimits {
@@ -16,7 +21,7 @@ pub(super) fn machine() -> Kernel {
             scopes: 32,
             owners: 16,
             cleanup: 32,
-            global_bytes: 64 * 1024 * 1024,
+            global_bytes,
         },
         HeapPlacementLimits {
             physical_pool: PhysicalExtent {
@@ -38,7 +43,7 @@ pub(super) fn machine() -> Kernel {
     )
     .unwrap();
     let mut k = Kernel::new(f);
-    k.enable_heap_service(1024 * 1024).unwrap();
+    k.enable_heap_service(owner_limit).unwrap();
     k
 }
 

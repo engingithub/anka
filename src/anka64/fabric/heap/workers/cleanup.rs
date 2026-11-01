@@ -114,7 +114,7 @@ impl Fabric {
         // Both manager returns were prepared before any mutation. Rust's one
         // exclusive borrow covers row removal, exact refunds and slot release.
         self.scoped_pointers.commit_heap_release(plan);
-        self.private_heap.as_mut().unwrap().rows[slot] = None;
+        self.private_heap.as_mut().unwrap().remove_row(slot);
         // Keep fixed capacity/shadow charge and the nonrewinding ObjectId floor.
         Ok(())
     }

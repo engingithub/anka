@@ -1,0 +1,48 @@
+import "anka108_rebuild_service.kleis"
+define ha108_input(execution : Bool,input_authority : Bool,current_receipt : Bool,charged_copy : Bool,actual_child : Bool) = execution ∧ input_authority ∧ current_receipt ∧ charged_copy ∧ actual_child
+example "input accepted" { assert(ha108_input(res108_true(),res108_true(),res108_true(),res108_true(),res108_true())) }
+example "input requires execution" { assert(¬(ha108_input(res108_false(),res108_true(),res108_true(),res108_true(),res108_true()))) }
+example "input requires input_authority" { assert(¬(ha108_input(res108_true(),res108_false(),res108_true(),res108_true(),res108_true()))) }
+example "input requires current_receipt" { assert(¬(ha108_input(res108_true(),res108_true(),res108_false(),res108_true(),res108_true()))) }
+example "input requires charged_copy" { assert(¬(ha108_input(res108_true(),res108_true(),res108_true(),res108_false(),res108_true()))) }
+example "input requires actual_child" { assert(¬(ha108_input(res108_true(),res108_true(),res108_true(),res108_true(),res108_false()))) }
+define ha108_destroy(realm_destroyed : Bool,input_destroyed : Bool) = realm_destroyed ∧ input_destroyed
+example "destroy accepted" { assert(ha108_destroy(res108_true(),res108_true())) }
+example "destroy requires realm_destroyed" { assert(¬(ha108_destroy(res108_false(),res108_true()))) }
+example "destroy requires input_destroyed" { assert(¬(ha108_destroy(res108_true(),res108_false()))) }
+define ha108_emit(complete_request : Bool,valid_output_span : Bool,output_authority : Bool) = complete_request ∧ valid_output_span ∧ output_authority
+example "emit accepted" { assert(ha108_emit(res108_true(),res108_true(),res108_true())) }
+example "emit requires complete_request" { assert(¬(ha108_emit(res108_false(),res108_true(),res108_true()))) }
+example "emit requires valid_output_span" { assert(¬(ha108_emit(res108_true(),res108_false(),res108_true()))) }
+example "emit requires output_authority" { assert(¬(ha108_emit(res108_true(),res108_true(),res108_false()))) }
+define ha108_input_size(n : BitVec64) = bvule(n,bvconst(65536,64))
+define ha108_request(n : BitVec64,prefix : Bool,tail : Bool) = bvuge(n,bvconst(23,64)) ∧ bvule(n,bvconst(1024,64)) ∧ prefix ∧ tail
+define ha108_read(used : BitVec64,count : BitVec64) = bvule(used,bvconst(1024,64)) ∧ bvugt(count,bvconst(0,64)) ∧ bvule(count,bvsub(bvconst(1024,64),used))
+define ha108_response(valid : Bool,size : BitVec64) = (valid ∧ (size=bvconst(74,64))) ∨ (¬valid ∧ (size=bvconst(64,64)))
+example "read makes finite progress without wrap" { assert(∀(u : BitVec64,n : BitVec64). ha108_read(u,n) → (bvugt(bvadd(u,n),u) ∧ bvule(bvadd(u,n),bvconst(1024,64)))) }
+example "response fits private buffer" { assert(∀(v : Bool,n : BitVec64). ha108_response(v,n) → bvule(n,bvconst(1024,64))) }
+example "input size 0" { assert(ha108_input_size(bvconst(0,64))) }
+example "input size 65536" { assert(ha108_input_size(bvconst(65536,64))) }
+example "input size 65537" { assert(¬(ha108_input_size(bvconst(65537,64)))) }
+example "input size 18446744073709551615" { assert(¬(ha108_input_size(bvsub(bvconst(0,64),bvconst(1,64))))) }
+example "request 23 True True" { assert(ha108_request(bvconst(23,64),res108_true(),res108_true())) }
+example "request 1024 True True" { assert(ha108_request(bvconst(1024,64),res108_true(),res108_true())) }
+example "request 22 True True" { assert(¬(ha108_request(bvconst(22,64),res108_true(),res108_true()))) }
+example "request 1025 True True" { assert(¬(ha108_request(bvconst(1025,64),res108_true(),res108_true()))) }
+example "request 23 False True" { assert(¬(ha108_request(bvconst(23,64),res108_false(),res108_true()))) }
+example "request 23 True False" { assert(¬(ha108_request(bvconst(23,64),res108_true(),res108_false()))) }
+example "response 74" { assert(ha108_response(res108_true(),bvconst(74,64))) }
+example "response 64" { assert(ha108_response(res108_false(),bvconst(64,64))) }
+
+// Source refinement: comparison results are canonical scalar 0/1 values.
+// Eager conjunction is equivalent here because neither comparison has effects.
+define ha108_bit(b : Bool) = if b then bvconst(1,64) else bvconst(0,64)
+define ha108_continue(used : BitVec64,done : BitVec64) = bvult(used,bvconst(1024,64)) ∧ (done=bvconst(0,64))
+// Exhaustive four-case proof for the two Boolean comparison results.
+example "scalar conjunction 0 0" { assert(bvand(ha108_bit(res108_false()),ha108_bit(res108_false()))=ha108_bit(res108_false() ∧ res108_false())) }
+example "scalar conjunction 0 1" { assert(bvand(ha108_bit(res108_false()),ha108_bit(res108_true()))=ha108_bit(res108_false() ∧ res108_true())) }
+example "scalar conjunction 1 0" { assert(bvand(ha108_bit(res108_true()),ha108_bit(res108_false()))=ha108_bit(res108_true() ∧ res108_false())) }
+example "scalar conjunction 1 1" { assert(bvand(ha108_bit(res108_true()),ha108_bit(res108_true()))=ha108_bit(res108_true() ∧ res108_true())) }
+example "fresh request enters read loop" { assert(ha108_continue(bvconst(0,64),bvconst(0,64))) }
+example "EOF stops read loop" { assert(¬ha108_continue(bvconst(23,64),bvconst(1,64))) }
+example "full buffer stops read loop" { assert(¬ha108_continue(bvconst(1024,64),bvconst(0,64))) }
