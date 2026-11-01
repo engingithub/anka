@@ -75,27 +75,24 @@ Latest supplied ordinary-service evidence: **6 focused tests**, **154 runtime
 tests with 10 ignored**, and the explicit real concurrent test in **75.79s**.
 The associated Kleis gate passed **29 positive / 21 explicitly disproved hostile
 witnesses**. These groups overlap and are not a fresh complete regression run.
-The last full-suite result supplied in this development history was 1,406 tests
-in 589.71s, before the subsequent compiler-service changes.
+**Protected HTTP application accepted (user-reported, 2026-11-01):**
+`httpd_protected.c` now compiles, links and runs through the ordinary rebuild
+service with private request storage and typed input/output. The HTTP Kleis gate
+passes **34 positive / 21 hostile witnesses**. This is finite-input application
+acceptance, not socket/NIC acceptance.
 
-**Implemented; real guest acceptance pending:** `httpd_protected.c` rebuilds the `/alive` HTTP
-application with protected byte pointers, typed input/output and private request
-storage. The ordinary command now accepts `--input FILE --run`; input authority,
-copy accounting and cleanup are explicit. The new gate passes **27 positive /
-18 hostile witnesses**. A native diagnostic checks response bytes and boundaries;
-it does not substitute for guest acceptance. The latest log passed nine focused tests and 160
-compiler-runtime tests. The first real HTTP compile hit pointer-registry
-exhaustion. The larger charged frame budget passed focused checks, but the
-next HTTP run reached its 1200-second diagnostic timeout. The current patch
-removes a full reserved-heap-table scan from ordinary address translation and
-adds authenticated source-cursor diagnostics. Real HTTP acceptance is pending;
-no new complete regression pass is claimed.
+**Latest full regression:** **1,612 passed, 2 failed, 12 ignored**, 296.72 seconds.
+The two failures were the monitor's obsolete ordinary-CC_B linker bootstrap and
+an obsolete test classifying supported AOM version 2 as unsupported. The current
+patch aligns monitor bootstrap with the extended fixed-point path and tests
+unsupported version 3 while retaining rejection of version 2 without its typed
+trailer. Local Rust reruns are pending; no complete regression pass is claimed.
 
-**Phase 10.8 remains open.** The next closure evidence is the protected HTTP
-application run, followed by actual socket/NIC integration and the end-to-end
-service rebuild, then final regressions. The original network stack already
-responds to `/alive`, but its CC_B/shared-buffer execution is not silently
-reclassified as the new protected rebuild. No additional project phase is added.
+**Phase 10.8 remains open.** Next: formalize the typed socket endpoint, connect
+the accepted HTTP application to the protected network services, and demonstrate
+the rebuilt NIC-to-HTTP-to-NIC `/alive` path, then finish closure regressions.
+The legacy CC_B/shared-buffer stack remains the protocol reference. DN-71 also
+tracks future logical-operator support and source-order-independent C entry.
 
 ## Build and explore
 

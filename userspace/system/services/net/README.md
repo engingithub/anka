@@ -13,7 +13,7 @@ Implemented progression:
 - `socket.c` — Phase 9.4f: process-facing single stream socket over exact IPC + explicitly shared memory
 
 - `httpd.c` — Phase 9.4g: implemented `/alive` HTTP service over the original socket IPC/shared-buffer ABI
-- `httpd_protected.c` — protected typed-input/output HTTP application; ordinary rebuild integration implemented, frame-budget checks passed; real compilation then timed out, and the heap-lookup performance correction awaits acceptance
+- `httpd_protected.c` — protected typed-input/output HTTP application; ordinary rebuild, link and finite-input execution accepted in the user-reported local run; protected socket/NIC integration remains outstanding
 
 The original stack and its CC_B witnesses are implemented. Phase 10.8 requires
 additional protected rebuild acceptance; these are different claims.
@@ -218,8 +218,8 @@ and stale-generation/DMA drain guarantees must survive the migration.
 
 ## Protected migration order
 
-Keep the legacy sources and their protocol tests as the reference. Accept the
-private-input protected HTTP application first, then formalize a typed socket
+Keep the legacy sources and their protocol tests as the reference. The
+private-input protected HTTP application is accepted; next formalize a typed socket
 endpoint that copies into private protected buffers. Port the Ethernet-to-socket
 services through the protected toolchain with explicit device/IPC authority,
 quotas, cancellation and DMA drainage. Require the rebuilt NIC-to-HTTP-to-NIC

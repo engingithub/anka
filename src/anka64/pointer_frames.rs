@@ -507,9 +507,15 @@ mod tests {
             assert!(ValidatedPointerModule::from_aom(&bytes[..end]).is_err());
         }
         let mut changed = bytes.clone();
+        // Version 2 is supported, but a version-1 body without its typed
+        // interface trailer must still be rejected.
         changed[8..16].copy_from_slice(&2u64.to_le_bytes());
         assert!(matches!(ValidatedPointerModule::from_aom(&changed),
-            Err(PointerModuleError::Aom(AomError::UnsupportedVersion(2)))));
+            Err(PointerModuleError::Aom(AomError::BadInterface))));
+        // Version 3 is genuinely unsupported.
+        changed[8..16].copy_from_slice(&3u64.to_le_bytes());
+        assert!(matches!(ValidatedPointerModule::from_aom(&changed),
+            Err(PointerModuleError::Aom(AomError::UnsupportedVersion(3)))));
         changed.resize(super::super::dev_compiler::DEVELOPMENT_COMPILER_OUTPUT_SIZE as usize + 1, 0);
         assert!(matches!(ValidatedPointerModule::from_aom(&changed), Err(PointerModuleError::Capacity)));
     }

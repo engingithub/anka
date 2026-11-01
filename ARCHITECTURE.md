@@ -5487,3 +5487,12 @@ to the supported scalar bitwise conjunction of parenthesized comparisons. CC2
 does not yet implement C short-circuit logical operators; native C execution
 alone cannot validate source compatibility with this subset. Neither source
 correction relaxes linker, memory, input authority or resource validation.
+
+
+The protected HTTP finite-input application has user-reported acceptance after
+its entry-order and loop-condition corrections. Socket/NIC integration remains
+open. The latest full suite reports 1612 passed, 2 failed and 12 ignored; monitor
+bootstrap and stale AOM-version test corrections await local rerun. DN-71 records
+these results and explicit future contracts for proper C logical operators and
+symbol-selected main entry independent of source order. Those improvements must
+preserve protected control flow and authority checks.

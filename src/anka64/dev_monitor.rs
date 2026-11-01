@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use super::ankald::{run_ankald, AnkaldError};
 use super::dev_compiler::{
     bootstrap_development_ccb, bootstrap_extended_ccb, compile_c_to_aom_stage3,
-    compile_c_with_ccb, compile_c_with_extended_ccb, CompiledCImage, DevelopmentCompileError,
+    compile_c_with_extended_ccb, CompiledCImage, DevelopmentCompileError,
 };
 use super::dev_runner::{
     run_registered_artifact, DeveloperExecutionAuthority, DevelopmentRunError,
@@ -359,12 +359,15 @@ impl DevelopmentShellSession {
     fn ensure_ankald(&mut self) -> Result<bool, DevelopmentMonitorError> {
         let bootstrapped = self.ankald_image.is_none();
         if self.ankald_image.is_none() {
-            self.ensure_canonical_ccb()?;
-            let ccb = self.ccb_image.as_deref().expect("canonical CC_B initialized above");
+            // The typed linker outgrew the ordinary 80-KiB CC_B arena.
+            // Match the accepted fixed-point bootstrap; retain its bounded
+            // compile-only mapping and sealing checks.
+            self.ensure_extended_ccb()?;
+            let ccb = self.extended_ccb_image.as_deref().expect("extended CC_B initialized above");
             let source = fs::read(self.userspace_root.join("system/compiler/ankald.c"))
                 .map_err(|err| DevelopmentMonitorError::HostRead(err.kind()))?;
             self.ankald_image = Some(
-                compile_c_with_ccb(ccb, &source)
+                compile_c_with_extended_ccb(ccb, &source)
                     .map_err(DevelopmentMonitorError::ToolchainCompile)?,
             );
         }
@@ -1084,6 +1087,9 @@ mod tests {
             "retained AOM bytes are debug observations, not executable Fabric artifacts");
 
         let linked = shell.execute_line("link probe-linked main probe-aom").unwrap();
+        assert!(shell.extended_ccb_image.is_some());
+        assert!(shell.ccb_image.is_none(),
+            "Phase-10 linker bootstrap must not fall back to the ordinary CC_B arena");
         assert!(matches!(linked, DevelopmentCommandResult::Continue(text)
             if text.contains("linked 'probe-linked'") && text.contains("entry=")));
         assert_eq!(shell.fabric.objects.len(), 0,

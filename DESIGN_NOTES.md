@@ -13504,3 +13504,58 @@ Boolean truth table is used explicitly rather than treating unknown as a pass.
 The resulting gate passes **34 positive / 21 explicitly disproved hostile
 witnesses**. Rust and the protected guest link/run must still be rerun locally. The broader
 Phase 10.8 network closure conditions above remain unchanged.
+
+
+### Full-suite regression repair and remaining closure (2026-11-01)
+
+After the HTTP source fixes, the user reported the protected HTTP script passed
+and merged the checkpoint to main. The attached full release/single-threaded
+log then reports **1612 passed, 2 failed, 12 ignored in 296.72s** (1626 total).
+The main userspace rebuild/fixed-point witness passed. The ignored witnesses
+are separate acceptance gates; this is not a full regression pass.
+
+1. `p10dev_stage3_aom_ankald_and_dump_close_debug_surface` faulted while compiling
+   the enlarged typed linker: `WrongPermission`, write offset zero, PC `0x2baa8`,
+   reported as `ToolchainCompile(CompilerFault(2))`. `ensure_ankald` still used the
+   canonical CC_B image and historical 80-KiB output arena. It now uses the same
+   extended bootstrap image and bounded extended arena as `cc2_fixed_point`.
+   Compilation remains compile-only with existing placement/sealing checks.
+   The end-to-end monitor test asserts that the ordinary compiler cache is not
+   populated by this Phase-10 bootstrap path.
+2. `protected_module_rejects_truncated_oversized_and_unsupported_aom` still
+   expected `UnsupportedVersion(2)`. Typed AOM version 2 is now supported. The
+   test now expects `BadInterface` when a legacy body is relabelled version 2
+   without its required trailer, and `UnsupportedVersion(3)` for an unknown
+   version. Truncation and size checks remain. No parser acceptance is widened.
+
+These changes align a caller and a stale test with existing accepted contracts;
+no new architectural invariant or Kleis theory is introduced. Rust execution is
+left to the user's local machine. Rerun the two failing tests first, then the
+full release suite. This patch is not evidence of their runtime success.
+
+**Explicit future compiler work (requested):**
+
+- **Logical operators:** the current lexer splits adjacent `&&` into binary
+  `&` and unary address-of. Unsupported compound tokens must be rejected as
+  whole tokens before broader application ports rely on them. Proper `&&`/`||`
+  support requires a formal lowering contract for precedence, left-to-right
+  evaluation, scalar/pointer truth testing, normalized 0/1 results and skipped
+  right-hand side effects/faults. Test both compiler profiles and fixed-point
+  parity; preserve valid spaced `x & &y` tokenization where type-correct.
+  HTTP currently uses parenthesized, side-effect-free comparisons with `&`.
+- **Entry placement:** source-order-dependent `main` at code offset zero is a
+  current compiler/linker profile restriction, not a C language requirement.
+  Define and prove symbol-selected entry or a validated startup trampoline
+  before implementation. Preserve the exact main signature, frame entry,
+  relocation, return authority, receipt binding and startup/exit accounting.
+  Acceptance must place helper definitions before main and the main-containing
+  module later in link order, while rejecting duplicate, missing or invalid
+  main symbols. Until then, supported applications define main first.
+
+**Bounded closure priority:** fix these two regressions; formalize typed socket
+copying into private protected buffers (endpoint/process incarnation, RX/TX
+rights, short reads/writes, EOF, cancellation/close, quotas, stale notifications
+and drain-before-reuse); implement the protected network service rebuild and
+real NIC-to-HTTP-to-NIC response; run remaining real and full regression gates.
+The compiler ergonomics items above are explicit future work. Metal/FPGA work
+remains separate from Phase 10.8 acceptance. No new phase is inserted.

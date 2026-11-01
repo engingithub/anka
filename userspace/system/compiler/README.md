@@ -97,7 +97,8 @@ separate execution authority and the charged isolated-run profile.
 Latest ordinary-service evidence: Kleis **29 positive / 21 hostile**, six focused
 tests, **154 runtime tests with ten ignored**, and the explicit real concurrent
 compiler test **75.79s**. These overlapping groups are not a complete regression
-run. The new HTTP/input packet is pending its own Rust acceptance.
+run. The HTTP/input packet now has user-reported Rust acceptance. The full-suite
+monitor bootstrap and obsolete AOM-version assertion fixes await local rerun.
 
 ```sh
 bash scripts/check-anka108-rebuild-service.sh --real

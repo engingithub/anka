@@ -34,7 +34,9 @@ image to the spawned child. No input or NIC authority is inherited by name.
 
 The latest ordinary-service acceptance includes actual concurrent compiler jobs,
 A exhaustion, C reuse, stale-alias rejection and unaffected B (75.79s). The new
-protected HTTP application/input packet still requires its own local acceptance.
+protected HTTP application/input packet has user-reported local acceptance.
+The latest full suite has two identified regressions; their fixes await rerun.
+Protected socket/NIC rebuild acceptance remains outstanding.
 See [the root README](../README.md) and [DN-71](../DESIGN_NOTES.md#dn-71).
 
 ## Legacy development monitor
