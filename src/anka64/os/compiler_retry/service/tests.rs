@@ -124,6 +124,17 @@ fn c5_http_read_loop_uses_supported_scalar_conjunction() {
     }
 }
 
+fn http_bundle(root:&[u8],socket:bool)->SourceBundle {
+    let mut members=vec![
+        SourceBundleMember::new("main.c",root.to_vec()).unwrap(),
+        SourceBundleMember::new("http_reply.h",include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),
+            "/userspace/system/services/net/http_reply.h")).to_vec()).unwrap(),
+    ];
+    if socket {members.push(SourceBundleMember::new("stdlib.h",include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/userspace/include/stdlib.h")).to_vec()).unwrap());}
+    SourceBundle::new("main.c",members).unwrap()
+}
+
 #[test]
 #[ignore="real protected HTTP ordinary rebuild; run explicitly in release mode"]
 fn c5_http_real_protected_application() {
@@ -135,7 +146,7 @@ fn c5_http_real_protected_application() {
         include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),"/userspace/system/compiler/ankald.c"))).unwrap();
     let mut s=RebuildService::new(&lineage,&exec).unwrap();
     let source=include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),"/userspace/system/services/net/httpd_protected.c"));
-    let h=s.submit(&bundle(source),0x40000,WORK,&exec,&auth).unwrap();
+    let h=s.submit(&http_bundle(source,false),0x40000,WORK,&exec,&auth).unwrap();
     // Capture the authentic workspace through the actual ABI request. Read it
     // only for diagnostics, through the current heap lifetime checks.
     let job=s.jobs[h.slot].as_ref().unwrap();let (owner,agent,_)=job.old;
@@ -193,4 +204,61 @@ fn c5_http_frame_service_charges_expanded_fixed_registry() {
         slots:4096,scopes:4096,owners:64,cleanup:512,global_bytes:0x20000000}).unwrap();
     assert!(k.fabric.scoped_pointers.fixed_metadata_bytes()>old.fixed_metadata_bytes());
     assert!(k.fabric.scoped_pointers.total_reserved_bytes()>=70*1024*1024+k.fabric.scoped_pointers.fixed_metadata_bytes());
+}
+
+#[test]
+#[ignore="real CC2 socket HTTP over ordered bytes; run explicitly in release mode"]
+fn s2_real_socket_http() {
+    use crate::anka64::dev_compiler::{self,DevelopmentCompileError};
+    use dev_runner::{DeveloperSocketAuthority,OrderedStream,StreamProgress};
+    let exec=DeveloperExecutionAuthority::provision();
+    let auth=RebuildPublicationAuthority::provision();
+    let socket=DeveloperSocketAuthority::provision();
+    let lineage=cc2_fixed_point::witness_cc2_fixed_point(Some(&exec),
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),"/userspace/system/compiler/ankacc2_stage3.c")),
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),"/userspace/system/compiler/ankapp.c")),
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),"/userspace/system/compiler/ankald.c"))).unwrap();
+    let sample=b"int main(){char b[1];return ssend(b,srecv(b,1));}";
+    dev_compiler::compile_protected_application_aom_with_linked_compiler(&lineage.cc2_2,sample,&exec).unwrap();
+    assert!(matches!(dev_compiler::compile_application_aom_with_linked_compiler(&lineage.cc2_2,sample,&exec),
+        Err(DevelopmentCompileError::CompilerRejected(9))));
+    for bad in [b"int main(){return srecv(0,1);}".as_slice(),
+                b"int main(){int b[1];return ssend(b,1);}",
+                b"int main(){char b[1];return ssend(b,b);}"] {
+        assert!(matches!(dev_compiler::compile_protected_application_aom_with_linked_compiler(
+            &lineage.cc2_2,bad,&exec),Err(DevelopmentCompileError::CompilerRejected(9))));
+    }
+    let mut s=RebuildService::new(&lineage,&exec).unwrap();
+    let h=s.submit(&http_bundle(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/userspace/system/services/net/httpd_socket.c")),true),0x40000,WORK,&exec,&auth).unwrap();
+    let start=std::time::Instant::now();let mut last=start;
+    let module=loop {
+        assert!(start.elapsed().as_secs()<300,"socket HTTP compile exceeded diagnostic bound");
+        if let Some(e)=s.poll(h,&exec,&auth).unwrap(){break e;}
+        if last.elapsed().as_secs()>=5 {eprintln!("S2 guest compilation: {}s",start.elapsed().as_secs());last=std::time::Instant::now();}
+    };
+    let linked=s.link(&[module],&exec,&auth).unwrap();
+    let ok=b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\nAnka64 is alive.".as_slice();
+    let missing=b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice();
+    let charge=s.kernel.fabric.scoped_pointers.total_reserved_bytes();
+    let mut boundary=[b'x';1024];boundary[..21].copy_from_slice(b"GET /alive HTTP/1.1\r\n");
+    boundary[1020..].copy_from_slice(b"\r\n\r\n");
+    for (a,b,fin,window,code,expected,stats) in [
+        // Each nonfinal short send fills 7 bytes, followed by a real -2 before drain.
+        (b"GET /alive HTTP/1.1\r\nX: \0\xff\r\n\r".as_slice(),b"\n".as_slice(),false,7,0,ok,(1,10,10)),
+        (b"GET /other HTTP/1.1\r".as_slice(),b"\n\r\n".as_slice(),false,1024,0,missing,(1,0,0)),
+        (&boundary[..1022],&boundary[1022..],false,1024,0,ok,(1,0,0)),
+        (b"GET /alive HTTP/1.1\r\n".as_slice(),b"".as_slice(),true,7,11,b"".as_slice(),(0,0,0)),
+        (&[b'x';1024][..],b"".as_slice(),false,7,14,b"".as_slice(),(0,0,0)),
+    ] {
+        let mut actual_len=0;let mut matched=false;
+        let (status,progress)=s.run_with_socket(linked,&exec,OrderedStream::new(&socket,a,b,fin,window).unwrap(),
+            |wire|{actual_len=wire.len();matched=wire==expected;Ok(())}).unwrap();
+        assert_eq!(status,ProcessResult::Exited(code),"response {actual_len} bytes; {progress:?}");
+        assert!(matched,"response mismatch: expected {}, got {actual_len}; {progress:?}",expected.len());
+        assert_eq!(progress,StreamProgress{receive_waits:stats.0,send_waits:stats.1,short_sends:stats.2});
+        assert_eq!(s.kernel.fabric.scoped_pointers.total_reserved_bytes(),charge);
+        assert!(s.kernel.linked_compiler_receipt(linked).is_ok());
+    }
+    eprintln!("S2 passed: protected CC2 HTTP, split header before FIN, exact wire response across short sends, truncated FIN and full prefix");
 }

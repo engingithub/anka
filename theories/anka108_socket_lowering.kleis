@@ -1,0 +1,61 @@
+// S2: two source primitives, both with signature int(char *, scalar).
+// Token IDs 41/42 are disjoint from '.' and '->' (40/39). Both producers
+// evaluate pointer then length once, spill the tagged pointer, and reload.
+import "anka108_typed_socket_io.kleis"
+define sx_recv() = bvconst(41,8)
+define sx_send() = bvconst(42,8)
+define sx_source(tok : BitVec8, protected_mode : Bool, char_pointer : Bool, scalar_count : Bool, arity : BitVec8) = ((tok=sx_recv()) ∨ (tok=sx_send())) ∧ protected_mode ∧ char_pointer ∧ scalar_count ∧ (arity=bvconst(2,8))
+define sx_op(tok : BitVec8) = if tok=sx_recv() then bvconst(23,64) else (if tok=sx_send() then bvconst(24,64) else sk_error())
+define sx_trap(tok : BitVec8,scalar01 : Bool,scalar45 : Bool,tagged23 : Bool) = sk_abi((tok=sx_recv()),sx_op(tok),sk_zero(),sk_zero(),scalar01,scalar45,tagged23)
+// Compare only when four bytes exist. Scan the first untested end index;
+// split reads never reset the prefix. Never treat would-block as a length.
+define sx_ending(a : BitVec8,b : BitVec8,c : BitVec8,d : BitVec8) = (a=bvconst(13,8)) ∧ (b=bvconst(10,8)) ∧ (c=bvconst(13,8)) ∧ (d=bvconst(10,8))
+define sx_step(used : BitVec64,limit : BitVec64,n : BitVec64) = bvule(limit,sk_cap()) ∧ bvule(used,limit) ∧ bvugt(n,sk_zero()) ∧ bvule(n,bvsub(limit,used))
+define sx_advance(used : BitVec64,limit : BitVec64,n : BitVec64) = if sx_step(used,limit,n) then bvadd(used,n) else used
+define sx_response(header_seen : Bool,valid : Bool) = if header_seen then (if valid then bvconst(74,64) else bvconst(64,64)) else sk_zero()
+// Directional admission for an explicitly selected connected child; the default
+// finite-input realm retains its old allowlist. For a socket run, shrinking
+// the send window never enlarges the backing allocation.
+define sx_window(w : BitVec64) = bvugt(w,sk_zero()) ∧ bvule(w,sk_cap())
+define sx_bind(authority : Bool,receipt : Bool,child : Bool,before_run : Bool,w : BitVec64) = authority ∧ receipt ∧ child ∧ before_run ∧ sx_window(w)
+define sx_tx(used : BitVec64,w : BitVec64,n : BitVec64) =
+  if ¬sx_window(w) ∨ bvugt(used,w) ∨ bvugt(n,sk_cap()) then sk_error()
+  else sk_result(sk_false(),sk_true(),bvsub(sk_cap(),bvsub(w,used)),n,sk_false())
+example "recv lowering enters S1" { assert(sx_trap(sx_recv(),sk_true(),sk_true(),sk_true())) }
+example "send lowering enters S1" { assert(sx_trap(sx_send(),sk_true(),sk_true(),sk_true())) }
+example "protected pointer and scalar accepted" { assert(sx_source(sx_recv(),sk_true(),sk_true(),sk_true(),bvconst(2,8))) }
+example "send scalar result remains word sized" { assert(sx_tx(sk_zero(),bvconst(7,64),bvconst(74,64))=bvconst(7,64)) }
+example "full negotiated window waits" { assert(sx_tx(bvconst(7,64),bvconst(7,64),bvconst(67,64))=sk_again()) }
+example "range-safe progress" { assert(∀(u : BitVec64,l : BitVec64,n : BitVec64). sx_step(u,l,n) → (bvugt(bvadd(u,n),u) ∧ bvule(bvadd(u,n),l))) }
+example "send retry preserves offset" { assert(sx_advance(bvconst(7,64),bvconst(74,64),sk_again())=bvconst(7,64)) }
+example "complete header answers without FIN" { assert(sx_response(sk_true(),sk_true())=bvconst(74,64)) }
+example "truncated EOF never yields success response" { assert(sx_response(sk_false(),sk_true())=sk_zero()) }
+example "CRLFCRLF completes" { assert(sx_ending(bvconst(13,8),bvconst(10,8),bvconst(13,8),bvconst(10,8))) }
+example "window composition preserves remaining capacity" { assert(∀(u : BitVec64,w : BitVec64,n : BitVec64). (sx_window(w) ∧ bvult(u,w) ∧ bvule(n,sk_cap())) → bvule(sx_tx(u,w,n),bvsub(w,u))) }
+example "authorized socket run" { assert(sx_bind(sk_true(),sk_true(),sk_true(),sk_true(),bvconst(7,64))) }
+// The two argument spills are distinct. Scalar count evaluation may overwrite
+// working registers. Its store cannot overlap the aligned 16-byte pointer spill.
+example "separate scalar spill preserves saved pointer kind" {
+ assert(kind107_raw_memory(bvconst(48,64),bvconst(8,64),bvconst(32,64),bvconst(1,8))=bvconst(1,8))
+}
+example "writing R0 R1 R5 leaves restored R2 pair tagged" {
+ assert(kind107_raw_register(bvconst(2,64),bvconst(5,64),
+    kind107_raw_register(bvconst(2,64),bvconst(1,64),
+    kind107_raw_register(bvconst(2,64),bvconst(0,64),bvconst(1,8))))=bvconst(1,8))
+}
+// After accumulating a new fragment, consider each untested end exactly once.
+// If a candidate ending crosses the split, every byte still belongs to the
+// same retained local. There is no unsigned end-4 underflow.
+define sx_scan(scanned : BitVec64,used : BitVec64) = bvult(scanned,used) ∧ bvule(used,sk_cap())
+example "scanner stays inside accumulated span" {
+ assert(∀(s : BitVec64,u : BitVec64). sx_scan(s,u) →
+      (bvugt(bvadd(s,bvconst(1,64)),s) ∧ bvule(bvadd(s,bvconst(1,64)),u)))
+}
+example "split keeps previous three bytes addressable" {
+ assert(∀(s : BitVec64,u : BitVec64). (sx_scan(s,u) ∧ bvuge(s,bvconst(3,64))) →
+      bvult(bvsub(bvadd(s,bvconst(1,64)),bvconst(4,64)),u))
+}
+// Successful socket-mode process exit cannot silently discard bytes previously
+// accepted by SEND. Abnormal termination uses S1 cancellation instead.
+define sx_clean_exit(live : Bool,tx_pending : BitVec64) = live ∧ (tx_pending=sk_zero())
+example "drained TX permits normal exit" { assert(sx_clean_exit(sk_true(),sk_zero())) }

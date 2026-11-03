@@ -13,7 +13,7 @@ Implemented progression:
 - `socket.c` — Phase 9.4f: process-facing single stream socket over exact IPC + explicitly shared memory
 
 - `httpd.c` — Phase 9.4g: implemented `/alive` HTTP service over the original socket IPC/shared-buffer ABI
-- `httpd_protected.c` — protected typed-input/output HTTP application; ordinary rebuild, link and finite-input execution accepted in the user-reported local run; protected socket/NIC integration remains outstanding
+- `httpd_protected.c` — protected typed-input/output HTTP application; ordinary rebuild, link and finite-input execution accepted in the user-reported local run; see the separately accepted socket/NIC service below
 
 The original stack and its CC_B witnesses are implemented. Phase 10.8 requires
 additional protected rebuild acceptance; these are different claims.
@@ -200,7 +200,8 @@ From the repository root:
 
 ```sh
 printf 'GET /alive HTTP/1.1\r\n\r\n' > /tmp/anka-request.txt
-cargo run --release -- rebuild --run --input /tmp/anka-request.txt userspace/system/services/net/httpd_protected.c
+cargo run --release -- rebuild --run --input /tmp/anka-request.txt \
+  --include userspace/system/services/net/http_reply.h userspace/system/services/net/httpd_protected.c
 ```
 
 This command runs the real protected guest application through ordinary compiler
@@ -211,17 +212,63 @@ execution, and destroyed before its machine reservation is refunded.
 
 The original `socket.c`/`httpd.c` handshake retains shared-memory permissions;
 SEND notification is not architectural revocation. The protected socket/NIC
-migration still needs a concrete typed endpoint/buffer ownership contract,
-Kleis gates and actual Ethernet/TCP `/alive` acceptance. Do not treat the new
-application-only witness as that network acceptance. Existing driver/controller
-and stale-generation/DMA drain guarantees must survive the migration.
+migration now has a checked typed endpoint/copy contract. The separate S4 release witness verified
+Ethernet/TCP `/alive` through the virtual NIC in 124.61s.
 
 ## Protected migration order
 
 Keep the legacy sources and their protocol tests as the reference. The
-private-input protected HTTP application is accepted; next formalize a typed socket
-endpoint that copies into private protected buffers. Port the Ethernet-to-socket
-services through the protected toolchain with explicit device/IPC authority,
-quotas, cancellation and DMA drainage. Require the rebuilt NIC-to-HTTP-to-NIC
-`/alive` witness before declaring Phase 10.8 complete. A legacy transport bridge
-can exercise a port but cannot stand in for the completed stack rebuild.
+private-input protected HTTP application is accepted. The S1 kernel endpoint
+provides separate receive/send operations on private protected spans. The S2 guest, `httpd_socket.c`, accumulates up to 1024 bytes in a local array,
+scans once to the first CRLF CRLF, and sends one response from a protected
+heap buffer across short writes. Its bundle includes `http_reply.h` (shared
+with the finite-input fixture) and `stdlib.h`. It retries would-block and
+does not wait for FIN. The bounded host transport supplies already ordered
+bytes and captures transmitted prefixes; it does not emulate TCP or a NIC.
+Run `bash scripts/check-anka108-socket-http.sh --real` for the isolated socket
+guest witness. For the complete bounded TCP path use the replay below.
+
+
+## Protected frame service
+
+`frame_service.c` receives one Ethernet frame and offers at most one reply:
+local ARP, IPv4/ICMP echo, or IPv4/UDP echo on 49152. The UDP payload is at
+most 1472 bytes for a 1514-byte frame. The guest receives private heap bytes;
+the driver owns the virtual NIC and runs its RX/TX syscalls. S4 uses a separate
+TCP publication. The combined S3/S5 release witness passed in 85.25s.
+
+From the repository root, use a binary Ethernet frame without preamble or FCS:
+
+```bash
+cargo run --release -- rebuild --run --frame request.bin \
+  --include userspace/include/stdlib.h userspace/system/services/net/frame_service.c > reply.bin
+```
+
+Stdout is the exact virtual NIC TX frame, or empty for a classified drop.
+Diagnostics and the guest decision go to stderr. An intentional drop or a
+successful reply is a successful CLI operation; malformed run results, quotas
+and DMA failures are errors. For the discovery-checked release acceptance, run
+`bash scripts/check-anka108-packet-service.sh --real`.
+
+## Stateful `/alive` replay
+
+`tcp_session.c` implements the bounded TCP transition and frame serializer.
+`httpd_socket.c` remains a separate protected application. The example below
+rebuilds and links both, injects raw Ethernet frames into one virtual NIC,
+starts HTTP while the peer remains open, and checks every emitted frame.
+Input lines are `rx HEX` or one `serve` scheduling point; output is a sequence
+of two-byte big-endian lengths followed by exact committed frames. No host
+network configuration is needed.
+
+```bash
+cargo run --release -- rebuild --run --tcp-replay examples/tcp-alive.replay \
+  --include userspace/include/stdlib.h --include userspace/system/services/net/http_reply.h \
+  userspace/system/services/net/tcp_session.c userspace/system/services/net/httpd_socket.c \
+  > /tmp/anka-tcp-alive.capture
+cmp examples/tcp-alive.expected /tmp/anka-tcp-alive.capture
+```
+
+For development acceptance use `bash scripts/check-anka108-tcp-session.sh --real`
+instead: it additionally checks drops, checkpoint preservation, quota release
+and stale delivery, with one bootstrap. The public demo uses a fixed initial
+sequence number and one connection; it is not an Internet-facing TCP server.

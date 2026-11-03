@@ -13352,11 +13352,11 @@ revocation and drainage refinement before implementation.
 
 | Remaining closure step | Required evidence |
 |---|---|
-| Accept protected HTTP | This corrected ordinary compile/link/run witness: exact 200/404, binary bytes, 1024/1025 boundaries, cleanup and receipt checks |
-| Typed socket boundary | New Kleis endpoint/copy/close contract and hostile witnesses; affected typed-I/O, process-incarnation, quota and cleanup gates |
-| Port network services | Compile Ethernet/ARP/IP/ICMP/UDP/TCP/socket through the protected toolchain, preserving each protocol test; explicit controller RX/TX authority and DMA drain/initialization gates |
-| Rebuilt network acceptance | Actual NIC → rebuilt TCP/socket → protected HTTP → NIC `/alive`, plus stale/error/peer-exit cases and exact published tool/source receipts |
-| Final closure | Required real/ignored witnesses and full release single-threaded regression, then update this table to accepted |
+| Protected HTTP — accepted locally | Corrected ordinary compile/link/run witness: exact 200/404, binary bytes, 1024/1025 boundaries, cleanup and receipt checks |
+| Typed socket boundary | S1 contract and all five focused Rust tests passed. The S2 real CC2 socket HTTP witness passed in 92.83s. |
+| Port network services | S3 Ethernet/ARP/IPv4/ICMP accepted (83.16s); bounded TCP/socket accepted below. Protected UDP accepted: both guests matched the shared 17-case oracle. Combined S3/S5 guest gate passed in 85.25s. |
+| Rebuilt network acceptance | S4 accepted: actual virtual NIC → rebuilt TCP/socket → protected HTTP → virtual NIC `/alive` in 124.61s, including stale/drop, revoked TX and refund checks. One bounded connection, no host network. |
+| Final closure — pending | Run `bash scripts/check-anka108-closure.sh --final` on the closing tree. Record the full release result, exact ignored witness count and input ID before marking C2/C3/C4/C5 and 10.8 closed. |
 
 A transition bridge may help test a protected service against the old stack, but
 that alone does not close the full stack rebuild. Ports and contract gaps should
@@ -13529,9 +13529,9 @@ are separate acceptance gates; this is not a full regression pass.
    version. Truncation and size checks remain. No parser acceptance is widened.
 
 These changes align a caller and a stale test with existing accepted contracts;
-no new architectural invariant or Kleis theory is introduced. Rust execution is
-left to the user's local machine. Rerun the two failing tests first, then the
-full release suite. This patch is not evidence of their runtime success.
+no new architectural invariant or Kleis theory was needed. Both focused tests
+subsequently passed; the pre-socket full release suite passed **1614/0/12 ignored
+in 289.36s**.
 
 **Explicit future compiler work (requested):**
 
@@ -13552,10 +13552,252 @@ full release suite. This patch is not evidence of their runtime success.
   module later in link order, while rejecting duplicate, missing or invalid
   main symbols. Until then, supported applications define main first.
 
-**Bounded closure priority:** fix these two regressions; formalize typed socket
+**Bounded closure priority after the regression fixes:** formalize typed socket
 copying into private protected buffers (endpoint/process incarnation, RX/TX
 rights, short reads/writes, EOF, cancellation/close, quotas, stale notifications
 and drain-before-reuse); implement the protected network service rebuild and
 real NIC-to-HTTP-to-NIC response; run remaining real and full regression gates.
 The compiler ergonomics items above are explicit future work. Metal/FPGA work
 remains separate from Phase 10.8 acceptance. No new phase is inserted.
+
+### S1 — Typed socket ingress and egress (2026-11-02)
+
+The accepted HTTP probe reads a finite image through EOF. The TCP client is
+entitled to wait for its response with the connection open. S1 therefore makes
+would-block distinct from EOF and leaves TX usable after a peer FIN. The guest
+port must complete a bounded header on CRLF CRLF, including when that sentinel
+straddles deliveries; FIN with an incomplete request is a separate case.
+
+The executable contract imports the typed-input/typed-output byte and tag
+rules. Its bilateral direction checks consume trusted whole-span certificates.
+Within one exclusive kernel call, RX consumes bytes only after the destination
+write succeeds; TX exposes bytes only after the source read succeeds. On a
+failed or stale call the queues and application bytes stay unchanged. Stream
+ingress is all-or-none including a trailing FIN. The adapter is assumed to
+supply authenticated, ordered TCP bytes; a generation ticket alone does not
+deduplicate a same-connection TCP retransmission. Zero-copy, shared DMA
+backing and a guarantee of network delivery are outside this interface.
+
+Concrete first slice: dispatch 23/24 only from saved protected trap images;
+separate per-direction rights, charged finite queues, stale-ticket rejection,
+no rebinding in the same incarnation, graceful drained close and abort on
+cancellation/death. The synchronous copy retains no guest pointer. Standard
+Fabric checks/traces apply to local copies; heap copies use the owner-checked
+heap path. The owner charge covers endpoint storage; a full network realm
+must additionally bound machine/trace storage, polling and transport work.
+No protected CC2 builtins or live TCP input are claimed by this patch.
+
+**Evidence:** `--only-typed-socket`: 70 positive witnesses passed and 62/62
+hostile claims explicitly disproved. All five focused Rust tests passed locally against the actual trap dispatcher and local spans.
+The passing 1614-test run predates these socket changes.
+
+**Next integration witness:** compile a socket client through CC2; on an open
+stream deliver a split header terminator, run HTTP before FIN, apply TX
+backpressure and reconstruct the exact HTTP response from short sends. Exercise
+peer abort/reuse and heap spans as well as locals. Service scheduling must drain
+accepted TX before normal teardown. A transport bridge is intermediate; the
+final witness must traverse the rebuilt protected NIC/TCP services in both
+directions. Keep the legacy stack as the packet-level reference.
+
+### S2 — Rebuilt HTTP over an ordered stream
+
+The separate socket authority and current linked receipt select one spawned
+child before its first instruction. The bridge reuses the accounted realm and
+charged report; no console traffic can enter the socket capture. The input
+fragments are synchronous caller borrows totaling at most 1024 bytes; the
+capture limit is also 1024. The second fragment arrives only after a genuine
+receive-would-block. A short transmit holds its prefix until send-would-block;
+the adapter then copies that prefix out. A full successful send drains before
+the next guest instruction. The adapter aborts after more than 64 would-block receives; the execution
+budget (at most 2 million scheduler rounds including startup) also bounds a
+guest that never calls the socket; it never turns an empty open stream into EOF.
+
+Both CC2 producers reserve the exact identifiers `srecv` and `ssend`. They
+use existing typed byte-call lowering, reject raw/wrong pointer types and
+pointer counts, and return an unmodified scalar count/error. No pointer or
+endpoint key is reconstructed in userspace. The HTTP guest receives into a
+local array and sends from a malloc allocation. It handles the first complete
+bounded header then exits; body parsing, persistent connections and pipelining
+are outside the one-request profile.
+
+**Evidence:** S2 Kleis: 17 positive, 20/20 hostile explicitly disproved.
+Native execution of the ABI-2 compiler emitted both socket trap sequences;
+native HTTP logic was exercised across every split of a binary-header request.
+These diagnostics do not establish guest execution. Run
+`bash scripts/check-anka108-socket-http.sh --real` for discovery-checked Rust
+gates and one real bootstrap. The local release witness passed on 2026-11-02 in **92.83s**. It checked exact 200/404 responses,
+short writes and retry counts, the 1024-byte edge, incomplete FIN, full
+unterminated input, receipt survival and quota release. S1 acceptance is
+unchanged. After S2 guest acceptance, connect ordered delivery to the real
+protected transport and NIC; a successful scripted stream alone does not
+close Phase 10.8.
+
+### S3 — One Ethernet frame through the virtual NIC and a protected packet service
+
+S2 closed the CC2-to-socket path on ordered bytes. S3 starts from a complete
+opaque frame instead. The driver runs a small fixed Anka64 program: receive with
+`SYS_NIC_RX`, wait for a length word, transmit with `SYS_NIC_TX`, then exit.
+It has one exact RX/TX device handle and one 1514-byte RW bounce handle. Only
+the length word needs a virtual map. A separate copy domain has ordinary
+Fabric memory grants. No raw address or device capability crosses into the
+published CC2 application. The host neither parses headers nor computes replies.
+
+Admission checks the live linked receipt before RX. The shared service reserves
+8 MiB for the isolated driver (2 MiB RAM, at most 2 MiB registry and bounded
+remaining storage), in addition to the existing application-run, input and
+report charges. There is one injection, one receive, at most one transmit,
+96 one-instruction scheduler rounds per direction, and a bounded trace. Only
+a successful, drained RX completion with the exact transferred length permits
+the Fabric read into private input. The run uses its own ordinary protected C
+startup with a finite dispatch budget. The host copies the output into the TX
+bounce buffer only for exit 1 with a 14..1514-byte offer. Exits 2, 3 or 64 with
+empty output are intentional drops; every inconsistent result is an error. The
+returned wire bytes come from the controller sink after its authorized DMA READ
+commits. Teardown destroys the *whole* private emulator before refund, including
+on failure. This is not a claim about resetting a physical NIC.
+
+`frame_service.c` implements Ethernet classification, ARP and fixed-header
+IPv4/ICMP echo in protected C. It preserves admitted padding, checks actual
+lengths before parsing, rejects fragments and invalid checksums, and recomputes
+the reply checksums. Legacy CC_B services remain the packet-level reference.
+The new branch introduces no guest syscall and gives HTTP no DMA authority.
+
+**Evidence:** S3 Kleis: 12 positive, 18/18 hostile explicitly disproved. The
+native ABI-2 producer compiled the expanded C source (23,184-byte AOM); native
+packet logic passed exact-byte ARP and ICMP cases including odd and maximum
+payloads and hostile inputs. The real Rust/NIC/guest gate passed locally in **83.16s** on 2026-11-02.
+`bash scripts/check-anka108-packet-service.sh --real` compiled and linked
+once, then checked ten independent exchanges including quota refund after each.
+
+**Next closure decision:** reuse the checked packet boundary for transport.
+Port UDP and the single-connection TCP state machine; before integrating with S2,
+refine state retention across frames, tuple/sequence checks, backpressure,
+when ACK/sequence advances may commit, stale connection events, and FIN/drain.
+The final witness must take a NIC request through rebuilt TCP/socket and HTTP
+and actually transmit the response. An Ethernet/ICMP pass alone does not close
+that path, and the one-shot frame adapter does not retain TCP state.
+
+### S4 — One TCP connection through protected socket HTTP and NIC TX
+
+S3 is accepted. S4 pins two distinct linked publication epochs (TCP and HTTP)
+to one exclusive session and retains a single virtual NIC, driver and bounce
+buffer. The driver takes a bounded RX or TX command and returns to user PC
+zero only after the finite request completes. The broker checks the exact
+device, status, transferred length and drained controller. It never clears the
+live NIC trace. One 12 MiB parent reservation covers the driver, 4096-entry
+trace and small staging buffers; ordinary protected runs and their reports
+retain their separate reservations. Each session admits at most 16 frames
+and one HTTP launch, then destroys all temporary state before refund.
+
+**Who owns the TCP state:** the protected TCP C program defines the bytes and
+the transitions. The broker holds the last committed 32 bytes privately for
+this connection and passes them back to a fresh execution of the same published
+program for the next event. This deliberately avoids a persistent process ABI.
+The input is operation (1 RX / 2 application output), two bytes of available
+FIFO credit, 32 state bytes and exact input bytes. A successful proposal has
+six header bytes (action, zero, big-endian wire length and delivery length),
+32 new state bytes, delivery bytes, then the proposed frame. A rejected input
+exits zero with empty output. The broker checks role, lengths, credit, and
+byte equality at the fixed payload offset. It stages data before acknowledging
+it and publishes the FIFO length and checkpoint only after any required NIC TX
+commits. Failed I/O terminates the operation. Previously captured frames
+remain real transmissions; failure cannot retract them.
+
+TCP accepts one passive development connection on 49153 with fixed IPv4/TCP
+headers, IP and pseudo-header checksums, a pinned link peer and exact TCP
+sequence/acknowledgement numbers. TCP arithmetic wraps at 32 bits; FIFO
+accounting never wraps. The trusted scheduling input `serve` starts the
+independently receipt-checked HTTP guest on accumulated bytes. Rust does not
+inspect the HTTP request or synthesize FIN. A successful guest reply goes
+back through the **TCP guest** for PSH/ACK/FIN serialization, then through
+Fabric DMA and NIC TX. This is one buffered request and one response; it does
+not run a live host listener, refill HTTP from newly arriving frames once
+scheduled, or implement retransmission timers, TIME_WAIT or multiple peers.
+Matching a TCP tuple or source MAC is not cryptographic authentication.
+
+**Evidence:** S4 Kleis passed 12 positive witnesses and explicitly disproved
+16/16 hostile claims. The native ABI-2 compiler accepted the TCP source.
+Native execution of the C sources matched the independent 14-event capture
+(13 received frames and one application scheduling event): handshake, bad
+tuple/ACK/checksum, gap, duplicate, insufficient credit, wrap, split request,
+HTTP response before peer FIN and clean shutdown. The reported S4 release run
+passed all three focused tests and `s4_real_nic_tcp_http_alive` in 124.61s.
+The latter bootstrapped once, linked both services separately, checked the
+exact 74-byte HTTP response inside committed TX, fresh-session isolation,
+a revoked-device TX failure, close and refunds.
+
+### S5 — Protected UDP parity on the existing frame service
+
+Port 49152 uses the same charged driver, published program and private
+packet copy as S3. The phase 9.4d UDP contract still governs the wire:
+one fixed IPv4 header, one exact UDP datagram, a zero input checksum means
+omitted, and a supplied checksum covers the pseudo-header and all declared
+UDP bytes. An echo always supplies a checksum (raw zero encodes as 0xffff).
+Payload and Ethernet padding are preserved byte for byte; padding never
+participates in either checksum. Other ports drop with no TX. No new syscall,
+grant, queue, persistent peer, or general UDP socket interface is required.
+
+The S5 refinement imports the S3 and 9.4d contracts. **9 positive witnesses
+passed; all 17 hostile claims explicitly disproved.** The model takes
+checksum validity as an input. For the actual checksum and serializer, native
+execution compared both C implementations against an independent wire oracle
+at every payload length 0..1472, with checksum supplied and omitted, including
+separate zero-result and malformed cases. The native-hosted ABI-2 producer
+emitted a 29,976-byte object for the protected service.
+
+**Legacy fixture correction:** The first S5 release run passed both formal gate
+pairs and the three S3 focused tests. The legacy CC_B UDP witness then faulted
+on the signed full-MTU case, before the protected test ran. Its byte helper
+reads an aligned eight-byte word at 1512 to extract the last two wire bytes;
+the old 1514-byte object/grant stopped six bytes short. The legacy fixture
+now zeroes a private 1520-byte object, maps it read-only through the last word,
+and installs the ordinary 1514-byte RW packet capability. The NIC receives
+only that capability. Its RX/TX limits, the protected byte ISA and all 17
+wire cases stay unchanged. The full-MTU case also checks the actual capability
+length and that a full-word write across the tail is denied. An instrumented
+native run of the legacy C word operations reproduced the denial at 0x5e8
+and returned the exact signed 1514-byte reply with the corrected read extent.
+
+**Guest acceptance:** the developer reran `check-anka108-packet-service.sh --real`.
+Both formal pairs and all four focused Rust tests passed. The legacy UDP
+guest matched its wire oracle in **1.02s**. The protected program compiled
+once and passed **10 Ethernet/ARP/ICMP plus 17 UDP cases in 85.25s**; exact
+TX bytes, intentional drops, current receipt and post-exchange quota were
+checked. This resolves the recorded full-MTU fault. Together with S4, the
+bounded protected network path is accepted. Keep the legacy reference tests.
+
+### Final Phase 10.8 checkpoint — runtime confirmation pending
+
+A complete formal sweep exposed one inconclusive 64-bit queue proof in
+`anka108_async_reclamation`: transferring an owner's records from armed to
+pending must preserve the capacity bound. The original transition and theorem
+are unchanged. Queue admission now tests nonzero capacity, no carry in
+`armed + pending`, and a sum at most capacity. A new universal equivalence
+witness checks this against the original checked-subtraction predicate for
+all three 64-bit inputs, including wraparound. The isolated theory passes
+258 positive and 171 explicitly disproved hostile witnesses. This is a proof
+formulation change only; no guest or kernel behavior changed.
+
+On the supplied tree with this refinement, the full formal runner passed all
+48 theory pairs (13 Phase 10.7 and 35 Phase 10.8): 4,467 positive witnesses
+and 3,664 explicit hostile disproofs. No unknown was counted.
+
+Run `bash scripts/check-anka108-closure.sh --final` from the repository root.
+It checks the 10.7 prerequisites and all 10.8 theory pairs, then runs the
+ordinary release suite (including the nonignored CC2 fixed point) serially.
+It compares the compiled ignored-test inventory with the 15 required real
+witnesses and executes each by exact name: oversized publication; workspace,
+source growth and typed structures; large linking; preprocessing; concurrent
+compiler jobs and publication; and the protected HTTP/socket/packet/TCP gates.
+A missing required test, zero-test match, failed assertion or failed command
+blocks acceptance. Additional ignored library tests are included automatically.
+The ordinary suite is run fresh; a successful ignored-test log may be reused
+after interruption for the same runtime inputs, binary and diagnostic timeout.
+The final report identifies the input digest and logs under `target/anka108-closure/`.
+Use a stable checkout and one runner at a time. The old `--real` mode and the
+pre-socket full-suite total are historical component evidence.
+
+The remaining decision is the final release result, not a new network port.
+This gate covers the emulator's bounded virtual NIC and single-connection
+service. Host networking, general TCP, Metal/FPGA, short-circuit logical
+operators and source-order-independent entry selection remain separate work.

@@ -81,16 +81,19 @@ service with private request storage and typed input/output. The HTTP Kleis gate
 passes **34 positive / 21 hostile witnesses**. This is finite-input application
 acceptance, not socket/NIC acceptance.
 
-**Latest full regression:** **1,612 passed, 2 failed, 12 ignored**, 296.72 seconds.
-The two failures were the monitor's obsolete ordinary-CC_B linker bootstrap and
-an obsolete test classifying supported AOM version 2 as unsupported. The current
-patch aligns monitor bootstrap with the extended fixed-point path and tests
-unsupported version 3 while retaining rejection of version 2 without its typed
-trailer. Local Rust reruns are pending; no complete regression pass is claimed.
+**Last complete regression before typed sockets:** 1,614 passed, 0 failed,
+12 ignored in 289.36 seconds. Both the monitor bootstrap and typed AOM
+regressions passed individually as well. Ignored real gates are run separately.
 
-**Phase 10.8 remains open.** Next: formalize the typed socket endpoint, connect
-the accepted HTTP application to the protected network services, and demonstrate
-the rebuilt NIC-to-HTTP-to-NIC `/alive` path, then finish closure regressions.
+**Phase 10.8 remains open.** The typed socket kernel path passed its five focused Rust tests.
+The real CC2 socket HTTP witness passed in 92.83 seconds: the client kept the
+stream open and received the exact reply under backpressure. The real Ethernet/ARP/IPv4/ICMP NIC gate also passed (83.16 seconds).
+The rebuilt bounded `/alive` path passed on the virtual NIC in **124.61s**:
+protected TCP delivered the split request and transmitted the protected HTTP
+reply before peer FIN. The legacy UDP oracle passed in 1.02s. In a single
+85.25s release witness the protected guest passed 17 UDP and 10 Ethernet/ARP/
+IPv4/ICMP cases, checking committed wire bytes, drops, receipts and refunds.
+Final release verification is the remaining Phase 10.8 gate.
 The legacy CC_B/shared-buffer stack remains the protocol reference. DN-71 also
 tracks future logical-operator support and source-order-independent C entry.
 
@@ -132,9 +135,14 @@ witness. Long real witnesses are deliberately ignored by the ordinary test
 runner and must be selected explicitly. At the final integration checkpoint:
 
 ```sh
-bash scripts/check-anka108-closure.sh --real
-cargo test --release -- --test-threads=1
+bash scripts/check-anka108-closure.sh --final
 ```
+
+The final command checks the formal prerequisites, runs the ordinary release
+suite serially, and discovers and executes the ignored guest witnesses. Each
+successful ignored witness has a log under `target/anka108-closure/`; rerunning
+the command can reuse it for the same compiled test binary and inputs. The
+older `--real` mode is a focused integration check.
 
 Formal gates require Python 3, Kleis with Z3 support, and the matching standard
 library. Override `KLEIS_BIN` and `KLEIS_ROOT` for the scripts, or run one gate:

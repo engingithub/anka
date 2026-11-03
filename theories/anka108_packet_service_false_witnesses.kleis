@@ -1,0 +1,19 @@
+import "anka108_packet_service.kleis"
+example "execution receipt alone permits network" { assert(pkt_open(pkt_no(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),bvconst(60,64))) }
+example "uncharged driver" { assert(pkt_open(pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_no(),bvconst(60,64))) }
+example "truncated wide length" { assert(pkt_span(bvconst(65578,64))) }
+example "stale device completion" { assert(pkt_rx(pkt_no(),pkt_yes(),pkt_yes(),pkt_yes(),bvconst(60,64),bvconst(60,64))) }
+example "read before DMA drain" { assert(pkt_rx(pkt_yes(),pkt_yes(),pkt_yes(),pkt_no(),bvconst(60,64),bvconst(60,64))) }
+example "unwritten tail accepted" { assert(pkt_rx(pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),bvconst(60,64),bvconst(1514,64))) }
+example "nonlocal ARP gets TX" { assert(pkt_arp(bvconst(60,16),bvconst(2054,16),pkt_yes(),pkt_yes(),pkt_no())) }
+example "ARP header overreads" { assert(pkt_arp(bvconst(41,16),bvconst(2054,16),pkt_yes(),pkt_yes(),pkt_yes())) }
+example "fragment gets echo" { assert(pkt_echo(bvconst(60,16),bvconst(31,16),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes())) }
+example "padding completes truncated IP packet" { assert(pkt_echo(bvconst(60,16),bvconst(47,16),pkt_yes(),pkt_yes(),pkt_no(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes())) }
+example "bad ICMP checksum" { assert(pkt_echo(bvconst(60,16),bvconst(31,16),pkt_yes(),pkt_yes(),pkt_no(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_no())) }
+example "faulted parser still transmits" { assert(pkt_offer(pkt_no(),bvconst(1,64),bvconst(42,64))) }
+example "drop carrying bytes accepted" { assert(pkt_drop(pkt_yes(),bvconst(64,64),bvconst(1,64))) }
+example "RX right used as TX" { assert(pkt_tx(pkt_yes(),pkt_yes(),pkt_no(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_no())) }
+example "faulted DMA publishes frame" { assert(pkt_tx(pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes())) }
+example "valid reply bypasses failed RX" { assert(pkt_round(pkt_yes(),pkt_no(),pkt_yes(),bvconst(1,64),bvconst(60,64),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_no())) }
+example "undrained bounce buffer reused" { assert(pkt_round(pkt_yes(),pkt_yes(),pkt_yes(),bvconst(1,64),bvconst(60,64),pkt_yes(),pkt_yes(),pkt_yes(),pkt_no(),pkt_yes(),pkt_no())) }
+example "nonempty drop routed as response" { assert(pkt_round(pkt_yes(),pkt_yes(),pkt_yes(),bvconst(64,64),bvconst(60,64),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_no())) }

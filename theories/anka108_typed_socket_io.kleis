@@ -1,0 +1,122 @@
+// Phase 10.8, S1. Single bound stream, synchronous copy, independent RX/TX.
+// No axioms. Whole-span certificates come from in108_destination/io108_buffer
+// (or their protected heap equivalents) on the actual saved syscall image.
+// No process-visible socket address, device object, borrowed queue or DMA slot.
+import "anka108_typed_input.kleis"
+
+define sk_zero() = bvconst(0,64)
+define sk_cap() = bvconst(1024,64)
+define sk_error() = bvsub(sk_zero(),bvconst(1,64))
+define sk_again() = bvsub(sk_error(),bvconst(1,64))
+define sk_min(a : BitVec64,b : BitVec64) = if bvule(a,b) then a else b
+define sk_same(slot : BitVec64,owner : BitVec64,gen : BitVec32,owner_gen : BitVec32,ctx : BitVec64,owner_ctx : BitVec64,dom : BitVec64,owner_dom : BitVec64) = (slot=owner) ∧ (gen=owner_gen) ∧ (ctx=owner_ctx) ∧ (dom=owner_dom)
+define sk_ticket(same : Bool,live : Bool,charge : Bool,event : BitVec64,bound : BitVec64) = same ∧ live ∧ charge ∧ (event=bound) ∧ bvugt(bound,sk_zero())
+// Local process cannot choose the transport ticket. RX needs endpoint RX and
+// a writable destination; TX needs endpoint TX and a readable source.
+define sk_admit(rx : Bool,binding : Bool,rx_right : Bool,tx_right : Bool,writable : Bool,readable : Bool,abi : Bool,n : BitVec64) = binding ∧ abi ∧ bvule(n,sk_cap()) ∧ (if rx then (rx_right ∧ writable) else (tx_right ∧ readable))
+
+// used is that direction's occupied bytes. fin is the inbound half-close only.
+// n=0 is an authenticated no-op, never evidence for EOF.
+define sk_result(rx : Bool,admitted : Bool,used : BitVec64,n : BitVec64,fin : Bool) =
+    if ¬admitted ∨ bvugt(used,sk_cap()) ∨ bvugt(n,sk_cap()) then sk_error()
+    else if n=sk_zero() then sk_zero()
+    else if rx then (if used=sk_zero() then (if fin then sk_zero() else sk_again()) else sk_min(n,used))
+    else if used=sk_cap() then sk_again() else sk_min(n,bvsub(sk_cap(),used))
+
+// Final copy must succeed under the same exclusive kernel borrow. Until then
+// no bytes become visible to the consumer; failed copies keep the queue intact.
+define sk_count(result : BitVec64,commit : Bool) = if commit ∧ bvule(result,sk_cap()) then result else sk_zero()
+define sk_used_after(rx : Bool,used : BitVec64,result : BitVec64,commit : Bool) =
+    if rx then bvsub(used,sk_count(result,commit)) else bvadd(used,sk_count(result,commit))
+define sk_rx_byte(result : BitVec64,commit : Bool,pos : BitVec64,index : BitVec64,source : BitVec8,old : BitVec8) =
+    in108_byte(bvconst(1,8),pos,sk_count(result,commit),index,source,old)
+define sk_rx_tag(result : BitVec64,commit : Bool,pos : BitVec64,cell : BitVec64,old : BitVec8) =
+    in108_tag(bvconst(1,8),pos,sk_count(result,commit),cell,old)
+// Transport delivers an already ordered TCP prefix (never raw packet input).
+// A fragment, optionally including its trailing FIN, is accepted all-or-none.
+define sk_deliver(ticket : Bool,fin : Bool,used : BitVec64,n : BitVec64) = ticket ∧ ¬fin ∧ bvule(used,sk_cap()) ∧ bvule(n,bvsub(sk_cap(),used))
+define sk_fin_after(fin : Bool,accepted : Bool,incoming_fin : Bool) = fin ∨ (accepted ∧ incoming_fin)
+// Cancel can invalidate the binding immediately, even with queued bytes.
+// Destruction/refund precede rebinding. Device work never references these
+// private copy queues; any future direct device borrow would need real drain.
+define sk_reuse(free : Bool,dropped : Bool,refunded : Bool,work : BitVec64,old : BitVec64,fresh : BitVec64) = free ∧ dropped ∧ refunded ∧ (work=sk_zero()) ∧ bvugt(fresh,old)
+
+define sk_true() = (bvconst(1,8)=bvconst(1,8))
+define sk_false() = ¬sk_true()
+example "bound process" { assert(sk_same(bvconst(1,64),bvconst(1,64),bvconst(7,32),bvconst(7,32),bvconst(9,64),bvconst(9,64),bvconst(12,64),bvconst(12,64))) }
+example "slot reuse" { assert(¬sk_same(bvconst(2,64),bvconst(1,64),bvconst(7,32),bvconst(7,32),bvconst(9,64),bvconst(9,64),bvconst(12,64),bvconst(12,64))) }
+example "old process generation" { assert(¬sk_same(bvconst(1,64),bvconst(1,64),bvconst(2,32),bvconst(7,32),bvconst(9,64),bvconst(9,64),bvconst(12,64),bvconst(12,64))) }
+example "old execution context" { assert(¬sk_same(bvconst(1,64),bvconst(1,64),bvconst(7,32),bvconst(7,32),bvconst(2,64),bvconst(9,64),bvconst(12,64),bvconst(12,64))) }
+example "other domain" { assert(¬sk_same(bvconst(1,64),bvconst(1,64),bvconst(7,32),bvconst(7,32),bvconst(9,64),bvconst(9,64),bvconst(2,64),bvconst(12,64))) }
+example "live transport identity" { assert(sk_ticket(sk_true(),sk_true(),sk_true(),bvconst(3,64),bvconst(3,64))) }
+example "wrong child" { assert(¬sk_ticket(sk_false(),sk_true(),sk_true(),bvconst(3,64),bvconst(3,64))) }
+example "cancelled" { assert(¬sk_ticket(sk_true(),sk_false(),sk_true(),bvconst(3,64),bvconst(3,64))) }
+example "uncharged" { assert(¬sk_ticket(sk_true(),sk_true(),sk_false(),bvconst(3,64),bvconst(3,64))) }
+example "delayed event after reuse" { assert(¬sk_ticket(sk_true(),sk_true(),sk_true(),bvconst(2,64),bvconst(3,64))) }
+example "zero ticket" { assert(¬sk_ticket(sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(0,64))) }
+example "RX least authority" { assert(sk_admit(sk_true(),sk_true(),sk_true(),sk_false(),sk_true(),sk_false(),sk_true(),bvconst(7,64))) }
+example "RX absent binding" { assert(¬sk_admit(sk_true(),sk_false(),sk_true(),sk_false(),sk_true(),sk_false(),sk_true(),bvconst(7,64))) }
+example "RX wrong endpoint direction" { assert(¬sk_admit(sk_true(),sk_true(),sk_false(),sk_false(),sk_true(),sk_false(),sk_true(),bvconst(7,64))) }
+example "RX wrong memory right" { assert(¬sk_admit(sk_true(),sk_true(),sk_true(),sk_false(),sk_false(),sk_false(),sk_true(),bvconst(7,64))) }
+example "RX forged scalar ABI" { assert(¬sk_admit(sk_true(),sk_true(),sk_true(),sk_false(),sk_true(),sk_false(),sk_false(),bvconst(7,64))) }
+example "RX oversized full span" { assert(¬sk_admit(sk_true(),sk_true(),sk_true(),sk_false(),sk_true(),sk_false(),sk_true(),bvconst(1025,64))) }
+example "TX least authority" { assert(sk_admit(sk_false(),sk_true(),sk_false(),sk_true(),sk_false(),sk_true(),sk_true(),bvconst(7,64))) }
+example "TX absent binding" { assert(¬sk_admit(sk_false(),sk_false(),sk_false(),sk_true(),sk_false(),sk_true(),sk_true(),bvconst(7,64))) }
+example "TX wrong endpoint direction" { assert(¬sk_admit(sk_false(),sk_true(),sk_false(),sk_false(),sk_false(),sk_true(),sk_true(),bvconst(7,64))) }
+example "TX wrong memory right" { assert(¬sk_admit(sk_false(),sk_true(),sk_false(),sk_true(),sk_false(),sk_false(),sk_true(),bvconst(7,64))) }
+example "TX forged scalar ABI" { assert(¬sk_admit(sk_false(),sk_true(),sk_false(),sk_true(),sk_false(),sk_true(),sk_false(),bvconst(7,64))) }
+example "TX oversized full span" { assert(¬sk_admit(sk_false(),sk_true(),sk_false(),sk_true(),sk_false(),sk_true(),sk_true(),bvconst(1025,64))) }
+example "empty open is retry" { assert(sk_result(sk_true(),sk_true(),bvconst(0,64),bvconst(7,64),sk_false())=sk_again()) }
+example "drained FIN is EOF" { assert(sk_result(sk_true(),sk_true(),bvconst(0,64),bvconst(7,64),sk_true())=bvconst(0,64)) }
+example "drain payload before EOF" { assert(sk_result(sk_true(),sk_true(),bvconst(3,64),bvconst(9,64),sk_true())=bvconst(3,64)) }
+example "partial receive" { assert(sk_result(sk_true(),sk_true(),bvconst(9,64),bvconst(3,64),sk_false())=bvconst(3,64)) }
+example "zero send to full queue" { assert(sk_result(sk_false(),sk_true(),bvconst(1024,64),bvconst(0,64),sk_false())=bvconst(0,64)) }
+example "no unchecked EOF" { assert(sk_result(sk_true(),sk_false(),bvconst(0,64),bvconst(1,64),sk_true())=sk_error()) }
+example "no unchecked zero write" { assert(sk_result(sk_false(),sk_false(),bvconst(0,64),bvconst(0,64),sk_false())=sk_error()) }
+example "tx backpressure" { assert(sk_result(sk_false(),sk_true(),bvconst(1024,64),bvconst(4,64),sk_false())=sk_again()) }
+example "partial send" { assert(sk_result(sk_false(),sk_true(),bvconst(1022,64),bvconst(4,64),sk_false())=bvconst(2,64)) }
+example "send after peer FIN" { assert(sk_result(sk_false(),sk_true(),bvconst(0,64),bvconst(4,64),sk_true())=bvconst(4,64)) }
+example "invalid occupancy" { assert(sk_result(sk_false(),sk_true(),bvconst(1025,64),bvconst(1,64),sk_false())=sk_error()) }
+example "binary copy" { assert(sk_rx_byte(bvconst(2,64),sk_true(),bvconst(16,64),bvconst(17,64),bvconst(255,8),bvconst(9,8))=bvconst(255,8)) }
+example "unchanged tail" { assert(sk_rx_byte(bvconst(2,64),sk_true(),bvconst(16,64),bvconst(18,64),bvconst(255,8),bvconst(9,8))=bvconst(9,8)) }
+example "failed atomic copy" { assert(sk_rx_byte(bvconst(2,64),sk_false(),bvconst(16,64),bvconst(17,64),bvconst(255,8),bvconst(9,8))=bvconst(9,8)) }
+example "overlapping protected cell loses kind" { assert(sk_rx_tag(bvconst(1,64),sk_true(),bvconst(31,64),bvconst(16,64),bvconst(1,8))=bvconst(0,8)) }
+example "disjoint protected cell keeps kind" { assert(sk_rx_tag(bvconst(1,64),sk_true(),bvconst(31,64),bvconst(32,64),bvconst(1,8))=bvconst(1,8)) }
+example "fin without payload" { assert(sk_deliver(sk_true(),sk_false(),bvconst(1024,64),bvconst(0,64))) }
+example "space for last byte" { assert(sk_deliver(sk_true(),sk_false(),bvconst(1023,64),bvconst(1,64))) }
+example "no partial ingress" { assert(¬sk_deliver(sk_true(),sk_false(),bvconst(1023,64),bvconst(2,64))) }
+example "stale ingress" { assert(¬sk_deliver(sk_false(),sk_false(),bvconst(0,64),bvconst(1,64))) }
+example "data after FIN" { assert(¬sk_deliver(sk_true(),sk_true(),bvconst(0,64),bvconst(1,64))) }
+example "rejected fragment cannot close stream" { assert(¬sk_fin_after(sk_false(),sk_false(),sk_true())) }
+example "FIN sticks" { assert(sk_fin_after(sk_true(),sk_true(),sk_false())) }
+example "fresh binding" { assert(sk_reuse(sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(17,64),bvconst(18,64))) }
+example "no live replacement" { assert(¬sk_reuse(sk_false(),sk_true(),sk_true(),bvconst(0,64),bvconst(17,64),bvconst(18,64))) }
+example "no dirty reuse" { assert(¬sk_reuse(sk_true(),sk_false(),sk_true(),bvconst(0,64),bvconst(17,64),bvconst(18,64))) }
+example "no charge leak" { assert(¬sk_reuse(sk_true(),sk_true(),sk_false(),bvconst(0,64),bvconst(17,64),bvconst(18,64))) }
+example "undrained work" { assert(¬sk_reuse(sk_true(),sk_true(),sk_true(),bvconst(1,64),bvconst(17,64),bvconst(18,64))) }
+example "epoch must advance" { assert(¬sk_reuse(sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(17,64),bvconst(17,64))) }
+example "no epoch wrap" { assert(¬sk_reuse(sk_true(),sk_true(),sk_true(),bvconst(0,64),sk_error(),bvconst(0,64))) }
+example "RX occupancy bounded for all outcomes" { assert(∀(u : BitVec64,n : BitVec64,a : Bool,f : Bool,c : Bool). bvule(u,sk_cap()) → bvule(sk_used_after(sk_true(),u,sk_result(sk_true(),a,u,n,f),c),sk_cap())) }
+example "RX no queue change on copy failure" { assert(∀(u : BitVec64,r : BitVec64). sk_used_after(sk_true(),u,r,sk_false())=u) }
+example "RX rollback at nonzero prefix" { assert(sk_used_after(sk_true(),bvconst(3,64),bvconst(2,64),sk_false())=bvconst(3,64)) }
+example "TX occupancy bounded for all outcomes" { assert(∀(u : BitVec64,n : BitVec64,a : Bool,f : Bool,c : Bool). bvule(u,sk_cap()) → bvule(sk_used_after(sk_false(),u,sk_result(sk_false(),a,u,n,f),c),sk_cap())) }
+example "TX no queue change on copy failure" { assert(∀(u : BitVec64,r : BitVec64). sk_used_after(sk_false(),u,r,sk_false())=u) }
+example "TX rollback at nonzero prefix" { assert(sk_used_after(sk_false(),bvconst(3,64),bvconst(2,64),sk_false())=bvconst(3,64)) }
+
+define sk_abi(rx : Bool,op : BitVec64,reserved : BitVec64,flags : BitVec64,scalar01 : Bool,scalar45 : Bool,tagged23 : Bool) = (op=(if rx then bvconst(23,64) else bvconst(24,64))) ∧ (reserved=sk_zero()) ∧ (flags=sk_zero()) ∧ scalar01 ∧ scalar45 ∧ tagged23
+example "saved RX trap" { assert(sk_abi(sk_true(),bvconst(23,64),sk_zero(),sk_zero(),sk_true(),sk_true(),sk_true())) }
+example "saved TX trap" { assert(sk_abi(sk_false(),bvconst(24,64),sk_zero(),sk_zero(),sk_true(),sk_true(),sk_true())) }
+example "socket and console ops disjoint" { assert(¬sk_abi(sk_false(),bvconst(1,64),sk_zero(),sk_zero(),sk_true(),sk_true(),sk_true())) }
+example "raw buffer cannot enter" { assert(¬sk_abi(sk_true(),bvconst(23,64),sk_zero(),sk_zero(),sk_true(),sk_true(),sk_false())) }
+example "no endpoint selected by guest" { assert(¬sk_abi(sk_true(),bvconst(23,64),bvconst(1,64),sk_zero(),sk_true(),sk_true(),sk_true())) }
+
+// A guest endpoint is implicit in its incarnation. Never replace its peer
+// under a suspended saved trap, including after successful cancellation.
+define sk_bind(already_bound : Bool,slot_free : Bool,funded : Bool) = ¬already_bound ∧ slot_free ∧ funded
+define sk_close(ticket : Bool,rx : BitVec64,tx : BitVec64) = ticket ∧ (rx=sk_zero()) ∧ (tx=sk_zero())
+example "fresh funded bind" { assert(sk_bind(sk_false(),sk_true(),sk_true())) }
+example "cancelled incarnation cannot rebind" { assert(¬sk_bind(sk_true(),sk_true(),sk_true())) }
+example "drained close" { assert(sk_close(sk_true(),sk_zero(),sk_zero())) }
+example "no graceful discard TX" { assert(¬sk_close(sk_true(),sk_zero(),bvconst(1,64))) }
+example "no graceful discard RX" { assert(¬sk_close(sk_true(),bvconst(1,64),sk_zero())) }
+example "full check then no-op" { assert(sk_result(sk_true(),sk_true(),sk_zero(),sk_zero(),sk_false())=sk_zero()) }

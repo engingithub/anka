@@ -1,0 +1,40 @@
+// S3: one real NIC binding, one fresh driver realm, one published frame service.
+// No new axioms. The broker sees lengths and completion status, not protocol fields.
+import "anka93e4_finite_nic_dma.kleis"
+import "anka94a_ethernet_contract.kleis"
+import "anka94b_arp_contract.kleis"
+import "anka94c_ipv4_icmp_contract.kleis"
+
+define pkt_yes() = (bvconst(1,8)=bvconst(1,8))
+define pkt_no() = ¬pkt_yes()
+// ABI words are 64-bit: validate before ANY size/16-bit conversion.
+define pkt_span(n : BitVec64) = bvugt(n,bvconst(0,64)) ∧ bvule(n,bvconst(1514,64))
+define pkt_open(net : Bool,exec : Bool,input : Bool,receipt : Bool,charged : Bool,n : BitVec64) =
+  net ∧ exec ∧ input ∧ receipt ∧ charged ∧ pkt_span(n)
+define pkt_rx(current : Bool,write_grant : Bool,commit : Bool,drained : Bool,actual : BitVec64,expected : BitVec64) =
+  nic93e4_rx_accept(pkt_yes(),current,pkt_yes(),current,write_grant,pkt_yes(),pkt_yes()) ∧ commit ∧ drained ∧ pkt_span(actual) ∧ (actual=expected)
+// Exited(1) offers ONE frame. A drop with nonempty output is a protocol error.
+// The TX permit is independent of interpretation/exit status and current at DMA.
+define pkt_offer(exited : Bool,code : BitVec64,n : BitVec64) = exited ∧ (code=bvconst(1,64)) ∧ pkt_span(n) ∧ bvuge(n,bvconst(14,64))
+define pkt_drop(exited : Bool,code : BitVec64,n : BitVec64) = exited ∧ (n=bvconst(0,64)) ∧ ((code=bvconst(2,64)) ∨ (code=bvconst(3,64)) ∨ (code=bvconst(64,64)))
+define pkt_tx(offer : Bool,current : Bool,tx_right : Bool,read_grant : Bool,prior_drained : Bool,committed : Bool,fault : Bool) =
+  offer ∧ prior_drained ∧ nic93e4_tx_accept(current,tx_right,current,read_grant,pkt_yes(),pkt_yes()) ∧ (nic93e4_tx_sink_delta(committed,fault)=bvconst(1,3))
+define pkt_arp(n : BitVec16,etype : BitVec16,header : Bool,request : Bool,local : Bool) = ethernet94a_length_valid(n) ∧ (etype=bvconst(2054,16)) ∧ bvuge(n,bvconst(42,16)) ∧ arp94b_should_reply(arp94b_payload_safe(bvsub(n,bvconst(14,16))),header,request,local)
+define pkt_echo(n : BitVec16,total : BitVec16,v4fixed : Bool,ipcheck : Bool,fragmented : Bool,local : Bool,icmp : Bool,echo : Bool,code0 : Bool,icheck : Bool) =
+  ethernet94a_length_valid(n) ∧ bvuge(n,bvconst(34,16)) ∧ icmp94c_should_echo_reply(ipv494c_supported_packet(v4fixed,ipv494c_lengths_safe(bvconst(20,16),total,bvsub(n,bvconst(14,16))),ipcheck,fragmented,local),icmp,icmp94c_length_safe(bvsub(total,bvconst(20,16))),echo,code0,icheck)
+example "maximum frame admitted" { assert(pkt_open(pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),bvconst(1514,64))) }
+example "runt wire reaches guest parser" { assert(pkt_rx(pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),bvconst(1,64),bvconst(1,64))) }
+example "valid ARP" { assert(pkt_arp(bvconst(42,16),bvconst(2054,16),pkt_yes(),pkt_yes(),pkt_yes())) }
+example "valid odd length echo with padding" { assert(pkt_echo(bvconst(60,16),bvconst(31,16),pkt_yes(),pkt_yes(),pkt_no(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes())) }
+example "only observed prefix copied" { assert(∀(n : BitVec64,m : BitVec64). pkt_rx(pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),n,m) → (n=m ∧ pkt_span(n))) }
+example "drop cannot be a reply" { assert(∀(e : Bool,c : BitVec64,n : BitVec64). pkt_drop(e,c,n) → ¬pkt_offer(e,c,n)) }
+example "valid bounded reply offered" { assert(pkt_offer(pkt_yes(),bvconst(1,64),bvconst(42,64))) }
+example "nonlocal packet emits no bytes" { assert(pkt_drop(pkt_yes(),bvconst(2,64),bvconst(0,64))) }
+example "committed TX capture" { assert(pkt_tx(pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_no())) }
+// A complete trace, not merely exit=1: exact RX completion must precede
+// the published service's offer and the independent committed NIC read.
+define pkt_round(admitted : Bool,received : Bool,exited : Bool,code : BitVec64,n : BitVec64,device : Bool,tx : Bool,readable : Bool,drained : Bool,commit : Bool,fault : Bool) =
+    admitted ∧ received ∧ pkt_tx(pkt_offer(exited,code,n),device,tx,readable,drained,commit,fault)
+example "one complete frame path" { assert(pkt_round(pkt_yes(),pkt_yes(),pkt_yes(),bvconst(1,64),bvconst(60,64),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_yes(),pkt_no())) }
+example "valid reply cannot cross MTU or underrun Ethernet header" { assert(∀(n : BitVec64,c : BitVec64,e : Bool). pkt_offer(e,c,n) → (bvuge(n,bvconst(14,64)) ∧ bvule(n,bvconst(1514,64)))) }
+example "ARP gate protects all 42 fixed bytes" { assert(∀(n : BitVec16,t : BitVec16,h : Bool,r : Bool,l : Bool). pkt_arp(n,t,h,r,l) → bvuge(n,bvconst(42,16))) }

@@ -17,7 +17,10 @@ use super::state::{
 };
 
 const NET_BUFFER_VADDR: u64 = 0x1_0000;
-const NET_BUFFER_SIZE: u64 = NIC_MAX_FRAME_SIZE as u64;
+const WIRE_LIMIT: u64 = NIC_MAX_FRAME_SIZE as u64;
+// Legacy CC_B getbyte reads an aligned u64, even for byte 1513.
+// Only the CPU read mapping includes the final, zero-filled word tail.
+const CPU_READ_SIZE: u64 = (WIRE_LIMIT + 7) & !7;
 const NET_STACK_VADDR: u64 = 0x2_0000;
 const NET_STACK_SIZE: u64 = 0x4000;
 const NET_TRAP_VADDR: u64 = 0x2_4000;
@@ -86,7 +89,7 @@ fn run_udp(frame: &[u8]) -> NetRun {
 
     let buffer = fabric.alloc_object(
         "p94d-udp-buffer",
-        NET_BUFFER_SIZE,
+        CPU_READ_SIZE,
         ObjectKind::Memory,
     );
     assert!(fabric.place_object(buffer, NET_BUFFER_PHYS));
@@ -103,12 +106,12 @@ fn run_udp(frame: &[u8]) -> NetRun {
         grants: vec![BootGrant {
             obj: buffer,
             offset: 0,
-            size: NET_BUFFER_SIZE,
-            perms: Permissions::RW,
+            size: CPU_READ_SIZE,
+            perms: Permissions::READ,
         }],
         maps: vec![BootMap {
             vaddr: NET_BUFFER_VADDR,
-            size: NET_BUFFER_SIZE,
+            size: CPU_READ_SIZE,
             obj: buffer,
             obj_offset: 0,
         }],
@@ -132,12 +135,22 @@ fn run_udp(frame: &[u8]) -> NetRun {
         0,
         buffer,
         0,
-        NET_BUFFER_SIZE,
+        WIRE_LIMIT,
         Permissions::RW,
     ).expect("phase 9.4d DMA capability");
     assert_eq!(device, CapabilityHandle { slot: 0, generation: 0 });
     assert_eq!(dma, CapabilityHandle { slot: 1, generation: 0 });
 
+    if frame.len() == NIC_MAX_FRAME_SIZE {
+        // Exercise the installed authorities, not just the size constants.
+        let domain = kernel.processes[0].core.domain;
+        let word = (WIRE_LIMIT - 1) & !7;
+        assert!(kernel.fabric.find_authorizing_cap(domain, buffer, word, 8, Permissions::READ).is_some());
+        assert!(kernel.fabric.find_authorizing_cap(domain, buffer, word, 8, Permissions::WRITE).is_none());
+        assert!(matches!(kernel.resolve_capability(0, dma),
+            Some(super::state::ResolvedCapability::Memory { object, offset: 0, length: WIRE_LIMIT, .. })
+                if object == buffer));
+    }
     assert!(kernel.inject_nic_rx(binding, frame));
     kernel.run(500_000, 180);
 
@@ -387,4 +400,79 @@ fn p94d_udp_c_rejects_fragmentation_options_and_truncated_ipv4() {
     trunc.truncate(14 + total - 1);
     let run = run_udp(&trunc);
     assert_exit(&run, MALFORMED);
+}
+
+// Shared wire oracle for the legacy UDP binary and the separately compiled
+// protected packet service. The production paths do not import these helpers.
+pub(crate) fn udp_parity_cases() -> Vec<(&'static str, Vec<u8>, u64, Vec<u8>)> {
+    fn reply(mut frame: Vec<u8>) -> Vec<u8> {
+        frame[..6].copy_from_slice(&PEER_MAC);
+        frame[6..12].copy_from_slice(&LOCAL_MAC);
+        frame[22] = 64;
+        frame[26..30].copy_from_slice(&LOCAL_IP);
+        frame[30..34].copy_from_slice(&PEER_IP);
+        frame[34..36].copy_from_slice(&SERVICE_PORT.to_be_bytes());
+        frame[36..38].copy_from_slice(&PEER_PORT.to_be_bytes());
+        set_udp_checksum(&mut frame);
+        set_ipv4_checksum(&mut frame);
+        frame
+    }
+    let mut cases = Vec::new();
+    let mut yes = |name, frame: Vec<u8>| {
+        let want = reply(frame.clone());
+        cases.push((name, frame, UDP_REPLIED, want));
+    };
+    yes("empty/omitted", udp_frame(&[], false));
+    let mut odd = udp_frame(&[0x80, 0, 0xff], true);
+    odd[45..].fill(0xbd); // Padding changes after signing; checksum must still validate.
+    yes("odd binary and padding", odd);
+    let mtu: Vec<u8> = (0..1472).map(|i| (i * 17) as u8).collect();
+    yes("full MTU signed", udp_frame(&mtu, true));
+    // For a zero payload word, its checksum is precisely the word needed
+    // to make the final raw checksum zero (one's-complement arithmetic).
+    let mut zero = udp_frame(&[0, 0], false);
+    let word = udp_checksum(&zero, 10);
+    zero[42..44].copy_from_slice(&word.to_be_bytes());
+    assert_eq!(udp_checksum(&zero, 10), 0);
+    yes("computed zero", zero.clone());
+    zero[40..42].fill(0xff);
+    yes("supplied all ones", zero);
+
+    let valid = udp_frame(&[8, 0, 6], true);
+    for (name, n) in [("short UDP", 7u16), ("shorter than IP", 10), ("longer into padding", 12)] {
+        let mut r = valid.clone(); r[38..40].copy_from_slice(&n.to_be_bytes());
+        cases.push((name, r, MALFORMED, vec![]));
+    }
+    let mut r = valid.clone(); r[44] ^= 1;
+    cases.push(("corrupt last odd byte", r, MALFORMED, vec![]));
+    let mut r = valid.clone(); r[29] ^= 1; set_ipv4_checksum(&mut r);
+    cases.push(("stale pseudo-header", r, MALFORMED, vec![]));
+    let mut r = valid.clone(); r.truncate(44);
+    cases.push(("truncated IP", r, MALFORMED, vec![]));
+    let mut r = valid.clone(); r[36..38].copy_from_slice(&49153u16.to_be_bytes()); set_udp_checksum(&mut r);
+    cases.push(("wrong port", r, NO_REPLY, vec![]));
+    let mut r = valid.clone(); r[33] ^= 1; set_ipv4_checksum(&mut r); set_udp_checksum(&mut r);
+    cases.push(("nonlocal", r, NONLOCAL, vec![]));
+    let mut r = valid.clone(); r[20] = 0x20; set_ipv4_checksum(&mut r);
+    cases.push(("fragment", r, MALFORMED, vec![]));
+    let mut r = valid.clone(); r[14] = 0x46; set_ipv4_checksum(&mut r);
+    cases.push(("IP options", r, MALFORMED, vec![]));
+    let mut r = valid.clone(); r[23] = 6; set_ipv4_checksum(&mut r);
+    cases.push(("unhandled protocol", r, NO_REPLY, vec![]));
+    let mut r = valid; r[24] ^= 1;
+    cases.push(("invalid IP checksum", r, MALFORMED, vec![]));
+    cases
+}
+
+#[test]
+fn s5_udp_legacy_matches_shared_wire_oracle() {
+    for (name, input, code, want) in udp_parity_cases() {
+        let mut run = run_udp(&input);
+        assert_eq!(run.kernel.processes[0].result, Some(ProcessResult::Exited(code)), "{name}");
+        assert_eq!(tx_count(&run), usize::from(code == UDP_REPLIED), "{name}");
+        if code == UDP_REPLIED {
+            let actual = run.kernel.take_nic_tx(run.binding).unwrap();
+            assert_eq!(actual.as_slice(), want.as_slice(), "{name}");
+        }
+    }
 }

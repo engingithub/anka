@@ -97,8 +97,7 @@ separate execution authority and the charged isolated-run profile.
 Latest ordinary-service evidence: Kleis **29 positive / 21 hostile**, six focused
 tests, **154 runtime tests with ten ignored**, and the explicit real concurrent
 compiler test **75.79s**. These overlapping groups are not a complete regression
-run. The HTTP/input packet now has user-reported Rust acceptance. The full-suite
-monitor bootstrap and obsolete AOM-version assertion fixes await local rerun.
+run. The HTTP/input packet now has user-reported Rust acceptance. Both monitor-bootstrap and AOM-version regressions passed on the pre-socket revision.
 
 ```sh
 bash scripts/check-anka108-rebuild-service.sh --real
@@ -107,6 +106,6 @@ bash scripts/check-anka108-http-application.sh --real
 
 Use focused checks during development; run required ignored real witnesses
 explicitly and the complete single-threaded regression at the final checkpoint.
-Phase 10.8 still requires protected socket/NIC integration and the end-to-end
-service rebuild. [DN-71](../../../DESIGN_NOTES.md#dn-71) is the authoritative
+The bounded protected NIC/TCP/HTTP rebuild passed in 124.61s; the combined
+packet/UDP guest passed in 85.25s. Final release verification remains. [DN-71](../../../DESIGN_NOTES.md#dn-71) is the authoritative
 closure checklist; historical test totals in older notes do not close this gate.

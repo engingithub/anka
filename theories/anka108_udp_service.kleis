@@ -1,0 +1,28 @@
+// S5: specialize S3's one-frame authority boundary for the Phase 9.4d echo endpoint.
+// IPv4 version/IHL, addresses, fragmentation and IP checksum form the upstream ip_ok;
+// a supplied UDP checksum verdict is over its pseudo-header and exact datagram.
+import "anka108_packet_service.kleis"
+import "anka94d_udp_contract.kleis"
+
+define du_geometry(w : BitVec16,t : BitVec16,u : BitVec16) =
+    ethernet94a_length_valid(w) ∧ bvuge(w,bvconst(42,16)) ∧
+    ipv494c_lengths_safe(bvconst(20,16),t,bvsub(w,bvconst(14,16))) ∧
+    udp94d_length_safe(u,bvsub(t,bvconst(20,16)))
+define du_echo(w : BitVec16,t : BitVec16,u : BitVec16,ip_ok : Bool,proto : BitVec8,port : BitVec16,checkword : BitVec16,valid : Bool) =
+    udp94d_should_deliver(ip_ok,(proto=bvconst(17,8)),du_geometry(w,t,u),(port=bvconst(49152,16)),(checkword=bvconst(0,16)),valid)
+define du_wire_sum(raw : BitVec16,wire : BitVec16) =
+    ((raw=bvconst(0,16)) ∧ (wire=bvconst(65535,16))) ∨
+    (¬(raw=bvconst(0,16)) ∧ (wire=raw))
+// No new mechanism for NIC authority: an echo is just one S3 offer;
+// equality with original width forbids emitting a truncated/extended frame.
+define du_send(echo : Bool,rx : BitVec64,tx : BitVec64,read_grant : Bool,drained : Bool,commit : Bool) =
+    echo ∧ (rx=tx) ∧ pkt_round(pkt_yes(),pkt_yes(),pkt_yes(),bvconst(1,64),tx,pkt_yes(),pkt_yes(),read_grant,drained,commit,pkt_no())
+example "UDP payload never exceeds MTU" {assert(∀(w : BitVec16,t : BitVec16,u : BitVec16). du_geometry(w,t,u) → bvule(u,bvconst(1480,16)))}
+example "declared bytes are all present without wrap" {assert(∀(w : BitVec16,t : BitVec16,u : BitVec16). du_geometry(w,t,u) → bvule(bvadd(bvconst(34,16),u),w))}
+example "empty UDP and nonempty Ethernet padding" {assert(du_echo(bvconst(60,16),bvconst(28,16),bvconst(8,16),pkt_yes(),bvconst(17,8),bvconst(49152,16),bvconst(0,16),pkt_no()))}
+example "odd length supplied valid" {assert(du_echo(bvconst(60,16),bvconst(31,16),bvconst(11,16),pkt_yes(),bvconst(17,8),bvconst(49152,16),bvconst(123,16),pkt_yes()))}
+example "full MTU datagram" {assert(du_geometry(bvconst(1514,16),bvconst(1500,16),bvconst(1480,16)))}
+example "computed zero transmitted as all ones" {assert(du_wire_sum(bvconst(0,16),bvconst(65535,16)))}
+example "nonzero checksum unchanged" {assert(∀(x : BitVec16). ¬(x=bvconst(0,16)) → du_wire_sum(x,x))}
+example "echo never omits its checksum" {assert(∀(r : BitVec16,c : BitVec16). du_wire_sum(r,c) → ¬(c=bvconst(0,16)))}
+example "exact committed frame" {assert(du_send(pkt_yes(),bvconst(60,64),bvconst(60,64),pkt_yes(),pkt_yes(),pkt_yes()))}

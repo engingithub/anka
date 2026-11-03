@@ -14,6 +14,8 @@
 //! is never inherited by the child.  Ingress authority, placement, and execution
 //! authority therefore remain distinct.
 
+mod socket_stream;
+pub(crate) use socket_stream::{DeveloperSocketAuthority, OrderedStream, StreamProgress};
 use super::dev_shell::{
     ArtifactKey, DevelopmentArtifact, DevelopmentArtifactRegistry, DevelopmentShellError,
 };
@@ -103,6 +105,7 @@ pub struct DevelopmentRunReport {
     /// process slot.  The child is collected by SYS_WAIT before this report is
     /// returned.
     pub process_slots_observed: usize,
+    pub(crate) stream: Option<StreamProgress>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -111,6 +114,7 @@ pub enum DevelopmentRunError {
     DeveloperInputAuthorityRequired,
     InputTooLarge,
     InputProvisionRejected,
+    SocketProvisionRejected,
     HeapServiceUnavailable,
     ResourceEnvelope,
     Artifact(DevelopmentShellError),
@@ -221,6 +225,16 @@ pub(crate) fn run_accounted_c_application_with_input(
     if input.len()>super::os::application_run::INPUT_BYTES {return Err(DevelopmentRunError::InputTooLarge);}
     let prepared=prepare_run(registry,authority,fabric,placement,"rebuilt-application",config)?;
     execute_prepared_run(fabric,placement,prepared,config,Some(input),true,true)
+}
+
+/// Bounded ordered transport; takes its own socket authority and never attaches
+/// a finite input image, console grant, NIC, or DMA object to the application.
+pub(crate) fn run_accounted_c_application_with_socket(
+    registry:&DevelopmentArtifactRegistry,authority:&DeveloperExecutionAuthority,
+    fabric:&mut Fabric,placement:&mut PhysicalPlacementManager,config:DevelopmentRunConfig,
+    stream:OrderedStream<'_>)->Result<DevelopmentRunReport,DevelopmentRunError> {
+    let prepared=prepare_run(registry,authority,fabric,placement,"rebuilt-application",config)?;
+    execute_prepared_run_stream(fabric,placement,prepared,config,None,true,true,Some(stream))
 }
 
 /// Run the exact registered artifact with an explicitly authorized input image.
@@ -516,6 +530,12 @@ fn execute_prepared_run(
     callable_entry: bool,
     bounded: bool,
 ) -> Result<DevelopmentRunReport, DevelopmentRunError> {
+    execute_prepared_run_stream(fabric,placement,prepared,config,input,callable_entry,bounded,None)
+}
+
+fn execute_prepared_run_stream(fabric:&mut Fabric,placement:&mut PhysicalPlacementManager,
+    prepared:PreparedRun,config:DevelopmentRunConfig,input:Option<&[u8]>,callable_entry:bool,
+    bounded:bool,stream:Option<OrderedStream<'_>>) -> Result<DevelopmentRunReport,DevelopmentRunError> {
     let PreparedRun {
         artifact,
         supervisor_obj,
@@ -567,7 +587,8 @@ fn execute_prepared_run(
         return Err(DevelopmentRunError::ResourceEnvelope);
     }
     let mut input_rounds=0usize;
-    if let Some(bytes) = input {
+    let mut bridge=stream.map(socket_stream::Bridge::new);
+    if input.is_some() || bridge.is_some() {
         // One-instruction rounds until ordinary SYS_SPAWN publishes the child.
         // The scheduler captures its process range before running the parent;
         // a newly created child cannot execute in its birth round.
@@ -585,14 +606,20 @@ fn execute_prepared_run(
             kernel.run(1, 1);
             input_rounds+=1;
         }
-        if target.is_none_or(|key| kernel.provision_process_input(key, bytes).is_err()) {
+        let attached = target.is_some_and(|key|match (&mut bridge,input) {
+            (Some(b),None)=>b.attach(&mut kernel,key).is_ok(),
+            (None,Some(bytes))=>kernel.provision_process_input(key,bytes).is_ok(),
+            _=>false,
+        });
+        if !attached {
             kernel.finish_process(0, ProcessResult::ProtectionFault);
             kernel.reclaim_process(0);
             scrub_kernel_dynamic_region(&mut kernel, kernel_phys_base);
             teardown_sealed_transient(&mut kernel.fabric, placement, control_obj);
             teardown_sealed_transient(&mut kernel.fabric, placement, supervisor_obj);
             *fabric = kernel.into_fabric();
-            return Err(DevelopmentRunError::InputProvisionRejected);
+            return Err(if bridge.is_some(){DevelopmentRunError::SocketProvisionRejected}
+                else{DevelopmentRunError::InputProvisionRejected});
         }
     }
 
@@ -601,9 +628,18 @@ fn execute_prepared_run(
         // includes ordinary wake/wait/cleanup; no device can outlive the realm.
         let rounds=config.quantum.checked_mul(config.max_rounds)
             .ok_or(DevelopmentRunError::ResourceEnvelope)?;
+        // Stream exchanges cannot spend the general runner's entire two-billion
+        // step ceiling spinning on an empty socket.
+        let rounds=if bridge.is_some(){rounds.min(2_000_000)}else{rounds};
         for _ in input_rounds..rounds {
             if kernel.processes[0].exited() {break;}
             kernel.run(1,1);
+            if let Some(b)=bridge.as_mut() {
+                if b.after_round(&mut kernel).is_err() {
+                    kernel.finish_process(0,ProcessResult::ProtectionFault);
+                    break;
+                }
+            }
         }
     } else {kernel.run(config.quantum, config.max_rounds);}
 
@@ -683,6 +719,7 @@ fn execute_prepared_run(
             None
         },
         process_slots_observed,
+        stream:bridge.map(|b|b.progress),
     })
 }
 

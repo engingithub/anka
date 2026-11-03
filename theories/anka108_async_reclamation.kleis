@@ -44,7 +44,15 @@ define ut108_serial(revision : BitVec64, expected : BitVec64, serial : BitVec8) 
 // All held records, including clean or leased records, consume a slot. Fixed
 // queue bytes are charged ONCE as infrastructure, not per enqueue/dequeue.
 define ut108_queue(cap : BitVec64, armed : BitVec64, pending : BitVec64) =
-    bvugt(cap,ut108_z()) ∧ bvule(armed,cap) ∧ bvule(pending,bvsub(cap,armed))
+    bvugt(cap,ut108_z()) ∧ bvuge(bvadd(armed,pending),armed) ∧ bvule(bvadd(armed,pending),cap)
+
+// Equivalent to the original remaining-space bound, for ALL 64-bit counts.
+// Naming the no-carry test lets Z3 cancel the transferred count in the
+// unchanged death-transition theorem; modular occupancy alone is insufficient.
+example "queue occupancy agrees with checked remaining space" {
+    assert(∀(c : BitVec64,a : BitVec64,p : BitVec64).
+        ut108_queue(c,a,p) = (bvugt(c,ut108_z()) ∧ bvule(a,c) ∧ bvule(p,bvsub(c,a))))
+}
 define ut108_queue_bytes(cap : BitVec64, stride : BitVec64, bytes : BitVec64) =
     bvugt(cap,ut108_z()) ∧ bvugt(stride,ut108_z()) ∧
     bvule(cap,bvudiv(ptr107_max(),stride)) ∧ (bytes=bvmul(cap,stride))

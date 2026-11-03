@@ -102,7 +102,7 @@ impl CompilerLinkedOutput<'_> {
 }
 
 impl Kernel {
-    fn validate_linked_compiler_publication(&mut self,epoch:u64)->Result<(),CompilerLinkError> {
+    pub(in crate::anka64::os::compiler_retry) fn validate_linked_compiler_publication(&mut self,epoch:u64)->Result<(),CompilerLinkError> {
         let n=self.compiler_publications.links.get(&epoch).ok_or(CompilerLinkError::Binding)?.epochs.len();
         if n==0 || n>4096 {return Err(CompilerLinkError::Binding);}
         for index in 0..n {

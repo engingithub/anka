@@ -1,4 +1,5 @@
 //! Ordinary trusted rebuild coordinator. No test helpers or fabricated replies.
+pub(crate) mod frame_port;
 use super::*;
 use super::jobs::{CompilerJobHandle,CompilerJobProgress};
 use super::inputs::{CompilerInputHandle,CompilerInputRole};
@@ -162,6 +163,15 @@ impl RebuildService {
             Some(input_authority),input,dev_runner::DevelopmentRunConfig::default()).map_err(error)?;
         output(&report.execution().byte_output)?;
         Ok(report.execution().child_result.clone())
+    }
+    pub(crate) fn run_with_socket(&mut self,epoch:u64,execution:&DeveloperExecutionAuthority,
+        stream:dev_runner::OrderedStream<'_>,output:impl FnOnce(&[u8])->Result<(),String>)
+        ->Result<(ProcessResult,dev_runner::StreamProgress),String> {
+        let report=self.kernel.run_linked_compiler_publication_with_socket(epoch,execution,stream,
+            dev_runner::DevelopmentRunConfig::default()).map_err(error)?;
+        let run=report.execution();
+        output(&run.byte_output)?;
+        Ok((run.child_result.clone(),run.stream.ok_or("missing socket run report")?))
     }
     pub(crate) fn link(&mut self,epochs:&[u64],execution:&DeveloperExecutionAuthority,
         publication:&RebuildPublicationAuthority)->Result<u64,String> {

@@ -207,3 +207,18 @@ fn c5_http_input_failed_startup_refunds_both_machine_and_input() {
         Some(&DeveloperInputAuthority::provision()),b"x",tiny).is_err());
     assert_eq!(charge(&k),before);assert!(k.linked_compiler_receipt(e).is_ok());
 }
+
+#[test]
+fn s2_socket_startup_charges_and_releases_exact_child_without_guest_io() {
+    use dev_runner::{DeveloperSocketAuthority,OrderedStream,StreamProgress};
+    let(mut k,_,e)=fixture();let before=charge(&k);
+    let socket=DeveloperSocketAuthority::provision();let exec=DeveloperExecutionAuthority::provision();
+    let result=k.run_linked_compiler_publication_with_socket(e,&exec,
+        OrderedStream::new(&socket,b"",b"",false,7).unwrap(),config()).unwrap();
+    assert_eq!(result.execution().child_result,ProcessResult::Exited(42));
+    assert_eq!(result.execution().stream,Some(StreamProgress::default()));
+    assert!(result.execution().byte_output.is_empty());
+    assert_eq!(charge(result.kernel),before+REPORT_CHARGE);
+    drop(result);assert_eq!(charge(&k),before);
+    assert!(k.linked_compiler_receipt(e).is_ok());
+}

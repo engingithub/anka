@@ -1,25 +1,31 @@
 //! Ordinary host command ingress to the protected Anka64 rebuild service.
 //! Bootstrapping accepted tools is trusted provisioning, outside per-job quota.
+mod tcp_replay;
 use super::{cc2_fixed_point,compiler_adapter,dev_runner,source_bundle};
 use super::os::compiler_retry::service::RebuildService;
 use super::os::ProcessResult;
 use std::io::{Read,Write};
 use std::path::Path;
 use std::time::{Duration,Instant};
-const HELP:&str="Usage: anka rebuild [--include FILE] [--initial-output BYTES] [--run] [--input FILE] ROOT.c [MODULE.c ...]\n\
+const HELP:&str="Usage: anka rebuild [--include FILE] [--initial-output BYTES] [--run] [--input FILE | --frame FILE | --tcp-replay FILE] ROOT.c [MODULE.c ...]\n\
 Compiles up to eight modules in argument order, guest-links and publishes them.\n\
 Bundle lookup names are file basenames; includes must use those exact names.\n\
 --run executes the linked protected application and writes its captured bytes.\n\
 --input supplies up to 65536 bytes to the actual child; requires --run.\n\
+--frame supplies one 1..1514-byte virtual NIC frame; requires --run. Stdout is committed TX only.\n\
+--tcp-replay requires --run and two roots (TCP, HTTP). Stdout is u16-BE-length-prefixed TX frames.\n\
 Bootstraps accepted tools once per invocation. No source is compiled by the host.";
 fn fail(e:impl std::fmt::Debug)->String {format!("{e:?}")}
-struct Options {roots:Vec<String>,includes:Vec<String>,run:bool,capacity:u64,input:Option<String>}
+struct Options {roots:Vec<String>,includes:Vec<String>,run:bool,capacity:u64,input:Option<String>,frame:Option<String>,replay:Option<String>}
 fn options(args:&[String])->Result<Options,String> {
-    let mut o=Options{roots:Vec::new(),includes:Vec::new(),run:false,capacity:0x40000,input:None};
+    let mut o=Options{roots:Vec::new(),includes:Vec::new(),run:false,capacity:0x40000,input:None,frame:None,replay:None};
     let mut it=args.iter();
     while let Some(a)=it.next() {
         match a.as_str() {
             "--run"=>o.run=true,
+            "--tcp-replay"=>{if o.replay.is_some(){return Err("duplicate replay".into());}o.replay=Some(it.next().ok_or("missing replay file")?.clone());},
+            "--frame"=>{if o.frame.is_some(){return Err("duplicate --frame".into());}
+                o.frame=Some(it.next().ok_or("missing frame path")?.clone());},
             "--input"=>{if o.input.is_some(){return Err("duplicate --input".into());}
                 o.input=Some(it.next().ok_or("missing input path")?.clone());},
             "--include"=>{if o.includes.len()>=248 {return Err("too many include files".into());}
@@ -32,6 +38,8 @@ fn options(args:&[String])->Result<Options,String> {
         }
     }
     if o.roots.is_empty() {return Err(HELP.into());}
+    if o.replay.is_some() && (!o.run || o.input.is_some() || o.frame.is_some() || o.roots.len()!=2){return Err("--tcp-replay needs --run, exactly two roots and no other input mode".into());}
+    if o.frame.is_some() && (!o.run || o.input.is_some()){return Err("--frame requires --run and excludes --input".into());}
     if o.input.is_some() && !o.run {return Err("--input requires --run".into());}Ok(o)
 }
 // Host ingress is bounded independently of guest service quota. take() also
@@ -50,10 +58,17 @@ pub fn command(args:&[String])->i32 {
 }
 fn execute(args:&[String])->Result<i32,String> {
     let o=options(args)?;
+    let replay=o.replay.as_deref().map(tcp_replay::Replay::load).transpose()?;
     let input=if let Some(path)=&o.input {
         let mut bytes=Vec::new();std::fs::File::open(path).map_err(fail)?.take(65537)
             .read_to_end(&mut bytes).map_err(fail)?;
         if bytes.len()>65536{return Err("run input exceeds 65536 bytes".into());}Some(bytes)
+    }else{None};
+    let frame=if let Some(path)=&o.frame {
+        let mut bytes=Vec::new();std::fs::File::open(path).map_err(fail)?.take(1515)
+            .read_to_end(&mut bytes).map_err(fail)?;
+        if bytes.is_empty() || bytes.len()>1514{return Err("frame size must be 1..1514".into());}
+        Some(bytes)
     }else{None};
     let mut members=Vec::new();let mut total=16usize;
     for p in o.roots.iter().chain(o.includes.iter()) {
@@ -86,10 +101,22 @@ fn execute(args:&[String])->Result<i32,String> {
             if last.elapsed()>=Duration::from_secs(5) {eprintln!("Rebuild: {name} active {:.1}s",start.elapsed().as_secs_f64());last=Instant::now();}
         }
     }
+    if let Some(replay)=replay {
+        let tcp=service.link(&epochs[..1],&execution,&publication)?;
+        let http=service.link(&epochs[1..],&execution,&publication)?;
+        eprintln!("TCP/HTTP linked receipt epochs: {tcp}/{http}");
+        replay.run(&mut service,tcp,http,&execution)?;return Ok(0);
+    }
     let linked=service.link(&epochs,&execution,&publication)?;
     eprintln!("Rebuild: linked receipt epoch={linked}, modules={}",epochs.len());
     if !o.run {return Ok(0);}
     let emit=|bytes:&[u8]|std::io::stdout().write_all(bytes).map_err(fail);
+    if let Some(frame)=frame {
+        use super::os::compiler_retry::service::frame_port::DeveloperFrameAuthority;
+        let result=service.run_frame(linked,&execution,&dev_runner::DeveloperInputAuthority::provision(),
+            &DeveloperFrameAuthority::provision(),&frame,emit)?;
+        eprintln!("Frame service: {result:?}");return Ok(0);
+    }
     let result=match input {
         Some(bytes)=>service.run_with_input(linked,&execution,&dev_runner::DeveloperInputAuthority::provision(),&bytes,emit)?,
         None=>service.run(linked,&execution,emit)?,
@@ -101,6 +128,11 @@ fn execute(args:&[String])->Result<i32,String> {
 mod tests {
     use super::*;
     fn args(a:&[&str])->Vec<String>{a.iter().map(|s|s.to_string()).collect()}
+    #[test] fn s3_frame_cli_requires_explicit_exclusive_run_mode() {
+        for a in [vec!["--frame","rx","a.c"],vec!["--run","--input","x","--frame","rx","a.c"],
+            vec!["--run","--frame","a","--frame","b","a.c"]]{assert!(options(&args(&a)).is_err());}
+        assert_eq!(options(&args(&["--run","--frame","rx","a.c"])).unwrap().frame.as_deref(),Some("rx"));
+    }
     #[test] fn c5_service_cli_capacity_and_argument_bounds() {
         assert!(options(&args(&["--initial-output","4096","a.c","--run"])).unwrap().run);
         for a in [vec![],vec!["--include"],vec!["--initial-output","4097","a.c"],vec!["--unknown","a.c"]] {

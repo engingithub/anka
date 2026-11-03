@@ -19,6 +19,7 @@ use super::fabric::Fabric;
 use super::isa::*;
 use super::state::*;
 
+pub(crate) mod typed_socket;
 mod cleanup_workers;
 mod heap_context;
 mod heap_cleanup;
@@ -56,6 +57,8 @@ pub const SYS_DEV_WAIT: u64 = 16; // dev_wait(slot, gen) → completion status
 pub const SYS_DEV_EVENT_WAIT: u64 = 17; // dev_event_wait(cap_slot, cap_gen, epoch) → status, epoch
 pub const SYS_NIC_RX: u64 = 18; // nic_rx(dev_slot, dev_gen, buf_slot, buf_gen) → status, len
 pub const SYS_NIC_TX: u64 = 19; // nic_tx(dev_slot, dev_gen, buf_slot, buf_gen, len) → status, len
+pub const SYS_SOCKET_RECV: u64 = 23;
+pub const SYS_SOCKET_SEND: u64 = 24;
 pub const SYS_MALLOC: u64 = 21;
 pub const SYS_FREE: u64 = 22;
 pub const SYS_READ_BYTES: u64 = 20; // protected R2/R3 destination, R4 capacity
@@ -88,6 +91,7 @@ pub const MAX_MAILBOX_SIZE: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct Process {
+    socket_was_bound: bool,
     heap_free_wait: Option<HeapFreeWait>,
     pub pid: u64,
     pub state: ProcessState,
@@ -1057,6 +1061,7 @@ impl DeviceRegistry {
 }
 
 pub struct Kernel {
+    socket_endpoint: Option<typed_socket::Endpoint>,
     callable_application_entry: Option<application_entry::CallableApplicationEntry>,
     compiler_jobs: compiler_retry::jobs::CompilerJobs,
     compiler_admission: Option<compiler_retry::admission::CompilerAdmission>,
@@ -1112,6 +1117,7 @@ pub struct Kernel {
 impl Kernel {
     pub fn new(fabric: Fabric) -> Self {
         Self {
+            socket_endpoint: None,
             callable_application_entry: None,
             compiler_jobs: Default::default(),
             compiler_admission: None,
@@ -1420,6 +1426,7 @@ impl Kernel {
             let reuse_gen = self.processes[slot].generation;
             core.bind_heap_process(ProcessKey {slot, generation:reuse_gen});
             self.processes[slot] = Process {
+                socket_was_bound: false,
                 heap_free_wait: None,
                 pid,
                 state: ProcessState::Running,
@@ -1445,6 +1452,7 @@ impl Kernel {
         let slot = self.processes.len();
         core.bind_heap_process(ProcessKey {slot, generation:0});
         self.processes.push(Process {
+            socket_was_bound: false,
             heap_free_wait: None,
             pid,
             state: ProcessState::Running,
@@ -2746,6 +2754,7 @@ impl Kernel {
                     self.finish_process(idx, ProcessResult::Exited(words[R1 as usize]));
                 }
                 SYS_WRITE => self.handle_protected_buffer_write(idx, words, kinds),
+                SYS_SOCKET_RECV | SYS_SOCKET_SEND => self.handle_typed_socket(idx, words, kinds),
                 SYS_READ_BYTES => self.handle_protected_buffer_read(idx, words, kinds),
                 SYS_MALLOC => self.handle_malloc(idx, words, kinds),
                 SYS_FREE => self.handle_free(idx, words, kinds),
@@ -5646,8 +5655,11 @@ mod tests {
     }
 
     fn typed_io_fixture(length: u64, position: i64, number: u64) -> (Kernel, ObjectId) {
+        typed_io_on_fabric(Fabric::new(0x400000),length,position,number)
+    }
+
+    fn typed_io_on_fabric(mut fabric: Fabric,length:u64,position:i64,number:u64) -> (Kernel,ObjectId) {
         use super::super::pointer_frames::{ValidatedPointerProgram, FrameManifest, LocalStorage};
-        let mut fabric = Fabric::new(0x400000);
         let (mut core, domain, text, _, stack) = create_process(
             &mut fabric, CPU0, "typed_output", 0, 0x10000, 0x20000);
         let mut asm = Asm64::new();
@@ -5675,6 +5687,12 @@ mod tests {
         let mut kernel = Kernel::new(fabric); kernel.spawn(core);
         kernel.byte_output.push(90);
         (kernel, stack)
+    }
+
+    // Keep these tests in the parent fixture module; they exercise actual
+    // saved trap images, the dispatcher, process teardown and Fabric writes.
+    mod typed_socket_tests {
+        include!("os/typed_socket/tests.rs");
     }
 
     fn input_fixture(capacity: u64, position: i64, bytes: Option<&[u8]>) -> (Kernel, ObjectId) {
@@ -5925,7 +5943,7 @@ mod tests {
             let (mut kernel, _)=typed_output_fixture(1,0);
             kernel.byte_output=Vec::with_capacity(application_run::OUTPUT_BYTES);
             kernel.byte_output.resize(used,90);
-            kernel.application_run=Some(application_run::ApplicationRunEnvelope{spawned:true});
+            kernel.application_run=Some(application_run::ApplicationRunEnvelope{spawned:true,socket:false,last_socket:None});
             kernel.handle_syscall(0);
             assert_eq!(kernel.processes[0].core.r[0],expected);
             assert_eq!(kernel.byte_output.len(),if expected==1 {used+1}else{used});

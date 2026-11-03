@@ -58,6 +58,11 @@ def main():
                            help='run only shared compiler host-storage accounting gates')
     selection.add_argument('--only-c3-c4', action='store_true',
                            help='run compiler growth and module type evidence gates')
+    selection.add_argument('--only-udp-service', action='store_true', help='run protected UDP reflector gate pair')
+    selection.add_argument('--only-tcp-session', action='store_true', help='run protected TCP session gate pair')
+    selection.add_argument('--only-packet-service', action='store_true', help='run one-frame NIC and protected packet service gates')
+    selection.add_argument('--only-socket-lowering', action='store_true', help='run guest socket lowering and HTTP stream gate')
+    selection.add_argument('--only-typed-socket', action='store_true', help='run protected stream endpoint and copy gates')
     selection.add_argument('--only-http-application', action='store_true', help='run protected HTTP application and accounted input gates')
     selection.add_argument('--only-rebuild-service', action='store_true', help='run ordinary rebuild service composition gates')
     selection.add_argument('--only-application-run', action='store_true', help='run charged application execution gates')
@@ -92,7 +97,7 @@ def main():
             or args.only_reclamation or args.only_undertaker or args.only_a22 or args.only_a23
             or args.only_workers or args.only_cleanup or args.only_malloc
             or args.only_local_initialization or args.only_compiler_resources
-            or args.only_publication or args.only_compiler_storage or args.only_c3_c4 or args.only_workspace or args.only_source_growth or args.only_jobs or args.only_preprocessor_storage or args.only_compiler_admission or args.only_linker_storage or args.only_application_run or args.only_rebuild_service or args.only_http_application):
+            or args.only_publication or args.only_compiler_storage or args.only_c3_c4 or args.only_workspace or args.only_source_growth or args.only_jobs or args.only_preprocessor_storage or args.only_compiler_admission or args.only_linker_storage or args.only_application_run or args.only_rebuild_service or args.only_http_application or args.only_typed_socket or args.only_socket_lowering or args.only_packet_service or args.only_tcp_session or args.only_udp_service):
         try:
             previous = subprocess.run(
                 [sys.executable, str(root / 'scripts/check-anka107-gates.py'),
@@ -104,7 +109,17 @@ def main():
         if previous.returncode:
             return 1
     all_ok = True
-    if args.only_http_application:
+    if args.only_udp_service:
+        stems = ('anka108_udp_service',)
+    elif args.only_tcp_session:
+        stems = ('anka108_tcp_session',)
+    elif args.only_packet_service:
+        stems = ('anka108_packet_service',)
+    elif args.only_socket_lowering:
+        stems = ('anka108_socket_lowering',)
+    elif args.only_typed_socket:
+        stems = ('anka108_typed_socket_io',)
+    elif args.only_http_application:
         stems = ('anka108_http_application',)
     elif args.only_rebuild_service:
         stems = ('anka108_rebuild_service',)
@@ -172,7 +187,7 @@ def main():
                  'anka108_cleanup_workers', 'anka108_cleanup_reuse', 'anka108_malloc_runtime',
                  'anka108_local_initialization', 'anka108_compiler_resources',
                  'anka108_artifact_publication', 'anka108_compiler_storage',
-                 'anka108_compiler_growth', 'anka108_module_types', 'anka108_workspace_directory', 'anka108_source_growth', 'anka108_compiler_jobs', 'anka108_preprocessor_storage', 'anka108_compiler_admission', 'anka108_linker_storage', 'anka108_application_run', 'anka108_rebuild_service', 'anka108_http_application')
+                 'anka108_compiler_growth', 'anka108_module_types', 'anka108_workspace_directory', 'anka108_source_growth', 'anka108_compiler_jobs', 'anka108_preprocessor_storage', 'anka108_compiler_admission', 'anka108_linker_storage', 'anka108_application_run', 'anka108_rebuild_service', 'anka108_http_application', 'anka108_typed_socket_io', 'anka108_socket_lowering', 'anka108_packet_service', 'anka108_tcp_session', 'anka108_udp_service')
     for stem in stems:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')

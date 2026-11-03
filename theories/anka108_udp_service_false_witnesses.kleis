@@ -1,0 +1,18 @@
+import "anka108_udp_service.kleis"
+example "short frame with wrapped subtraction" {assert(du_geometry(bvconst(7,16),bvconst(28,16),bvconst(8,16)))}
+example "short IP header wraps payload" {assert(du_geometry(bvconst(60,16),bvconst(19,16),bvconst(65535,16)))}
+example "UDP header only seven bytes" {assert(du_geometry(bvconst(60,16),bvconst(27,16),bvconst(7,16)))}
+example "consume a padding byte" {assert(du_geometry(bvconst(60,16),bvconst(28,16),bvconst(9,16)))}
+example "exclude real IP payload byte" {assert(du_geometry(bvconst(60,16),bvconst(29,16),bvconst(8,16)))}
+example "truncated IP input" {assert(du_geometry(bvconst(60,16),bvconst(47,16),bvconst(27,16)))}
+example "wire exceeds MTU" {assert(du_geometry(bvconst(1515,16),bvconst(1501,16),bvconst(1481,16)))}
+example "bad supplied checksum" {assert(du_echo(bvconst(60,16),bvconst(28,16),bvconst(8,16),pkt_yes(),bvconst(17,8),bvconst(49152,16),bvconst(1,16),pkt_no()))}
+example "wrong endpoint" {assert(du_echo(bvconst(60,16),bvconst(28,16),bvconst(8,16),pkt_yes(),bvconst(17,8),bvconst(49153,16),bvconst(0,16),pkt_no()))}
+example "other protocol routed into UDP" {assert(du_echo(bvconst(60,16),bvconst(28,16),bvconst(8,16),pkt_yes(),bvconst(6,8),bvconst(49152,16),bvconst(0,16),pkt_no()))}
+example "omitted checksum overrides IP failure" {assert(du_echo(bvconst(60,16),bvconst(28,16),bvconst(8,16),pkt_no(),bvconst(17,8),bvconst(49152,16),bvconst(0,16),pkt_no()))}
+example "encode computed zero as omitted" {assert(du_wire_sum(bvconst(0,16),bvconst(0,16)))}
+example "reply trimmed to IP end" {assert(du_send(pkt_yes(),bvconst(60,64),bvconst(42,64),pkt_yes(),pkt_yes(),pkt_yes()))}
+example "emit after rejection" {assert(du_send(pkt_no(),bvconst(60,64),bvconst(60,64),pkt_yes(),pkt_yes(),pkt_yes()))}
+example "reply without fabric read" {assert(du_send(pkt_yes(),bvconst(60,64),bvconst(60,64),pkt_no(),pkt_yes(),pkt_yes()))}
+example "undrained receive" {assert(du_send(pkt_yes(),bvconst(60,64),bvconst(60,64),pkt_yes(),pkt_no(),pkt_yes()))}
+example "attempt counts as transmission" {assert(du_send(pkt_yes(),bvconst(60,64),bvconst(60,64),pkt_yes(),pkt_yes(),pkt_no()))}

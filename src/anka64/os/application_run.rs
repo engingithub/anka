@@ -4,22 +4,25 @@ pub(crate) const OUTPUT_BYTES:usize=65536;
 pub(crate) const INPUT_BYTES:usize=65536;
 pub(crate) const IO_CHUNK:usize=4096;
 const TRACE:usize=16384;
-pub(super) struct ApplicationRunEnvelope { pub(super) spawned:bool }
+pub(super) struct ApplicationRunEnvelope { pub(super) spawned:bool, pub(super) socket:bool, pub(super) last_socket:Option<(u64,u64,u64)> }
 pub(crate) fn output_fits(used:usize,count:u64)->bool {
     used<=OUTPUT_BYTES && count<=IO_CHUNK as u64 && count<=(OUTPUT_BYTES-used) as u64
 }
 impl Kernel {
     pub(crate) fn prepare_application_run(&mut self)->Result<(),()> {
         // Init, cleanup worker, then exactly one child via ordinary SYS_SPAWN.
-        if self.application_run.is_some() || self.processes.len()!=2
+        if self.application_run.is_some() || self.socket_endpoint.is_some() || self.processes.len()!=2
             || !self.is_heap_service_process(1) || self.processes[0].core.protected_application()
             || !self.byte_output.is_empty() || self.fabric.timer.is_some()
             || !self.device_registry.devices.is_empty() {return Err(());}
         self.byte_output.try_reserve_exact(OUTPUT_BYTES).map_err(|_|())?;
         if self.byte_output.capacity()>OUTPUT_BYTES {return Err(());}
         self.fabric.prepare_preprocessor_trace(TRACE)?;
-        self.application_run=Some(ApplicationRunEnvelope{spawned:false});
+        self.application_run=Some(ApplicationRunEnvelope{spawned:false,socket:false,last_socket:None});
         Ok(())
+    }
+    pub(crate) fn take_socket_call(&mut self)->Option<(u64,u64,u64)> {
+        self.application_run.as_mut()?.last_socket.take()
     }
     pub(super) fn application_run_step_ok(&mut self,idx:usize)->bool {
         self.processes.len()<=3 && self.fabric.timer.is_none()
@@ -32,7 +35,10 @@ impl Kernel {
     pub(super) fn application_run_syscall_allowed(&mut self,idx:usize)->bool {
         if self.processes[idx].core.protected_application() {
             return self.processes[idx].core.protected_syscall_image().is_some_and(|(w,_)|
-                matches!(w[0],SYS_EXIT|SYS_WRITE|SYS_READ_BYTES|SYS_MALLOC|SYS_FREE));
+                if self.application_run.as_ref().is_some_and(|r|r.socket) {
+                    matches!(w[0],SYS_SOCKET_RECV|SYS_SOCKET_SEND|SYS_MALLOC|SYS_FREE)
+                        || (w[0]==SYS_EXIT && self.socket_exit_drained(idx))
+                } else {matches!(w[0],SYS_EXIT|SYS_WRITE|SYS_READ_BYTES|SYS_MALLOC|SYS_FREE)});
         }
         if idx!=0 {return false;}
         match self.processes[idx].core.r[R0 as usize] {

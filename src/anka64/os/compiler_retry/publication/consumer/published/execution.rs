@@ -50,18 +50,24 @@ impl Kernel {
     pub(crate) fn run_linked_compiler_publication(&mut self,epoch:u64,
         authority:Option<&DeveloperExecutionAuthority>,config:DevelopmentRunConfig)
         ->Result<LinkedCompilerRunReport<'_>,CompilerLinkError> {
-        self.run_linked_compiler_publication_inner(epoch,authority,config,None)
+        self.run_linked_compiler_publication_inner(epoch,authority,config,None,None)
     }
     pub(crate) fn run_linked_compiler_publication_with_input(&mut self,epoch:u64,
         authority:Option<&DeveloperExecutionAuthority>,input_authority:Option<&DeveloperInputAuthority>,
         input:&[u8],config:DevelopmentRunConfig)->Result<LinkedCompilerRunReport<'_>,CompilerLinkError> {
         let input_authority=input_authority.ok_or(CompilerLinkError::Authority)?;
         if input.len()>INPUT_BYTES {return Err(CompilerLinkError::Binding);}
-        self.run_linked_compiler_publication_inner(epoch,authority,config,Some((input_authority,input)))
+        self.run_linked_compiler_publication_inner(epoch,authority,config,Some((input_authority,input)),None)
     }
+    pub(crate) fn run_linked_compiler_publication_with_socket(&mut self,epoch:u64,
+        authority:&DeveloperExecutionAuthority,stream:dev_runner::OrderedStream<'_>,
+        config:DevelopmentRunConfig)->Result<LinkedCompilerRunReport<'_>,CompilerLinkError> {
+        self.run_linked_compiler_publication_inner(epoch,Some(authority),config,None,Some(stream))
+    }
+
     fn run_linked_compiler_publication_inner(&mut self,epoch:u64,
         authority:Option<&DeveloperExecutionAuthority>,config:DevelopmentRunConfig,
-        input:Option<(&DeveloperInputAuthority,&[u8])>)
+        input:Option<(&DeveloperInputAuthority,&[u8])>,stream:Option<dev_runner::OrderedStream<'_>>)
         ->Result<LinkedCompilerRunReport<'_>,CompilerLinkError> {
         let authority=authority.ok_or(CompilerLinkError::Authority)?;
         self.validate_linked_compiler_publication(epoch)?;
@@ -93,10 +99,13 @@ impl Kernel {
                 "compiler-publication-run",image).map_err(CompilerLinkError::Executable)?;
             let mut registry=DevelopmentArtifactRegistry::new();
             registry.register_linked_application(&fabric,&artifact).map_err(CompilerLinkError::Register)?;
-            let run=match input {
-                Some((input_authority,bytes))=>dev_runner::run_accounted_c_application_with_input(
+            let run=match (stream,input) {
+                (Some(stream),None)=>dev_runner::run_accounted_c_application_with_socket(
+                    &registry,authority,&mut fabric,&mut placement,config,stream),
+                (Some(_),Some(_))=>return Err(CompilerLinkError::Binding),
+                (None,Some((input_authority,bytes)))=>dev_runner::run_accounted_c_application_with_input(
                     &registry,authority,Some(input_authority),&mut fabric,&mut placement,config,bytes),
-                None=>dev_runner::run_accounted_c_application(&registry,authority,&mut fabric,&mut placement,config),
+                (None,None)=>dev_runner::run_accounted_c_application(&registry,authority,&mut fabric,&mut placement,config),
             }.map_err(CompilerLinkError::Run)?;
             if run.byte_output.capacity()>OUTPUT_BYTES {return Err(CompilerLinkError::Storage);}
             Ok(run)

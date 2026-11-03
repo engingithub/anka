@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local acceptance for the typed-object/member/large-link integration packet.
+# --final verifies the complete phase. Default and --real retain the focused integration checks.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # A patch ZIP is an overlay, not a complete checkout. Fail before a long run
@@ -12,13 +12,22 @@ for required in Cargo.toml src/lib.rs src/anka64/cc2_fixed_point.rs \
     exit 2
   fi
 done
+case "${1:-}" in
+  --final)
+    [[ $# -eq 1 ]] || { echo "usage: $0 --final" >&2; exit 2; }
+    python3 scripts/check-anka108-job-integration.py
+    python3 -u scripts/check-anka108-gates.py --kleis "${KLEIS_BIN:-$HOME/.cargo/bin/kleis}" \
+      --kleis-root "${KLEIS_ROOT:-$HOME/git/cee/kleis}"
+    exec python3 -u scripts/check-anka108-final-runtime.py
+    ;;
+esac
 python3 scripts/check-anka108-job-integration.py
 python3 scripts/check-anka108-gates.py --kleis "${KLEIS_BIN:-$HOME/.cargo/bin/kleis}" --kleis-root "${KLEIS_ROOT:-$HOME/git/cee/kleis}" --only-compiler-admission
 run_real=0
 case "${1:-}" in
   "") ;;
   --real) run_real=1 ;;
-  *) echo 'Usage: scripts/check-anka108-closure.sh [--real]' >&2; exit 2 ;;
+  *) echo 'Usage: scripts/check-anka108-closure.sh [--real|--final]' >&2; exit 2 ;;
 esac
 python3 scripts/check-anka108-gates.py \
   --kleis "${KLEIS_BIN:-$HOME/.cargo/bin/kleis}" \

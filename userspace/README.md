@@ -35,8 +35,9 @@ image to the spawned child. No input or NIC authority is inherited by name.
 The latest ordinary-service acceptance includes actual concurrent compiler jobs,
 A exhaustion, C reuse, stale-alias rejection and unaffected B (75.79s). The new
 protected HTTP application/input packet has user-reported local acceptance.
-The latest full suite has two identified regressions; their fixes await rerun.
-Protected socket/NIC rebuild acceptance remains outstanding.
+The pre-socket full suite passed: 1,614 passed, 0 failed, 12 ignored.
+The bounded protected virtual NIC/TCP/socket/HTTP path passed (124.61s).
+Protected UDP parity passed in the combined 85.25s packet witness. Final release verification remains.
 See [the root README](../README.md) and [DN-71](../DESIGN_NOTES.md#dn-71).
 
 ## Legacy development monitor
@@ -51,5 +52,4 @@ anka64> run /bin/hello
 
 The original network services use explicit legacy mappings, device capabilities
 and IPC. They are implemented software, but their original CC_B tests do not
-certify their rebuild as protected CC2 applications. Preserve both boundaries
-until the socket/NIC migration is accepted.
+certify their rebuild as protected CC2 applications. Keep the original stack as a protocol regression reference.

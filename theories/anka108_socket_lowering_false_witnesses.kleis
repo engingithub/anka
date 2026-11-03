@@ -1,0 +1,21 @@
+import "anka108_socket_lowering.kleis"
+example "raw pointer accepted" { assert(sx_source(sx_recv(),sk_true(),sk_false(),sk_true(),bvconst(2,8))) }
+example "tagged length accepted" { assert(sx_source(sx_send(),sk_true(),sk_true(),sk_false(),bvconst(2,8))) }
+example "legacy numeric profile gets socket builtin" { assert(sx_source(sx_recv(),sk_false(),sk_true(),sk_true(),bvconst(2,8))) }
+example "third guest endpoint selector" { assert(sx_source(sx_send(),sk_true(),sk_true(),sk_true(),bvconst(3,8))) }
+example "member token becomes socket send" { assert(sx_source(bvconst(40,8),sk_true(),sk_true(),sk_true(),bvconst(2,8))) }
+example "ordinary move restores pointer kind" { assert(sx_trap(sx_recv(),sk_true(),sk_true(),sk_false())) }
+example "write bytes is socket send" { assert(sx_op(sx_send())=bvconst(1,64)) }
+example "read bytes is socket receive" { assert(sx_op(sx_recv())=bvconst(20,64)) }
+example "missing last LF completes" { assert(sx_ending(bvconst(13,8),bvconst(10,8),bvconst(13,8),bvconst(0,8))) }
+example "short write loses suffix" { assert(sx_advance(sk_zero(),bvconst(74,64),bvconst(7,64))=bvconst(74,64)) }
+example "partial request produces HTTP response" { assert(sx_response(sk_false(),sk_true())=bvconst(74,64)) }
+example "would-block increases input count" { assert(sx_step(sk_zero(),sk_cap(),sk_again())) }
+example "receipt alone routes socket" { assert(sx_bind(sk_false(),sk_true(),sk_true(),sk_true(),sk_cap())) }
+example "binding wrong child" { assert(sx_bind(sk_true(),sk_true(),sk_false(),sk_true(),sk_cap())) }
+example "send window over backing" { assert(sx_window(bvconst(1025,64))) }
+example "full window reports one byte" { assert(sx_tx(bvconst(7,64),bvconst(7,64),bvconst(1,64))=bvconst(1,64)) }
+example "overlapping count spill keeps kind" { assert(kind107_raw_memory(bvconst(40,64),bvconst(8,64),bvconst(32,64),bvconst(1,8))=bvconst(1,8)) }
+example "clear R3 while marshaling pointer" { assert(kind107_raw_register(bvconst(2,64),bvconst(3,64),bvconst(1,8))=bvconst(1,8)) }
+example "read following byte before another receive" { assert(sx_scan(bvconst(22,64),bvconst(22,64))) }
+example "normal exit loses queued short write" { assert(sx_clean_exit(sk_true(),bvconst(7,64))) }

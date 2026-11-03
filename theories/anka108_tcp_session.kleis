@@ -1,0 +1,31 @@
+// S4: one exclusive, receipt-bound session, no guest pointers or capabilities
+// in the retained TCP state. The source of state is the previous committed
+// proposal from the same TCP publication, never an incoming packet.
+import "anka94e_tcp_contract.kleis"
+import "anka108_packet_service.kleis"
+define tc4_yes() = pkt_yes()
+define tc4_no() = pkt_no()
+define tc4_bind(net : Bool,execute : Bool,input : Bool,socket : Bool,tcp_receipt : Bool,http_receipt : Bool,quota : Bool) = net ∧ execute ∧ input ∧ socket ∧ tcp_receipt ∧ http_receipt ∧ quota
+define tc4_room(used : BitVec16,n : BitVec16) = bvule(used,bvconst(1024,16)) ∧ bvule(n,bvsub(bvconst(1024,16),used))
+define tc4_data(open : Bool,peer_fin : Bool,local_fin : Bool,peer : Bool,valid : Bool,flags : Bool,seq : BitVec32,next : BitVec32,ack : BitVec32,snd : BitVec32,used : BitVec16,len : BitVec16) =
+ open ∧ ¬peer_fin ∧ ¬local_fin ∧ tc4_room(used,len) ∧ peer ∧ valid ∧ flags ∧ bvugt(len,bvconst(0,16)) ∧ (seq=next) ∧ (ack=snd)
+define tc4_commit(live : Bool,receipt : Bool,exact_record : Bool,room : Bool,tx_required : Bool,tx_committed : Bool) = live ∧ receipt ∧ exact_record ∧ room ∧ (¬tx_required ∨ tx_committed)
+define tc4_after(ok : Bool,next : BitVec32,n : BitVec32) = if ok then tcp94e_after_data(next,n) else next
+define tc4_reply(open : Bool,local_fin : Bool,app_success : Bool,already_run : Bool,n : BitVec16) = open ∧ ¬local_fin ∧ app_success ∧ ¬already_run ∧ bvugt(n,bvconst(0,16)) ∧ bvule(n,bvconst(1024,16))
+define tc4_sent_fin(snd : BitVec32,n : BitVec32) = tcp94e_after_fin(tcp94e_after_data(snd,n))
+example "separate authorities" { assert(tc4_bind(tc4_yes(),tc4_yes(),tc4_yes(),tc4_yes(),tc4_yes(),tc4_yes(),tc4_yes())) }
+example "last permitted octet" { assert(tc4_room(bvconst(1023,16),bvconst(1,16))) }
+example "fifo count cannot wrap" { assert(∀(u : BitVec16,n : BitVec16). tc4_room(u,n) → (bvuge(bvadd(u,n),u) ∧ bvule(bvadd(u,n),bvconst(1024,16)))) }
+example "exact in-order data" { assert(tc4_data(tc4_yes(),tc4_no(),tc4_no(),tc4_yes(),tc4_yes(),tc4_yes(),bvconst(9,32),bvconst(9,32),bvconst(8,32),bvconst(8,32),bvconst(0,16),bvconst(7,16))) }
+example "failed TX preserves sequence" { assert(∀(s : BitVec32,n : BitVec32). tc4_after(tc4_commit(tc4_yes(),tc4_yes(),tc4_yes(),tc4_yes(),tc4_yes(),tc4_no()),s,n)=s) }
+example "ack-only transition needs no wire offer" { assert(tc4_commit(tc4_yes(),tc4_yes(),tc4_yes(),tc4_yes(),tc4_no(),tc4_no())) }
+example "sequence wrap is TCP arithmetic" { assert(tc4_after(tc4_yes(),bvconst(4294967292,32),bvconst(9,32))=bvconst(5,32)) }
+example "HTTP reply before peer FIN" { assert(tc4_reply(tc4_yes(),tc4_no(),tc4_yes(),tc4_no(),bvconst(74,16))) }
+example "PSH FIN consumes payload plus one" { assert(tc4_sent_fin(bvconst(100,32),bvconst(74,32))=bvconst(175,32)) }
+// Snapshot custody and exact record lengths are ordinary bounded arithmetic;
+// no untrusted integer is promoted to a pointer or an endpoint generation.
+define tc4_capsule(same_session : Bool,same_tcp_receipt : Bool,prior_committed : Bool,from_wire : Bool) = same_session ∧ same_tcp_receipt ∧ prior_committed ∧ ¬from_wire
+define tc4_size(data : BitVec64,wire : BitVec64,total : BitVec64) = bvule(data,bvconst(1024,64)) ∧ bvule(wire,bvconst(1514,64)) ∧ (total=bvadd(bvconst(38,64),bvadd(data,wire)))
+example "candidate has finite unambiguous extent" { assert(∀(d : BitVec64,w : BitVec64,t : BitVec64). tc4_size(d,w,t) → (bvuge(t,bvconst(38,64)) ∧ bvule(t,bvconst(2576,64)))) }
+example "only own prior candidate seeds next call" { assert(tc4_capsule(tc4_yes(),tc4_yes(),tc4_yes(),tc4_no())) }
+example "final handshake ack needs exact sequence" { assert(tcp94e_syn_rcvd_ack(true,true,true,true,bvconst(9,32),bvconst(9,32),bvconst(8,32),bvconst(8,32))=true) }

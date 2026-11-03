@@ -5436,8 +5436,8 @@ handoff steps consume the same finite dispatch bound as the application run.
 `httpd_protected.c` uses a private 1024-byte buffer and typed byte I/O to implement
 the existing restricted `/alive` response. Oversized/empty input emits nothing;
 other bounded nonmatching requests receive the existing 404. Its ordinary rebuild
-and guest execution witness is supplied but not yet Rust-accepted; Kleis passes
-27 positive / 18 hostile witnesses. This finite input image is not a network
+and guest execution witness passed locally; its corrected Kleis gate passes
+34 positive / 21 hostile witnesses. This finite input image is not a network
 endpoint, DMA mapping or permission lease. The remaining socket/NIC migration
 must formalize that actual endpoint and buffer-lifetime boundary before changing
 the original shared-memory protocol. DN-71 tracks the exact closure conditions.
@@ -5450,11 +5450,11 @@ The ordinary two-job rebuild service uses a charged 36864-slot registry, with a
 heap headroom. Application execution keeps its 4096-local envelope. Pending-frame
 budget checks precede frame initialization; quotas and finite work still bound
 admission. The latest guest HTTP compile completes in 21.83 seconds with the occupied-row
-lookup correction below. Protected HTTP link/run acceptance remains pending.
+lookup correction below. The later corrected HTTP witness passed locally.
 DN-71 records evidence and test commands.
 
 The legacy CC_B network stack remains the protocol regression reference during
-migration. The next boundary is a typed socket endpoint copying into private
+migration. The S1 boundary below specifies a typed socket endpoint copying into private
 protected buffers, with formal RX/TX authority, incarnation, length, short I/O,
 EOF, quota, cancellation and close contracts. NIC buffers stay under driver/
 controller authority and require drain-before-reuse. No SEND implies revocation.
@@ -5482,17 +5482,77 @@ DN-71 records the HTTP timeout and subsequent successful 21.83-second guest
 compilation. The protected application entry contract still requires exported
 `int main()` at code offset zero: the HTTP source declares helpers, defines main
 first, then defines helpers. The subsequent local run compiled in 22.47 seconds and passed linking. HTTP
-execution acceptance remains pending after correcting its read-loop condition
+execution subsequently passed after correcting its read-loop condition
 to the supported scalar bitwise conjunction of parenthesized comparisons. CC2
 does not yet implement C short-circuit logical operators; native C execution
 alone cannot validate source compatibility with this subset. Neither source
 correction relaxes linker, memory, input authority or resource validation.
 
 
-The protected HTTP finite-input application has user-reported acceptance after
-its entry-order and loop-condition corrections. Socket/NIC integration remains
-open. The latest full suite reports 1612 passed, 2 failed and 12 ignored; monitor
-bootstrap and stale AOM-version test corrections await local rerun. DN-71 records
-these results and explicit future contracts for proper C logical operators and
-symbol-selected main entry independent of source order. Those improvements must
-preserve protected control flow and authority checks.
+### Typed socket copy boundary (S1)
+
+One protected process incarnation may bind one connected endpoint once. A trusted
+adapter holds the endpoint ticket; the guest cannot select a peer or supply an
+object ID. The ticket binds a nonwrapping epoch, process key, core context,
+domain and current storage reservation. Each Kernel admits at most one endpoint
+in this profile. The two 1024-byte queues are private and charged to the owner
+before allocation. The finite-input run profile and its syscall allowlist stay
+separate. No network device is admitted into that profile.
+
+| Saved syscall image | Effect |
+|---|---|
+| R0 = 23 (receive), R1/R5 = 0, tagged R2:R3, scalar R4 = capacity | Require RX authority and a writable span covering the **whole** request. Copy only the prefix available. |
+| R0 = 24 (send), same register convention | Require TX authority and a readable span covering the **whole** request. Copy only the prefix that fits. Success means queued, not transmitted or acknowledged. |
+
+R4 is at most 1024. R0 alone returns a scalar count, `u64::MAX-1` (would
+block) or `u64::MAX` (denied/error). Zero request length is an authenticated
+no-op; for nonzero receive, zero means FIN and all earlier data consumed.
+FIN does not disable sending. An app retries with the remaining span after a
+short transfer and yields to a bounded driver/scheduler on backpressure. A
+guest pointer never crosses the call boundary. Close requires empty queues;
+cancellation or process death discards them before refund. The transport owns
+bytes copied out and must separately drain its controller before device-buffer
+reuse. The S1 implementation passed its five focused Rust tests. S2 adds
+CC2 builtins `srecv(char *,int)` and `ssend(char *,int)`. Both evaluate the
+pointer before the scalar length and use typed spill/reload to preserve the
+pair. Only the explicitly socket-authorized, receipt-checked C startup can
+select an ordered-stream run; the finite-input runner retains its own policy.
+On this run the child cannot use console I/O. The negotiated TX window is
+1–1024 bytes, bounded by the original charged storage. A successful normal exit
+requires that accepted TX has drained. Errors, cancellation and faults still
+tear down the endpoint. This adapter has bounded input, capture and execution,
+no packet or DMA authority, and no claim of TCP/NIC acceptance.
+
+The pre-socket full suite passed (1,614 passed, 0 failed, 12 ignored). DN-71
+tracks separate future contracts for C logical operators and symbol-selected
+entry, and the remaining protected network rebuild.
+
+### Packet-service development boundary (Phase 10.8 S3)
+
+The S2 protected HTTP guest passed on ordered bytes. The separate one-frame
+profile joins a fresh bounded virtual NIC driver to a receipt-validated C
+application with explicit network, input and execution authority. One opaque
+RX frame crosses through the ordinary NIC syscall, generation-checked DMA and
+a Fabric-authorized read. The application sees a private copy; its heap, code
+and socket state are never mapped into the driver's domain. A clean reply offer
+may cross back through a Fabric write and the ordinary TX syscall. The only
+wire output is a frame taken from the virtual controller's committed TX queue.
+S3 does not connect to the host network or widen the socket realm's allowlist.
+UDP uses this same one-frame boundary. The C service checks port 49152 and
+requires the UDP length to consume exactly the declared IPv4 payload. Ethernet
+padding may be echoed only from the actual RX prefix; it never enters the
+pseudo-header checksum. UDP introduces no new driver grant, socket state, or
+retained peer. DN-71 records the acceptance evidence.
+
+### Bounded TCP conversation (Phase 10.8 S4)
+
+The accepted S3 frame driver establishes the opaque packet boundary. S4 keeps
+the same controller and driver process across a session and runs the protected
+TCP transition program against each committed RX prefix. Only previously
+committed private state can seed another step. Receive credit, the exact
+published TCP and HTTP programs, and the finite exchange budget are bound at
+the broker. The protected HTTP application receives socket bytes and has no NIC
+or DMA handle. Its captured response is passed to the TCP guest and the caller
+observes only committed NIC transmissions. An explicit application scheduling
+point allows replay of a client waiting for its response before closing.
+See DN-71 for the profile limits, accounting, and evidence.

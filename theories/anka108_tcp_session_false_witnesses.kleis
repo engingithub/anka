@@ -1,0 +1,17 @@
+import "anka108_tcp_session.kleis"
+example "HTTP receipt grants NIC" { assert(tc4_bind(tc4_no(),tc4_yes(),tc4_yes(),tc4_yes(),tc4_yes(),tc4_yes(),tc4_yes())) }
+example "unfunded state" { assert(tc4_bind(tc4_yes(),tc4_yes(),tc4_yes(),tc4_yes(),tc4_yes(),tc4_yes(),tc4_no())) }
+example "unchecked FIFO overflow" { assert(tc4_room(bvconst(1020,16),bvconst(5,16))) }
+example "wrapped free capacity" { assert(tc4_room(bvconst(65535,16),bvconst(1,16))) }
+example "replay appends twice" { assert(tc4_data(tc4_yes(),tc4_no(),tc4_no(),tc4_yes(),tc4_yes(),tc4_yes(),bvconst(8,32),bvconst(9,32),bvconst(8,32),bvconst(8,32),bvconst(0,16),bvconst(7,16))) }
+example "cross-peer reuse" { assert(tc4_data(tc4_yes(),tc4_no(),tc4_no(),tc4_no(),tc4_yes(),tc4_yes(),bvconst(9,32),bvconst(9,32),bvconst(8,32),bvconst(8,32),bvconst(0,16),bvconst(7,16))) }
+example "data after peer FIN" { assert(tc4_data(tc4_yes(),tc4_yes(),tc4_no(),tc4_yes(),tc4_yes(),tc4_yes(),bvconst(9,32),bvconst(9,32),bvconst(8,32),bvconst(8,32),bvconst(0,16),bvconst(7,16))) }
+example "premature ACK after failed wire TX" { assert(tc4_commit(tc4_yes(),tc4_yes(),tc4_yes(),tc4_yes(),tc4_yes(),tc4_no())) }
+example "trailing reply bytes ignored" { assert(tc4_commit(tc4_yes(),tc4_yes(),tc4_no(),tc4_yes(),tc4_no(),tc4_no())) }
+example "repeat HTTP launch" { assert(tc4_reply(tc4_yes(),tc4_no(),tc4_yes(),tc4_yes(),bvconst(74,16))) }
+example "faulted HTTP guest can serialize reply" { assert(tc4_reply(tc4_yes(),tc4_no(),tc4_no(),tc4_no(),bvconst(74,16))) }
+example "FIN occupies no sequence space" { assert(tc4_sent_fin(bvconst(100,32),bvconst(74,32))=bvconst(174,32)) }
+example "restore from another connection" { assert(tc4_capsule(tc4_no(),tc4_yes(),tc4_yes(),tc4_no())) }
+example "wire-selected state" { assert(tc4_capsule(tc4_yes(),tc4_yes(),tc4_yes(),tc4_yes())) }
+example "uncommitted proposal can resume" { assert(tc4_capsule(tc4_yes(),tc4_yes(),tc4_no(),tc4_no())) }
+example "extra candidate tail" { assert(tc4_size(bvconst(7,64),bvconst(60,64),bvconst(106,64))) }

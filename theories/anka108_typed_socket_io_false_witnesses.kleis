@@ -1,0 +1,64 @@
+import "anka108_typed_socket_io.kleis"
+
+example "hostile bound process" { assert(¬(sk_same(bvconst(1,64),bvconst(1,64),bvconst(7,32),bvconst(7,32),bvconst(9,64),bvconst(9,64),bvconst(12,64),bvconst(12,64)))) }
+example "hostile slot reuse" { assert(sk_same(bvconst(2,64),bvconst(1,64),bvconst(7,32),bvconst(7,32),bvconst(9,64),bvconst(9,64),bvconst(12,64),bvconst(12,64))) }
+example "hostile old process generation" { assert(sk_same(bvconst(1,64),bvconst(1,64),bvconst(2,32),bvconst(7,32),bvconst(9,64),bvconst(9,64),bvconst(12,64),bvconst(12,64))) }
+example "hostile old execution context" { assert(sk_same(bvconst(1,64),bvconst(1,64),bvconst(7,32),bvconst(7,32),bvconst(2,64),bvconst(9,64),bvconst(12,64),bvconst(12,64))) }
+example "hostile other domain" { assert(sk_same(bvconst(1,64),bvconst(1,64),bvconst(7,32),bvconst(7,32),bvconst(9,64),bvconst(9,64),bvconst(2,64),bvconst(12,64))) }
+example "hostile live transport identity" { assert(¬(sk_ticket(sk_true(),sk_true(),sk_true(),bvconst(3,64),bvconst(3,64)))) }
+example "hostile wrong child" { assert(sk_ticket(sk_false(),sk_true(),sk_true(),bvconst(3,64),bvconst(3,64))) }
+example "hostile cancelled" { assert(sk_ticket(sk_true(),sk_false(),sk_true(),bvconst(3,64),bvconst(3,64))) }
+example "hostile uncharged" { assert(sk_ticket(sk_true(),sk_true(),sk_false(),bvconst(3,64),bvconst(3,64))) }
+example "hostile delayed event after reuse" { assert(sk_ticket(sk_true(),sk_true(),sk_true(),bvconst(2,64),bvconst(3,64))) }
+example "hostile zero ticket" { assert(sk_ticket(sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(0,64))) }
+example "hostile RX least authority" { assert(¬(sk_admit(sk_true(),sk_true(),sk_true(),sk_false(),sk_true(),sk_false(),sk_true(),bvconst(7,64)))) }
+example "hostile RX absent binding" { assert(sk_admit(sk_true(),sk_false(),sk_true(),sk_false(),sk_true(),sk_false(),sk_true(),bvconst(7,64))) }
+example "hostile RX wrong endpoint direction" { assert(sk_admit(sk_true(),sk_true(),sk_false(),sk_false(),sk_true(),sk_false(),sk_true(),bvconst(7,64))) }
+example "hostile RX wrong memory right" { assert(sk_admit(sk_true(),sk_true(),sk_true(),sk_false(),sk_false(),sk_false(),sk_true(),bvconst(7,64))) }
+example "hostile RX forged scalar ABI" { assert(sk_admit(sk_true(),sk_true(),sk_true(),sk_false(),sk_true(),sk_false(),sk_false(),bvconst(7,64))) }
+example "hostile RX oversized full span" { assert(sk_admit(sk_true(),sk_true(),sk_true(),sk_false(),sk_true(),sk_false(),sk_true(),bvconst(1025,64))) }
+example "hostile TX least authority" { assert(¬(sk_admit(sk_false(),sk_true(),sk_false(),sk_true(),sk_false(),sk_true(),sk_true(),bvconst(7,64)))) }
+example "hostile TX absent binding" { assert(sk_admit(sk_false(),sk_false(),sk_false(),sk_true(),sk_false(),sk_true(),sk_true(),bvconst(7,64))) }
+example "hostile TX wrong endpoint direction" { assert(sk_admit(sk_false(),sk_true(),sk_false(),sk_false(),sk_false(),sk_true(),sk_true(),bvconst(7,64))) }
+example "hostile TX wrong memory right" { assert(sk_admit(sk_false(),sk_true(),sk_false(),sk_true(),sk_false(),sk_false(),sk_true(),bvconst(7,64))) }
+example "hostile TX forged scalar ABI" { assert(sk_admit(sk_false(),sk_true(),sk_false(),sk_true(),sk_false(),sk_true(),sk_false(),bvconst(7,64))) }
+example "hostile TX oversized full span" { assert(sk_admit(sk_false(),sk_true(),sk_false(),sk_true(),sk_false(),sk_true(),sk_true(),bvconst(1025,64))) }
+example "hostile empty open is retry" { assert(¬(sk_result(sk_true(),sk_true(),bvconst(0,64),bvconst(7,64),sk_false())=sk_again())) }
+example "hostile drained FIN is EOF" { assert(¬(sk_result(sk_true(),sk_true(),bvconst(0,64),bvconst(7,64),sk_true())=bvconst(0,64))) }
+example "hostile drain payload before EOF" { assert(¬(sk_result(sk_true(),sk_true(),bvconst(3,64),bvconst(9,64),sk_true())=bvconst(3,64))) }
+example "hostile partial receive" { assert(¬(sk_result(sk_true(),sk_true(),bvconst(9,64),bvconst(3,64),sk_false())=bvconst(3,64))) }
+example "hostile zero send to full queue" { assert(¬(sk_result(sk_false(),sk_true(),bvconst(1024,64),bvconst(0,64),sk_false())=bvconst(0,64))) }
+example "hostile no unchecked EOF" { assert(¬(sk_result(sk_true(),sk_false(),bvconst(0,64),bvconst(1,64),sk_true())=sk_error())) }
+example "hostile no unchecked zero write" { assert(¬(sk_result(sk_false(),sk_false(),bvconst(0,64),bvconst(0,64),sk_false())=sk_error())) }
+example "hostile tx backpressure" { assert(¬(sk_result(sk_false(),sk_true(),bvconst(1024,64),bvconst(4,64),sk_false())=sk_again())) }
+example "hostile partial send" { assert(¬(sk_result(sk_false(),sk_true(),bvconst(1022,64),bvconst(4,64),sk_false())=bvconst(2,64))) }
+example "hostile send after peer FIN" { assert(¬(sk_result(sk_false(),sk_true(),bvconst(0,64),bvconst(4,64),sk_true())=bvconst(4,64))) }
+example "hostile invalid occupancy" { assert(¬(sk_result(sk_false(),sk_true(),bvconst(1025,64),bvconst(1,64),sk_false())=sk_error())) }
+example "hostile binary copy" { assert(¬(sk_rx_byte(bvconst(2,64),sk_true(),bvconst(16,64),bvconst(17,64),bvconst(255,8),bvconst(9,8))=bvconst(255,8))) }
+example "hostile unchanged tail" { assert(¬(sk_rx_byte(bvconst(2,64),sk_true(),bvconst(16,64),bvconst(18,64),bvconst(255,8),bvconst(9,8))=bvconst(9,8))) }
+example "hostile failed atomic copy" { assert(¬(sk_rx_byte(bvconst(2,64),sk_false(),bvconst(16,64),bvconst(17,64),bvconst(255,8),bvconst(9,8))=bvconst(9,8))) }
+example "hostile overlapping protected cell loses kind" { assert(¬(sk_rx_tag(bvconst(1,64),sk_true(),bvconst(31,64),bvconst(16,64),bvconst(1,8))=bvconst(0,8))) }
+example "hostile disjoint protected cell keeps kind" { assert(¬(sk_rx_tag(bvconst(1,64),sk_true(),bvconst(31,64),bvconst(32,64),bvconst(1,8))=bvconst(1,8))) }
+example "hostile fin without payload" { assert(¬(sk_deliver(sk_true(),sk_false(),bvconst(1024,64),bvconst(0,64)))) }
+example "hostile space for last byte" { assert(¬(sk_deliver(sk_true(),sk_false(),bvconst(1023,64),bvconst(1,64)))) }
+example "hostile no partial ingress" { assert(sk_deliver(sk_true(),sk_false(),bvconst(1023,64),bvconst(2,64))) }
+example "hostile stale ingress" { assert(sk_deliver(sk_false(),sk_false(),bvconst(0,64),bvconst(1,64))) }
+example "hostile data after FIN" { assert(sk_deliver(sk_true(),sk_true(),bvconst(0,64),bvconst(1,64))) }
+example "hostile rejected fragment cannot close stream" { assert(sk_fin_after(sk_false(),sk_false(),sk_true())) }
+example "hostile FIN sticks" { assert(¬(sk_fin_after(sk_true(),sk_true(),sk_false()))) }
+example "hostile fresh binding" { assert(¬(sk_reuse(sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(17,64),bvconst(18,64)))) }
+example "hostile no live replacement" { assert(sk_reuse(sk_false(),sk_true(),sk_true(),bvconst(0,64),bvconst(17,64),bvconst(18,64))) }
+example "hostile no dirty reuse" { assert(sk_reuse(sk_true(),sk_false(),sk_true(),bvconst(0,64),bvconst(17,64),bvconst(18,64))) }
+example "hostile no charge leak" { assert(sk_reuse(sk_true(),sk_true(),sk_false(),bvconst(0,64),bvconst(17,64),bvconst(18,64))) }
+example "hostile undrained work" { assert(sk_reuse(sk_true(),sk_true(),sk_true(),bvconst(1,64),bvconst(17,64),bvconst(18,64))) }
+example "hostile epoch must advance" { assert(sk_reuse(sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(17,64),bvconst(17,64))) }
+example "hostile no epoch wrap" { assert(sk_reuse(sk_true(),sk_true(),sk_true(),bvconst(0,64),sk_error(),bvconst(0,64))) }
+example "hostile RX rollback at nonzero prefix" { assert(¬(sk_used_after(sk_true(),bvconst(3,64),bvconst(2,64),sk_false())=bvconst(3,64))) }
+example "hostile TX rollback at nonzero prefix" { assert(¬(sk_used_after(sk_false(),bvconst(3,64),bvconst(2,64),sk_false())=bvconst(3,64))) }
+example "console write is socket TX" { assert(sk_abi(sk_false(),bvconst(1,64),sk_zero(),sk_zero(),sk_true(),sk_true(),sk_true())) }
+example "guest numeric endpoint" { assert(sk_abi(sk_true(),bvconst(23,64),bvconst(1,64),sk_zero(),sk_true(),sk_true(),sk_true())) }
+example "scalar buffer" { assert(sk_abi(sk_true(),bvconst(23,64),sk_zero(),sk_zero(),sk_true(),sk_true(),sk_false())) }
+example "stale trap targets replacement" { assert(sk_bind(sk_true(),sk_true(),sk_true())) }
+example "unfunded stream" { assert(sk_bind(sk_false(),sk_true(),sk_false())) }
+example "graceful close drops output" { assert(sk_close(sk_true(),sk_zero(),bvconst(1,64))) }
+example "stale close" { assert(sk_close(sk_false(),sk_zero(),sk_zero())) }
