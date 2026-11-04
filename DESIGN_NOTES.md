@@ -8,6 +8,13 @@ rules, milestones, and implementation facts. [README.md](README.md) introduces
 the project's purpose and development entry points. Architectural decisions
 and future directions belong in these documents rather than separate root notes.
 
+For current work, use the [DN-71 status table](#dn71-status), its
+[final 10.8 evidence](#phase-108-final-evidence), and the
+[10.9 authority plan in DN-72](#dn-72). Dated implementation handoffs below are
+historical: their pending labels and intermediate counts do not override the
+final acceptance record. The later T1 delivery adds theories and a focused
+runner; it changes no runtime code.
+
 ---
 
 ## DN-1: Compiler residence and fixed output-image size
@@ -198,6 +205,11 @@ constructs every compiler process.  The invariant is:
 ---
 
 ## DN-6: Boot as root of authority
+
+**Scope clarification (10.9 planning):** the one-success-only boot contract below
+is per Kernel instance. It assumes trusted BootInfo; it does not establish
+persistent enrollment, current external grants or reboot freshness. [DN-72](#dn-72)
+plans that missing authority boundary without changing this runtime contract.
 
 **Date:** 2026-09-12 (Phase 8.0)
 
@@ -4516,6 +4528,11 @@ constraint.
 
 ## DN-44: Provenance Is a Trust Relationship, Not a PKI Product
 
+**10.9 clarification:** [DN-72](#dn-72) places recognized endorsement roles under
+one configured trust anchor. Delegated issuers are not independent roots of
+trust. The distinction below between provenance, custody and execution remains;
+no particular credential or transport technology is selected.
+
 **Date:** 2026-09-19
 
 **Context.** Phase 10's compiler lineage makes software provenance an explicit
@@ -7651,87 +7668,36 @@ is stated briefly in ARCHITECTURE.md. Neither consolidation starts implementatio
 
 ## DN-71 — Shared allocation, whole-stack review, and compiler resource growth (Phase 10.8)
 
-**Status: all four A1 pairs accepted on the developer machine, 2026-10-19;
-Undertaker asynchronous-reclamation refinement developer-accepted, 2026-10-20;
-A2.1 registry/reservation foundation developer-accepted, recorded 2026-10-22;
-A2.2 bounded placement/reservation Kleis refinement developer-accepted,
-recorded 2026-10-23; A2.2 Rust developer-accepted with the full single-threaded
-library suite: 1134 passed, 0 failed, 0 filtered out in 1149.73s, recorded
-2026-10-23. A2.3 Fabric/shadow/initialization refinement developer-accepted on
-2026-10-24: 192 positive witnesses (30 quantified laws) and 162 explicitly
-disproved hostile witnesses. A2.3.1 fixed Fabric/shadow storage and private
-attachment are developer-accepted: 17 new tests passed in 0.01s and the
-144-test focused shared-component regression passed in 0.09s (including those
-17), recorded 2026-10-24. A2.3.2 private byte/tag initialization is also
-developer-accepted: 18 new tests passed in 0.02s and the 162-test focused
-regression passed in 0.10s (including those 18). A2.3.3 conditional protected
-heap-cell operations are developer-accepted: 22 new tests passed in 0.01s and
-the 184-test focused regression passed in 0.13s (including those 22).
-A2.3.4 attached-failure closure is developer-accepted: 17 new tests passed in
-0.02s and the 201-test focused regression passed in 0.13s (including those 17).
-A2.3.5 concrete worker/terminal-work Kleis refinement is developer-accepted at
-197 positive witnesses (23 quantified laws) / 172 explicitly disproved hostile
-witnesses, recorded 2026-10-24. A2.3.5a fixed worker roles and per-job leases are
-developer-accepted: 21 new tests passed in 0.02s and the 222-test focused
-regression passed in 0.13s (including those 21). A2.3.5b bounded CPU backend
-registration/pinning is developer-accepted: 21 new tests passed in 0.03s and
-the 243-test focused regression passed in 0.16s (including those 21), recorded
-2026-10-24. A2.3.5c bounded execution/cancellation, terminal consumption and
-current drain census are developer-accepted, recorded 2026-10-25: 22 new tests
-passed in 0.02s and 265 focused tests passed in 0.17s (including those 22).
-A2.3.6 queued-job worker recovery is developer-accepted, recorded 2026-10-25:
-21 new tests passed in 0.01s and 286 focused tests passed in 0.16s (including
-those 21). A2.3.7 authority retirement is developer-accepted: 21 new tests
-passed in 0.02s and 307 focused tests passed in 0.19s (including those 21),
-recorded 2026-10-25. Complete trusted cleanup/reuse is now developer-accepted:
-92 positive / 79 explicitly disproved hostile witnesses; 19 new tests passed
-in 0.01s and 326 focused tests passed in 0.19s, including those 19. No full
-1333-test run was reported. A3 C malloc/free is now developer-accepted: the
-earlier full run passed 1344 tests (including all twelve A3 unit tests) and failed
-only the new direct-entry fixture. After its correction, the shared CC2/C
-integration rerun passed: 1 passed, 0 failed, 1344 filtered out in 1026.53s,
-reported 2026-10-25. It covers ordinary malloc/free, typed I/O, hostile aliases,
-cross-module heap return and independent A/B/C reuse. The new Kleis pair passed
-locally before implementation at 52 positive / 43 hostile; no developer rerun
-of that pair is reported. These are separate results, not one green 1345-test
-suite. A4's required source review is delivered below, with bounded follow-ups.
-R1's local-frame initialization refinement is now developer-accepted; recorded
-2026-10-27: Kleis 151 / 118, 16 focused Rust tests, shared CC2 integration in
-1008.62s, and the full 1361-test suite in 2446.84s all pass.** The original compiler-resource plan
-merged to `main` after the protected-module checkpoint. The revised order is
-general protected allocation, its C `malloc`/`free` interface, a required
-whole-stack review, then compiler resource growth using that shared foundation.
-The compiler is an ordinary allocation client; multiple agents must be able to
-compile concurrently. The allocation lifecycle, concrete ABI, residual-data
-isolation and storage/reclamation pairs have developer-confirmed evidence:
-579 positive witnesses and 386 explicitly disproved hostile assertions. The
-Undertaker pair below adds 257 positive witnesses and 171 explicitly disproved
-hostile assertions, developer-confirmed on 2026-10-20. All five pairs now have
-developer acceptance across the reported focused runs. A2.1 below adds executable
-bounded metadata and quota reservations. The sixth pair below refines bounded
-placement and the compound reservation; the developer confirmed its 215 positive /
-180 hostile gate run, recorded 2026-10-23. All six allocation pairs now have
-developer acceptance across focused runs. A2.2 Rust below adds private physical
-and virtual extent custody and exact cancellation. The seventh pair (A2.3)
-is now developer-accepted, bringing the accepted focused-run totals to 1243
-positive / 899 hostile. The eighth pair (A2.3.5) brings accepted evidence across
-focused runs to 1440 positive / 1071 hostile; no new combined run is claimed.
-A2.3.1 connects private Fabric metadata without authority publication, and
-A2.3.5a adds worker/lease metadata, A2.3.5b adds pinned CPU request records,
-and A2.3.5c connects their synchronous software effects and terminal consumption.
-A2.3.6 adds recovery/reassignment of queued jobs after exact worker fencing.
-A2.3.7 adds developer-accepted authority retirement after current drainage and
-exclusion checks. Developer-accepted cleanup/reuse connects retired-stage
-recovery, bounded byte/tag scrub, extent release and payload refunds. This brings
-developer-accepted evidence across focused formal runs to 1532 positive / 1150
-hostile; no combined run is claimed. A3 now connects C malloc/free, production
-publication, owned guest results and process-exit cleanup. Its independent-client
-and toolchain acceptance now pass. A4 has reviewed the delivered source and
-recorded bounded follow-ups. Earlier A2 deferrals describe their delivery
-checkpoints; A3/A4 provide the current integration status.
-Keep the plan here and the current
-status in ARCHITECTURE.md; do not create another standalone note.
-Current development branch: `feat/anka108-protected-allocation` (developer-confirmed).
+<a id="dn71-status"></a>
+
+### Current status — Phase 10.8 closed
+
+Reconciled 2026-11-04 with the supplied source archive and developer acceptance
+log. The work is merged to main. This is the single current status table for
+DN-71; the detailed sections below preserve implementation decisions, failures,
+corrections and acceptance at their original checkpoints.
+
+| Work | Status and accepted scope |
+|---|---|
+| A1–A3 | Protected allocation/free, bounded metadata and placement, initialization, cleanup/reuse and supported C malloc/free accepted for independent clients. |
+| A4 | Required whole-stack review delivered; its compiler follow-ups were tracked through C1–C5. Hardware, general shared ownership and other explicitly deferred refinements remain separate. |
+| R1 | Fresh/reused local-frame byte/tag initialization, typed nulls and nested arguments accepted. |
+| C1 | Shared compiler resource/lifecycle contract and concrete protected producer ABI accepted. |
+| C2 | Output growth, shared accounting, charged immutable inputs, producer admission, preprocessing, link/run envelopes and exact artifact publication accepted within configured service profiles. |
+| C3 | Source/workspace growth, recursive declarations, wide types and protected typed-module emission/member operations accepted. |
+| C4 | Guest typed linking, interface conflict rejection, ordered receipts, explicit C startup and large-profile charged loading/execution accepted. |
+| C5 | Ordinary rebuild coordinator, concurrent independent jobs, retry/publication/link/run and protected service rebuild accepted. |
+| S1–S5 | Typed socket copy boundary and bounded virtual-NIC packet/TCP/socket/HTTP `/alive` exchange accepted; legacy reference tests retained. |
+
+The [final evidence record](#phase-108-final-evidence) contains the complete
+formal/runtime result and its scope. Counts from different historical focused
+runs are not added together as a new full-suite result. No tests were rerun for
+this documentation reconciliation.
+
+The 2026-10-19 order remains the design record: general protected allocation,
+supported C malloc/free, the required whole-stack review, then compiler resource
+growth using that shared service. That sequence is complete for 10.8. The next
+architectural work is [DN-72 / Phase 10.9](#dn-72), not another C2–C5 extension.
 
 ### Goal and completion boundary
 
@@ -10127,7 +10093,8 @@ still require their own end-to-end evidence.
 unrestricted heap sharing, durable artifact storage, arbitrary legacy-C
 compatibility, hardware DMA, SMP and timing/cache guarantees. R1/C1 do not
 depend on completing these directions. The existing single trust-anchor
-direction, currently considering OIDC, gains no new implementation scope here.
+direction gains no new implementation scope at this checkpoint. DN-72 now
+records the technology-neutral authority plan; no protocol is selected.
 
 
 ### R1 — Protected local-frame initialization refinement (2026-10-26)
@@ -11107,9 +11074,9 @@ artifact capture/publication remains the separate C2.5 milestone.
 
 ### C2.5 — ABI-2 capture, retained custody and publication
 
-This is the single current C2.5 design section. The **implementation checkpoint
-table near the end of DN-71** records acceptance and remaining work; historical
-C2.4 handoffs above do not override it. The developer reported the publication
+This section records the C2.5 design and historical acceptance. The
+[DN-71 status table](#dn71-status) and final evidence record give current closure;
+earlier handoffs do not override them. The developer reported the publication
 Kleis pair passing **136 positive / 118 hostile**, then the nine C2.5a capture
 tests passing in **0.01s**, eight retention tests in **0.00s**, and the complete
 42-test compiler-retry bridge group in **0.04s**, followed by all 11
@@ -11338,7 +11305,9 @@ reported merging the branch into main. C2.5c is closed. The last reported
 complete suite is still C2.4's **1406 tests in 589.71s**; a 1441-test complete
 suite pass has not been reported.
 
-### C2 remaining work — output boundary and complete accounting
+<a id="c2-remaining-work--output-boundary-and-complete-accounting"></a>
+
+### C2 output boundary and complete accounting — implementation history
 
 The next bounded delivery removes the obsolete 256-KiB envelope from the
 **ABI-2 capture path only**. Its authentic attempt capacity now bounds the used
@@ -11575,44 +11544,11 @@ assumption and requires rechecking the affected proof environment.
 
 ### Bounded implementation handoffs
 
-Each row is a separately reviewable handoff with its relevant formal gate
-accepted before executable changes. Keep the established bootstrap reproducible;
-version or replace affected ABIs deliberately. Small handoffs do not imply a
-compiler-only architecture or permanent compatibility with temporary service ABIs.
-
-| Piece | Concrete deliverable | Acceptance evidence |
-|---|---|---|
-| A1 — allocation contract and ABI | Shared service, individual heap lifetimes, concurrent reservations, runtime/C interface, residual-data isolation and storage reclamation | Developer accepted all four pairs: 579 positive / 386 hostile; no runtime implementation claim |
-| A1-U — Undertaker refinement | Atomic death/registration, bounded durable directory, retained charges, exact worker/ticket identities, scrubbing and restart | 257 positive / 171 hostile developer-accepted on 2026-10-20; all five pairs accepted across focused runs and pass locally together at 836 / 557 |
-| A2.1 — registry and reservation foundation | Fixed common directory, retained owner accounts, atomic rounded-quota/slot/cleanup reservation, independent closure and clone-free local-frame admission | Developer confirmed all 120 focused tests, including 19 new witnesses, with one test thread; acceptance recorded 2026-10-22; no production heap publication |
-| A2.2 — bounded placement/reservation refinement | K+2 insertion capacity, reusable virtual holes, exact charging, shared-revision admission and identity-preserving cancellation through existing managers | Kleis 215 positive (34 quantified) / 180 hostile and Rust developer-accepted, recorded 2026-10-23; full single-threaded library run: 1134 passed, 0 failed, 0 filtered out in 1149.73s, including 21 new A2.2 witnesses; earlier local focused run: 160 passed |
-| A2.3 — Fabric/shadow/initialization refinement | Fixed heap Fabric rows, precharged dense shadow, private attachment, full backing byte/tag initialization, atomic visibility and attached-failure routing | Developer-accepted 2026-10-24: 192 positive (30 quantified) / 162 explicitly disproved hostile; runtime composition is now covered by accepted A3 below |
-| A2.3.1 — fixed Fabric storage/private attachment | Fallible setup and exact retained-capacity charging, shared checked ObjectIds, sticky private attachment, pool exclusion and unchanged-owner/failure preservation | Developer-accepted 2026-10-24: 17 new tests passed in 0.01s; 144-test shared-component regression passed in 0.09s, including those 17 |
-| A2.3.2 — private byte/tag initialization | Bounded full-backing scrub, opaque exact progress snapshots, current completion checks, trusted-write prefix invalidation and preserved other-owner state | Developer-accepted 2026-10-24: 18 new tests passed in 0.02s; 162-test shared-component regression passed in 0.10s, including those 18; publication disabled |
-| A2.3.3 — protected heap cells | Conditional live pointer-cell load/store, exact current source/destination checks, scalar tag invalidation and bounded dense-shadow use | Developer-accepted 2026-10-24: 22 new tests passed in 0.01s; 184-test focused regression passed in 0.13s, including those 22; positive tests use explicit test-only publication fixtures |
-| A2.3.4 — attached-failure closure | Exact per-allocation fencing, reserved-job queueing, idempotent repeats, retained backing/charges and closure before drainage | Developer-accepted 2026-10-24: 17 new tests passed in 0.02s; 201-test focused regression passed in 0.13s, including those 17; no worker reclamation or production publication |
-| A2.3.5 — concrete workers and terminal accounting | Fixed worker/lease/work records, incarnation-bound cleanup role, pinned exact backend tickets, complete census and current readiness | Developer-accepted Kleis: 197 positive (23 quantified laws) / 172 explicitly disproved hostile, 2026-10-24; runtime composition is now covered by accepted A3 below |
-| A2.3.5a — worker records and job leases | Fixed charged rows, borrowed current Kernel descriptor, explicit cleanup role, exact queued claim/authentication and supervisor fencing | Developer-accepted 2026-10-24: 21 new tests passed in 0.02s; 222 focused tests passed in 0.13s, including those 21 |
-| A2.3.5b — backend registration and pinning | Independently bounded CPU source/ledger arrays, exact incarnation/span binding, atomic registration and retained pins | Developer-accepted 2026-10-24: 21 new tests passed in 0.03s; 243 focused tests passed in 0.16s, including those 21 |
-| A2.3.5c — execution and terminal accounting | Bounded CPU execution/cancellation, exact terminal consumption, complete current census and worker-authenticated drain observation | Developer-accepted 2026-10-25: 22 new tests passed in 0.02s; 265 focused tests passed in 0.17s, including those 22; no full 1272-test run reported |
-| A2.3.6 — queued-job worker recovery | Exact per-job revocation, global worker fence, current backend checks and versioned return to unowned state; retained custody/work/charges | Developer-accepted 2026-10-25: 21 new tests passed in 0.01s; 286 focused tests passed in 0.16s, including those 21; no full 1293-test run reported |
-| A2.3.7 — authority retirement | Current worker/lease, complete fresh drain census and actual process/Fabric exclusion; Closing → Retired while retaining all custody and charges | Developer-accepted 2026-10-25: 21 new tests passed in 0.02s; 307 focused tests passed in 0.19s, including those 21; no full 1314-test run reported |
-| Complete trusted cleanup/reuse | Retired/scrub/clean worker recovery, bounded full byte/tag scrub, exact physical/virtual returns, payload refunds and safe reuse | Developer-accepted: 92 / 79 Kleis; 19 new Rust tests in 0.01s and 326 focused tests in 0.19s, including those 19 |
-| A2 — trusted allocation service | Implement the accepted contract through placement, reusable virtual arenas, bounded metadata, Fabric and process lifecycle machinery | Isolation, rollback, stale-alias rejection, arbitrary free order, concurrent-client exhaustion/reuse and sustained-churn storage/accounting witnesses |
-| A3 — C malloc/free | CC2 builtins, owned replies, private heap publication/access, free completion and lifecycle cleanup | Accepted 2026-10-25: all 12 A3 unit tests passed in the earlier full run; corrected shared CC2/C/module/A-B-C integration passed in 1026.53s. Kleis 52 / 43 passed locally before implementation |
-| A4 — whole-stack review | Source review delivered 2026-10-25 | Evidence/gap matrix and formal gate mapping above; follow-ups remain open |
-| R1 — local initialization | Formal pair and whole-frame byte/tag initialization runtime accepted | Kleis 151 / 118; 16 focused tests in 0.02s; shared CC2/C integration in 1008.62s; full 1361-test suite in 2446.84s, all passing |
-| C1 — compiler contract and ABI | Delivered resource/lifecycle theory, concrete ABI-2 layout and expanded limit inventory above | Original gate developer-accepted: 221 positive (26 quantified) / 195 hostile. C2.3 first-publication refinement developer-accepted: 254 (28 quantified) / 226. C2.4 selector/capacity and linker-profile refinements developer-accepted: 293 / 259 on 2026-10-31 |
-| C2 — output growth/accounting | C2.1-C2.5c accepted and merged; C2.6 oversized boundary developer-accepted. Host-storage quota refinement accepted. Charged immutable ingress/loader integration covered by the later passing 83-test bridge group. Complete job charging remains open | C2.6: 321336-byte real AOM, one automatic retry, capacity independence and prior receipts preserved; 1 test passed in 2174.32s. Do not infer full C2 closure |
-| C2 host storage | Shared-ledger quota without phantom guest extents; capture/candidate/frozen receipt integration; fixed charged directory and destruction-before-refund | Accepted: local Kleis 34 / 23; developer 10 new tests (0.03s), 89 heap tests (0.08s), 67 bridge tests (2.74s), one long test intentionally ignored |
-| C2 immutable ingress | Quota-reserved source/tool custody, shared immutable borrows, exact source-to-loader copy, cancellation and service-death cleanup | Expanded storage Kleis: 59 positive / 45 hostile passed locally; 12 new Rust tests supplied; subsequent 83-test bridge group passed (3.04s). Real CC2 publication fixture uses the charged source loader |
-| C2.5 formal gate | ABI-2 capture, retained custody, cleanup and publication contract | Developer-accepted C2.5c: 149 positive (20 quantified laws) / 129 hostile. Output-budget refinement: developer-accepted 163 / 139 |
-| C2.5a — capture/admission | Production bounded authenticated capture, role validation and quota-reserved staging | Developer-accepted: 9 capture tests in 0.01s; subsequent 42-test bridge group passed in 0.04s. Updated guest/full-suite acceptance not reported |
-| C2.5b — retained custody/publication | Focused acceptance complete: retention, cleanup, frozen provenance and atomic READ-only publication | 11 publication tests passed in 0.01s; affected bridge 53 passed in 0.04s. Real CC2 publication moves to C2.5c |
-| C2.5c — retry/publication integration | Accepted and merged: bounded runtime flow, real CC2 publication, concurrent A/B/C witness | Developer: Kleis 149 / 129; six flow tests; fixture preflight 0.01s; shared guest integration 464.34s; 60-test bridge 0.04s. No new full-suite pass claimed |
-| C3 — source, workspace and struct-pointer interfaces | In progress: geometry/type foundation and C3.1 guest directory accepted; C3.2 source/preprocessor growth accepted (110.74s). C3.3 forward/recursive declarations accepted (137.92s). C3.4 wide local type encoding accepted (211.55s); typed cross-module heap-list execution accepted (249.11s). Automatic directory-table retry is implemented below; real retry acceptance and ordinary-driver integration remain pending | Cross the existing source/table boundaries with valid programs; compile separate modules using shared-header struct-pointer parameters/returns and opaque forward declarations. Module-local numeric type IDs must not be mistaken for cross-module identity. See required C3/C4 contract below |
-| C4 — link, admission and struct-pointer interoperability | In progress: typed guest linking and shared publication consumption accepted. Persistent linked receipts accepted (7 tests). Explicit C startup and nine receipt-execution checks are developer-accepted; real-producer rerun, large-image acceptance and complete execution charging remain open | Link/execute beyond the old 1 MiB cap; accept compatible shared/opaque struct-pointer interfaces and reject incompatible definitions/signatures before execution. Preserve pointer bounds, rights, generation and lifetime through calls/returns; retain existing denial/receipt guarantees |
-| C5 — self-hosted closure | Connect the resource-aware path to ordinary user-facing compiler invocation and the rebuild driver, including concurrent jobs and real service code | Exact CC2 generation fixed point, independent concurrent compilations, automatic growth, matching direct-vs-retried artifacts, protected-module execution, and affected regressions; document remaining genuine language/encoding limits |
+The former cumulative A1–C5 table repeated the detailed handoffs and retained
+obsolete open/closed labels. Current acceptance is consolidated in the
+[DN-71 status table](#dn71-status). The preceding allocation/review/resource
+sections and the following storage, type, service and network sections retain
+the individual contracts and historical evidence.
 
 ### C2 host-storage quota refinement — developer-accepted
 
@@ -12281,14 +12217,10 @@ The ignored test shares one bootstrap and checks 17 recursive struct tags,
 legacy rejection, independent directory capacities and parsed public signature
 bytes. Passing it accepts private type widening, not cross-module struct linkage.
 
-**Remaining closure work (same C2–C5 scope, no new phase):**
-
-| Gate | Concrete work still required | Acceptance needed |
-|---|---|---|
-| C2 complete job accounting | Move preprocessing and legacy executable/process storage under admitted custody; cover dynamic metadata, trace/process growth and cleanup, not just RAM. Carry source/tool/bundle custody and copy peaks through the coordinator. | A/B concurrent jobs; A denial/exit and C clean reuse preserve B; stale A references rejected; no refund while retained work/storage survives. |
-| C3 type evidence | Emit complete/opaque ATY1 references in an explicitly gated object profile; implement struct field operations needed for real heap lists. | Shared-header/opaque declarations, struct-pointer parameters/returns, self/mutual recursion and actual allocation/traversal/free. |
-| C4 guest linker/loading | Guest ankald consumes type evidence, rejects mismatches and binds exact bytes into receipts; extend link/load policy and runtime admission. | Compatible modules execute, incompatible definitions reject, pointer authority survives calls, image crosses old 1-MiB limit. |
-| C5 ordinary rebuild | Connect admitted source, preprocessing, compiler retry, guest linking and publication to the ordinary user command and service rebuild driver. | Exact artifacts/fixed point, concurrent independent jobs, direct/retried parity, socket/HTTP rebuild and affected regressions. |
+**Historical handoff:** at the C3.4 checkpoint, complete job accounting,
+typed-object linking and ordinary rebuild integration were still outstanding.
+Their subsequent acceptance is consolidated in the [status table](#dn71-status).
+The audit observation below explains the accounting work that followed.
 
 **C2 audit detail:** `run_ankapp_attempt` creates an isolated Kernel/Fabric and
 untracked dynamic transport/process/trace structures. Reserving only
@@ -12440,20 +12372,11 @@ must not replace the project directory. The closure script checks essential
 files before starting tests. C2/C5 implementation and C3/C4 runtime acceptance
 remain open; this recovery does not mark Phase 10.8 closed.
 
-**Remaining acceptance and implementation, without introducing a new phase:**
-
-| Existing gate | Verified status | Remaining closure condition |
-|---|---|---|
-| C2 | Shared heap/capture/publication, accounted preprocessing, compiler admission and linker transport accepted. Application-run accounting accepted: eight focused tests, 149 runtime tests (nine ignored), real C5 run 247.31s. | Ordinary service and actual concurrent A/B/C accepted (75.79s). Preserve accounting in protected service I/O; final affected regressions. |
-| C3 | Source/workspace growth, recursive declarations, typed heap-list and automatic table retry accepted. Real table retry preserves exact AOM (83.55s). | Preserve these gates through the ordinary service and protected service-source rebuild. |
-| C4 | Typed guest linking, shared consumer, persistent receipts, C startup and charged execution accepted. Large-image link/load accepted (22.10s). | Ordinary service link/run integration accepted. New private-input HTTP execution and final affected regressions remain. |
-| C5 | Kernel-owned jobs retain exact source/provenance across retries and complete guest link, receipt and C startup. Latest real job passed in 247.31s. | `anka rebuild` coordinator accepted: 6 focused, 154 runtime (10 ignored), actual concurrent A/B/C in 75.79s. Protected HTTP/input is implemented below; socket/NIC rebuild and final regressions remain. |
-
-The current packet removes orchestration from test fixtures. It does not claim
-that the existing raw-address socket/HTTP sources have been ported or that all
-ignored guest tests ran. The required post-malloc review remains recorded earlier;
-this table tracks its findings without repeating the audit. FPGA/Metal remain
-future execution backends, not substitutes for closure evidence.
+**Historical handoff:** later C2/C4 charging and ordinary-service integration
+superseded the earlier pending labels. Final network and regression acceptance
+is recorded in the [status table](#dn71-status) and [final gate](#phase-108-final-evidence).
+The post-malloc review remains recorded above; it is not repeated by each
+checkpoint. FPGA/Metal remain future backends, separate from closure evidence.
 
 
 **C3.5 protected compiler frame-pressure correction (2026-11-01, runtime now accepted):**
@@ -12990,8 +12913,8 @@ reported revisions. Do not reinterpret this arena packet as full Phase 10 closur
 
 The compiler admission packet is accepted by the developer's latest “both tests
 passed” report. It supersedes that packet's pending status, without supplying
-new test counts or elapsed times. The C2–C5 status table above is authoritative;
-earlier dated implementation notes remain historical evidence.
+new test counts or elapsed times. The [DN-71 status table](#dn71-status) gives
+current closure; earlier dated implementation notes remain historical evidence.
 
 The shared publication consumer now reserves three separate amounts: input and
 parser staging, retained image capacity, and the isolated linker machine. The
@@ -13766,7 +13689,10 @@ TX bytes, intentional drops, current receipt and post-exchange quota were
 checked. This resolves the recorded full-MTU fault. Together with S4, the
 bounded protected network path is accepted. Keep the legacy reference tests.
 
-### Final Phase 10.8 checkpoint — runtime confirmation pending
+<a id="final-phase-108-checkpoint--runtime-confirmation-pending"></a>
+<a id="phase-108-final-evidence"></a>
+
+### Final Phase 10.8 checkpoint — accepted
 
 A complete formal sweep exposed one inconclusive 64-bit queue proof in
 `anka108_async_reclamation`: transferring an owner's records from armed to
@@ -13782,8 +13708,9 @@ On the supplied tree with this refinement, the full formal runner passed all
 48 theory pairs (13 Phase 10.7 and 35 Phase 10.8): 4,467 positive witnesses
 and 3,664 explicit hostile disproofs. No unknown was counted.
 
-Run `bash scripts/check-anka108-closure.sh --final` from the repository root.
-It checks the 10.7 prerequisites and all 10.8 theory pairs, then runs the
+The accepted verification command was
+`bash scripts/check-anka108-closure.sh --final` from the repository root.
+The runner checks the 10.7 prerequisites and all 10.8 theory pairs, then runs the
 ordinary release suite (including the nonignored CC2 fixed point) serially.
 It compares the compiled ignored-test inventory with the 15 required real
 witnesses and executes each by exact name: oversized publication; workspace,
@@ -13797,7 +13724,712 @@ The final report identifies the input digest and logs under `target/anka108-clos
 Use a stable checkout and one runner at a time. The old `--real` mode and the
 pre-socket full-suite total are historical component evidence.
 
-The remaining decision is the final release result, not a new network port.
+The supplied final log reports **1628 ordinary library tests passed, 0 failed,
+15 ignored**, in **296.41s**, followed by successful explicit execution of all
+**15 required guest witnesses** and a passing complete Cargo suite. The ordinary
+run's elapsed time is not the elapsed time of the entire closure command.
+Recorded release input digest:
+`625a65c351c3d77f1b8f150d3d69be49930327981200684cebb3749f6a221696`.
+The developer subsequently confirmed the merge to main. The earlier pending
+runtime decision is resolved; C2, C3, C4, C5 and Phase 10.8 are closed within
+their documented profiles.
+
 This gate covers the emulator's bounded virtual NIC and single-connection
-service. Host networking, general TCP, Metal/FPGA, short-circuit logical
-operators and source-order-independent entry selection remain separate work.
+service. It does not establish requester identity/authorization, general TCP or
+host-network deployment. Metal/FPGA, true short-circuit logical operators and
+source-order-independent entry selection remain separate work. Phase 10.9
+addresses identity/authority and the remaining supply-chain/hostile audit.
+This documentation update did not rerun or extend the accepted gates.
+
+---
+
+<a id="dn-72"></a>
+
+## DN-72 — Identity, authority, installation and reboot (Phase 10.9)
+
+**Status, 2026-11-04: T1 and the initial T2 persistence/reboot model have local
+Kleis acceptance. The developer confirmed T1 and all 13 Rust reference-core
+tests. The Phase 10.10 host-local backend and its formal gate are now delivered;
+new Rust backend tests remain pending. Concrete evidence refinement, T3–T5 and
+production runtime integration remain pending.** Phase 10.8 is accepted and
+merged. The [T1 evidence below](#dn72-t1) records the new proof results; no runtime
+implementation or runtime acceptance is claimed. It extends the planned 10.9 supply-chain
+and hostile CPU-to-HTTP audit with the authority model needed to interpret who
+may install, execute and request work. It does not reopen C2–C5.
+
+### Architectural decision and scope
+
+An Anka64 installation recognizes **one deliberately configured trust anchor**.
+For a person, Anka64 accepts the opaque identity that this anchor recognizes.
+How the anchor establishes that identity is outside Anka64's person model:
+there is no local reconciliation of names, pseudonyms, citizenship or aliases.
+An authenticated person is not automatically the installation's administrator,
+owner or an authorized caller of every service.
+
+The installation must distinguish recognition from scoped authority. Existing
+grants, rights, delegation, runtime capabilities and exact artifact receipts are
+the foundation; 10.9 must bind recognized principals to those mechanisms rather
+than create a second permission system. The anchor may authorize constrained
+issuer/endorser roles, but any such delegation must derive from that one root
+and cannot amplify its scope. An anchor relationship does not imply an online
+query for every memory operation; evidence lifetime and revalidation boundaries
+must be defined explicitly.
+
+No protocol, credential format, cryptographic suite, certificate hierarchy,
+transport or hardware identity representation is chosen here. Earlier OIDC
+consideration remains a candidate, not a requirement. Formalizing the semantic
+contracts comes before choosing or implementing their concrete evidence format.
+
+### Identity and authority vocabulary
+
+| Entity | Meaning for the proposed model | Must remain distinct from |
+|---|---|---|
+| Trust anchor | The explicitly selected source of recognized identity and root authority policy. | An arbitrary issuer, presented credential or network endpoint. |
+| Person principal | Opaque anchor-scoped identifier plus validated evidence binding the presenter to it. | Display name, physical presence, ownership or an automatic grant. |
+| Installation | Enrolled logical Anka64 instance with retained trust configuration and enrollment identity. | CPU/GPU serial, address, machine hostname or VM placement. |
+| Workload | Logical software actor recognized under an authorized deployment/execution relationship. | Its code bytes alone, its human operator, or a single process ID. |
+| Execution incarnation | One admitted boot/process/workload instance; stale instance references cannot name a replacement. | Stable installation/workload identity. |
+| Artifact | Exact immutable bytes and their accepted provenance/receipt. | A principal that acts, or permission to execute those bytes. |
+| Grant | Issuer-authorized subject/resource/operation scope with validity and delegation conditions. | Identity recognition or successful signature validation alone. |
+
+Hosting, ownership, deployment, endorsement and delegation are explicit
+relationships, not interchangeable identity labels. Migration can preserve a
+logical identity only under an authorized continuity transition. Cloning must
+not silently duplicate live incarnation authority. Whether installations may
+share a workload identity, and how replicas are distinguished, belongs in that
+explicit policy rather than a CPU serial-number convention.
+
+### Trust-anchor use cases
+
+| Use case | Required decision or evidence |
+|---|---|
+| First installation | Deliberate selection of the anchor; authority to enroll this installation and establish its administration. |
+| Person recognition | Anchor-recognized identifier and evidence that the presenter controls the claimed identity. |
+| Installation enrollment | Exact installation binding, enrollment entitlement and atomic completion; a person credential alone is insufficient. |
+| Workload admission | Authorized workload/deployment identity, selected artifact and permitted resources. |
+| Artifact endorsement | Recognized endorser within its scope, exact artifact identity and current applicable policy. |
+| Program execution | Separate execute grant for this actor, installation, artifact and execution profile. |
+| Local or network request | Bound caller, intended service, requested operation/resource and current grant; no ambient service authority donation. |
+| Delegation or transfer | Issuer authority, attenuation, recipient binding and explicit lifetime/revocation semantics. |
+| Renewal and revocation | Current validity/freshness evidence and defined effect on new admissions and outstanding work. |
+| Reboot | Retained enrollment, current trust configuration/artifact/grant checks and a fresh execution incarnation. |
+| Migration or cloning | Authorized continuity or new enrollment, with prevention of duplicate/replayed incarnation authority. |
+| Recovery, ownership change or anchor rotation | Explicit exceptional authority, atomic transition and treatment of old grants; normal self-enrollment cannot substitute for recovery. |
+
+### First installation and reboot are different transitions
+
+**Initial installation.** Anchor selection is an explicit bootstrap trust input:
+a credential claiming to come from an anchor cannot justify choosing that same
+anchor. The provisioning model must identify who or what may set this first
+configuration. Recognized-person evidence and installation-specific enrollment
+or administration entitlement are checked separately. Enrollment commits the
+installation binding and authorized initial state atomically; a failed attempt
+must not expose runnable ordinary workloads or partial root grants. Repeated or
+racing enrollment must not produce duplicate authority.
+
+**Reboot.** Enrollment normally survives; the machine need not repeat first-time
+person enrollment on every boot. It must nevertheless establish that the retained
+trust configuration, chosen boot artifacts and grants used to admit work remain
+acceptable under current policy. A fresh boot incarnation separates new processes,
+events, job handles and requests from the previous execution. A durable grant
+may authorize a new instance; it must not resurrect a saved runtime capability,
+process generation or suspended transaction. Rebooting cannot reset exhausted
+identity counters into a previously issued namespace.
+
+The proposed state sequence is unenrolled → enrolled/stopped → validating boot
+→ running, with separate failure/recovery states. These are conceptual states,
+not new Rust enums. The formal gate must specify each state's permitted actions,
+its linearization point, crash/rollback behavior and the exact evidence consumed.
+DN-6's current one-success-only boot rule applies within one Kernel instance;
+it does not establish this persistent lifecycle.
+
+### Validity, freshness and failure assumptions
+
+Expiration requires a trustworthy time basis or an explicitly defined alternative
+freshness mechanism. Revocation requires suitably current authority-state
+evidence; an old correctly authenticated credential cannot establish that it is
+still authorized. The first model must name the freshness bound, revalidation
+points and policy for unavailable or unverifiable evidence. Normal admission
+must not treat unknown evidence as success. Any offline allowance or restricted
+recovery authority needs its own explicit scope and validity; none is silently
+selected by this note.
+
+A locally fresh counter is insufficient against restoration of an older complete
+VM snapshot. Persistent anti-rollback state, anchor-mediated freshness or other
+external assumptions must be stated before claiming reboot replay resistance.
+Likewise, revoking a grant cannot undo committed output or already performed
+physical effects. Closing new admission and draining/cancelling accepted work
+are distinct transitions; charges, pins and cleanup custody remain until real
+terminal accounting permits reuse.
+
+The trust bootstrap must avoid a circular requirement that obtaining authority
+requires network access which itself requires that unavailable authority. Define
+a minimal provisioning/revalidation channel or equivalent evidence-delivery
+boundary, with no implicit general network or application privilege.
+
+Anchor rotation is not unrestricted acceptance of two roots. Its authorization,
+cutover, outstanding-grant treatment and failure recovery require an explicit
+transition while preserving the one-selected-anchor model. These details,
+offline policy, revocation latency and boot freshness representation remain
+choices to settle during formalization.
+
+### Existing contracts to reuse and their present limits
+
+The following inventory is based on the supplied theory files; it is not a new
+proof run. References describe modeled properties, not automatic proof of all
+Rust implementation or future hardware behavior.
+
+| Existing contract | Reuse in 10.9 | Boundary requiring refinement |
+|---|---|---|
+| `anka64_state_invariants.kleis` I7/I8 | Permission/range attenuation and generation checks. | External principal/grant binding, exact range proof width and indefinite replay/exhaustion policy are not established merely by these witnesses. |
+| `anka_device_capability_transfer.kleis` | Exact presented authority, attenuation and atomic receiver capability/provenance delivery. | Its independently held receiver authority survives sender death. Do not replace this with a blanket rule that all descendants die with the sender. |
+| `anka93h3_execution_authority.kleis` | Ingress is not execute; exact sealed artifact and separate run authority. | `developer_execution_authority_present` is a trusted premise; derive the corresponding 10.9 decision from validated identity/grant evidence. |
+| `anka108_artifact_publication.kleis` | Frozen source/tool/profile bindings, current custody, exact receipts and separate execution authority. | Trusted current-authority observations need a concrete authority-validation contract and recheck/commit boundary. |
+| `anka108_compiler_jobs.kleis`, `anka108_compiler_admission.kleis`, `anka108_application_run.kleis` | Incarnation-bound jobs, bounded admission, charged execution and failure cleanup. | Connect installation/workload authority to admissions without discarding existing quotas, receipt checks or cleanup duties. |
+| `anka108_typed_socket_io.kleis` and network service theories | Exact runtime owner/context/domain/generation binding and bounded socket work. | A socket ticket authenticates a runtime binding, not the identity or entitlement of an external requester. |
+| Pointer concurrency, allocation and reclamation theories | Access closure, registered work, retirement, scrub and safe reuse. | Policy revocation must compose with actual work accounting; a notification or timeout is not proof of stopped CPU/DMA effects. |
+| DN-6 BootInfo contract | Trusted boot image/grants and atomic initial-process admission. | Recognition of the installation/administrator, persistent enrollment and reboot freshness are additional contracts. |
+
+**Concrete proof-scope discrepancy:** I7c's comment in
+`anka64_state_invariants.kleis` says 16-bit transitivity, while its definition
+`req_within_cap_8` and quantified witness use **BitVec8**. The same comment records
+an inconclusive 64-bit attempt. This review changes no theorem. Correct the
+comment and establish the actual-width obligation or an explicit sound lifting
+argument before using it as a 64-bit 10.9 lemma. I8's one/two-revocation checks
+also do not prove non-resurrection after arbitrary counter wrap. These are proof
+coverage questions, not evidence by themselves of an exploitable runtime flaw.
+
+Authority lifetimes must distinguish independent transfer, dependent delegation
+and temporary borrowing. Parent expiry/death effects depend on that declared
+relationship. Revocation is enforced through authoritative runtime checks, not
+by clearing one register pair while aliases remain in cells or saved contexts.
+
+### Bounded formal-first work sequence
+
+| Gate | Contract to settle before implementation | Required hostile cases |
+|---|---|---|
+| T1 — recognition and enrollment | Explicit anchor-selection assumption; recognized person/installation identities; distinct enrollment/admin entitlement; exact issuer/subject/scope binding; atomic enrollment. | Foreign anchor, wrong subject/installation, recognized but unprivileged person, replayed/racing enrollment, partial failure. |
+| T2 — reboot and freshness | Retained enrollment, selected boot artifact, grant validity/revocation evidence, fresh boot incarnation, rollback/exhaustion and recovery rules. | Expired/revoked grant, missing freshness evidence, snapshot replay, old process/event/job handle, counter exhaustion, unauthorized recovery. |
+| T3 — scoped authority and requests | Attenuating derivation; explicit transfer/delegation/loan lifetimes; bound caller/service/operation; current-policy recheck at admission/commit. | Scope amplification, issuer outside its scope, credential substitution, request replay, confused deputy, revocation racing admission. |
+| T4 — artifact and execution composition | Bind exact receipt/endorsement to workload, installation, execution profile and independently authorized execution. Preserve existing quota/lifetime/cleanup invariants. | Authentic artifact without execute grant, substituted tool/artifact/profile, revoked endorser, stale incarnation, admitted work surviving a policy change. |
+| T5 — CPU-to-HTTP hostile closure | Compose the accepted rebuild with T1–T4; demonstrate authorized `/alive` and denial without unauthorized effects under the declared model. | Unrecognized or recognized-but-ungranted caller, wrong service/operation, stale grant/session, restart and interleaved independent clients. |
+
+T1 has the concrete theory pairs and local results recorded below. The initial
+T2 model is delivered in the [T2 evidence record](#dn72-t2); its concrete backend
+and freshness obligations remain open. T3–T5 remain proposed gates. The I7/I8 scope review establishes which earlier lemmas
+T1 actually uses: direct 64-bit range checks and nonwrapping admission revisions
+are explicit; the older reduced-width range-transitivity witness is not assumed.
+Later chained delegation still needs its own full-width obligation. Runtime
+refinement must preserve the named trusted inputs and transition boundaries;
+example counts alone do not establish implementation correctness.
+
+Credential authenticity may initially be an explicit abstract verifier premise,
+but the model must constrain how validated evidence binds issuer, subject, scope,
+audience, freshness and use. A caller-controlled Boolean set to true is not a
+validator. Record the concrete verifier/refinement obligation separately; an
+abstract proof cannot claim cryptographic or deployment security it assumes.
+
+### Trust boundary and completion evidence
+
+The present emulator assumes an honest host and trusted runtime/Fabric. This
+work does not prove protection from a malicious host, persistent-state rollback,
+physical tampering, cache timing or speculative effects. Future FPGA and
+Metal execution must preserve these authority/lifetime contracts and supply
+their own refinement and threat assumptions. An accelerated backend cannot
+substitute for missing identity or authorization semantics.
+
+10.9 acceptance must identify implemented checks, abstract assumptions, exact
+formal gates, runtime hostile results and remaining deployment limitations.
+Preserve the accepted 10.8 fixed point, receipt and bounded network witnesses;
+add authority-aware positive/negative evidence rather than treating the existing
+`/alive` response as an authorization test. Standards selection and real evidence
+validation require their own explicit decisions before production-security claims.
+
+**Immediate next task:** run the repaired T2 runner, the new backend gate and
+the focused Rust suite described in the [local-backend delivery](#dn72-local-backend).
+Then formalize bounded transport and request framing before adding a loopback
+service. T3–T4 still supply concrete authority validation and artifact admission;
+current evidence verdicts are trusted inputs, not network credentials.
+
+
+<a id="dn72-t1"></a>
+
+### T1 — recognition, enrollment and direct-anchor grant admission
+
+**Local formal acceptance, 2026-11-04.** The supplied Linux Kleis binary was run
+with the supplied standard library and Z3 4.13.4. No Rust code was modified and
+no long regression suite was run. The developer subsequently confirmed all
+three T1 pairs (132 positive witnesses and 114/114 hostile disproofs).
+
+| Theory pair | Positive witnesses | Quantified laws included | Explicit hostile disproofs |
+|---|---:|---:|---:|
+| `anka109_recognition` | 37 | 6 | 31/31 |
+| `anka109_enrollment` | 29 | 5 | 24/24 |
+| `anka109_grant_admission` | 66 | 7 | 59/59 |
+| Total | 132 | 18 | 114/114 |
+
+The runner rejects unknown solver results, ordinary evaluation failures,
+missing/duplicate witnesses, import errors, timeouts and unexpected exit status.
+It runs these three pairs only; unchanged 10.7/10.8 gates are not repeated.
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" \
+  --only-t1
+```
+
+**Recognition.** Structured evidence binds the selected anchor, opaque subject,
+principal kind, installation audience, policy epoch and fresh presenter challenge.
+Validity is a half-open interval: `first <= now < until`. Authenticity, possession
+and current-status evidence each distinguish Valid, Invalid and Unknown; only
+Valid is admitted. A recognized identity supplies no enrollment/admin/execute
+permission by itself. Person, installation and workload are distinct kinds.
+
+**Enrollment.** A separately validated direct-anchor enrollment entitlement must
+name the recognized person and exact installation. The old enrollment record
+must be uncommitted and empty, its expected revision current and nonexhausted,
+and trusted storage preflight successful. The before/after relation constrains
+all five retained fields together. Success records the anchor, installation and
+enrolling person and advances the revision; it does not create an administrator
+grant or runnable workload. Failure preserves every field. Quantified laws cover
+determinism, exact binding, rollback and rejection of a second racing enrollment.
+The person field records the enroller, not a claim of ownership.
+
+**Grant admission.** This first slice accepts grants issued directly by the one
+selected anchor. Delegated issuers remain T3 work. Recognition and committed
+installation enrollment are checked independently of the grant. Subject/kind,
+audience, purpose, resource identity/kind, policy epoch, lifetime and evidence
+status must match. Both grant and request generation must match a separate
+trusted observation of the resource's current generation: replaying two matching
+stale values does not pass.
+
+Memory-purpose admission uses the existing 8-bit R/W/X/A/S permission subset and
+64-bit subtractive range checks, including direct checks against actual object
+size and active/sealed permission policy. Other purposes (invoke, execute and
+administer) name exact service/artifact/installation resources and carry no
+memory byte range or Fabric rights. Purpose/kind numbers in these theories are
+semantic labels, not a selected wire ABI or a new permission-bit assignment.
+
+A single serialized admission lane retains the exact decision, selected anchor,
+installation, epoch, revision and consumed challenge. It must be empty and the
+expected revision current; capacity denial or any invalid evidence preserves its
+prior record. Successful admission consumes the challenge and advances revision
+without wrapping. Old snapshots and occupied-lane reuse reject. This is an
+abstract admission decision, **not runtime capability minting or permission to
+skip later use-time checks**. Slot allocation, release and multi-lane scheduling
+are outside this first transition model.
+
+**Proof representation.** All identity, time, generation, offset, length and
+revision quantities retain 64-bit width. Permission masks retain 8 bits. No new
+axioms were introduced. The supplied Kleis build was inconclusive for nested
+record-valued transitions; the delivered encoding uses complete before/after
+relations, flattened retained request fields and quantification over every
+constructor field. Unknown attempts were rejected, not counted as passes.
+The relation constrains each field to its guarded next value; rollback and
+partial-publication rejection are checked on those same relations.
+
+T1 does not invoke the older I7c 8-bit range-transitivity witness as a 64-bit
+lemma. It checks each requested span directly against both its grant and object.
+Permission transitivity and checked revision advancement have full-width
+quantified witnesses at their respective actual widths. The historical I7c
+comment discrepancy and arbitrary generation-wrap scope remain recorded above;
+this delivery neither changes that older theory nor claims to resolve chained
+range delegation or persistent reboot replay.
+
+**Trusted inputs and remaining refinements.** Validator verdicts must describe
+validated evidence over the entire record, with possession bound to its challenge;
+untrusted callers cannot supply a Valid verdict. Time, policy/revocation freshness,
+selected-anchor configuration and current resource generation/geometry/state are
+trusted observations. They must be rechecked under the same serialized commit
+boundary; a prior successful preflight is not a reusable permit. Storage preflight
+means reserved trusted capacity. These assumptions do not prove a cryptographic
+verifier, crash-durable enrollment, a freshness transport or malicious-host safety.
+T2 defines reboot persistence and freshness; T3–T4 define delegation, request
+composition and the bridge from an admitted grant to existing runtime authority.
+
+
+<a id="dn72-storage-foundation"></a>
+
+### Artifact, receipt and publication contracts as the storage foundation
+
+**Documentation review, 2026-11-04.** Reviewed the source in
+`Archive(20261104-002250).zip`, including the T1 theories. This is a source-grounded
+inventory and next-step specification, not a new Kleis proof, runtime acceptance,
+or comprehensive storage/security audit. No code or theory changes accompany it.
+Phase 10.8 remains closed. Network persistence is not already implemented by its
+artifact publication path.
+
+**Decision:** preserve the artifact and publication semantics already developed.
+Define a small durable record service around them rather than inventing a second
+provenance/permission system or making all stored data an executable format.
+Keep immutable artifact bytes separate from mutable, revision-controlled records
+such as enrollment, current artifact selection and boot-incarnation reservation.
+An authority record is data, not an AOM module; it needs its own schema and
+validation. Storage custody never grants enrollment, endorsement or execution.
+
+#### Source inventory: what is reusable and what is still missing
+
+| Reviewed source / contract | Existing mechanism | Persistence refinement required |
+|---|---|---|
+| `src/anka64/aom.rs`: `AomModule`, `AomHeader`, `AomSymbol`, `AomRelocation` | AOM v1/v2 has exact size, section/table geometry, typed symbols/relocations and an ATY1 interface trailer for v2. Parsing grants no execution authority. | Preserve the exact payload and format version. AOM itself does not contain the full publication receipt, durable object identity or storage authorization. |
+| `src/anka64/compiler_adapter.rs`: `RebuildReceipt`, `RebuildArtifactStore` | Receipt binds source, tools, target profile, role, output and isolated context; one complete record insertion makes artifact and receipt visible. The source explicitly disclaims disk durability. | Define portable provenance encoding and durable commit/recovery. Object numbers alone are not global identities, as the source explicitly states. |
+| `src/anka64/compiler_adapter/protected_modules.rs`: `LinkedModuleDependency`, `LinkedRebuildReceipt` | Ordered dependencies retain original compiler receipts, exact AOM bytes, transport bindings and actual linker/image/profile. | Preserve order and evidence across storage; define persistent references and deletion rules without treating transport keys as portable capabilities. |
+| `src/anka64/os/compiler_retry/publication.rs`: `PublicationInputs`, `CompilerPublicationReceipt`, `publish_compiler_candidate` | ABI-2 freezes actual inputs before execution, rechecks them, checks the expected epoch and reserves charges; a complete record is inserted after producer release and candidate cleanup. Receipt evidence is borrowed from trusted current state. | Durable atomicity must include recoverable provenance and request outcome. Exporting a Rust receipt or its fields is not authenticated remote evidence. Distinguish local epoch, persistent revision and authority-policy epoch. |
+| `src/anka64/os/compiler_retry/publication/consumer/published.rs` and `published/execution.rs` | Linked publication retains image/dependencies and charges; execution requires separate current admission. Object ID and heap generation remain distinct. | Fetch/import must validate persistent evidence and create fresh local bindings. A stored receipt cannot revive old pointer-kind state, heap tokens, process handles or execution grants. |
+| `theories/anka108_artifact_publication.kleis` | Exact capture/admission, owner release, immutable paired publication, nonwrapping epoch and charge constraints; current trusted observations and serialized custody are explicit assumptions. | Model volatile versus durable state, crashes, retries and network delivery. Its current certificates are not a remote validator or a disk flush guarantee. |
+| `theories/anka109_recognition.kleis`, `anka109_enrollment.kleis`, `anka109_grant_admission.kleis` | Selected-anchor recognition, separate enrollment entitlement, direct-anchor scope checks and guarded state transitions. | Refine trusted storage preflight and current-policy observations into persistence and freshness boundaries. The atomic enrollment relation alone is not crash recovery. |
+
+Two publication paths are intentionally distinguished above: the isolated
+`RebuildArtifactStore` and the Kernel ABI-2 publication service. They share useful
+semantics but do not have identical receipt representations or lifetime rules.
+The review does not collapse their fields into an invented common wire format.
+
+Existing runtime witnesses to retain include
+`c25_publication_atomically_exposes_exact_read_only_artifact_and_receipt`,
+`c25_publication_rechecks_every_sealed_dependency_and_tool_byte`,
+`c25_publication_failure_after_sealing_keeps_epoch_and_cleanup_obligation`, and
+`c25_retained_a_cleanup_c_reuse_preserves_b_and_candidate`. These test names
+identify source evidence, not tests rerun for this review. Their in-memory
+acceptance cannot be relabeled as a persistent or distributed guarantee.
+
+#### Proposed storage contract and trust boundary
+
+The first service is a single authoritative server with concurrent clients.
+Network access does not require replication or consensus in this first slice.
+The server's workload identity and operation-scoped grants must derive from the
+installation's selected trust anchor. Recognizing the server does not make its
+stored records current, and recognizing a caller does not permit reading,
+writing, publishing or deleting every record.
+
+Use a bounded, versioned record envelope whose eventual encoding binds record
+kind, namespace, stable persistent identity, exact payload length, schema/profile,
+ordered persistent dependencies and accepted provenance. These are proposed
+semantic fields, not a selected binary ABI. Define an explicit mapping from
+context-local keys to persistent references. Equal bytes need not imply equal
+publication identities, provenance, rights or retention obligations. If hashes
+are selected, state algorithm/domain separation and collision assumptions;
+a content hash supplies neither authorization nor freshness.
+
+Candidate operations are authorized read, expected-revision conditional commit,
+and request-outcome lookup. Boot-incarnation reservation is a constrained
+transaction over the retained installation state. An immutable artifact can be
+staged privately, then referenced by a committed record; no record may advertise
+success while its required bytes or provenance are not recoverably retained.
+Separate immutable-blob upload/download can follow when actual payload needs
+justify it. These operations do not select S3, HTTP, TLS, OIDC or a cryptographic
+suite.
+
+A successful commit must bind caller, installation/incarnation, namespace,
+operation identifier, exact request and expected revisions. Its state changes
+and retry outcome must become durable together before success is acknowledged.
+A lost response means an uncertain client outcome, not proof of abort. A retry
+must recover the prior outcome under authorized access, without committing a
+second effect; reuse of the identifier for different contents must reject.
+Request-history retention needs a bound and an expiry/fencing rule so removing
+old entries cannot turn an ancient retry into a new mutation.
+
+Ordinary reads, commit authorization and outcome lookup need explicitly stated
+freshness/revalidation rules. Recovery may expose the prior complete state or
+the new complete state, never a partially admitted artifact/receipt pair.
+A commit acknowledged before a modeled crash must survive recovery under the
+backend's declared durability assumptions. Updating an in-memory BTreeMap is
+insufficient evidence for this claim.
+
+The first model assumes an honest server/runtime and an explicitly specified
+crash/storage fault model. Rollback of the entire server or VM snapshot is a
+separate threat: signatures, hashes and counters inside that same snapshot do
+not establish freshness. Select an external freshness/anti-rollback basis or
+state that limitation before claiming reboot replay resistance. Replication,
+Byzantine storage and hardware timing guarantees remain separate refinements.
+
+Bootstrap must retain or provision enough anchor configuration and narrowly
+scoped evidence to contact and authenticate the store without fetching that
+same prerequisite solely from the store. Store unavailability or unverifiable
+freshness blocks normal boot/admission or enters an explicitly authorized
+recovery mode; it must never silently reset an installation to unenrolled.
+
+#### Required formal obligations before runtime implementation
+
+These are obligations within the existing T2–T4 sequence, not additional runtime
+milestones. Exact theory filenames and wire formats remain to be chosen.
+
+| Obligation | Compose with existing gates | Required positive / hostile evidence |
+|---|---|---|
+| Portable artifact and receipt binding | 10.8 artifact publication, protected modules and compiler adapter; T4 | Exact bytes, length, role/profile, provenance and dependency order survive export/import. Reject swapped receipts, truncated/tail bytes, reordered dependencies and foreign or old local handles. Import grants no execution authority. |
+| Durable atomic commit and retries | T1 enrollment, T2 persistence; 10.8 publication | Model crash before/after persistence and lost acknowledgment. Preserve prior records on definite precommit denial; recover committed outcomes once; reject same operation ID with changed request and competing stale revisions. Include revision exhaustion and bounded deduplication history. |
+| Caller/service authority and freshness | T1 recognition/grant admission, T2 reboot, T3 requests, T4 execution | Reject wrong anchor/audience/namespace/operation, recognized-but-ungranted actors, stale grants and revocation racing commit. An authentic old receipt is not current execute permission. Reserve each boot incarnation once despite retries and reject rollback under the declared freshness mechanism. |
+| Retention, quota and safe reclamation | Compiler storage/jobs, allocation/reclamation, publication and application-run gates | Charge private staging, committed bytes, provenance, dependency retention and retry records. A crashes/exhausts while B remains correct; C reuses A's released staging only after cleanup; published objects survive producer exit; no dangling committed dependency or stale A handle becomes authoritative. |
+| Rust-to-Anka64 refinement | All of the above plus bounded transport/parser contracts | The same request/crash traces yield the same abstract results. Reject malformed lengths/overflow and unknown versions before unbounded work. Name durable backend, evidence verifier and transport assumptions rather than treating mocks as production proof. |
+
+Canonical dependency/referrer lifetimes and garbage collection must be specified
+before deletion is enabled. Logical loss of reachability is not immediate refund
+or physical erasure; deletion cannot authorize stale memory access or discard a
+still-required retry result. Persistent confidentiality and media erasure are
+separate from Anka64's existing in-memory initialization/reuse guarantees.
+
+#### Bounded delivery and phase placement
+
+1. **Review and document (this change):** inventory existing representations,
+   reusable invariants, missing persistence guarantees and the acceptance cases.
+2. **Phase 10.9 formal step (initial model now delivered below):** specify the minimal persistence transition
+   system as part of T2, including portable identity, atomic commit/outcome and
+   boot freshness. Compose authority and artifact obligations into T3–T4. Run
+   affected positive and hostile Kleis gates; do not claim unchanged 10.8 gates
+   establish the new durable properties.
+3. **Proposed Phase 10.10:** implement and test the resulting network persistence
+   contract in Rust, then bring up an Anka64 C client and later the service. Start
+   with in-memory deterministic tests, then a local durable backend and loopback
+   transport. Keep protocol/state-machine semantics portable; a Rust embedded
+   database is a replaceable reference backend, not a dependency to translate
+   wholesale into AnkaCC2. Inject clock, network and disk faults; reuse traces
+   for differential Rust/C tests. No external cloud account is required.
+
+This proposed 10.10 explicitly extends the Phase 10 roadmap; it does not reopen
+10.8 or pretend a durable deployment was included in its closure. 10.9 may state
+conditional results under a declared persistence interface; concrete durable
+network-storage acceptance belongs to 10.10. Phase 11 is not assigned here.
+No inode model, disk driver, replicated cluster or general network filesystem
+is required for this initial implementation. The host server still needs real
+persistent backing; network storage relocates that obligation rather than
+eliminating it.
+
+**Review follow-through:** the initial T2 model and bounded Rust reference core
+are delivered below. The broader inventory above remains the acceptance checklist;
+this first slice does not complete durable backend, artifact import or network
+service refinement.
+
+
+<a id="dn72-t2"></a>
+
+### T2 — durable record transitions and separate reboot admission
+
+**Local formal results, 2026-11-04.** The supplied Linux Kleis executable and
+standard library ran the following gates using the available Z3 4.13 library.
+No new axioms were introduced. Unknown/import/parse/timeout results remain
+failures. These are model proofs, not a proof of Rust, cryptography or disks.
+
+| Theory pair | Positive witnesses | Quantified laws included | Explicit hostile disproofs |
+|---|---:|---:|---:|
+| `anka109_persistence` | 59 | 9 | 50/50 |
+| `anka109_reboot` | 28 | 6 | 22/22 |
+| Total | 87 | 15 | 72/72 |
+
+`--only-t2` runs these pairs; the runner's default runs T1 and T2. The existing
+T1 sources are unchanged. No 10.7/10.8 regression suite was rerun.
+
+**Concrete model choice.** One installation-scoped record has a revision,
+selected immutable-envelope identity, boot counter, and exactly one retained
+successful request/outcome. Requests bind anchor, installation, policy, caller,
+caller incarnation, monotonically increasing operation sequence, expected
+revision, operation kind, argument and boot-attempt identity. The two operations
+are select an immutable envelope and reserve a boot incarnation. They are
+semantic operations, not a network ABI or a grant-purpose-number allocation.
+The envelope identity is an opaque equality handle; no hash algorithm or global
+ObjectId encoding is claimed.
+
+New requests require current matching authority, exact expected revision, the
+next sequence, capacity and nonwrapping counters. A select changes only the
+selected value and publication metadata; a boot reservation preserves that
+value and increments the boot counter. The complete before/after relation binds
+all retained fields. The backend durability observation atomically selects the
+whole old or whole new record; absence of that observation preserves the old
+state. New success cannot be acknowledged before durable commit.
+
+**Bounded retry choice.** An exact retry of the latest successful request returns
+the recorded result without another effect, even when new-write capacity is
+unavailable. It still requires current authority. An identifier reused with
+changed contents rejects. Older outcomes expire when a later request commits;
+the durable sequence high-water mark rejects their replay rather than treating
+it as a new operation. This first slice does not promise indefinite outcome
+lookup or transparently retry an expired boot request. Concurrent losers must
+reread state and deliberately issue a new request. There is no general delete,
+sequence reset, record eviction or garbage collector in this slice.
+
+**Crash and boot are different transitions.** A lost acknowledgment does not
+prove abort. Recovery reloads the full durable record and an exact retained
+retry recovers the same result. Boot reservation itself starts no execution.
+Boot admission separately requires retained T1 enrollment, current authority,
+current durable revision/boot observations, valid artifact evidence, a matching
+fresh boot-attempt challenge, and an inactive volatile execution latch. Admission
+consumes that latch once. Crash clears volatile execution authority; another
+boot needs a new external challenge and a new durable reservation. Saved contexts
+with an older boot incarnation reject.
+
+**Proof/refinement boundary.** Valid access and artifact verdicts must be outputs
+of trusted validators over the exact bound records, not caller assertions. T3/T4
+still establish their concrete derivation. The context and freshness observations
+must remain current under the same serialized admission/commit boundary. Enrollment
+is trusted retained T1 state, not an arbitrary caller-supplied record. Authority
+revocation after reservation may prevent boot without undoing the reservation.
+The backend is assumed honest and installation-scoped. Whole-VM/store rollback
+resistance requires an external nonrollback freshness source; the model does not
+manufacture one from counters stored in that same snapshot. Reusing a challenge
+after restart violates the declared premise and is not protected by the latch.
+
+The durable flag abstracts an atomic backend commit. Torn-write detection,
+flush/rename semantics, a recoverable log, multiple server writers, corruption,
+and a portable authenticated receipt representation are not established by this
+flag. The artifact binding/retention inventory in the preceding review remains
+open; value selection here does not upload, validate or garbage-collect blobs.
+
+### Phase 10.10 first implementation slice — Rust reference core
+
+`src/anka64/authority_persistence.rs` implements the corresponding request
+checks, guarded transition, bounded retry rule and separate boot latch.
+`DurableRecord` isolates namespace-bound load and atomic compare/commit. The
+coordinator reloads state on each request and propagates uncertain commit errors;
+it never rolls back a possibly committed request. A backend must perform a real
+serialized compare-and-commit, and its successful return must mean durable
+recovery, not merely memory visibility.
+
+Thirteen focused tests in `authority_persistence/tests.rs` cover exact retries,
+crash before commit, commit before lost reply, changed request fields, competing
+clients/expired history, authorization denial before backend access, revoked
+outcome lookup, capacity/geometry failures, exhaustion, separate single boot
+admission, restart challenges, invalid freshness/artifact/enrollment, and stale
+prepared writers. The test backend retains a simulated durable image across
+coordinator replacement. It is not persistent disk storage, and those tests
+must not be described as physical crash-durability acceptance.
+
+**Developer acceptance of the original core:** all 13 focused Rust tests passed
+in 0.00s, as reported after this delivery. The authoring environment still has no
+Rust compiler; the newly added local backend tests below have not been run here.
+The standalone script compiles this module and its backend without the long
+CC2/bootstrap suite:
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" --only-t2
+bash scripts/check-anka110-persistence-reference.sh
+```
+
+The same tests are included in the ordinary crate test build via `anka64::authority_persistence`.
+The module is intentionally not connected to Kernel boot, sockets or capability
+issuance. At this original-core checkpoint, a disk backend, bounded transport
+and concrete credential validator were not implemented. The subsequent local
+backend delivery below supersedes only the disk-adapter status. No external storage account is needed for this reference
+slice. T2 is accepted only at the stated abstract boundary; Phase 10.10 remains
+in progress and neither phase is declared closed.
+
+**Follow-through:** the local backend contract and adapter are delivered below.
+Loopback transport and concrete authority validation remain pending; mock
+validator verdicts must never become remotely supplied authorization fields.
+
+
+<a id="dn72-local-backend"></a>
+
+### Phase 10.10 — local durable backend and recovery (2026-11-04)
+
+**Delivered; developer Rust verification pending.** The attached archive retained
+an older T1-only `scripts/check-anka109-gates.py`, although the T2 theory files
+and Rust core were present. This delivery repairs that exact runner path and
+adds `--only-backend`. `--only-t1` is preserved; `--only-t2` selects persistence
+and reboot; the default selects T1, T2 and the backend refinement. `cargo clean`
+cannot affect this Python argument mismatch.
+
+The current archive's original 13 Rust core tests passed on the developer's Mac.
+The corrected runner was used here to rerun T2: 59 + 28 positive witnesses and
+50/50 + 22/22 hostile disproofs passed. No new T1 run was necessary because its
+source is unchanged and the developer supplied passing results.
+
+| New theory pair | Positive witnesses | Quantified laws included | Explicit hostile disproofs |
+|---|---:|---:|---:|
+| `anka110_durable_record` | 51 | 6 | 45/45 |
+
+The backend model distinguishes old state, private partial write, complete flushed
+temporary file, rename with an outstanding directory barrier, and durable commit.
+Only the last phase on an unpoisoned handle may acknowledge success. Before rename,
+crash recovery selects the old record; between rename and the directory barrier,
+old or new may survive; after the successful barrier, the new complete record
+must survive under the filesystem assumptions. Recovery never combines fields
+from different records. Corrupt/missing/wrong-namespace heads fail closed rather
+than selecting an apparently usable temporary file. Exclusive custody, current
+before-state and a valid candidate are required before advancing.
+
+**Implemented adapter:** `src/anka64/authority_persistence/file_backend.rs` provides
+`FileRecord` for host-local Linux/macOS storage. It is not an Anka64 disk driver
+or a network storage protocol. It implements the existing `DurableRecord` load
+and compare/commit interface, and validates the complete current state and legal
+successor before any replacement. The envelope binds the configured anchor and
+installation; the per-installation last request retains all caller/operation
+bindings from T2.
+
+The fixed 152-byte format contains an eight-byte magic, seventeen little-endian
+64-bit words, and a CRC64-ECMA checksum. Words include version, namespace, state,
+a canonical optional last-request marker and every request field. Exact length,
+version, namespace, marker, operation, revision relationship and field constraints
+are checked. A read takes at most 153 bytes to detect an unwanted tail; no disk
+length controls an unbounded allocation or traversal. CRC is accidental-corruption
+detection, not authentication or protection against deliberate rewriting. This
+is a versioned host reference format, not a selected public network ABI.
+
+`create` is an explicit trusted provisioning operation and refuses an existing
+directory. `open` never creates enrollment, replaces a missing record or resets
+counters. Creation uses a new private directory and mode-0600 files. A stable
+`writer.lock` file is held with an exclusive, nonblocking advisory `flock` for
+the lifetime of the adapter. That lock inode is never replaced or removed;
+independent cooperating openers are refused until it closes, including process
+termination. Directory paths and host access are trusted administrative inputs;
+the adapter is not safe against a malicious host or noncooperating writers.
+
+For a commit, write one bounded `pending` record, flush it, rename it over
+`record` within the same directory, then complete directory and file durability
+barriers. Linux uses `sync_all`; macOS additionally requests `F_FULLFSYNC` and
+fails rather than silently accepting weaker flush semantics. Any error once
+rename has been attempted returns `CommitUncertain` and poisons the handle.
+Neither load nor another commit can proceed through that handle. Drop/reopen
+validates and synchronizes the visible head before the coordinator can recover
+an exact retry. Orphan pending data is removed only after the head is validated
+and settled; it is never promoted over an invalid head.
+
+Steady state retains one 152-byte head and an empty lock file; a replacement
+adds at most one 152-byte temporary payload. Filesystem block/metadata overhead
+is additional and is not an Anka64 quota charge. No unbounded transaction log,
+blob repository or garbage collector is introduced. Failed staging remains
+bounded and is cleaned on a later validated open/commit. Previously published
+artifacts are not stored or deleted by this scalar-reference record adapter.
+
+**Host assumptions and references.** The proofs assume the documented effects
+of same-directory atomic rename, cooperating advisory locking and successful
+flush barriers on a local filesystem/device. They do not prove a filesystem,
+physical power-loss behavior, media integrity or snapshot anti-rollback. NFS/SMB
+and remote mounts are outside this adapter's supported model. A storage error
+never permits first-enrollment fallback. The bootstrap freshness source, current
+credential verification and serialization against authority-policy changes remain
+T2/T3 integration obligations; the disk adapter itself grants no authority.
+
+Sources consulted for the host boundary:
+
+- [Linux fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html): file flush alone does not persist its directory entry; a directory barrier is separate.
+- [Apple flock(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/flock.2.html): exclusive nonblocking advisory locking and its cooperating-writer limitation.
+- [Apple fsync(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fsync.2.html) and [fcntl(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fcntl.2.html): distinction between fsync and the device-flush request F_FULLFSYNC.
+- [Apple Darwin fcntl.h](https://github.com/apple/darwin-xnu/blob/main/bsd/sys/fcntl.h): the F_FULLFSYNC command value used by the macOS host adapter.
+
+**Focused verification to run:** the Rust suite now has 29 test entries: the
+13 accepted core tests plus 16 backend entries (including a subprocess helper).
+New checks cover fixed encoding/CRC, every single-bit corruption, malformed
+records, namespace substitution, stale compare/commit, bounded storage, orphan
+handling, missing/corrupt/symlink heads, exclusive writers, and reopening at each
+write/rename/flush boundary. Subprocess tests exit without destructors at selected
+cut points and verify OS lock release and recovery. These are process-exit/fault
+injection tests, not physical power-cut certification. No new Rust pass is claimed
+until the developer runs them; the authoring environment lacks Rust.
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" --only-t2
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" --only-backend
+bash scripts/check-anka110-persistence-reference.sh
+```
+
+**Next task:** formalize the bounded request/response codec and transport dispatch,
+then add a local loopback service using this adapter. Keep caller evidence outside
+untrusted request fields until a concrete trusted verifier is supplied. No S3 or
+external cloud account is required. Artifact-byte import, current endorsement,
+network authentication and ordinary Anka64 client integration remain open; this
+backend delivery closes none of those gates or Phase 10.10 as a whole.

@@ -1,0 +1,46 @@
+import "anka110_durable_record.kleis"
+example "hostile: ordered stage 0 to 1" { assert(¬(d110_advance(bvconst(0,8),bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(1,8))) }
+example "hostile: ordered stage 1 to 2" { assert(¬(d110_advance(bvconst(1,8),bvconst(2,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(2,8))) }
+example "hostile: ordered stage 2 to 3" { assert(¬(d110_advance(bvconst(2,8),bvconst(3,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(3,8))) }
+example "hostile: ordered stage 3 to 4" { assert(¬(d110_advance(bvconst(3,8),bvconst(4,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(4,8))) }
+example "hostile: failed stage 0 preserves boundary" { assert(¬(d110_advance(bvconst(0,8),bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)))=bvconst(0,8))) }
+example "hostile: failed stage 1 preserves boundary" { assert(¬(d110_advance(bvconst(1,8),bvconst(2,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)))=bvconst(1,8))) }
+example "hostile: failed stage 2 preserves boundary" { assert(¬(d110_advance(bvconst(2,8),bvconst(3,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)))=bvconst(2,8))) }
+example "hostile: failed stage 3 preserves boundary" { assert(¬(d110_advance(bvconst(3,8),bvconst(4,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)))=bvconst(3,8))) }
+example "hostile: crash stage 0 retains old" { assert(¬(d110_choice(bvconst(0,8),(bvconst(1,8)=bvconst(0,8))))) }
+example "hostile: partial stage 0 cannot become new" { assert(¬(¬d110_choice(bvconst(0,8),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: crash stage 1 retains old" { assert(¬(d110_choice(bvconst(1,8),(bvconst(1,8)=bvconst(0,8))))) }
+example "hostile: partial stage 1 cannot become new" { assert(¬(¬d110_choice(bvconst(1,8),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: crash stage 2 retains old" { assert(¬(d110_choice(bvconst(2,8),(bvconst(1,8)=bvconst(0,8))))) }
+example "hostile: partial stage 2 cannot become new" { assert(¬(¬d110_choice(bvconst(2,8),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: uncertain rename may recover old" { assert(¬(d110_choice(bvconst(3,8),(bvconst(1,8)=bvconst(0,8))))) }
+example "hostile: uncertain rename may recover new" { assert(¬(d110_choice(bvconst(3,8),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: durable success recovers new" { assert(¬(d110_choice(bvconst(4,8),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: acknowledged commit cannot recover old" { assert(¬(¬d110_choice(bvconst(4,8),(bvconst(1,8)=bvconst(0,8))))) }
+example "hostile: bad phase rejected" { assert(¬(¬d110_choice(bvconst(5,8),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: no early success stage 0" { assert(¬(¬d110_ack(bvconst(0,8),(bvconst(1,8)=bvconst(0,8))))) }
+example "hostile: no early success stage 1" { assert(¬(¬d110_ack(bvconst(1,8),(bvconst(1,8)=bvconst(0,8))))) }
+example "hostile: no early success stage 2" { assert(¬(¬d110_ack(bvconst(2,8),(bvconst(1,8)=bvconst(0,8))))) }
+example "hostile: no early success stage 3" { assert(¬(¬d110_ack(bvconst(3,8),(bvconst(1,8)=bvconst(0,8))))) }
+example "hostile: barriers allow success" { assert(¬(d110_ack(bvconst(4,8),(bvconst(1,8)=bvconst(0,8))))) }
+example "hostile: poison forbids even later success" { assert(¬(¬d110_ack(bvconst(4,8),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: rename error poisons" { assert(¬(d110_poison((bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: pre-rename denial is not committed" { assert(¬(¬d110_poison((bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: poison cannot clear by retry" { assert(¬(d110_poison((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(0,8))))) }
+example "hostile: valid settled head loads" { assert(¬(d110_load((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: load requires exclusive lock" { assert(¬(¬d110_load((bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: load requires record exists" { assert(¬(¬d110_load((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: load requires exact length" { assert(¬(¬d110_load((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: load requires version" { assert(¬(¬d110_load((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: load requires namespace" { assert(¬(¬d110_load((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: load requires checksum" { assert(¬(¬d110_load((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: load requires canonical fields" { assert(¬(¬d110_load((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: load requires recovery barrier" { assert(¬(¬d110_load((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8))))) }
+example "hostile: commit requires lock" { assert(¬(d110_advance(bvconst(0,8),bvconst(1,8),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(0,8))) }
+example "hostile: commit requires current before state" { assert(¬(d110_advance(bvconst(0,8),bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(0,8))) }
+example "hostile: commit requires valid candidate" { assert(¬(d110_advance(bvconst(0,8),bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(0,8))) }
+example "hostile: cannot skip file barrier" { assert(¬(d110_advance(bvconst(1,8),bvconst(3,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(1,8))) }
+example "hostile: cannot skip rename" { assert(¬(d110_advance(bvconst(2,8),bvconst(4,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(2,8))) }
+example "hostile: corrupt head cannot justify orphan promotion" { assert(¬(¬d110_orphan_cleanup((bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: unsynced head cannot justify orphan cleanup" { assert(¬(¬d110_orphan_cleanup((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8))))) }
+example "hostile: settled head permits bounded orphan cleanup" { assert(¬(d110_orphan_cleanup((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8))))) }

@@ -74,3 +74,6 @@ pub mod pointer_frames;
 pub mod compiler_adapter;
 
 pub mod rebuild;
+
+// Phase 10.10 reference core; not yet wired into Kernel admission or boot.
+pub(crate) mod authority_persistence;

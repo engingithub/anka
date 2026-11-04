@@ -1172,8 +1172,15 @@ The strongest realization is native hardware in which every CPU, DMA, or acceler
 
 ### Envisioned trust anchor
 
-Anka64 is envisioned to have a single trust anchor, with OIDC currently being
-considered as its basis.
+An installation is intended to recognize one explicitly configured trust anchor.
+That anchor defines the person identifiers Anka64 accepts; recognition alone does
+not grant administration, execution or access to a service. Installation,
+workload and execution-instance identity must be bound to scoped authority.
+
+[Phase 10.9](#phase-109-authority) defines the next architectural work;
+[DN-72](DESIGN_NOTES.md#dn-72) records the decisions, open assumptions and formal
+sequence. No identity protocol, credential encoding or hardware identity scheme
+is selected. Earlier consideration of OIDC is not an architectural requirement.
 
 **Hardware direction deferred (2026-10-17).** Native FPGA/hardware realization
 is a future research direction, not current implementation work or a prerequisite
@@ -1677,29 +1684,31 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 
 # 18. Current Implementation Facts
 
-Current implementation evidence: **2026-10-27**; post-malloc review delivered
-**2026-10-25**. R1 local-frame initialization is developer-accepted: its Kleis
-gate, focused Rust tests, shared CC2 integration and full suite pass (DN-71).
-Historical sizes/counts describe their earlier checkpoints; A3/A4 supersede
-their pending integration language. Focused results remain separate runs.
+Status reconciled against the supplied archive and developer acceptance evidence
+on 2026-11-04: **Phase 10.8 is closed and merged to main. Phase 10.9 T1 and the initial T2 model have passing local formal gates; the Phase 10.10 Rust reference core has 13 passing developer tests; a local durable adapter is delivered with new Rust tests pending. Production integration remains pending.**
+The [DN-71 status table](DESIGN_NOTES.md#dn71-status) and
+[final evidence record](DESIGN_NOTES.md#phase-108-final-evidence) supersede older
+intermediate counts and pending labels. The 10.8 runtime/formal gates were not rerun; their acceptance applies to the
+recorded tested revision. The 10.9 T1/T2 formal results are recorded separately
+in DN-72.
 
 | Property | Status |
 |----------|--------|
 | ISA | Single-source instruction descriptions, including byte and protected-pointer operations; see `src/anka64/desc.rs` |
 | Self-hosted compiler | Exact CC2_1 == CC2_2 fixed point; CC_B == CC_C remains the bootstrap foundation |
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
-| Current CC2 witness | Latest developer rerun, recorded 2026-10-27: CC2_0 = 164840 bytes; exact CC2_1 = CC2_2 = 186920 bytes; entry 184232 |
-| CC2 source | `userspace/system/compiler/ankacc2_stage3.c` |
-| Regression evidence | Latest developer full suite: 1361 passed / 0 failed / 0 ignored in 2446.84s. Separate focused runs: 16 R1 tests passed in 0.02s; shared CC2 integration passed in 1008.62s with 1360 filtered. Earlier failing runs remain historical evidence (DN-71) |
-| Protected modules | Current rerun: two C units, four frames, 3520 code + 2048 metadata bytes; receipt-bound exit 0, output [65,0,255,66] and hostile lifetime/bounds rejection. A3 also accepts cross-module heap return/free (DN-71) |
-| Module formal gate | 217 positive / 168 explicitly disproved hostile witnesses |
-| Shared allocation and compiler resources | DN-71's six pairs through A2.2 are developer-accepted across focused runs; their combined local checkpoint was 1051 positive / 737 hostile. A2.1: 120 focused tests accepted 2026-10-22. A2.2 Kleis 215 / 180 and Rust accepted 2026-10-23: all 1134 library tests passed single-threaded in 1149.73s, including 21 new A2.2 witnesses. A3 heap publication and C malloc/free now have developer runtime/CC2 acceptance; A4 review is delivered. R1 is developer-accepted. C1 resource/ABI-2 gate is developer-accepted: 221 positive (26 quantified) / 195 hostile. C2.1/C2.2 checkpoints are accepted (18 planner / 11 bridge tests). C2.3 loader and C2.4 protected ABI-2 guest producer are developer-accepted: current resource gates 293 / 259; full Rust suite 1406 passed in 589.71s on 2026-10-31. The ordinary public adapter still uses ABI 1. C2.5 production artifact capture/publication is formal-first work; C2 output-growth closure remains open (DN-71). |
-| Allocation A2.3 | Formal gate developer-accepted 2026-10-24: 192 positive (30 quantified laws) / 162 hostile. A2.3.1 accepted: 17 new tests / 144 focused; A2.3.2: 18 / 162; A2.3.3: 22 / 184; A2.3.4: 17 / 201; A2.3.5a: 21 / 222; A2.3.5b: 21 / 243; A2.3.5c: 22 / 265, recorded 2026-10-25 (each focused run includes its new tests). A2.3.5 worker gate is accepted: 197 positive (23 quantified) / 172 hostile. A2.3.6 queued-job recovery is developer-accepted: 21 new / 286 focused tests (0.01s / 0.16s), recorded 2026-10-25. A2.3.7 authority retirement is developer-accepted: 21 new / 307 focused tests (0.02s / 0.19s), including the new tests. Complete trusted cleanup/reuse is developer-accepted: Kleis 92 positive / 79 hostile, 19 new tests in 0.01s and 326 focused tests in 0.19s (including those 19). A3 implements C malloc/free, owned results, production publication and automatic lifecycle cleanup. Its new Kleis gate passed locally at 52 / 43. The corrected integration passes in 1026.53s, including C malloc/free, hostile cases, linked modules and independent A/B/C reuse. Actual concurrent compiler jobs remain C5 work. |
+| Current CC2 witness | Accepted lineage witness: CC2_0 = 164840 bytes; exact CC2_1 = CC2_2 = 186920 bytes; entry 184232. Protected producer images are separate artifacts. |
+| CC2 source | `userspace/system/compiler/ankacc2_stage3.c` and protected producer `ankacc2_abi2.c` |
+| Regression evidence | Final 10.8 acceptance: 1628 ordinary library tests passed, 15 ignored guest witnesses explicitly passed, complete Cargo suite passed; formal sweep: 48 pairs, 4467 positive witnesses and 3664 explicit hostile disproofs. See DN-71 for scope and input digest. |
+| Protected modules | Typed separate compilation, exact interface evidence, guest linking, ordered dependency receipts and separately authorized protected execution accepted, including heap-list and stale/bounds denial witnesses. |
+| Module formal gate | Included in the final 48-pair sweep; per-theory counts and development history are retained in DN-65 through DN-71. |
+| Shared allocation and compiler resources | Shared protected allocation/free, C malloc/free, post-malloc review and R1 local initialization accepted. C1–C5 resource growth, charged preprocessing/link/run storage, retained publication and concurrent compiler/rebuild jobs accepted within configured profiles. |
+| Allocation A2.3 | Fixed charged metadata, private Fabric attachment, full backing initialization, closure, exact work accounting, worker recovery, retirement, scrub and safe reuse. Process-private heap DMA/export remain outside this profile. |
 | Residual-data isolation | New private lifetimes must receive initialized bytes and no inherited pointer kinds before authority publication. A2.3.2 private heap initialization is developer-accepted; A3 guest heap publication and zeroed reuse are accepted. R1's formal pair and full-frame byte/tag initialization runtime are developer-accepted, including fresh/reused C locals and typed nulls (DN-71). |
 | Protected application ABI | Metadata-bearing pointers, checked arithmetic, local-frame lifetimes, protected calls/spills and event-context save/restore |
-| Typed I/O | Exact protected-buffer output and process-owned immutable input |
+| Typed I/O | Protected-buffer console I/O, process-owned input and incarnation-bound typed socket copy boundary. |
 | Toolchain artifacts | Guest preprocessing, AOM emission, static linking, separate admission/publication/execution authority and ordered dependency receipts |
-| Networking | Ethernet through HTTP implemented; Phase 10's rebuild of the real socket/HTTP chain remains open |
+| Networking | Bounded rebuilt packet/TCP/socket/HTTP path serves `/alive` through the virtual NIC. General TCP, host-network deployment and external requester authentication are not established by 10.8. |
 | Multicore | Existing emulator SC + XCHG support; A3 malloc acceptance covers serialized guest interleavings, not a native SMP allocation refinement |
 | DMA | Protected fabric agent, narrow request-local delegation |
 | W⊕X | Implemented (Active ⇒ ¬X, Sealed ⇒ ¬W) |
@@ -1710,7 +1719,7 @@ their pending integration language. Focused results remain separate runs.
 | SYS\_BLOCK\_READ | Suspended syscall continuation via EventFrame + IoWait |
 | I-format immediates | fits\_imm18() — assembler and compiler share single range predicate |
 | Capability table | Per-process 16-slot, generation-qualified handles, AuthorityId-backed |
-| Capability transfer | SYS\_SEND\_CAP: atomic preflight-then-commit, Memory-only, DelegationId provenance |
+| Capability transfer | SYS_SEND_CAP: atomic preflight-then-commit, kind-sensitive memory/device authority and DelegationId provenance; transfer lifetime differs from dependent delegation or a loan. |
 | Device authority | Kind-sensitive cap slots (Memory/Device sum type), DeviceRights, per-domain device-authority collection |
 | SYS\_DEV\_SUBMIT | Exact-handle device syscall: seven-gate preflight, exact-AuthorityId DMA delegation, DelegationId propagation |
 | IPC | SYS\_SEND (legacy PID), SYS\_SEND\_KEY (ProcessKey), SYS\_RECV (extended: tag + cap + sender) |
@@ -1720,7 +1729,7 @@ their pending integration language. Focused results remain separate runs.
 | SYS_WRITE | Buffer-based, capability-checked, output-atomic |
 | Literal authority | Immutable R-only, two-ended image allocator |
 | Bootstrap development model | CC_A frozen; new features via canonical source + CC_B |
-| Boot contract | `kernel.boot(BootInfo)` — host owns machine, Anka owns process |
+| Boot contract | `kernel.boot(BootInfo)` establishes runtime root authority from trusted boot state. Persistent enrollment and reboot authority validation are Phase 10.9 work. |
 | Shared process primitive | `prepare_process()` used by boot, SYS_EXEC, and SYS_SPAWN |
 | Process lifecycle | SYS_SPAWN (R1-R8) / SYS_WAIT with capability-shaped authority |
 | Initial environment | SpawnGrant (authority) ≠ SpawnMap (placement) ≠ SpawnLayout (process structure) |
@@ -3372,15 +3381,13 @@ processes terminate through their ordinary protocols.
 
 ### Stage 43 (in progress): Second-Generation Self-Hosted Anka C Toolchain (Phase 10)
 
-Phase 9.4g closes the original CPU-to-HTTP vertical slice.  That closure also
-provides the demanding client for the next toolchain phase.  CC_B proved that a
-small self-hosted compiler is sufficient to construct real Anka software, but
-real userspace has now exposed compiler constraints that distort the software
-above it: eight-character identifiers, restricted integer literals, one
-translation unit, no source/header composition, and no linker-level module
-composition.  The network stack sometimes duplicates lower-layer parsing not
-because the architecture requires duplication, but because the compiler cannot
-yet express the desired module structure.
+Phase 9.4g closed the original CPU-to-HTTP vertical slice and supplied the client
+for Phase 10. The historical CC_B limitations—eight-character identifiers,
+restricted literals and absent source/module composition—motivated AnkaCC2.
+Phases 10.0–10.8 have now delivered the second-generation toolchain and protected
+service rebuild. The remaining Phase 10 work includes the 10.9 authority/supply-chain
+audit and proposed 10.10 network persistence refinement; the lineage and bootstrap
+rationale below remain applicable.
 
 Phase 10 therefore builds **AnkaCC2**, a second-generation self-hosted C
 toolchain, using the existing authoritative CC_B as its bootstrap compiler.
@@ -3564,1017 +3571,179 @@ toolchains.
 
 #### Phase 10 decomposition
 
-The planned work is intentionally staged so each new abstraction gets a real
-client and an adversarial gate before the next one depends on it:
-
-```text
-10.0  AC2 language + bootstrap + object/link authority contracts — CLOSED
-      - 55/55 positive Kleis witnesses, 0/26 hostile witnesses accepted
-      - no new axioms
-10.1  AnkaCC2 lexer/parser core under CC_B — CLOSED
-      - C-style ASCII identifiers, 1..63 bytes
-      - decimal/0x integer magnitude through full u64
-      - stable diagnostics and deliberately narrow direct grammar
-      - direct executable output retained; no AOM yet
-      - 932/932 Rust tests, including 9/9 Phase 10.1 runtime witnesses
-      - 15/15 positive Kleis witnesses, 0/8 hostile witnesses accepted
-10.2  AC2 declarations/types/ABI — CLOSED
-      - compatible prototypes + exact signature matching
-      - int/char/void, pointers, fixed arrays, structs, typedefs, enums
-      - R0..R3 scalar/pointer argument ABI; R0 scalar/pointer return
-      - array-parameter decay, stack-resident local objects, sizeof(type[/extent])
-      - mutable file-scope data rejected while the backend is code-only
-      - 23/23 positive Kleis witnesses, 0/14 hostile witnesses accepted
-10.3  AOM relocatable object emission + separate translation units — CLOSED
-      - AOM v1 byte format frozen; code + optional read-only data + typed symbols/relocations
-      - separate translation units: exports, required imports, local forward-call patching
-      - compile-only object emission remains distinct from linking and execution authority
-      - 955/955 Rust tests, including 11/11 Phase 10.3 runtime witnesses
-      - 22/22 positive Kleis witnesses, 0/15 hostile witnesses accepted
-10.4  ankald static linker + permission-aware linked artifacts — CLOSED
-      - userspace ankald built by canonical CC_B and executed as an ordinary Anka process
-      - ordered AOM v1 inputs, exact typed import/export resolution, CALL_PC20 relocation
-      - deterministic code/RO-data image with transactional publication
-      - successful linking creates no execution or sealing authority
-      - 967/967 Rust tests
-      - 37/37 positive linker Kleis witnesses, 0/28 hostile witnesses accepted
-      - 14/14 positive linker-process ABI witnesses, 0/13 hostile witnesses accepted
-10.5  source bundles + headers/includes + minimum earned preprocessing — COMPLETE
-      - explicit immutable source bundles with unique canonical logical names
-      - exact root selection; names remain metadata and create no authority
-      - include-only first slice; no ambient host/filesystem lookup
-      - deterministic bounded include expansion; cycle/depth failure
-      - preprocessing failure emits/publishes nothing
-      - 20/20 positive source-bundle witnesses, 0/16 hostile witnesses accepted
-      - 21/21 positive include-preprocessing witnesses, 0/17 hostile witnesses accepted
-      - guest ankapp include expansion and bundle-to-AOM-to-link path implemented
-      - merged in PR #9; 980/980 Rust tests at that checkpoint
-10.6  AnkaCC2 self-host bootstrap and fixed-point closure — COMPLETE
-10.7  verified CC2 application rebuild and protected local pointer ABI — COMPLETE
-      - byte/word access, checked pointer arithmetic, typed calls and spills
-      - local-frame registration/retirement and protected event save/restore
-      - exact self-hosted CC2 lineage and compiler-backed application witnesses
-      - 1037/1037 Rust tests; 744 positive / 688 hostile Kleis checks
-10.8  typed syscall I/O and broader modular toolchain/userspace rebuild
-      - synchronous protected console output COMPLETE: ABI, runtime/lowering, DN-60
-      - exact CC2 fixed point and rebuilt output probe pass; 1043/1043 Rust tests
-      - 113 positive / 86 hostile Kleis checks; 10.7 prerequisites remain green
-      - typed trap ABI, exact buffer READ authority, lease drain, atomic output
-      - process-owned immutable input COMPLETE: ABI, runtime/lowering, DN-61
-      - exact CC2 input/echo probe passes; input checkpoint 1057/1057
-      - input gates: 116 positive / 88 explicitly disproved hostile witnesses
-      - read_bytes uses protected local buffers; async/device/file I/O remain open
-      - bounded AOM artifact channel + atomic receipt COMPLETE: DN-62/DN-64
-      - 124 positive / 99 hostile formal checks; full CC2 acceptance passed
-      - exact lineage, separate publication authority, fresh READ-only AOM publication
-      - concrete CC2 adapter ABI COMPLETE: DN-63/DN-64; 170 positive / 137 hostile checks
-      - 7 new focused Rust tests pass; protected rebuild now retains the AOM receipt
-      - pre-module all-green checkpoint: 1064/1064 in 1027.13s
-      - protected separate-module composition: Kleis specification in DN-65
-      - module admission, dense frame indices, guest manifest merge and ordered receipts
-      - formal gate: 217 positive / 168 explicitly disproved hostile witnesses
-      - piece 1: CC2 definition-only frame indices + relocatable module validator (DN-66)
-      - piece 1 CC2 acceptance passed on the developer machine: 1 test, 239.48s
-      - piece 2: guest manifest merge, PFRAME rebasing and exact output checks (DN-67)
-      - piece 2 passed locally: 7 linker tests (19.99s), CC2 acceptance (246.54s)
-      - piece 2/3 witness: 3 frames, 688 code + 512 metadata bytes, entry 0
-      - piece 3: module admission + ordered dependency/linked receipts (DN-68)
-      - piece 3 passed locally: 22 tests (23.16s), CC2 receipt acceptance (248.79s)
-      - piece 4 COMPLETE: receipt-bound spawn, cross-unit calls and typed output (DN-69)
-      - 5 focused execution tests pass (32.80s); full run: 1093 passed, 1 failed (1134.87s)
-      - root-RET probe error corrected; fixed-point acceptance rerun PASSED (249.49s)
-      - module checkpoint: all 1094 library tests had passing evidence across those runs; full A2.2 run below supersedes that regression checkpoint
-      - 2 modules / 4 frames / 3336 code + 2048 metadata bytes; exact output and exit 0
-      - escaped-local and one-past cases both reject with ProtectionFault and no output
-      - A1 allocation + concrete C/runtime ABI Kleis pairs accepted by developer (DN-71)
-      - lifecycle: 171 positive / 125 hostile; ABI: 116 positive / 81 hostile
-      - residual-data isolation: 113 positive / 72 hostile; local-frame initialization gap recorded
-      - reclamation: 179 positive / 108 hostile developer-accepted; all four A1 pairs total 579 / 386
-      - Undertaker: 257 positive / 171 hostile developer-accepted; all five allocation pairs accepted at 836 / 557
-      - A2.1 developer-accepted: bounded common registry/accounts/cleanup reservations; 120 tests pass, including 19 new witnesses
-      - acceptance recorded 2026-10-22: single-threaded, 0 failures, 993 filtered out, 0.03s
-      - A2.2 Kleis developer acceptance recorded 2026-10-23: 215 positive (34 quantified) / 180 hostile; all six pairs 1051 / 737
-      - A2.2 Rust developer-accepted, recorded 2026-10-23: all 1134 library tests pass single-threaded in 1149.73s, 0 failures/ignored/filtered
-      - physical/reusable-virtual reservation and cancellation; 21 new witnesses; earlier local focused run: 160 passed
-      - A2.3 Fabric/shadow/initialization refinement: developer-accepted 192 positive (30 quantified) / 162 hostile, 2026-10-24
-      - A2.3.1 fixed Fabric/shadow storage/private attachment accepted 2026-10-24: 17 new tests pass (0.01s), 144-test focused regression passes (0.09s), including those 17
-      - A2.3.2 private backing byte/tag initialization accepted: 18 new tests pass (0.02s), 162-test focused regression passes (0.10s), including those 18
-      - A2.3.3 conditional protected heap cells accepted: 22 new tests pass (0.01s), 184-test focused regression passes (0.13s), including those 22; positive fixtures are test-only
-      - A2.3.4 attached-failure closure accepted: 17 new tests pass (0.02s), 201-test focused regression passes (0.13s), including those 17
-      - A2.3.5 concrete worker/terminal-work Kleis refinement developer-accepted: 197 positive (23 quantified laws) / 172 hostile
-      - A2.3.5a worker roles and per-job leases accepted: 21 new tests pass (0.02s), 222-test focused regression passes (0.13s), including those 21
-      - A2.3.5b bounded CPU backend registration/pinning developer-accepted: 21 new / 243 focused tests (0.03s / 0.16s; includes new tests)
-      - A2.3.5c CPU effects/terminal accounting/current census developer-accepted 2026-10-25: 22 new / 265 focused tests (0.02s / 0.17s; includes new tests)
-      - A2.3.6 queued-job worker recovery developer-accepted 2026-10-25: 21 new / 286 focused tests (0.01s / 0.16s; includes new tests)
-      - A2.3.7 authority retirement developer-accepted: 21 new / 307 focused tests (0.02s / 0.19s; includes new tests)
-      - Complete trusted cleanup/reuse developer-accepted: Kleis 92 / 79; 19 new / 326 focused Rust tests passed (0.01s / 0.19s; includes new tests)
-      - A3 C malloc/free accepted 2026-10-25: local formal gate 52 / 43; developer unit tests, exact CC2 fixed point and C/module/A-B-C integration pass
-      - required A4 whole-stack review delivered in DN-71; track its findings
-      - R1 accepted: Kleis 151 / 118; 16 focused Rust tests, shared CC2 integration and full 1361-test suite pass (DN-71)
-      - C1 shared compiler resource/ABI-2 gate developer-accepted: 221 positive / 195 hostile
-      - C2.1/C2.2 checkpoints accepted; C2.3 five-region ABI-2 loader locally checked; guest CC2 migration, successful publication and C2 output-growth acceptance remain open
-      - then C3-C5 source/workspace/link growth and concurrent compiler closure
-      - compiler/toolchain modularization, headers, modules, and libraries
-      - persistent tool/source receipts and rebuilt socket/HTTP services
-10.9  supply-chain closure, hostile audit, and CPU-to-HTTP rebuild gate
-```
-
-The completed 10.7 scope is fixed by DESIGN_NOTES.md DN-59. The former roadmap
-entry assigning compiler/toolchain modularization to 10.7 is superseded; that work
-is scheduled in 10.8. Typed console output is the first completed 10.8 slice,
-validated by the exact CC2 application witness and 1043 passing Rust/runtime tests
-on 2026-10-15. Broader I/O and service rebuilds remain future milestones, not
-outstanding requirements for the completed protected local application checkpoint. The final Phase 10 acceptance conditions remain unchanged: rebuilding
-the exact socket/HTTP artifacts and producing the alive response are still
-required before Phase 10 as a whole closes.
-
-The next slice is [DN-71: shared allocation and compiler resources](DESIGN_NOTES.md#dn-71),
-with the A2.2 formal refinement added on 2026-10-22. The developer has accepted all four A1 Kleis pairs for
-protected allocation/free, concurrent-client admission, runtime/C ABI, residual-data
-initialization and storage reclamation: 579 positive / 386 hostile witnesses. The
-new Undertaker asynchronous-reclamation pair was developer-accepted on
-2026-10-20 at 257 positive / 171 explicitly disproved hostile assertions, using
-`scripts/check-anka108-gates.py --only-undertaker`, with the established Kleis
-binary/root options. All five pairs now have developer acceptance across focused
-runs, and one local run passes all five at 836 / 557. A2.1 now supplies the bounded
-registry, account reservations and reserved cleanup directory with local runtime
-evidence below and developer acceptance recorded on 2026-10-22. A3 has now
-delivered and validated the common service's C interface; A4 has reviewed
-CPU/events, Fabric/placement, processes, IPC, DMA/controllers, tools/artifacts
-and network/other services. DN-71 records evidence, gaps and formal gates.
-R1 and C1 are accepted. Continue C2-C5; hardware and future service ownership
-remain separately scoped.
-
-A2.1 integrates local and heap identities in one preallocated stable directory,
-with nonwrapping generations and fixed scope, owner-account and cleanup tables.
-Local backing bindings moved into the directory, and frame admission preflights
-all entries instead of cloning the whole registry for rollback. Owner accounts
-bind process incarnation, execution context and domain plus a nonreused account
-serial. A single mutable registry serializes rounded backing-quota, identity and
-cleanup-credit reservation. Fixed metadata is charged from actual Rust element
-sizes and retained capacities; cancellation refunds only the staged backing
-quota, retaining all infrastructure charges.
-
-Owner closure fences admission and queues the complete exact-owner census
-without allocating new records or IDs, even at full capacity. Pending records
-retain their account and quota. Heap close is independent of local LIFO order;
-its live-state tests use a test-only publication fixture. Production heap
-publication and access remain disabled. The A2.1 checkpoint was metadata/quota
-infrastructure; A2.2 below adds physical/virtual extent custody. Pointer-shadow
-capacity, initialization, worker execution/recovery, typed results and process
-lifecycle integration remain A2 work. The existing Fabric constructor remains
-local-only. A2.2 composes reservations with the existing physical manager and
-reusable virtual arenas, including bounded index/scratch capacity and exact
-cancellation.
-
-Local validation on 2026-10-20 passes `cargo check --locked --lib`, all 19 new
-A2.1 witnesses, and 120 focused registry/Fabric/pointer/event/typed-I/O tests.
-The developer subsequently confirmed the single-threaded focused run: 120 passed,
-0 failed, 993 filtered out, 0.03s. Acceptance was recorded on 2026-10-22; the
-filtered tests are outside that run. A2.1 is developer-accepted; A2.2 evidence
-follows below.
-The metadata witness exercises 2,048 two-client cancellation/reuse cycles with
-constant capacities; it does not exercise physical backing reclamation. DN-71
-records exact commands, measured metadata sizes and the remaining boundaries.
-No Kleis theory changed during A2.1, and no long CC2/full regression run is
-claimed for that handoff.
-
-Before A2.2 Rust work, `anka108_allocation_placement.kleis` now supplies the
-bounded placement/reservation refinement. Local validation on 2026-10-22 passes
-215 positive witnesses, including 34 quantified laws, and 180/180 explicitly
-disproved hostile assertions. The original five pairs remain unchanged; all six
-pass together locally at 1051 positive / 737 hostile. The developer confirmed
-the new pair at 215 / 180, with acceptance recorded 2026-10-23; all six pairs
-now have developer acceptance across focused runs. Run
-`scripts/check-anka108-gates.py --only-a22` with the established Kleis binary/root
-options; `--only-allocation` now includes the new pair.
-
-For each arena with at most K simultaneous held claims, retain K+2 free-index
-entries: the canonical K+1 bound plus one precharged insertion slot. This permits
-sorted insertion and in-place coalescing without the current physical manager's
-temporary merge vector. Charge actual retained capacities, additional claim
-bindings, owner-arena descriptors and scratch exactly once. Read-only physical,
-virtual and metadata plans share one current revision; all admission checks
-precede a nonfallible commit across both extents, registry, cleanup credit,
-accounting and identity counters. An explicit installation postcondition binds
-all four records to the same newly issued owner/slot/generation/job identity.
-
-Rejected admission preserves all selected state. Later cancellation binds the
-exact current keys and extents, preflights both returns, and refunds only once,
-without rewinding identity history or refunding fixed storage. Direct cancellation
-is restricted to never-attached, unpublished reservations; owner closure and
-terminal revision exhaustion do not strand those reservations. These gates
-include bounded two-client traces, array-index laws and hostile cross-record
-substitution, not a proof of arbitrary Rust loops, actual byte initialization,
-hardware drainage or C malloc/free.
-
-A2.2 Rust now supplies those bounded profiles through
-`ScopedPointers::with_heap_placement`. All free/claim buffers and per-owner
-virtual managers are preallocated and charged. One exclusive registry borrow
-contains both read-only placement plans and the complete nonfallible commit;
-private cancellation preflights both returns before releasing either claim or
-refunding quota. Retained owner arenas rebind only when empty, using a fresh
-account serial. The trusted physical pool must be dedicated, and each owner
-uses the configured virtual window in its own address space. Loader/Fabric
-partition integration remains necessary before publication.
-
-On x86-64 Rust 1.90.0, the registry value is 312 bytes, each common slot is 96,
-each virtual manager descriptor is 120, and the fixed operation-plan allowance
-is 208. The four-slot/two-owner witness with four physical and three per-owner
-virtual claims charges 2312 fixed bytes, including retained capacity. These are
-derived target measurements, not allocator-header, full stack or RSS costs.
-DN-71 records the exact charge categories and later budget obligations.
-
-Local validation on 2026-10-23 passes `cargo check --locked --lib` and **160
-focused tests** single-threaded, including **21 new A2.2 witnesses** and the
-previous registry/Fabric/pointer/event/typed-I/O and placement tests; 974 tests
-are filtered out. The new tests include all four adjacency cases, all 24 free
-orders for four claims, partial/exact take, fragmentation, late failure without
-mutation, stale keys, owner reuse, exhausted identities and 2,048 interleaved
-churn cycles. Independent partition/counter censuses and a test-only allocator
-counter check full recovery, stable capacities and zero host allocations during
-steady-state operations.
-
-Developer runtime acceptance is recorded on 2026-10-23: the full
-`cargo test --locked --lib -- --test-threads=1` run reports **1134 passed,
-0 failed, 0 ignored, 0 measured, 0 filtered out in 1149.73s**. Both the existing
-heap test file and the new nested placement test file are present in the
-accompanying source archive. This is developer-reported full-library evidence,
-separate from the earlier local focused run. A2.2 is accepted. The A2.2 acceptance
-correction itself changed no Rust or Kleis source. A2.3 below supplies the next formal
-refinement; heap pointer publication and C malloc/free remain gated on the
-complete lifecycle implementation.
-
-**A2.3 formal refinement, developer-accepted 2026-10-24.**
-`anka108_allocation_fabric.kleis` and its hostile pair specify bounded Fabric
-attachment, pointer shadow and initialization before heap publication. The
-initial software profile preallocates one composite heap Fabric row per common
-registry slot and a dense protected shadow table covering the dedicated heap
-pool, one entry per aligned 16-byte physical cell. Actual retained capacities,
-element sizes and scratch are charged once at construction. Shadow storage
-therefore scales with the configured pool, not just the number of stored
-pointers; it is a predictable bounded choice, not a claim of minimal overhead
-or a hardware tag layout. Logical payload quotas remain the A2.2 rounded
-reservation charges. Attachment/publication must not double-charge them.
-
-The dedicated physical pool must be excluded from all other placement and raw
-access paths; each process's virtual heap arena excludes its code/stack/maps.
-The planned heap path cannot depend on growing `BTreeMap`, grant-vector or
-temporary-byte-vector allocation during commit or pointer store. Authenticate
-the exact allocation owner/lifetime and object-generation-offset key before
-using a physical shadow index. A shared checked Fabric ObjectId issuer accepts
-zero, fails on exhaustion and never reuses an attached identity; attachment
-preserves the allocation epoch already consumed by A2.2.
-
-Private attachment publishes no authority. Bounded synchronous software steps
-zero the **entire rounded backing** and clear protected tags, retaining exact
-reservation and mutation-version bindings. Other trusted private writes reset
-initialization progress and invalidate old receipts. One row-stage transition
-then exposes the logical-only object/map/RW grant and typed result together,
-provided current owner, completed initialization, safe result delivery and the
-complete cleanup lifecycle are connected. Failed transitions preserve prior
-state. Any failure after attachment uses the pre-reserved Undertaker path and
-retains charges/custody until safe release; direct A2.2 cancellation is forever
-excluded by the sticky attachment marker. Closing rejects surviving aliases
-through current lifetime checks, including copies restored from event contexts.
-
-The developer confirmed the focused gate with **192 positive witnesses**, including
-**30 quantified laws**, and **162/162 explicitly disproved hostile witnesses**.
-The constructed attach/initialize/publish/close trace proves arbitrary old-byte
-and tag removal for its full backing, successful logical reads, inaccessible
-padding, and preservation of another owner's bytes/tags. Index bounds,
-non-aliasing shadow entries, failed-transition preservation, stale identities,
-wrong receipts and resource shortages are also checked. This is conditional
-model evidence: complete trusted scans, actual Rust integration, terminal work
-drainage and visibility remain obligations. It establishes no cache/timing,
-DMA, FPGA or unconditional cleanup-progress guarantee. The earlier six accepted
-allocation pairs were not rerun for the original formal handoff, which changed
-no Rust source and ran no long suite. A2.3.1 below supplies the subsequent
-runtime foundation. The local-frame payload-initialization gap also remains open.
-
-The seven allocation pairs now have developer acceptance across their focused
-runs, totaling **1243 positive / 899 hostile**; no new combined run is claimed.
-The accepted gate definitions are unchanged by the runtime piece below.
-
-**A2.3.1 runtime foundation, developer-accepted 2026-10-24.**
-`Fabric::with_private_heap` is a fresh optional machine profile. It composes
-A2.2 custody with fallibly allocated fixed composite rows and dense shadow,
-charging actual retained capacities and scratch once. `attach_private_heap`
-rechecks exact owner/reservation/cleanup identity, domain, revision, both manager
-claims, row capacity and actual legacy/pending-work conflicts before committing.
-The commit advances one revision and ObjectId, preserves quota and the reserved
-allocation epoch, and sets sticky attachment. It changes no bytes/tags and
-publishes no grant, mapping, initialized-prefix receipt or protected pointer.
-
-Private rows remain outside the legacy public object/placement maps. Dedicated
-physical-pool checks block legacy placement, translation, full transaction spans
-and bootstrap read/write/zero paths, including spans crossing a pool boundary.
-Rejected relocation preserves the old placement. Legacy and heap allocation
-share checked ObjectId issuance; a retained identity fence prevents the existing
-unpublished-staging rollback helper from rewinding across an attached heap.
-The new fallible legacy identity API is `try_alloc_object`; existing infallible
-callers still panic on identity exhaustion instead of wrapping. Attached owner
-closure retains extents/charges and queues existing cleanup records; no worker
-or early refund/reuse is introduced here.
-
-Library and test code pass `cargo check --locked --lib` and
-`cargo check --locked --tests`. **No Rust tests were executed by the agent**,
-as requested. Seventeen new `a231_` tests cover storage accounting, exact
-attachment, stale/foreign keys, duplicate admission, exhaustion/rollback, pool
-isolation, CPU/DMA pipeline conflicts, unchanged unrelated owners, shadow
-indexing and allocation-free admitted operations. The developer confirmed
-**17 passed in 0.01s** (1134 filtered out), followed by **144 passed in 0.09s**
-(1007 filtered out). The latter includes the 17 new tests; the counts are not
-additive. The last accepted full-library result remains A2.2's **1134 passed**.
-
-The profile has no OS/runner caller yet. Trusted process freshness, actual
-code/stack exclusion from each virtual heap window, exit/fault integration and
-controller drainage remain prerequisites before publication. Bounded heap-owned
-metadata does not bound the legacy machine inventory or prove timing/cache/DMA
-properties. `Fabric::new` remains the existing non-heap profile.
-
-**A2.3.2 private initialization, developer-accepted 2026-10-24.**
-The accepted `a23_chunk`/`a23_dirty` and `init108_*` contracts now have a bounded
-software implementation. An opaque `HeapInitialization` snapshot binds exact
-reservation, owner, object/generation, geometry, trusted prefix and version.
-Every operation rechecks the current registry, both placement claims, domain,
-revision, actual byte/shadow bounds and exclusion of legacy/pending work.
-
-Each nonzero 16-byte-aligned scrub step covers at most 4096 bytes of the next
-contiguous prefix. Bytes and dense-shadow tags clear together under one
-exclusive Fabric borrow; prefix, version and common revision update in the same
-nonfallible commit. Coverage includes all rounded padding. The only trusted
-private byte-write path clears overlapping tags and resets the entire prefix,
-invalidating older completion snapshots even when the new values are zero.
-Current completion validation never publishes a grant or protected pointer.
-
-The fixed budget includes initialization scratch value storage. Accepted/rejected
-operations grow no tables or chunk buffers and consume no additional payload
-quota or identity. Another client's unchanged snapshot can continue with the
-new common revision. Owner closure retains attached extents and charges; it
-still works at version/revision exhaustion. There is no attached release or
-Undertaker worker yet.
-
-`cargo check --locked --tests` passes. The agent executed no Rust tests;
-**18 new `a232_` tests were developer-confirmed passing in 0.02s** (1151
-filtered out), followed by **162 focused tests passing in 0.10s** (1007 filtered
-out), including those 18. They cover full padding/tag coverage, stale/substituted
-progress, trusted-write invalidation, failure preservation, independent-owner
-interleavings and pipeline/placement exclusion. No full 1169-test run was reported.
-No accepted Kleis theory or gate script changed. This does not close the
-local-frame initialization gap or establish hardware/DMA/cache guarantees.
-
-**A2.3.3 protected heap cells, developer-accepted 2026-10-24.**
-The accepted current-lifetime, cell, coherent transport and overlapping-write
-contracts now have bounded internal Fabric operations. Destination and stored
-source are authenticated against current owner/incarnation/context/domain,
-CPU agent, slot/generation, publication state, cleanup binding, both placement
-claims and exact Fabric geometry. Logical bounds exclude rounded padding.
-
-`store_heap_pointer_cell` transports a protected heap/local source or canonical
-null using a fixed 16-byte payload and the preallocated dense shadow.
-`load_heap_pointer_cell` checks both payload words against the shadow and
-reauthenticates the source before returning it. `write_heap_bytes` clears all
-overlapping tags, including for unchanged bytes. Raw words cannot create kind;
-one-past can be transported but not dereferenced. Heap closure or local-frame
-retirement invalidates surviving stored and cached aliases without erasing them.
-
-No data operation grows a map/log or consumes a new identity, quota charge or
-ledger revision. Construction charges additional access-plan/transport scratch.
-Failed preflight preserves prior bytes/tags; full shadow or exhausted admission
-revision does not prevent valid existing-cell operations. CPU-only access and
-legacy/raw/DMA/atomic pool exclusion remain in effect.
-
-**Production publication remains disabled.** Positive tests initialize real
-backing, then synthesize a published live checkpoint in `#[cfg(test)]` helpers.
-Those helpers are absent from production builds. The accepted tests validate a
-conditional component; they do not establish publication, C malloc/free or concurrent-client
-acceptance. CPU instruction routing, heap arithmetic/spills, process/context
-handoff, typed syscall results and cleanup remain future integration work.
-
-`cargo check --locked --tests` passes; the agent executed no Rust tests.
-**22 new `a233_` tests were developer-confirmed passing in 0.01s** (1169
-filtered out), followed by **184 focused tests passing in 0.13s** (1007 filtered
-out), including those 22. No full 1191-test run was reported. No accepted Kleis
-file or gate script changed. A2.3.4 below adds attached-failure closure;
-Undertaker/process integration follows before production publication. The
-post-malloc review was deferred at that handoff; A3 now satisfies its entry
-condition and DN-71 A4 records the completed review.
-
-**A2.3.4 attached-failure closure, developer-accepted 2026-10-24.**
-The internal `close_attached_heap` operation binds one opaque reservation,
-retained owner incarnation/context/domain and exact Fabric ObjectId. It rechecks
-the common registry, cleanup identity, accounting, both placement claims and
-the fixed Fabric row before any mutation. The commit sets the common stage to
-`Closing`, queues the existing reserved job and advances the shared revision
-with saturation. Exact repeats return `AlreadyClosing` without a second
-transition. Changed bindings still fail on repeats.
-
-Closure needs no live CPU/domain, new identity, queue capacity or completed
-initialization. It allocates no host storage and leaves bytes, tags, progress,
-ObjectIds, extents and charges unchanged. Initialization and conditional heap
-access paths reject the closed lifetime, including surviving alias copies;
-other allocations in the same owner and other owners retain their authority.
-This is trusted runtime closure, not a guest free-by-address interface.
-
-Outstanding CPU/DMA/atomic work does not block admission closure and is not
-silently completed or discarded. Neither backing reuse nor refunds become
-possible here. Direct never-attached cancellation remains forbidden after
-attachment. At this closure checkpoint, worker claims, terminal accounting and
-cleanup were downstream; their implementation is recorded below. Process hooks
-and typed results remain pending, and no production heap pointer is issued.
-Conditional live tests still use explicitly synthetic publication.
-
-`cargo check --locked --tests` passes; the agent executed no Rust tests.
-**17 new `a234_` tests were developer-confirmed passing in 0.02s** (1191
-filtered out), followed by **201 focused tests passing in 0.13s** (1007 filtered
-out), including those 17. No full 1208-test run was reported. The existing
-closure/held-custody/saturating revision contracts cover that Rust piece.
-The supplied archive matches its implementation and docs. A2.3.5 below adds
-the required concrete worker/terminal-work contract before the next Rust work.
-
-**A2.3.5 concrete cleanup-worker gate, developer-accepted 2026-10-24.**
-The accepted Undertaker model leaves worker lookup and exact backend-ticket
-accounting abstract. The new `anka108_cleanup_workers.kleis` pair selects fixed
-worker rows, a lease extension in each existing cleanup row and a fixed old-work
-directory. Worker handles bind a nonreused serial, process incarnation, context,
-domain and trusted cleanup role. Claiming preserves the pending job and its
-backing/charges; every lease use rechecks current worker authority. Fencing
-invalidates that authority while retaining unresolved work and references.
-
-Asynchronous work must reserve both a ledger row and backend capacity before
-starting. Its exact allocation key, fresh operation ID, backend/source index,
-source generation/request ID, agent and span/access remain bound and pinned
-until terminal consumption. Messages, timeouts and worker death cannot finish
-work. Even a faulted backend must have stopped effects and visible results.
-Completion remains possible without a live cleanup worker and consumes only the
-matching active ticket and its stored work class; DMA completion cannot
-decrement CPU work. The first heap profile continues to exclude DMA.
-
-A full locked scan derives current CPU/DMA counts; malformed active rows fail
-the scan. Drain readiness also requires zero unregistered source conflicts,
-closed access paths, retained custody and a current worker lease. An empty
-notification queue or cached zero-count snapshot is insufficient. Readiness
-does not retire authority, scrub memory, refund charges or publish a pointer.
-Backend adapters must establish these predicates from actual trusted state;
-the existing growing legacy transaction history is not automatically a bounded
-heap backend. Current protected heap operations remain synchronous.
-
-Local Kleis validation and developer acceptance both report **197 positive
-witnesses, including 23 quantified laws, and 172/172 explicitly disproved hostile
-witnesses**. The constructive conditional-backend trace drains A's
-CPU/DMA work while B retains its outstanding operation; it is not concurrent
-C-client execution or a hardware proof. No Rust sources changed and no Rust
-build/tests ran for that formal handoff. `--only-workers` selects this accepted
-pair; unchanged independent gates need not be rerun for each Rust piece.
-
-**A2.3.5a worker roles and job leases, developer-accepted 2026-10-24.**
-The common registry now owns fixed worker rows and a lease extension in every
-reserved cleanup row. `with_private_heap_and_workers` precharges actual retained
-worker capacity plus fixed scratch before exposure; the prior constructor has
-zero worker capacity. Cleanup roles are separate from allocation ownership.
-Opaque handles bind one-based row/nonreused serial to process incarnation,
-context and domain. Enrollment is an explicit trusted Kernel role grant, with
-no guest syscall or IPC path. A private borrowed descriptor checks the actual
-Running process and prevents descriptor mutation across the Fabric operation;
-Fabric checks the current domain and registered CPU. Every claim and lease use
-repeats these checks. CPU migration within the same context/domain is allowed.
-
-Claims authenticate both placement claims and the exact attached Fabric custody
-row, require Closing/queued/unowned state and nonwrapping lease/revision headroom,
-and preserve pending jobs, dirty bytes, pointer tags, extents and charges.
-Worker fencing invalidates all lease copies through the central role record,
-even after process death or at revision MAX, without clearing obligations.
-Only a fenced row with no retained lease references can be removed. Worker
-operations are still disabled; their actual reference census must be connected
-before future worker/scrub admission. A2.3.5b ordinary CPU requests bind
-application accounts, not cleanup-role handles. No claim/authentication result is evidence
-of drainage, clean backing or permission to perform a later memory operation.
-
-`cargo check --locked --tests` passes. The developer confirmed **21 new `a235a_`
-tests passed in 0.02s** (1208 filtered out) and **222 focused tests passed in
-0.13s** (1007 filtered out), including those 21. The agent ran no Rust tests
-or unchanged Kleis gates. A2.2's 1134 tests remain the accepted full baseline;
-no full 1229-test run was reported. This adds metadata primitives, not a running
-cleanup service or working C malloc/free.
-
-**A2.3.5b bounded CPU backend registration/pinning, developer-accepted 2026-10-24.**
-The explicit `with_private_heap_cpu_work` profile precharges two separate fixed
-tables: work-ledger rows and real prepared CPU request records, including their
-owned 4096-byte scalar payloads. Earlier constructors keep this backend absent.
-The common borrowed Kernel descriptor (`CurrentHeapProcess`) serves both heap
-clients and cleanup-role checks without conflating their authorities. Admission
-requires the current Running process/CPU, current live published heap authority,
-complete initialization, exact custody and a nonempty logical read/write span
-of at most 4096 bytes. Success cases currently require test-only publication.
-
-Both free capacities, pin integrity and nonwrapping IDs/revision are checked
-before mutation. A positive operation ID binds the ledger row to the exact
-software CPU source index/generation/request ID, allocation, object, extents,
-agent and span/access. Source IDs may be zero; they cannot name legacy
-transactions or device requests. Write input is copied before admission can
-commit. The source/pin and ledger row then commit in one exclusive operation;
-failure preserves earlier requests and consumes no identity or revision.
-Actual retained capacities and value scratch are charged once at setup. Slots
-are globally bounded; per-client work-slot quotas/fairness remain unclaimed.
-
-Every retained-ticket check authenticates both directions of the pin and the
-actual allocation/Fabric custody. Owner closure, worker claims and worker
-fencing preserve requests and allocation charges. Ordinary application requests
-never refer to cleanup-worker roles, so removing an unreferenced role does not
-remove that process's ordinary work. Malformed/orphan source records reject.
-This is exact binding validation, not terminal completion or drain readiness.
-
-At the A2.3.5b handoff, the backend represented **Prepared requests only**.
-Execution, consumption and request-slot reuse were deferred to A2.3.5c below.
-No caller-supplied completion flag or timeout substitutes for terminal checks.
-
-`cargo check --locked --tests` passes. The developer confirmed **21 new `a235b_`
-tests passed in 0.03s** (1229 filtered out) and **243 focused tests passed in
-0.16s** (1007 filtered out), including those 21. No Rust tests or unchanged
-Kleis gates ran here. DN-71 records the focused commands and mapping to accepted
-`cw108_storage`, `cw108_submit` and `cw108_work_binding`. This was the accepted
-focused result at that handoff; A2.2's 1134 tests remain the full baseline. No full
-1250-test run was reported.
-
-**A2.3.5c bounded CPU effects and terminal accounting, developer-accepted 2026-10-25.**
-The existing terminal/finish/census/readiness gates were assessed before
-implementation. An exact pinned source becomes `Committed` only after a
-synchronous bounded read capture or scalar write finishes under exclusive
-Fabric access. Writes clear every overlapped protected shadow cell. Explicit
-cancellation accepts only `Prepared` work, which has no started effects, and
-establishes the stopped terminal case. New admission still requires live
-authority; already admitted work retains exact custody and may finish after
-owner closure/death. This is a software backend, not a device visibility proof.
-
-Terminal work remains pinned and counted until exact once-only consumption.
-Consumption validates the complete current source/ledger census, discards
-private payload and removes only that pair. It preserves backing, tags,
-extents, cleanup leases and charges. Slot reuse requires fresh request,
-operation and source-generation identities; exhausted identities never reset.
-Reads remain private backend data until discarded by consumption; guest read
-completion is not connected. Fixed state and operation scratch are precharged.
-
-The census checks every active row, including foreign jobs, and rejects
-malformed custody or orphan sources. Prepared and terminal rows both count
-until consumed; counts are diagnostic, never supplied as authorization.
-DMA remains excluded by the concrete profile. Readiness reconstructs the
-current worker descriptor and checks its role/lease, Closing queued job,
-retained custody, full census and the existing legacy-pool exclusion. Zero
-registered work alone is insufficient. Readiness is an observation only;
-retirement must repeat the checks in its own exclusive operation, including
-at saturated revision. Cleanup can consume work at MAX without reopening
-admission or treating an unchanged revision as a reusable permit.
-
-`cargo check --locked --tests` passes. The developer confirmed **22 new
-`a235c_` tests passed in 0.02s** (1250 filtered out) and **265 focused tests
-passed in 0.17s** (1007 filtered out), including those 22. No full 1272-test
-run was reported. No Rust tests or unchanged Kleis gates ran here. DN-71 records
-the concrete predicate mapping, limits and commands. Test-only publication
-supplies positive backend witnesses; this is not a working guest allocator or
-the complete concurrent A/B/C scenario.
-
-**A2.3.6 queued-job worker recovery, developer-accepted 2026-10-25.**
-The accepted Undertaker failure/recovery and concrete worker/census gates were
-assessed before implementation. A trusted supervisor can revoke one exact
-held lease into `Revoking`, then recover it to `Unowned` only after the retained
-worker role is globally fenced and current custody/backend checks pass.
-Per-job revocation and global fencing remain separate. Neither worker death,
-a timeout nor a new process occupying the old slot substitutes for the fence.
-Reclaiming the job still requires a current enrolled replacement descriptor.
-
-Recovery scans actual CPU source/ledger bindings and excludes legacy-pool
-conflicts afresh under the same exclusive Fabric borrow. The enabled CPU
-source type carries ordinary application identity, not cleanup-worker roles;
-there is no worker/scrub/device source. Ordinary requests remain intact and
-counted, including requests from a process that also held the failed role.
-Lease reassignment therefore does not establish drainage. Worker/scrub/DMA
-admission must extend the reference census and stopped-effects checks first.
-
-A precharged cleanup-row version advances without wrapping on recovery. The
-lease epoch stays unchanged until the next claim advances it. Stale copies
-cannot control the replacement; exhausted versions/epochs/IDs retain obligations.
-Cleanup still works at saturated common revision when its own version has
-headroom, but new claims remain blocked. No cached readiness result is used.
-Bytes, tags, initialization history, pending jobs, extents, CPU work and all
-charges remain held. Worker rows become removable only after every held or
-revoking lease reference is gone; they retain fresh serials on reuse.
-
-Developer results: **21 new tests passed in 0.01s; 286 focused tests passed in
-0.16s**, including those 21. No full 1293-test run was reported. The accepted
-full baseline remains A2.2's 1134 tests. This checkpoint covers queued/draining
-jobs; the complete cleanup/reuse refinement below extends later-stage recovery.
-
-**A2.3.7 authority retirement, developer-accepted 2026-10-25.**
-The accepted Undertaker `ut108_retire` and concurrency `conc107_retire` gates
-were assessed before implementation. Explicit trusted Kernel dispatch borrows
-all process descriptors while Fabric authenticates the current worker/lease,
-checks exact backing/placement custody, freshly scans every CPU source/ledger
-binding and requires zero unconsumed requests. Committed or cancelled requests
-still block until consumed. Kernel checks every retained process map, capability
-slot and owned stack/trap object reference, including exited processes; Fabric
-checks domain authority, legacy objects/placement, pointer-stack/local backing
-records and legacy transaction/pool exclusion. Cached readiness is insufficient.
-
-The exclusive commit changes Closing to Retired and advances the saturating
-common revision. It preserves allocation generation, pending job/lease/version,
-owner accounts, physical/virtual extents, dirty bytes, pointer tags and all
-charges. Application access still requires Live: register, saved-event and cell
-aliases remain stored but cannot regain authority. Duplicate closure reports
-AlreadyRetired without reopening the lifetime. Retirement is neither scrubbing
-nor backing reuse; retired records cannot be aborted or recycled.
-
-Developer results: **21 new `a237_` tests passed in 0.02s; 307 focused tests
-passed in 0.19s**, including those 21. No full 1314-test run was reported;
-A2.2's 1134 tests remain the accepted full baseline.
-
-**Complete trusted cleanup and reuse, developer-accepted 2026-10-25.**
-This is one functional delivery covering recovery after retirement, bounded
-scrubbing, release and reuse. The new `anka108_cleanup_reuse` theory pair passed
-locally before runtime implementation: **92 positive witnesses (13 quantified
-or structural laws), 79/79 hostile assertions explicitly disproved**. Developer
-acceptance is now recorded: the same gate passed, as did 19 new Rust tests in
-0.01s and 326 focused tests in 0.19s, including those 19. The old queued-only
-`cw108_claim` predicate is preserved; the new refinement explicitly permits
-claiming recovered retired jobs and restarting interrupted scrub/clean jobs.
-
-The registry slot remains `Retired` while its cleanup job progresses through
-Pending, Scrubbing and Clean. Every byte operation rechecks the current worker
-incarnation, exact lease/job/version/sequence, private backing row, all retained
-process descriptors, complete backend census and actual authority exclusions.
-Aligned chunks clear at most 4096 bytes and their pointer tags together,
-including rounded padding. Each operation completes under one exclusive borrow;
-there is no asynchronous scrub request. A fenced worker's replacement restarts
-at zero with a fresh lease and invalidates prior progress snapshots.
-
-Release prepares both exact physical and virtual extent returns before mutation,
-then removes private custody and refunds the owner's and global payload charges
-once. Fixed metadata stays charged; generations and the ObjectId floor never
-rewind. The contiguous scrub prefix and exclusion of all enabled writers
-establish clean custody without a full-payload rescan at release. Fresh
-allocations still require their own initialization evidence. Release at saturated
-common revision is an explicit formal extension using same-operation current
-checks, not counter reset or acceptance of a cached permit.
-
-The developer passed all 19 new `a238_` tests and the 326-test focused run.
-They include service-level A/B/C reuse: A exhausts/exits, C reuses A's backing,
-B's pending work stays correct, and A's stale aliases fail. These tests do not
-establish concurrent compiler execution. The last accepted full library run
-remains 1134 tests; no full 1333-test run was reported.
-
-**A3 C malloc/free accepted; A4 review delivered, 2026-10-25.** The new `anka108_malloc_runtime` pair passed locally before runtime
-implementation: **52 positive witnesses (9 quantified/structural laws), 43/43
-hostile assertions disproved**. `--only-malloc` selects this pair. Rust
-compile checking passes; the agent ran no Rust tests or CC2 bootstraps.
-
-Protected CC2 applications now lower `malloc(int)` and `free(void *)` through
-syscalls 21/22. The optional `/include/stdlib.h` supplies matching declarations.
-Object/void pointer conversions preserve the protected pair; literal zero is
-canonical null. Pointer equality, null conditions and typed pointer-cell
-load/store work through the same representation. Numeric forgery and `void *`
-dereference remain rejected. Compiler workspace limits have not been raised.
-
-Kernel derives exact process/incarnation/context/domain ownership and prepares
-a one-use owned syscall result. Fabric publishes only after full rounded
-initialization, current custody, complete work accounting and authority/map
-exclusion checks. Core heap reads/writes/arithmetic and local/heap pointer
-storage reauthenticate the private lifetime. Typed input/output accepts checked
-heap spans without granting a numeric-address path.
-
-Free closes all aliases immediately, then waits for retirement, complete scrub,
-extent return and payload refund before replying. Process death closes its
-allocations and queues the same bounded cleanup path. A kernel-owned worker
-advances at most one 4096-byte scrub chunk per scheduler visit. Failed checks
-retain quarantine and charges; no timeout claims a successful drain.
-
-Protected standalone and receipt-bound module execution use an explicit 2 MiB
-heap pool outside the existing placement pool, with a 1 MiB per-client quota.
-Fixed metadata remains charged and bounds admission. Generic legacy runtimes
-opt in explicitly. Private-heap DMA, sharing, hardware timing/cache guarantees,
-compiler resource growth and local-frame payload initialization remain separate.
-
-The developer full run reported **1344 passed / 1 failed in 1967.45s**. All
-twelve `a3_` tests passed, and CC2_1/CC2_2 closed at 186920 bytes, entry 184232.
-The existing protected-module cases passed. The first malloc C probe then
-faulted at PC `0x12e8`: it used plain return from directly entered `main`, which
-has no CALL authority. The fixture correction uses explicit SYS_EXIT on all new
-C entry exit paths; ordinary helpers still return. Hostile fixtures must also
-exit normally if their forbidden access is accepted, avoiding false-positive
-RET faults. Allocator, compiler and Core semantics remain unchanged. The agent
-compile-checked the correction and left Rust execution to the developer.
-
-The corrected developer rerun passed: **1 passed, 0 failed, 1344 filtered out
-in 1026.53s**. It reached the malloc probe, typed I/O, hostile frees/aliases,
-heap return across linked modules and independent A/B/C clients: A exhausts
-and exits, C receives A's exact backing zeroed, and B stays correct. The separate
-fast witness retains A's saved-event alias and rejects its use. Hostile faults
-and compiler rejections are expected assertions in this passing test. The
-earlier full run and this rerun are separate evidence, not one all-green suite.
-
-**Post-malloc review result.** DN-71 A4 records the complete source-review
-matrix, assumptions, gates and bounded follow-ups. Protected heap allocation is
-usable by supported C clients. The compiler/preprocessor still create separate
-fixed-workspace machines; real network services retain their numeric-buffer
-profile. Allocator-client acceptance does not establish concurrent compiler
-jobs or the protected service-stack rebuild.
-
-| Boundary | Review decision |
-|---|---|
-| Fresh local storage | R1 accepted: full-frame byte/tag initialization before local authority preserves parent storage and incoming arguments. Kleis 151 / 118, 16 focused Rust tests, shared CC2/C integration and the 1361-test full suite pass. |
-| Compiler job resources | Continue C1-C5 after R1. Budget mutable regions, metadata, work/retries, copies and retained publications. RebuildArtifactStore retains per-record Fabric instances outside heap payload accounting. |
-| Independent compilation | Retain actual A/B/C compiler acceptance: A exhausts/exits, C reuses backing, B's canonical output/receipt remains correct, and A's stale references/messages fail. Current allocator clients are compiled before their concurrent run. |
-| IPC and DMA | Current sharing is delegation/notification; private-heap export and DMA remain denied. Prove concrete ownership-epoch handoff and controller borrow/drainage before enabling those boundaries. |
-| Scheduling and trust | Cleanup uses bounded software steps, but malloc initialization is synchronous and complete machine metadata/scans lack unified owner budgets. No unconditional progress, SMP or timing/cache guarantee follows. |
-
-The A4 review was documentation only. R1 supplies the first accepted follow-up
-formal pair and runtime; their passing execution evidence is recorded below. The other
-proposed gates remain undelivered. Track these findings without repeating A4.
-
-The implemented initial heap profile is process-private and supports independent
-concurrent clients. Heap lifetimes are not LIFO local frames. Existing protected
-two-word handles retain nonwrapping generations; exact logical bounds are
-separate from page-rounded backing and its metadata charge. Closing rejects new
-alias access; draining and removal of grants/maps/tags precede backing reuse.
-New allocations are zeroed and have no inherited pointer tags. Cross-process
-heap export and DMA remain disabled until separately refined.
-
-The A1 ABI reserves syscall 21 for allocation and 22 for free. Allocation returns
-a protected R0/R1 pair with scalar status in R2; free takes its protected argument
-in R2/R3. A3 adds typed pointer-result delivery through the exact owned saved
-event, with a nonwrapping event identity and one-use result state. The complete register, failure, null and cleanup contract is in DN-71.
-Passing model witnesses do not establish allocator implementation, device
-drainage, hardware enforcement or the complete system's correctness.
-
-The initialization refinement requires **zeroing before new private authority is
-issued**, after all former accesses are terminal and excluded. It covers reuse
-by the same owner as well as another owner. Completed scrub chunks establish
-byte and pointer-tag initialization over the full reserved extent; exact receipt
-binding and mutation versions prevent partial, stale or unrelated initialization
-from authorizing publication. Explicit new image/local initializers may overlay
-the clean bytes under their own provenance checks. This policy does not require
-immediate zeroing when an allocation is freed.
-
-The protected local-frame path now zeroes the entire new aligned frame and
-clears overlapping pointer-cell kinds before publishing local authority.
-PUNFRAME retires authority without requiring an eager scrub; later PFRAME reuse
-initializes bytes again. ERET restores an existing lifetime without scrubbing.
-Process stack/trap reuse already zeroes before regrant; generic object destruction
-and placement release still do not scrub. The uniform rule is therefore not yet
-implemented across every legacy object path. `--only-initialization` selects
-the general residual-data pair; `--only-local-initialization` selects R1.
-`--only-allocation` includes both.
-
-**R1 delivery, 2026-10-26.** The developer accepted the unchanged Kleis pair:
-151 positive witnesses (26 quantified laws), 118 explicitly disproved hostile
-witnesses. Runtime source is based on `Archive(20261026-212200).zip`; that archive
-omits the R1 pair/checker, so they are included with this delivery unchanged.
-Core checks stack identity/generation, full virtual/physical bounds and exact
-local mappings. Fabric checks full-frame authority, current physical aliases,
-live/event-suspended frames and nonterminal CPU/atomic/DMA transactions, including
-captured physical spans. All container and registry capacity is reserved before
-clearing. Whole-frame custody uses the existing bounded scope table, so padding
-and empty frames also exclude overlapping admission. Its larger row remains
-charged by the registry's fixed metadata accounting.
-
-Commit is serialized and has no allocation or fallible validation after the first
-byte write. Incoming register words/kinds, LR, flags, return state and caller
-storage survive. CC2 copies argument registers into clean parameter locals after
-PFRAME; explicit initializers then overlay the zeros. No compiler change is needed.
-
-This CPU-only profile conservatively rejects another registered agent in the
-owner domain at admission; trusted scheduling must maintain agent registrations.
-It does not establish SMP, hardware cache/timing or asynchronous DMA guarantees.
-The Kleis refinement contains no new axioms and is not a proof of the Rust source.
-
-`cargo check --tests --offline` passed at delivery. **Developer acceptance
-recorded 2026-10-27:** all 16 focused Rust tests passed in 0.02s after the fixture
-correction. Removing the C probe's unsupported leading block comment resolved
-the subsequent lexer failure. The shared CC2 integration passed in 1008.62s
-(1 passed / 0 failed / 1360 filtered), including fresh/reused local bytes, typed
-nulls, nested arguments, protected modules and malloc/free with independent
-A/B/C reuse. The full single-threaded suite passed: **1361 passed / 0 failed /
-0 ignored / 0 measured / 0 filtered in 2446.84s**. These are developer-run results;
-this documentation update ran no Rust tests or CC2 bootstrap. C1 has since been developer-accepted; proceed through C2 without reopening the
-completed A4 audit.
-
-**C1 formal handoff, 2026-10-27.** DN-71 records the shared compiler resource
-contract, concrete internal ABI 2 and source limit inventory. The focused new
-Kleis pair passes locally: 221 positive witnesses (26 quantified laws) and
-195/195 explicitly disproved hostile assertions, independently confirmed by the
-developer on 2026-10-27.
-The contract requires frozen job/tool/source/profile/plan bindings, exact owner
-and fresh attempt identities, job/owner/global peak budgets, authenticated data
-regions, cumulative work/retry limits, safe drainage/reuse and exact-prefix
-publication. ABI-2 header/region/reply layouts use protected pointer-kind state;
-numeric addresses create no authority. Existing ABI-1 runtime limits remain
-unchanged. C2 implements output growth; C3-C5 retain their source/workspace,
-linking/publication and actual concurrent-compiler obligations.
-
-**C2.1 implementation, 2026-10-27.** `compiler_adapter::resources` now decodes
-all scalar ABI-2 reply fields and computes bounded output retry proposals.
-The developer independently accepted all 18 focused Rust tests. The decoder rejects stale identities/bindings,
-malformed results, unsupported growth and guest claims of coordinator outcomes.
-The planner preserves cumulative work/retry limits and checks growth/attempt
-arithmetic. Its proposal has no allocation, refund or launch authority. It does
-not establish stopped/drained work, current protected grants, artifact validity
-or complete shared accounting. Existing compilation still uses ABI 1; no guest
-source or runtime capacity changed.
-
-**C2.2 runtime bridge, 2026-10-27.** The specialized capacity-probe runner now
-binds genuine malloc output/reply tokens, meters real instruction slices,
-checks the owned zero-exit event and registered work before reading the reply,
-and waits for actual owner cleanup/release before consuming a retry proposal.
-Old aliases are fenced at process completion; charges remain until cleanup.
-An internal release receipt cannot be replaced by a guest integer or drain flag.
-Eleven runtime tests passed locally (0.90s), including fresh 256-to-512 KiB heap
-allocation and independent-client reuse. The checkpoint was accepted for
-progression after the supplied archive reproduced 11 bridge tests (0.82s) and
-18 planner tests (0.00s); the developer also reported 12 heap-runtime tests
-(0.01s). These ISA probes are not compiler-generated AOMs. C2.3 adds the request
-loader below; the CC2 producer still needs migration, together with successful
-output admission/publication and complete whole-job charging. Ordinary compilation
-continues through ABI 1. Actual automatic compiler retry and an emitted artifact
-beyond 256 KiB remain required for C2 closure; see DN-71.
-
-**C2.3 ABI-2 loader, 2026-10-27.** A fresh admitted protected producer now receives
-an authenticated request in R0:R1 and reply in R2:R3. Five shared-service regions
-hold source, workspace, output, request and reply. Source/request are read-only
-from first publication, with matching registry/Fabric rights; the other regions
-are read/write. Full backing zeroing precedes trusted payload and pointer-kind
-installation. The exact 768-byte request includes five typed region references,
-including its self-reference. Raw copies preserve bytes but cannot mint kind.
-Write paths and typed input require write authority; cleanup handles both rights
-classes. A failed partial load fences its owner and retains charges until cleanup.
-
-The existing compiler-resource Kleis pair was refined before implementation and
-passes locally at **254 positive / 226 hostile**, including 28 quantified laws.
-Local Rust evidence: 8 new loader tests, 19 combined bridge/loader tests, 18
-planner tests and 250 heap tests, all passing; developer acceptance is pending.
-This is an ISA-level request/entry/cleanup witness. CC2 still uses ABI 1, source
-and workspace limits remain for C3, and successful artifact publication plus
-whole-job accounting are still open. Next is C2.4 guest producer migration;
-DN-71 records the concrete scope and local test commands. No long regressions
-were run for C2.3.
-
-**Current compiler checkpoint, 2026-10-31.** The preceding C2.3 handoff
-status is historical. C2.3 and C2.4 are developer-accepted and merged: the
-compiler-resource pair passes 293 positive / 259 hostile witnesses; the
-targeted guest witness passes in 410.74s and the full 1406-test suite passes
-in 589.71s with optimized host execution, assertions and overflow checks.
-
-**C2.5 capture and publication.** The publication contract is developer-accepted:
-149 positive / 129 hostile witnesses for the accepted C2.5c refinement. Earlier focused acceptance includes nine
-capture tests, eight retention tests, all 11 publication tests (0.01s) and
-all 53 compiler-retry bridge tests (0.04s). Subsequent C2.5c acceptance is
-recorded below; no new complete-suite result is inferred.
-
-Capture uses protected zero exit, quota-reserved staging, bounded authenticated
-reads and exact role-specific AOM admission. Independent custodian storage keeps
-candidate bytes charged after actual producer release; cancellation drops payload
-before refund. Pending producer work blocks readiness.
-
-The C2.5b commit has focused developer acceptance. A job freezes
-actual loader source, admitted compiler code/manifest and canonical retry plan
-before execution, plus selected sealed bundle/tools/profile/ordered dependencies.
-Publication rechecks those bytes, grants, current custody, authority and expected
-nonwrapping epoch. A fresh exact-length private heap artifact is READ-only from
-first publication; one record exposes it with its receipt. The receipt uses the
-protected slot generation, not the private object's legacy generation-zero field.
-No execution permission is granted. Separate artifact and provenance charges
-remain held; attached failure storage follows real drain/scrub/reclamation.
-
-C2.5c now adds a bounded runtime flow that composes execution, real cleanup,
-retention and publication. A cleanup-released retry budget is returned exactly
-once for fresh process admission. Current lineage and process selection remain
-coordinator duties. Concurrent publication uses an explicit guarded epoch refresh:
-ready candidate, actual release, custody, charges, sealed bytes and authority are
-rechecked before updating the expectation; prior records remain untouched. The
-extended Kleis pair passes 149 positive / 129 hostile witnesses locally and
-on the developer machine.
-
-The updated shared CC2 witness uses actual guest preprocessing and the accepted
-lineage, drives A exhaustion/C retry while B remains independent, verifies backing
-reuse and stale-A rejection, then checks exact published AOMs and receipts across
-peer commits and adequate capacities. Developer acceptance includes six flow
-tests, the corrected fixture preflight (0.01s), the real guest integration
-(464.34s) and the affected 60-test bridge (0.04s). The fixture's 128-MiB global
-accounting ceiling covers fixed shadow/registry/work storage and its 32-MiB pool;
-guest RAM is 64 MiB and the owner quota 16 MiB. C2.5c is merged into main.
-
-**C2.6 output boundary (developer-accepted):** ABI-2 capture now uses the authentic attempt
-capacity instead of the legacy 256-KiB application envelope. Checked staging
-reservation precedes allocation/validation; copies remain bounded to 4096-byte
-transactions. A quota denial still preserves prior publications. The shared
-module validator takes the caller's admitted limit; legacy entry points retain
-their own policies. Publication/lifecycle/READ-only guarantees are unchanged.
-The affected Kleis refinement passes 163 positive / 139 hostile witnesses locally
-and on the developer machine. After correcting the missed final-sealing cap,
-all six fast tests passed (0.03s), followed by 66 bridge tests (0.07s). The
-separate real-compiler test then exposed a fixture signature error: struct-pointer
-parameters cannot be serialized by the existing AOM profile. Its correction
-keeps only the pointer local to an ordinary scalar-signature function; the
-large struct is a type declaration. That function is not called by main, and
-this output witness makes no claim about executing null-pointer arithmetic.
-The corrected real-compiler test passed on 2026-10-31: 321336-byte artifact,
-one automatic retry, exact lineage AOM, capacity independence and preserved prior
-receipts; 1 passed / 0 failed in 2174.32s. Do not repeat that expensive test for
-unrelated edits. This does not close complete job accounting, C3 source/workspace
-growth, C4 linking/loading or C5 ordinary rebuild.
-DN-71 contains the single authoritative acceptance table and test commands.
-No hardware/DMA synchronization claim is added.
-
-**C2 host-storage accounting refinement.** Capture/parser staging, candidate
-custody and frozen publication evidence now use a distinct host-storage token in
-the existing allocation ledger. These charges share owner/global ceilings and
-nonwrapping reservation identities with heap allocations, but consume no guest
-physical/virtual extents or pointer slots. A fixed, precharged directory bounds
-host reservations. Closing an owner fences access while retaining charges;
-only trusted payload destruction or independently charged custody transfer can
-precede exact refund. Guest cleanup workers cannot reclaim host storage.
-Published artifact payloads retain ordinary backed heap allocation and cleanup.
-The initial Kleis pair passed locally at 34 positive / 23 hostile. Developer
-acceptance: ten new tests, then 89 heap tests and 67 bridge tests after correcting
-the old metadata census; the long output test remained intentionally ignored. Legacy producer code/stacks,
-source/tool ingestion and preprocessor/job-host resources still require actual
-coordinator admission/lifetime integration before complete C2 accounting closure.
-DN-71 records the precise boundary and focused commands.
-
-**C2 charged immutable ingress (delivered, Rust acceptance pending).** The
-coordinator can now retain source/tool bytes under a current custodian-bound
-host-storage reservation, reserved before copying. Immutable borrows share one
-stored tool; storage alone grants no execution rights or lineage acceptance.
-The new source-handle loader validates role, length and independent producer,
-retains both source and destination charges at the copy peak, and restores input
-custody after a failed load. Cancellation/death destroys payload before refund.
-The real CC2 publication fixture now uses this loader path; twelve fast Rust
-witnesses are supplied and the expanded Kleis pair passes locally at 59 / 45.
-This does not yet account the external caller's original inputs, isolated
-preprocessing machine or legacy producer code/stacks. DN-71 retains those exact
-closure obligations and current validation commands; C2 is not declared closed.
-
-The reclamation refinement requires reusable physical and per-owner virtual
-extents, exact split/coalesce transitions, stable slot/generation history and
-bounded metadata. Keep a permanently charged capacity-bounded directory; empty
-bulky record pages may be released only after every contained slot and metadata
-reader/writer is quiescent. Rehydration preserves the directory history and
-creates no authority. Generation-exhausted slots remain retired within the
-configured directory; neither slot renumbering nor counter reset may revive old
-pointers. Refund only storage actually returned, retaining charges for cached
-capacity, fixed infrastructure and pending work. A2 acceptance now includes
-sustained allocation/free churn and reusable virtual holes; the current
-VirtualLayoutBuilder remains monotonic until that implementation is supplied.
-The new theory proves local extent laws, a free-record count induction, and
-accounting/cycle properties under stated representation assumptions. It does
-not verify the future Rust allocator or guarantee infinite successful allocation.
-Local Kleis validation on 2026-10-19 passes 179 positive witnesses (including
-32 quantified laws) and explicitly disproves all 108 hostile assertions for
-this added pair; developer-machine acceptance subsequently passed on 2026-10-19.
-No runtime source changed. `--only-allocation` now includes all five allocation
-pairs with the Undertaker refinement below.
-
-The **Undertaker** makes cleanup asynchronous while retaining custody and charges.
-Reserve cleanup records and queue capacity before allocation publication. The
-trusted death transition closes the exact owner incarnation and atomically
-registers all of its obligations; notification delivery itself creates no
-authority. A worker drains accepted CPU/DMA work, retires old access paths,
-scrubs the complete reserved extent and pointer tags, establishes visibility,
-then atomically returns backing and refunds only actual released storage.
-Authority retirement and clean completion both precede storage release; neither
-alone makes storage free. Clean-pool capacity remains charged.
-
-Worker leases, submission operation numbers and mutation versions never wrap.
-A cancelled scrub retry receives a new operation number even when its range and
-version are unchanged. Recovery fences and drains the failed worker before
-reassignment, invalidates old receipts and conservatively restarts scrubbing.
-The trusted directory survives worker restart; host reset/power-loss persistence
-is outside this model. New private publication retains its own initialization
-and authority checks. Local-frame initialization and clean-pool receipt transfer
-remain separate refinements.
-
-The added theory pair proves bounded queue/census and accounting laws, exact
-identity checks, pointwise isolation, a concrete failure/restart/whole-page scrub
-trace, and conditional progress measures. It does not prove scheduler fairness,
-physical device drainage, cache coherence, timing noninterference or runtime
-implementation. Eventual cleanup needs eventual successful service, terminal
-work and adequate counter headroom; permanent errors retain quarantine. DN-71
-records the 257 positive witnesses (42 quantified laws), 171 hostile disproofs,
-implementation obligations and the software-Fabric-first handoff.
-
-Small-object suballocation and live-object compaction remain later refinements.
-The existing Fabric move helper is not a payload/tag-preserving, rollback-safe
-relocation protocol. A future moving compactor must prove that protocol before
-use; it is not required for the first reusable malloc/free service.
-
-Compiler jobs are ordinary clients of that service and must support concurrent
-invocations with private mutable state, per-job budgets and atomic global
-reservations. Automatic sizing or fresh-attempt retries then remove per-program
-capacity tuning across preprocessing/source, tables/output, producer-image
-admission, linking, publication and loading. Real ISA/ABI bounds remain explicit.
-Compiler growth and buffer-ownership handoff remain planned work. Supported
-process-private C malloc/free is now accepted; the present 65528-byte
-effective-source, 256 KiB compiler-output and 1 MiB protected-linked-image
-policies still apply. Implementation proceeds in
-bounded pieces after the relevant formal gates.
+| Phase | Delivered scope | Status |
+|---|---|---|
+| 10.0 | AC2 language, bootstrap and object/link authority contracts | Closed |
+| 10.1 | AnkaCC2 lexer/parser under CC_B | Closed |
+| 10.2 | Declarations, types and calling convention | Closed |
+| 10.3 | AOM objects and separate translation units | Closed |
+| 10.4 | Guest static linker and permission-aware artifacts | Closed |
+| 10.5 | Immutable source bundles, headers and include preprocessing | Closed |
+| 10.6 | Exact AnkaCC2 self-host fixed point | Closed |
+| 10.7 | Protected local pointer ABI and application rebuild | Closed; DN-59 fixes its scope |
+| 10.8 | Shared allocation, compiler resource growth, typed modules and protected network-service rebuild | Closed; final evidence in DN-71 |
+| 10.9 | Identity/authority model, supply-chain closure and hostile CPU-to-HTTP audit | T1 and initial T2 model delivered; backend/evidence refinement, T3–T5 and integration pending; DN-72 |
+| 10.10 (proposed) | Durable network persistence using the artifact/publication foundation | Core accepted; local durable adapter delivered, new tests pending; network/evidence integration open; DN-72 |
+
+Phase 10.8's implementation chronology and test commands live in
+[DN-71](DESIGN_NOTES.md#dn-71). The repeated allocation/worker/compiler progress
+narrative formerly here has been consolidated there. Phase 10 as a whole remains
+open for 10.9 and the proposed 10.10 persistence work; producing `/alive` is not
+evidence of requester authorization or durable storage.
+
+#### Phase 10.8 accepted architectural boundary
+
+The common allocation service supports independent process-private C clients.
+Owner identity binds process incarnation, execution context, domain and a fresh
+account serial. Stable slot/generation history, checked ObjectId issuance,
+physical/virtual claims, cleanup credit and quota are reserved together before
+publication. Generations do not rewind; exhausted identities retire. Fixed
+retained metadata stays charged. Reusable extent indices include precharged
+insertion capacity; cancellation returns only exact unpublished reservations.
+
+Private attachment gives no application authority. The entire rounded backing
+and pointer tags are initialized before logical bounds, grants and a protected
+result become visible together. Later trusted writes invalidate initialization
+evidence. Attached failure always retains custody and charges for cleanup.
+Current lifetime checks reject stale aliases in registers, cells and saved
+contexts; clearing one alias is not revocation. Full-frame initialization also
+precedes local authority publication, while event return restores an existing
+lifetime without scrubbing it. Legacy object destruction is not a universal
+zero-on-free guarantee.
+
+Cleanup closes access, accounts for admitted work, retires authority, scrubs and
+returns backing in that order. Exact backend tickets remain pinned and counted
+until terminal consumption; timeouts and notifications do not prove drainage.
+Worker fencing/recovery preserves obligations and invalidates old leases. Each
+software scrub step clears at most 4096 bytes and tags under exclusive Fabric
+access; recovery restarts with fresh evidence. Release refunds only returned
+payload, never retained capacity. New allocations still need current
+initialization evidence. Shared heap export/DMA, moving compaction, native SMP
+and cache/timing guarantees require separate refinements.
+
+Compiler jobs are clients of this shared service. Immutable inputs, producer
+admission, source/workspace/output growth, capture, retained candidates,
+preprocessing, linking and application execution have explicit bounded custody
+and charges. Retry requires actual prior-owner cleanup, unchanged frozen source
+and provenance, and the carried finite work budget. Another client's authority
+and publication survive failure or exhaustion. No partial artifact becomes a
+successful publication. Configured quotas, language/format limits and profile
+bounds still apply; automatic growth does not promise unlimited compilation.
+
+Publication binds exact bytes, ordered dependencies, tools, profile and current
+authority into a fresh READ-only artifact and receipt. It grants no execution
+permission. Separate admission and execution checks preserve W⊕X and lifetime
+rules. Typed module interfaces compare public type evidence rather than local
+numeric type IDs; private heap pointers retain authority through supported calls.
+The ordinary rebuild command composes these steps and the protected network
+services. The accepted network boundary is the bounded virtual-NIC packet path
+and single-connection TCP/socket/HTTP exchange, with legacy tests retained as
+reference coverage. It is not yet an authenticated external service.
+
+<a id="phase-109-authority"></a>
+
+#### Phase 10.9 — identity, authority and supply-chain closure
+
+**T1 and initial T2 formal gates delivered, 2026-11-04; production authority/boot integration remains pending.**
+Three new Kleis pairs locally pass 132 positive witnesses (18 quantified laws)
+and explicitly disprove all 114 hostile assertions. Recognition, installation
+enrollment and direct-anchor grant admission are modeled; the source and exact
+proof boundary are recorded in [DN-72](DESIGN_NOTES.md#dn72-t1).
+The remaining work refines the existing grants, attenuation, execution authority,
+artifact receipts and process-incarnation contracts into an installation-wide
+identity/authority model. [DN-72](DESIGN_NOTES.md#dn-72) is the detailed plan.
+
+One deliberately configured trust anchor defines recognized principals. A person
+is its opaque person identifier; Anka64 does not resolve human aliases or civil
+identities. An enrolled installation and a logical workload are distinct from
+where they run. Each boot and process execution has its own incarnation. CPU/GPU
+serial numbers, VM placement and physical ownership are not mandatory identity
+representations. An artifact has exact identity/provenance but does not itself
+act as a principal.
+
+Recognition, artifact endorsement and permission to execute or perform an
+operation are separate decisions. A valid credential supplies evidence; it does
+not mint ambient capability authority. Scoped grants must bind the subject,
+issuer, resource, operation, validity and delegation conditions. A service acting
+for a caller must preserve that caller's authorized scope rather than donate its
+own authority. Network and local requests use the same grant semantics, with
+separate evidence-validation boundaries.
+
+Initial installation deliberately selects the anchor and requires authorized
+enrollment/administration. Reboot retains enrollment but revalidates the trust
+configuration, selected artifacts and applicable grants before admitting normal
+work under a fresh boot incarnation. Saved process capabilities, continuations
+and outstanding request identities cannot simply become live again. Expiration,
+revocation freshness, rollback and recovery require explicit evidence and failure
+policies. A valid old signature alone cannot establish current authorization.
+
+The technology and standards remain undecided. Formalization must state its
+trusted evidence, time, persistence and host assumptions, and distinguish them
+from proved transition properties. The first bounded gate covers enrollment,
+principal recognition and direct-anchor scoped grant admission. It checks current
+resource generation, exact scope, expiry, evidence status and serialized
+before/after state; it grants no executable capability. Reboot/freshness and
+request-to-execution composition require refinement before production runtime integration. The final 10.9
+CPU-to-HTTP gate must demonstrate authorized operation and hostile denial under
+that model, building on the accepted 10.8 rebuild rather than reopening it.
+
+<a id="phase-1010-storage"></a>
+
+#### Persistence foundation and proposed Phase 10.10
+
+**Initial T2 model, Rust core and host-local durable adapter delivered, 2026-11-04; no network service claimed.**
+The [DN-72 storage review](DESIGN_NOTES.md#dn72-storage-foundation) inventories the
+existing artifact, receipt and publication contracts and defines the next formal
+work. The persistence/reboot contract belongs in Phase 10.9 T2, composed with
+T3 caller authority and T4 artifact/execution admission. Proposed Phase 10.10
+supplies the concrete durable network service. This is an explicit roadmap
+extension, not a change to the accepted Phase 10.8 boundary.
+
+The [T2 evidence record](DESIGN_NOTES.md#dn72-t2) reports 87 positive witnesses
+(including 15 quantified laws) and 72 explicit hostile disproofs. The initial
+model separates durable conditional record commit from boot admission, bounds
+retry history to one retained outcome with a nonresetting sequence, and requires
+external fresh boot-attempt evidence after restart. A complete backend commit is
+still a trusted premise, not a demonstrated disk protocol. The Rust reference
+core passed all 13 focused tests on the developer Mac. The subsequent local
+adapter has a passing 51-positive/45-hostile backend theory gate; its new Rust
+tests remain pending. Use `scripts/check-anka110-persistence-reference.sh` to run
+29 entries without CC2/bootstrap. Kernel boot/authority wiring and network
+transport remain pending. No T2/10.10 closure is implied by the initial formal results.
+
+AOM supplies structured executable-object bytes and type/interface evidence.
+Full source/tool/dependency provenance and publication authority are maintained
+by the surrounding receipt/publication services, not wholly inside AOM. Their
+atomic in-memory record insertion is the semantic foundation for durable
+publication, but neither a disk commit nor a portable authenticated receipt.
+Fabric object IDs, heap generations and process/context handles are local;
+persistent references must be distinct and imported into fresh local bindings.
+
+The initial design separates immutable artifacts from mutable revision-controlled
+records for enrollment, current selections and boot-incarnation reservation.
+It uses one authoritative server with concurrent clients. Authorized conditional
+commit, durable request-outcome recovery, bounded retention/quotas and current
+policy checks must be formalized before implementation. Stored evidence grants
+no execution permission; authentic old records do not establish freshness.
+Bootstrap access to the store cannot depend solely on credentials held inside it.
+
+A Rust reference server can run with local backing and loopback tests without
+an external cloud service. Anka64 C will implement the same defined protocol and
+state transitions, first as a client. The first host backend uses a private local snapshot file with atomic rename,
+flush barriers and a stable advisory writer lock; public wire format and cryptography
+remain unselected. Its fixed CRC-protected encoding detects corruption and is
+not authenticated remote evidence. See the [backend record](DESIGN_NOTES.md#dn72-local-backend)
+for host assumptions, uncertain-commit fencing and developer test commands. Crash injection and common Rust/C operation traces must distinguish
+volatile visibility from acknowledged durability. Replication, general filesystem
+semantics and protection against malicious storage or whole-snapshot rollback
+require additional explicit assumptions/refinements; they are not implied by
+hashes or the existing in-memory epoch counters.
+
+#### Historical phase contracts
+
+The sections below retain language/ABI and mechanism detail from their delivery
+checkpoints. Intermediate test counts are historical; current closure evidence
+is the [DN-71 final record](DESIGN_NOTES.md#phase-108-final-evidence).
 
 #### Phase 10.0 closure: AC2, bootstrap, and AOM/link contracts
 
@@ -5129,8 +4298,8 @@ The C3/C4 implementation foundation (2026-11-01) provides checked source,
 workspace-table and link geometry in `compiler_adapter::resources::growth`, and
 bounded, zero-copy ATY1 interface validation in `compiler_adapter::interfaces`.
 The full wire contract, supported type subset and integration order are in
-DN-71 (`DESIGN_NOTES.md`). These components do not yet replace the current guest
-CC2/ankald ABI or raise its effective limits; C3/C4 closure remains pending.
+DN-71 (`DESIGN_NOTES.md`). Guest integration and C3/C4 acceptance followed this
+foundation and are included in the final 10.8 closure record.
 
 ATY1 uses full public structure tags and exact complete layouts rather than
 module-local ordinals or hashes. Opaque declarations permit pointer transport;
@@ -5200,12 +4369,11 @@ profile-0 tables retain 16 slots. Pointer construction rejects overflow before
 packing; public primitive/pointer AOM signatures are converted to the unchanged
 legacy representation. Local struct ordinals remain forbidden as public type
 identity. Module-type Kleis gates pass 69 / 61; native diagnostics pass, while
-protected guest C3.4 acceptance passed in 211.55s. ATY1 guest emission/linking,
-complete job charging and the ordinary concurrent rebuild remain required for
-C2–C5 closure. See the consolidated DN-71 closure table.
+protected guest C3.4 acceptance passed in 211.55s. ATY1 guest emission/linking, complete job charging and the ordinary concurrent
+rebuild were subsequently accepted; see the DN-71 status table.
 
 
-#### C3/C4 typed modules and protected member lowering (acceptance pending)
+#### C3/C4 typed modules and protected member lowering
 
 AOM v2 appends exact ATY1 evidence after relocations while preserving the v1
 section/header layout. Rust admission and guest ankald both validate the evidence
@@ -5224,8 +4392,8 @@ It does not widen the legacy or compiler-producer profiles.
 The application profile is frozen with ordered module dependencies and retained
 in the linked receipt. Publication checks the executed profile and actual control
 word; loading validates the receipt and image under that same policy. The default
-module-store producer remains bounded to 256 KiB per module. This does not yet
-connect the shared-Kernel ABI-2 job service to the ordinary rebuild command.
+module-store producer remains bounded to 256 KiB per module. The ordinary rebuild command uses the shared-Kernel ABI-2 job service described
+below; this legacy module-store limit does not define its growth policy.
 
 Extended CC_B rejects fixups to un-emitted output slots after capacity failure;
 the real fixed-point toolchain uses its extended arena for the typed linker.
@@ -5236,8 +4404,8 @@ and linker diagnostics passed. The supplied Rust log confirms the bootstrap
 regression, typed-link component checks and receipt-profile checks passed.
 The parser-dispatch refactor passed the real typed-module heap-list witness
 in 249.11 seconds, including capacity parity and stale/incompatible rejection.
-DN-71 lists the exact tests and remaining C2/C5 accounting/service work. These
-mechanisms alone do not close Phase 10.8 or establish whole-system verification.
+DN-71 records the subsequent accounting/service integration and final closure.
+These mechanisms do not establish whole-system verification.
 
 
 The shared-Kernel compiler publication consumer now binds the existing protected
@@ -5284,12 +4452,9 @@ trusted runtime policy, not guest-selectable receipt data. The trap vector still
 starts with HALT; startup is at offset 16. Existing trap-page ownership handles
 reclamation. Startup is covered by the refined publication gate (256 positive /
 221 hostile); the developer subsequently passed four startup tests and nine
-receipt-execution tests. Real-producer and large-image reruns remain unreported.
-
-The isolated runner's full RAM/metadata/trace/output and peak-copy accounting is
-still a C2 obligation. The bridge does not claim a shared-account bound for that
-legacy footprint. C5 still requires ordinary service orchestration; DN-71 retains
-the remaining closure conditions.
+receipt-execution tests. Subsequent real-producer, large-image, charged runner
+and ordinary-service acceptance is recorded in DN-71. The charged envelope
+below applies to the service path, not every legacy runner.
 
 
 Directory-profile compiler retries use exact capacity roles 32..38, identifying
@@ -5301,9 +4466,8 @@ addresses or strides. Old ownership must be released before the next budget is
 available; current admission still checks shared quota. Retried directory
 substitution is rejected before allocation, cumulative work is preserved, and
 output-only retries keep the directory. Fixed-profile error 8 remains terminal.
-Workspace Kleis witnesses pass 55/52; new runtime and real-compiler acceptance
-are pending. This mechanism is not a claim of complete job accounting or C5
-user-command integration; see DN-71's unchanged closure checklist.
+The workspace contract and real automatic-retry witness are included in final
+10.8 acceptance; see DN-71 for the complete job accounting and command integration.
 
 
 #### Kernel-owned compiler jobs (Phase 10.8 integration)
@@ -5317,10 +4481,8 @@ snapshot stays charged until the next snapshot is frozen. Cancellation and
 custodian/service teardown destroy job payload before refund; published artifacts
 and receipts have independent lifetimes.
 
-This internal coordinator does not yet supply ordinary shell/service invocation
-or complete accounting for the isolated preprocessor and legacy process storage.
-Its Kleis job contract passes; new Rust and real-compiler acceptance is pending.
-The current closure evidence and remaining work are recorded in DESIGN_NOTES.md.
+The ordinary rebuild service composes this coordinator with charged admission,
+preprocessing, linking and execution. Its final acceptance is recorded in DN-71.
 
 
 #### Accounted preprocessing boundary (Phase 10.8)
@@ -5334,9 +4496,9 @@ custody before releasing staging. Retry work is cumulative. Other live compiler
 clients remain in the parent Kernel and retain their authority and charges.
 
 This policy bounds retained software-machine payloads, not physical allocator RSS.
-Legacy preprocessing entry points remain separate. Complete compiler admission,
-link/run accounting and ordinary service integration are still required; the
-precise bounds and acceptance status are recorded in DESIGN_NOTES.md.
+Legacy preprocessing entry points remain separate. The service path composes
+this boundary with accepted compiler admission and charged link/run integration;
+precise bounds and acceptance are recorded in DN-71.
 
 
 ### Compiler-service admission storage (Phase 10.8 refinement)
@@ -5356,8 +4518,8 @@ excludes devices/timers and bounds call/frame/event metadata. These restrictions
 are a current software service profile, not general ISA or future-hardware
 limits. The Kleis compiler-admission gate specifies admission/reuse conditions;
 The developer confirms the focused/runtime and real-toolchain admission checks
-passed. Linker and application-run accounting are now accepted; ordinary
-network-service rebuild integration remains open.
+passed. Linker, application-run accounting and bounded protected network-service
+rebuild integration are included in final 10.8 acceptance.
 
 
 The shared compiler publication consumer runs guest ankald under a separately
@@ -5373,8 +4535,8 @@ The linker-storage Kleis gate passed 33 positive and 23 disproved hostile
 witnesses; the developer accepted 146 runtime tests and the real C5 job (249.26s). The separately authorized
 application runner now has the enforced and charged envelope described below;
 the developer accepted eight focused tests, 149 runtime tests and the real C5
-run in 247.31s. This
-change does not establish an ordinary network-service rebuild or close 10.8.
+run in 247.31s. Subsequent network-service composition is covered by the final
+10.8 record rather than inferred from these component tests.
 
 
 Receipt-authorized application execution reserves a conservative isolated-machine
@@ -5394,8 +4556,8 @@ authority is required. DN-71 records the conservative charge formula, explicit
 test budgets and exact acceptance command. The application-run Kleis gate passes
 29 positive and 19 disproved hostile witnesses; the developer accepted its
 focused/runtime and real C5 results.
-Ordinary command/service integration and concurrent/network rebuild closure
-remain required for Phase 10.8.
+Ordinary command/service integration and concurrent/network rebuild acceptance
+are recorded separately in the final DN-71 evidence.
 
 
 ### Ordinary protected rebuild command
@@ -5417,9 +4579,9 @@ work and immutable evidence capacity; it does not claim unlimited compilation.
 
 The composition Kleis gate passes 29 positive / 21 hostile witnesses. Ordinary
 service runtime acceptance passed: six focused tests, 154 runtime tests (ten
-ignored), and actual concurrent A/B/C compiler reuse in 75.79s. DN-71 gives the policy, commands and evidence. Existing socket/HTTP raw
-address sources still require protected-service migration; this command alone
-does not close Phase 10.8 or establish the protected `/alive` rebuild.
+ignored), and actual concurrent A/B/C compiler reuse in 75.79s. DN-71 gives the policy, commands and evidence. The protected socket/HTTP path
+below completes the bounded `/alive` rebuild; legacy raw-address sources remain
+reference coverage rather than the protected production path.
 
 
 ### Protected HTTP application input
@@ -5438,9 +4600,9 @@ the existing restricted `/alive` response. Oversized/empty input emits nothing;
 other bounded nonmatching requests receive the existing 404. Its ordinary rebuild
 and guest execution witness passed locally; its corrected Kleis gate passes
 34 positive / 21 hostile witnesses. This finite input image is not a network
-endpoint, DMA mapping or permission lease. The remaining socket/NIC migration
-must formalize that actual endpoint and buffer-lifetime boundary before changing
-the original shared-memory protocol. DN-71 tracks the exact closure conditions.
+endpoint, DMA mapping or permission lease. The subsequent S1–S5 socket/NIC
+contracts and runtime path supply that separate endpoint boundary. DN-71 records
+the final evidence and the retained legacy reference profile.
 
 
 ### Compiler frame capacity and protected network migration
@@ -5523,9 +4685,9 @@ requires that accepted TX has drained. Errors, cancellation and faults still
 tear down the endpoint. This adapter has bounded input, capture and execution,
 no packet or DMA authority, and no claim of TCP/NIC acceptance.
 
-The pre-socket full suite passed (1,614 passed, 0 failed, 12 ignored). DN-71
-tracks separate future contracts for C logical operators and symbol-selected
-entry, and the remaining protected network rebuild.
+The pre-socket checkpoint passed 1,614 tests with 12 ignored; the final DN-71
+record supersedes that count and includes protected network acceptance. C logical
+operators and symbol-selected entry retain separate future contracts.
 
 ### Packet-service development boundary (Phase 10.8 S3)
 

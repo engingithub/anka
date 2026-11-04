@@ -1,0 +1,83 @@
+// Phase 10.10 local backend refinement of the T2 atomic-record contract.
+// No new axioms. Honest host/private directory; exclusive advisory lock;
+// same-directory atomic rename and successful file/directory durability barriers
+// are backend assumptions. Media/host corruption is fail-closed, not repaired.
+// Phases: 0 old only; 1 private partial; 2 private complete+file flushed;
+// 3 complete replacement renamed, directory barrier outstanding; 4 durable.
+// One temporary slot; bounded codec/parser and checksum implementation are Rust
+// refinement obligations. Checksum is corruption detection, not authentication.
+import "anka109_persistence.kleis"
+define d110_phase(p : BitVec8) = bvule(p,bvconst(4,8))
+define d110_advance(p : BitVec8,event : BitVec8,locked : Bool,current : Bool,valid : Bool,ok : Bool) =
+    if locked ∧ current ∧ valid ∧ ok ∧ d110_phase(p) ∧ bvult(p,bvconst(4,8)) ∧ (event=bvadd(p,bvconst(1,8))) then event else p
+// Any error after attempting rename must poison the open handle. Reopening
+// validates and synchronizes the visible complete head before allowing replay.
+define d110_poison(old : Bool,rename_attempted : Bool,failed : Bool) = old ∨ (rename_attempted ∧ failed)
+define d110_ack(p : BitVec8,poison : Bool) = (p=bvconst(4,8)) ∧ ¬poison
+// Crash choice: before rename old; after rename before directory barrier old or
+// new; after barrier new. This states the modeled filesystem durability boundary.
+define d110_choice(p : BitVec8,new : Bool) = d110_phase(p) ∧
+    (if bvult(p,bvconst(3,8)) then ¬new else (if p=bvconst(4,8) then new else (bvconst(1,8)=bvconst(1,8))))
+define d110_load(locked : Bool,present : Bool,exact_length : Bool,version : Bool,namespace : Bool,checksum : Bool,canonical : Bool,synced : Bool) =
+    locked ∧ present ∧ exact_length ∧ version ∧ namespace ∧ checksum ∧ canonical ∧ synced
+// Never choose a second copy to hide an invalid head. Private pending data is
+// discarded only AFTER a valid visible head has been durably settled.
+define d110_orphan_cleanup(head_valid : Bool,head_synced : Bool,locked : Bool) = head_valid ∧ head_synced ∧ locked
+define d110_recover(p : BitVec8,new : Bool,readable : Bool,old : P109State,candidate : P109State,recovered : P109State) =
+    d110_choice(p,new) ∧ readable ∧ (if new then p109_same(candidate,recovered) else p109_same(old,recovered))
+// For an actual admitted candidate, successful durable backend completion
+// refines the existing abstract atomic transition over ALL retained fields.
+define d110_commit(c : A109Context,s : P109State,r : P109Request,a : P109Access,cap : Bool,p : BitVec8,poison : Bool,t : P109State) =
+    p109_new(c,s,r,a,cap) ∧ d110_ack(p,poison) ∧
+    p109_step(c,s,r,a,cap,(bvconst(1,8)=bvconst(1,8)),t)
+example "ordered stage 0 to 1" { assert(d110_advance(bvconst(0,8),bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(1,8)) }
+example "ordered stage 1 to 2" { assert(d110_advance(bvconst(1,8),bvconst(2,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(2,8)) }
+example "ordered stage 2 to 3" { assert(d110_advance(bvconst(2,8),bvconst(3,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(3,8)) }
+example "ordered stage 3 to 4" { assert(d110_advance(bvconst(3,8),bvconst(4,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(4,8)) }
+example "failed stage 0 preserves boundary" { assert(d110_advance(bvconst(0,8),bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)))=bvconst(0,8)) }
+example "failed stage 1 preserves boundary" { assert(d110_advance(bvconst(1,8),bvconst(2,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)))=bvconst(1,8)) }
+example "failed stage 2 preserves boundary" { assert(d110_advance(bvconst(2,8),bvconst(3,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)))=bvconst(2,8)) }
+example "failed stage 3 preserves boundary" { assert(d110_advance(bvconst(3,8),bvconst(4,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)))=bvconst(3,8)) }
+example "crash stage 0 retains old" { assert(d110_choice(bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))) }
+example "partial stage 0 cannot become new" { assert(¬d110_choice(bvconst(0,8),(bvconst(1,8)=bvconst(1,8)))) }
+example "crash stage 1 retains old" { assert(d110_choice(bvconst(1,8),(bvconst(1,8)=bvconst(0,8)))) }
+example "partial stage 1 cannot become new" { assert(¬d110_choice(bvconst(1,8),(bvconst(1,8)=bvconst(1,8)))) }
+example "crash stage 2 retains old" { assert(d110_choice(bvconst(2,8),(bvconst(1,8)=bvconst(0,8)))) }
+example "partial stage 2 cannot become new" { assert(¬d110_choice(bvconst(2,8),(bvconst(1,8)=bvconst(1,8)))) }
+example "uncertain rename may recover old" { assert(d110_choice(bvconst(3,8),(bvconst(1,8)=bvconst(0,8)))) }
+example "uncertain rename may recover new" { assert(d110_choice(bvconst(3,8),(bvconst(1,8)=bvconst(1,8)))) }
+example "durable success recovers new" { assert(d110_choice(bvconst(4,8),(bvconst(1,8)=bvconst(1,8)))) }
+example "acknowledged commit cannot recover old" { assert(¬d110_choice(bvconst(4,8),(bvconst(1,8)=bvconst(0,8)))) }
+example "bad phase rejected" { assert(¬d110_choice(bvconst(5,8),(bvconst(1,8)=bvconst(1,8)))) }
+example "no early success stage 0" { assert(¬d110_ack(bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))) }
+example "no early success stage 1" { assert(¬d110_ack(bvconst(1,8),(bvconst(1,8)=bvconst(0,8)))) }
+example "no early success stage 2" { assert(¬d110_ack(bvconst(2,8),(bvconst(1,8)=bvconst(0,8)))) }
+example "no early success stage 3" { assert(¬d110_ack(bvconst(3,8),(bvconst(1,8)=bvconst(0,8)))) }
+example "barriers allow success" { assert(d110_ack(bvconst(4,8),(bvconst(1,8)=bvconst(0,8)))) }
+example "poison forbids even later success" { assert(¬d110_ack(bvconst(4,8),(bvconst(1,8)=bvconst(1,8)))) }
+example "rename error poisons" { assert(d110_poison((bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))) }
+example "pre-rename denial is not committed" { assert(¬d110_poison((bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)))) }
+example "poison cannot clear by retry" { assert(d110_poison((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(0,8)))) }
+example "valid settled head loads" { assert(d110_load((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))) }
+example "load requires exclusive lock" { assert(¬d110_load((bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))) }
+example "load requires record exists" { assert(¬d110_load((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))) }
+example "load requires exact length" { assert(¬d110_load((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))) }
+example "load requires version" { assert(¬d110_load((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))) }
+example "load requires namespace" { assert(¬d110_load((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))) }
+example "load requires checksum" { assert(¬d110_load((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))) }
+example "load requires canonical fields" { assert(¬d110_load((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)))) }
+example "load requires recovery barrier" { assert(¬d110_load((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)))) }
+example "commit requires lock" { assert(d110_advance(bvconst(0,8),bvconst(1,8),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(0,8)) }
+example "commit requires current before state" { assert(d110_advance(bvconst(0,8),bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(0,8)) }
+example "commit requires valid candidate" { assert(d110_advance(bvconst(0,8),bvconst(1,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(0,8)) }
+example "cannot skip file barrier" { assert(d110_advance(bvconst(1,8),bvconst(3,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(1,8)) }
+example "cannot skip rename" { assert(d110_advance(bvconst(2,8),bvconst(4,8),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))=bvconst(2,8)) }
+example "corrupt head cannot justify orphan promotion" { assert(¬d110_orphan_cleanup((bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))) }
+example "unsynced head cannot justify orphan cleanup" { assert(¬d110_orphan_cleanup((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)))) }
+example "settled head permits bounded orphan cleanup" { assert(d110_orphan_cleanup((bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)))) }
+example "law: acknowledged commit survives modeled crash" { assert(∀ p : BitVec8 . ∀ poison : Bool . ∀ new : Bool . (d110_ack(p,poison) ∧ d110_choice(p,new)) ⟹ new) }
+example "law: unrenamed private data never promoted" { assert(∀ p : BitVec8 . ∀ new : Bool . (bvult(p,bvconst(3,8)) ∧ d110_choice(p,new)) ⟹ ¬new) }
+example "law: missing authority to serialize cannot advance" { assert(∀ p : BitVec8 . ∀ e : BitVec8 . ∀ c : Bool . ∀ v : Bool . ∀ ok : Bool . d110_advance(p,e,(bvconst(1,8)=bvconst(0,8)),c,v,ok)=p) }
+example "law: success requires final phase and unpoisoned handle" { assert(∀ p : BitVec8 . ∀ poison : Bool . d110_ack(p,poison) ⟹ ((p=bvconst(4,8)) ∧ ¬poison)) }
+example "law: poison retained until reopen" { assert(∀ attempted : Bool . ∀ failed : Bool . d110_poison((bvconst(1,8)=bvconst(1,8)),attempted,failed)) }
+example "law: recovery returns one complete record" { assert(∀ o_revision : BitVec64 . ∀ o_value : BitVec64 . ∀ o_boot : BitVec64 . ∀ o_sequence : BitVec64 . ∀ o_caller : BitVec64 . ∀ o_incarnation : BitVec64 . ∀ o_kind : BitVec64 . ∀ o_expected : BitVec64 . ∀ o_argument : BitVec64 . ∀ o_attempt : BitVec64 . ∀ o_anchor : BitVec64 . ∀ o_installation : BitVec64 . ∀ o_policy : BitVec64 . ∀ c_revision : BitVec64 . ∀ c_value : BitVec64 . ∀ c_boot : BitVec64 . ∀ c_sequence : BitVec64 . ∀ c_caller : BitVec64 . ∀ c_incarnation : BitVec64 . ∀ c_kind : BitVec64 . ∀ c_expected : BitVec64 . ∀ c_argument : BitVec64 . ∀ c_attempt : BitVec64 . ∀ c_anchor : BitVec64 . ∀ c_installation : BitVec64 . ∀ c_policy : BitVec64 . ∀ r_revision : BitVec64 . ∀ r_value : BitVec64 . ∀ r_boot : BitVec64 . ∀ r_sequence : BitVec64 . ∀ r_caller : BitVec64 . ∀ r_incarnation : BitVec64 . ∀ r_kind : BitVec64 . ∀ r_expected : BitVec64 . ∀ r_argument : BitVec64 . ∀ r_attempt : BitVec64 . ∀ r_anchor : BitVec64 . ∀ r_installation : BitVec64 . ∀ r_policy : BitVec64 . ∀ p : BitVec8 . ∀ new : Bool . ∀ readable : Bool . d110_recover(p,new,readable,P109State(o_revision,o_value,o_boot,o_sequence,o_caller,o_incarnation,o_kind,o_expected,o_argument,o_attempt,o_anchor,o_installation,o_policy),P109State(c_revision,c_value,c_boot,c_sequence,c_caller,c_incarnation,c_kind,c_expected,c_argument,c_attempt,c_anchor,c_installation,c_policy),P109State(r_revision,r_value,r_boot,r_sequence,r_caller,r_incarnation,r_kind,r_expected,r_argument,r_attempt,r_anchor,r_installation,r_policy)) ⟹ (p109_same(P109State(o_revision,o_value,o_boot,o_sequence,o_caller,o_incarnation,o_kind,o_expected,o_argument,o_attempt,o_anchor,o_installation,o_policy),P109State(r_revision,r_value,r_boot,r_sequence,r_caller,r_incarnation,r_kind,r_expected,r_argument,r_attempt,r_anchor,r_installation,r_policy)) ∨ p109_same(P109State(c_revision,c_value,c_boot,c_sequence,c_caller,c_incarnation,c_kind,c_expected,c_argument,c_attempt,c_anchor,c_installation,c_policy),P109State(r_revision,r_value,r_boot,r_sequence,r_caller,r_incarnation,r_kind,r_expected,r_argument,r_attempt,r_anchor,r_installation,r_policy)))) }
