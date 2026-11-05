@@ -15,6 +15,7 @@ T1_PAIRS = ('anka109_recognition', 'anka109_enrollment', 'anka109_grant_admissio
 
 T2_PAIRS = ('anka109_persistence', 'anka109_reboot')
 BACKEND_PAIRS = ('anka110_durable_record',)
+PROTOCOL_PAIRS = ('anka110_persistence_protocol',)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -25,6 +26,7 @@ def main():
     selection.add_argument('--only-t1', action='store_true', help='run recognition, enrollment and grant admission')
     selection.add_argument('--only-t2', action='store_true', help='run persistence and reboot')
     selection.add_argument('--only-backend', action='store_true', help='run the Phase 10.10 durable backend refinement')
+    selection.add_argument('--only-protocol', action='store_true', help='run the Phase 10.10 bounded persistence protocol')
     parser.add_argument('--timeout', type=int, default=120, help='seconds per theory file')
     args = parser.parse_args()
     if args.timeout <= 0:
@@ -40,7 +42,8 @@ def main():
         env['KLEIS_ROOT'] = str(cwd)
     all_ok = True
     pairs = (T1_PAIRS if args.only_t1 else T2_PAIRS if args.only_t2 else
-             BACKEND_PAIRS if args.only_backend else T1_PAIRS + T2_PAIRS + BACKEND_PAIRS)
+             BACKEND_PAIRS if args.only_backend else PROTOCOL_PAIRS if args.only_protocol else
+             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS)
     for stem in pairs:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')

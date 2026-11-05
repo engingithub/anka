@@ -13747,13 +13747,16 @@ This documentation update did not rerun or extend the accepted gates.
 
 ## DN-72 — Identity, authority, installation and reboot (Phase 10.9)
 
-**Status, 2026-11-04: T1 and the initial T2 persistence/reboot model have local
-Kleis acceptance. The developer confirmed T1 and all 13 Rust reference-core
-tests. The Phase 10.10 host-local backend and its formal gate are now delivered;
-new Rust backend tests remain pending. Concrete evidence refinement, T3–T5 and
+**Status, 2026-11-05: T1 and the initial T2 persistence/reboot model have local
+Kleis acceptance. The developer confirmed T1 and all 29 Rust persistence tests
+(core plus host-local backend), with 51 positive/45 hostile backend witnesses.
+The bounded protocol formalization is accepted on the developer machine. Its
+Rust codec/dispatcher is accepted: all 48 developer tests passed in 0.33s.
+The loopback transport is accepted: all 66 developer tests passed in 0.38s.
+The bounded client is delivered below with runtime acceptance pending. Concrete evidence refinement, T3–T5 and
 production runtime integration remain pending.** Phase 10.8 is accepted and
 merged. The [T1 evidence below](#dn72-t1) records the new proof results; no runtime
-implementation or runtime acceptance is claimed. It extends the planned 10.9 supply-chain
+authority-model integration or runtime acceptance is claimed for T1. It extends the planned 10.9 supply-chain
 and hostile CPU-to-HTTP audit with the authority model needed to interpret who
 may install, execute and request work. It does not reopen C2–C5.
 
@@ -14322,11 +14325,13 @@ validator verdicts must never become remotely supplied authorization fields.
 
 ### Phase 10.10 — local durable backend and recovery (2026-11-04)
 
-**Delivered; developer Rust verification pending.** The attached archive retained
+**Accepted locally and merged to main (developer-reported): 29 passed, 0 failed,
+0 ignored in 0.37 seconds; backend Kleis 51 positive / 45 hostile disproofs.**
+At the earlier delivery, the attached archive retained
 an older T1-only `scripts/check-anka109-gates.py`, although the T2 theory files
 and Rust core were present. This delivery repairs that exact runner path and
 adds `--only-backend`. `--only-t1` is preserved; `--only-t2` selects persistence
-and reboot; the default selects T1, T2 and the backend refinement. `cargo clean`
+and reboot. The default now also includes the protocol refinement below. `cargo clean`
 cannot affect this Python argument mismatch.
 
 The current archive's original 13 Rust core tests passed on the developer's Mac.
@@ -14407,15 +14412,15 @@ Sources consulted for the host boundary:
 - [Apple fsync(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fsync.2.html) and [fcntl(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fcntl.2.html): distinction between fsync and the device-flush request F_FULLFSYNC.
 - [Apple Darwin fcntl.h](https://github.com/apple/darwin-xnu/blob/main/bsd/sys/fcntl.h): the F_FULLFSYNC command value used by the macOS host adapter.
 
-**Focused verification to run:** the Rust suite now has 29 test entries: the
+**Accepted focused verification:** the Rust suite has 29 test entries: the
 13 accepted core tests plus 16 backend entries (including a subprocess helper).
 New checks cover fixed encoding/CRC, every single-bit corruption, malformed
 records, namespace substitution, stale compare/commit, bounded storage, orphan
 handling, missing/corrupt/symlink heads, exclusive writers, and reopening at each
 write/rename/flush boundary. Subprocess tests exit without destructors at selected
 cut points and verify OS lock release and recovery. These are process-exit/fault
-injection tests, not physical power-cut certification. No new Rust pass is claimed
-until the developer runs them; the authoring environment lacks Rust.
+injection tests, not physical power-cut certification. The developer supplied
+the complete passing 29-test output; no full-system regression is implied.
 
 ```bash
 python3 scripts/check-anka109-gates.py \
@@ -14427,9 +14432,420 @@ python3 scripts/check-anka109-gates.py \
 bash scripts/check-anka110-persistence-reference.sh
 ```
 
-**Next task:** formalize the bounded request/response codec and transport dispatch,
-then add a local loopback service using this adapter. Keep caller evidence outside
+**Follow-through:** the bounded protocol contract is recorded below. Next,
+implement its byte codec and local loopback service using this adapter. Keep caller evidence outside
 untrusted request fields until a concrete trusted verifier is supplied. No S3 or
 external cloud account is required. Artifact-byte import, current endorsement,
 network authentication and ordinary Anka64 client integration remain open; this
 backend delivery closes none of those gates or Phase 10.10 as a whole.
+
+
+<a id="dn72-persistence-protocol"></a>
+
+### Phase 10.10 — bounded persistence protocol contract (2026-11-04)
+
+**Formal-first delivery on `feat/anka110-persistence-protocol`.**
+`anka110_persistence_protocol.kleis` and its hostile pair compose with the existing
+T2 persistence definitions. They introduce no axioms. The focused runner now
+supports `--only-protocol`, preserves T1/T2/backend selectors, and includes the
+new pair by default. Acceptance: **120 positive witnesses, including 7 quantified
+laws; 89/89 hostile claims explicitly disproved** by Kleis/Z3 in the authoring
+environment. This is a word-level framing, resource and dispatch model. It is
+not a proof of a byte parser, a cryptographic protocol or a running network service.
+That formal-only delivery changed no Rust code. The codec/dispatcher implementation
+and its pending runtime checks are recorded below; the accepted backend is unchanged.
+
+**First service scope.** One configured anchor/installation record, one serialized
+backend owner, multiple bounded connections. The only operations are T2 Select
+and ReserveBoot. There is no remote provisioning/reset, unguarded state read,
+artifact-byte API or boot-admission operation. A boot reservation is not permission
+to execute. Initial provisioning and bootstrap access remain trusted operations
+outside this protocol. This contract targets the Rust loopback reference first;
+a later Anka64 C client must implement the same canonical bytes and transitions.
+
+**Version-1 canonical encoding proposed for implementation:** all integers are
+unsigned 64-bit little-endian words; magic is the eight literal bytes shown.
+These network envelopes are distinct from the 152-byte on-disk snapshot.
+
+| Offset | Request: exactly 112 bytes | Reply: exactly 144 bytes |
+|---:|---|---|
+| 0 | `ANKAPQ1` followed by a zero byte | `ANKAPR1` followed by a zero byte |
+| 8 | Version = 1 | Version = 1 |
+| 16 | Reserved flags = 0 | Reserved flags = 0 |
+| 24 | Nonzero correlation identifier | Exact echoed correlation |
+| 32–111 | Ten T2 request words, in the order below | Exact echo of all ten words |
+| 112 | No field | Status |
+| 120 | No field | Result revision |
+| 128 | No field | Result value |
+| 136 | No field | Result boot counter |
+
+The ten request words are anchor, installation, policy epoch, caller, caller
+incarnation, sequence, expected revision, operation, argument and boot attempt.
+Operation 1 selects a nonzero value and requires attempt zero. Operation 2
+reserves a boot incarnation and requires a nonzero attempt and the currently
+selected value. Caller, incarnation, namespace and sequence are nonzero.
+Policy and expected revision are checked against trusted current context and
+backend state, not treated as authority because they appear in a message.
+
+A connection carries **one request and one reply**. The client half-closes its
+write direction after sending the request. The server requires EOF at exactly
+112 bytes before dispatch; truncation, extra bytes, unknown version/operation,
+nonzero reserved words and invalid shape cannot access the backend. At most
+113 input bytes are retained to detect an extra tail. The server closes its
+write direction after a complete reply; the client likewise requires exactly
+144 bytes and EOF. The model's `length` and `ended` fields describe observations
+by the parser/transport; they are not additional wire fields. Half-close does
+not cancel the request. A disconnect after commit does not roll it back.
+
+**Authority and reply binding.** `A109Context`, `P109Access`, the verified peer
+binding and current time/status are supplied by trusted server observations.
+None is decoded from a caller's claimed validity flag. Loopback address alone
+is not identity. Admission must recheck current authority after framing and
+before any backend read/commit; reply/outcome retrieval also checks current
+authority. The concrete verifier and synchronization with policy/revocation
+changes remain explicit T3 integration work. Test-only credentials/verdicts must
+not become a production allow-all path.
+
+A successful reply binds every request word and the correlation identifier to
+one complete settled record. The client also needs a trusted server binding and
+its current pending connection/request incarnation; matching bytes from a recycled
+connection are insufficient. The model's `server_bound` and `pending_current`
+are trusted observations, not wire booleans. Success requires expected revision
+plus one without wrap, exact value and the matching server boot result. The
+client cannot independently establish server durability merely from those words.
+
+| Status | Meaning | Outcome fields |
+|---:|---|---|
+| 0 | Durable success, or exact retained outcome under current authority | Exact revision, value and boot counter |
+| 1 | Authority denied | All zero |
+| 2 | Conflict or expired retained-retry window | All zero |
+| 3 | Resource/counter exhaustion | All zero |
+| 4 | Backend unavailable | All zero |
+| 5 | Commit uncertain; recovery required | All zero |
+| 6 | Invalid request | All zero |
+
+Malformed framing may simply close without a reply. Error replies never expose
+current stored values or the previous caller's outcome. `n110_client_result` is
+an outcome classifier **after** complete canonical reply validation; it must not
+be used as an admission check for arbitrary bytes. Unknown status, absent/unbound
+reply and explicit uncertain status yield an unknown outcome. An explicit negative
+reply describes this dispatch only: it does not prove an earlier identical request
+whose reply was lost had no effect.
+
+**Retry and recovery.** The durable T2 sequence and exact last request, not the
+connection correlation identifier, define idempotency. A reconnect can use a new
+correlation while retrying the identical ten request words. Lost delivery leaves
+the durable transition intact. Reopen/settle an uncertain backend before returning
+success; do not keep using a poisoned handle. Exact retry under current authority
+returns the retained outcome without another effect or new allocation capacity.
+A changed field, revoked/expired grant, skipped sequence or stale expected revision
+rejects. A later successful writer evicts the one-outcome retry window: an older
+request must reject without re-execution or exposing the later writer's state.
+This bounded history does not promise indefinite result recovery.
+
+**Resources and finite work.** Configure 1–64 active slots (initial loopback
+profile: 4); each accepted connection reserves 384 logical bytes for the 113-byte
+input guard, 144-byte reply and connection metadata. Admission checks available
+space before addition and fails closed on overflow or exhausted slots. Real host
+socket/kernel memory is additional; this logical charge is not a claim to account
+for the host allocator. The implementation must bound those sockets as well.
+Reserve before reading; the model's budget describes pre-acquire accounting and
+is not permission to charge again at dispatch. Current deadline/work checks are
+revalidated after framing.
+
+Each connection has at most 512 I/O/dispatch poll units and an absolute trusted
+monotonic deadline. A successful modeled poll strictly decreases its finite
+budget; interruptions/retries also spend work in the implementation. Deadline
+expiry, stalled input or exhausted work closes the connection and releases only
+its owned reservation once. An unowned/repeated release cannot refund a peer's
+charge. Ownership of the reservation is trusted service state; a client cannot
+assert the model's `owned` predicate. Counter/deadline construction must reject
+wrap. These bounds do not prove fairness, a filesystem flush time bound or
+preemption of a blocked host system call.
+
+**Witness coverage.** The pair exercises exact framing/EOF, every echoed request
+field, header and outcome substitution, unauthenticated/stale connection binding,
+current revoked/unknown/expired authority, malformed boot attempts, bounded slots,
+bytes and work, arithmetic boundaries, exact release, durable/lost/uncertain
+responses, boot-reservation retries and an older request after a peer commit.
+Quantified laws establish charging within limits, strictly decreasing work,
+inert unowned release, uncertainty on incomplete/unbound/uncertain responses,
+and complete ten-word request equality. Existing T2 laws provide the underlying
+state-transition/retry obligations; this is not an exhaustive security proof.
+
+Run only the new gate:
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" --only-protocol
+```
+
+**Implementation follow-through:** the fixed Rust byte codec and dispatcher are
+delivered below. The next transport implementation is bounded loopback backed by
+`FileRecord`. Acceptance must include malformed/truncated/
+extra-tail frames, fragmented reads/writes, competing clients, lost acknowledgement
+plus restart and exact retry, authority denial before storage access, resource
+refunds and uncertain-outcome recovery. Reuse the focused standalone Rust script;
+no CC2/bootstrap suite is necessary for this isolated reference slice. Actual
+transport behavior, byte refinement, authenticated remote access, artifact imports
+and kernel enrollment/reboot integration remain open. Phases 10.9/10.10 are not
+closed by this formal delivery.
+
+
+<a id="dn72-persistence-codec"></a>
+
+### Phase 10.10 — Rust persistence codec and dispatcher
+
+**Accepted by developer, 2026-11-05:** all **48 tests passed**, none failed or
+ignored, in **0.33s**. The protocol gate had 120 positive witnesses and 89/89
+explicit hostile disproofs. This acceptance covers the original 29 core/backend
+tests plus 19 codec/dispatcher tests. It does not establish full-system acceptance.
+
+`src/anka64/authority_persistence/protocol.rs` exposes the fixed request/reply
+codec, synchronous dispatcher and fail-closed client outcome interpretation.
+The implementation is split into `protocol/codec.rs`, `protocol/dispatch.rs`
+and `protocol/tests.rs`, and included by the standalone persistence script.
+That codec slice added no socket listener, remote authentication mechanism or Kernel boot wiring. The subsequent transport slice is recorded below.
+
+- Requests are exactly 112 bytes, replies 144 bytes, with the specified magic,
+  little-endian words, version, zero reserved flags and full request echo.
+  Exact size is checked before any offset access. Invalid operations, shape,
+  truncation, extra tails and missing EOF reject. Encoding uses fixed arrays;
+  no message-provided length controls allocation.
+- Reply parsing binds correlation and all ten request fields before interpreting
+  status. Success validates the nonwrapping expected revision increment, exact
+  value and nonzero reserved boot result. Negative replies require all three
+  outcome words to be zero. Unknown/malformed/unbound replies remain uncertain
+  at the client; explicit rejection describes this dispatch only.
+- `Verifier` receives a trusted peer handle separately from request bytes and
+  returns current `Context`/`Access`; its default implementation and `DenyAll`
+  reject every request. A verifier result is still checked against all existing
+  T2 bindings. A claimed caller or loopback address cannot provide validity.
+- Dispatch parses before any verifier/backend call, checks the reservation/time/
+  work snapshot, verifies authority, and invokes the existing `transact` core.
+  Before returning a result or backend diagnostic it revalidates authority.
+  Revocation at this point suppresses the outcome but never rolls back an
+  already committed record. A success inconsistent with the request becomes
+  an uncertain response rather than a fabricated success or definite abort.
+- `ClientEvidence` is a trusted integration input: authentic server binding and
+  the current pending connection incarnation must be supplied by the future
+  transport. No received byte can set these observations.
+
+**Explicit integration boundary:** `DispatchBudget` validates the modeled
+pre-acquire reservation snapshot (slots, bytes, work and deadline) with checked
+subtraction. It does not own or allocate connection reservations, decrement
+transport poll budgets, update the clock, or refund sockets. The transport must
+reserve once before receiving input, retain the owned reservation, provide current
+work/time observations and refund once on every exit. Similarly, the `ended`
+argument must be derived from actual stream EOF. This slice intentionally tests
+the codec/dispatcher boundary before introducing socket lifecycle machinery.
+The host must serialize trusted policy observations and commit in one authority
+lane, as required by T2; a callback alone does not supply that synchronization.
+
+**19 new tests** cover golden bytes/high-word round trips; every request/reply
+truncation, tail and missing EOF; invalid headers/operations; correlation and all
+ten request-word substitutions; invalid success/overflow; all error statuses and
+zeroed outcome fields; malformed input before verifier/storage; default denial
+and foreign peer; identity/grant mismatch; quota/work/deadline overflow boundaries;
+exact retry with a new correlation; revocation between commit and reply; capacity
+and backend errors; uncertain commit recovery; boot-reservation retry; peer commit
+followed by an expired retry; trusted client acceptance; and real `FileRecord`
+commit/reopen/retry through encoded frames. Reopen is real local file access;
+fragmented socket I/O, connection cleanup and actual process/network restart
+remain transport tests for the next slice.
+
+Run from the repository root:
+
+```bash
+bash scripts/check-anka110-persistence-reference.sh
+```
+
+Acceptance at this checkpoint: **48 tests** (29 existing + 19 new), none ignored.
+The same command now discovers the subsequently added tests recorded below.
+There is no need to rerun CC2/bootstrap or the full regression suite for this
+isolated reference-module handoff. The Kleis source is unchanged since the
+confirmed protocol gate.
+
+**Follow-through:** the bounded loopback transport is delivered below. The
+accepted codec/backend remain its foundation; no authenticated remote-storage
+or Kernel boot-admission claim follows from this reference implementation.
+
+<a id="dn72-persistence-transport"></a>
+
+### Phase 10.10 — Bounded loopback persistence transport
+
+**Accepted by developer, 2026-11-05:** all **66 Rust tests passed** in **0.38s**,
+with no failures or ignored tests; the **127/98** protocol gate also passed. Formal-first lifecycle
+refinement extends the existing protocol pair to **127 positive witnesses
+(including 9 quantified laws) and 98 explicitly disproved hostile witnesses**.
+Both files passed in the authoring environment. Seven positive and nine hostile
+additions cover nonwrapping fresh connection identity, owned cancellation,
+exact EOF/one dispatch, and authorized bounded partial-write progress. These are
+word-level transition obligations, not a proof of Rust, TCP or host I/O.
+
+That transport slice added **18 focused tests** to the prior 48, yielding the
+accepted **66-test** suite on Linux/macOS. The intentionally caught binder panic
+was followed by `ok`; it was not a test failure. No full-system acceptance follows
+from this isolated reference suite.
+
+`protocol/transport.rs` adds `Server<B,V>`, parameterized by the existing durable
+backend and trusted verifier. The server owns both and serializes dispatches;
+it binds only loopback addresses and uses nonblocking sockets. It is a manually
+polled reference service, not a background daemon or a production listener.
+
+- A fixed slot table permits 1–64 connections (default four). Each accepted socket
+  reserves 384 logical protocol bytes before peer binding or input. Failed binding,
+  setup failure, cancellation, timeout, I/O failure, completion and shutdown refund
+  only the owned slot. Temporary reservation cleanup also survives callback unwind.
+  The charge is not a claim about host allocator RSS, TCP kernel buffers, the listen
+  backlog or arbitrary trusted `Peer` storage; those remain host/embedding costs.
+- Each connection holds a fixed 113-byte input guard and 144-byte reply. Real read
+  EOF after exactly 112 bytes permits one dispatch. Truncation, a 113th byte and
+  extra requests reject before backend access. Reading a full frame without EOF
+  cannot trigger an operation. Replies preserve short-write prefixes; completion
+  drops the socket so the client can observe EOF.
+- One poll performs at most one read or write per active connection and at most
+  one accept. Each I/O attempt, including WouldBlock/Interrupted, consumes one of
+  at most 512 work units. Each connection also has an absolute monotonic `Instant`
+  deadline (default five seconds, configuration at most 60). The caller controls
+  polling cadence; rapid polling can intentionally exhaust the finite budget.
+  Neither filesystem sync nor trusted callbacks are preempted by these guards.
+- Server-local connection sequences and service identities do not wrap. An opaque
+  ticket binds both: a stale ticket or a ticket from another server cannot select
+  a new connection. It is a cancellation handle, not an authorization credential.
+- The trusted binder supplies the peer independently of request bytes. A missing
+  binding closes immediately; `DenyAll` cannot access storage. The test binder is
+  explicitly synthetic. A loopback address does not establish possession or
+  identity. Production evidence verification remains unimplemented.
+- Authority is rechecked before every partial reply write, in addition to the
+  dispatcher checks. Revocation suppresses remaining output without undoing a
+  commit. Bytes already sent cannot be recalled; a partial response is an unknown
+  client outcome. A socket close never proves the operation did not commit.
+- `DispatchBudget` receives the owned slot's pre-acquire accounting projection
+  (current totals minus that slot's charge). The transport checks actual `Instant`
+  time, then represents the admitted time predicate as 0 < 1 for the synchronous
+  dispatcher. No wire field supplies EOF, time, budget or authority observations.
+  Trusted policy observation/commit serialization remains an embedding obligation.
+
+**18 new tests:** forced short writes/backpressure; revocation after a partial
+reply; finite work/deadline/zero-write closure; real socket fragmentation and EOF;
+truncation/tail rejection; quota pressure with a surviving peer; stale/foreign
+cancellation; idle exhaustion; shutdown; unbound/denied peers; default denial;
+competing clients and exact retry; sequence exhaustion; configuration validation;
+interrupted/reset I/O; actual FileRecord commit, lost reply, reopen and retry;
+callback-unwind cleanup; and one expired connection preserving another. The
+restart test recreates the service/backend in the test process; the previously
+accepted backend tests separately exercise subprocess exit and lock recovery.
+
+Run from the repository root:
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" --only-protocol &&
+bash scripts/check-anka110-persistence-reference.sh
+```
+
+Acceptance at this checkpoint: **127 positive / 98 explicit hostile disproofs;
+66 Rust tests**. The current command includes the subsequent client additions.
+The callback-unwind test intentionally catches a test panic; its final result
+must be `ok`. Treat any compilation error or failed test as an open acceptance gate.
+
+**Follow-through:** the client lifecycle refinement and implementation are
+recorded below. Concrete evidence verification and authority/boot integration
+remain separate milestones.
+
+<a id="dn72-persistence-client"></a>
+
+### Phase 10.10 — Bounded persistence client and exact retry
+
+**Delivered, 2026-11-05; developer Rust acceptance pending.** The latest accepted
+baseline is 66 tests in 0.38s. This slice adds **17 tests**, for **83 total** on
+Linux/macOS. Rust is unavailable in the authoring environment; compilation and
+runtime acceptance are pending. The extended protocol gate passed **137 positive
+witnesses (11 quantified laws) and 108 explicit hostile disproofs** here.
+
+The ten new positive and ten hostile witnesses refine current connection binding,
+trusted server evidence before I/O, finite work/deadline checks, exact request
+half-close, exact reply EOF, and retry preserving all durable request fields.
+These remain word-level contracts rather than proofs of Rust or cryptography.
+
+`protocol/client.rs` supplies a client that owns its stream, immutable request,
+fixed 112-byte send buffer and 145-byte reply guard. The explicit phases are send,
+half-close, receive and terminal. Each poll performs at most one nonblocking
+stream operation. Exact request completion precedes write-half shutdown; exact
+144-byte response plus real EOF precedes result acceptance. Truncation, tails,
+wrong echo/correlation, impossible success and malformed status remain unknown.
+
+`ServerVerifier` is a default-deny trusted extension point. Its input binds the
+actual stream's local/remote endpoints, a fresh nonwrapping client connection
+identity, and the full expected request/correlation. This identity is process-local;
+it is not durable evidence of freshness across a client restart. The external
+evidence provider must bind a fresh authenticated channel/challenge across such
+restarts. Evidence must establish the
+server role and expected anchor/installation/policy for that connection; an IP
+address is insufficient. The verifier runs before each request write, half-close
+and read, and again at EOF before accepting an outcome. The client supplies no
+wire-controlled `pending_current` flag: only its currently owned stream can finish
+its immutable pending request. `DenyServer` sends zero request bytes.
+
+**This is an evidence interface, not a concrete evidence verifier.** No TLS/OIDC
+mechanism, certificate parser, trust-anchor enrollment service or cryptographic
+handshake is added. Tests use explicit synthetic authority fixtures. A production
+embedding must keep default denial until that missing verifier is implemented.
+The `Channel` interface is trusted and requires nonblocking behavior after setup;
+the reference adapter uses TCP and restricts endpoints to loopback.
+
+The public client retains a maximum 512-unit budget and an absolute monotonic
+deadline (default five seconds, configurable up to 60). Setup and every poll,
+including WouldBlock/Interrupted, consume work. `connect` uses bounded TCP connect
+without DNS and includes connect time in the original deadline. `start` can adopt
+an already connected stream; its prior connection cost belongs to its caller.
+The embedding controls polling cadence and must bound trusted verifier callbacks.
+Fixed per-client buffers do not provide a global client admission quota; bounding
+client count and host socket overhead remains an embedding responsibility.
+
+Cancellation closes the owned stream and fixes an unknown outcome, unless a
+terminal result was already established. It cannot roll back a durable operation.
+Repeated poll/cancel returns the same terminal result without more network I/O.
+A previously accepted success is historical evidence, not a new authorization grant.
+
+An explicit retry is allowed only after an unknown result. It must use a new
+nonzero correlation and a newly owned connection; **all ten durable request
+fields remain unchanged**. The original deadline and remaining work are shared,
+not reset. Failed retry setup also consumes work. Old connection-bound evidence
+cannot authorize the new connection. The client never automatically advances a
+sequence/revision or retries an established success/rejection. A later independent
+operation needs a fresh admission decision; request recovery after a client-process
+crash is not implemented by this in-memory lifecycle.
+
+**17 new tests** cover short writes and fragmented replies; exact bytes without
+EOF; truncated/tailed/corrupt replies; stale correlation and changed request;
+default-deny before sending; revocation during request transmission; post-EOF
+revalidation; exact retry with shared budget/deadline; stale connection evidence;
+stable terminal results; work/deadline exhaustion; WouldBlock/Interrupted/zero
+writes; invalid configuration/retry; real client-server exchange; lost-reply retry
+with one commit; FileRecord/service recreation and exact retry; and canonical
+negative statuses including uncertain commit. Socket tests use the accepted server
+and durable core. The backend-recreation test validates the committed revision
+before retrying; it does not claim client-process crash recovery.
+
+Run only the changed formal pair and focused reference suite:
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" --only-protocol &&
+bash scripts/check-anka110-persistence-reference.sh
+```
+
+Expected: **137 positive / 108 hostile disproofs; 83 Rust tests**. The pre-existing
+binder-unwind test intentionally catches a panic and must finish `ok`.
+
+**Next:** formalize the concrete trusted evidence admission record and its current
+anchor/policy/revocation/connection bindings before implementing the production
+verifier. Then integrate persistence with Anka64 enrollment and reboot admission.
+Keep technology choices separate until that contract is explicit. This completes
+the reference transport/client lifecycle slice only; Phases 10.9 and 10.10 remain
+open for evidence and runtime integration.

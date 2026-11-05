@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile the core and local backend tests only; no CC2/bootstrap/full suite.
+# Compile core/backend, codec, loopback and bounded client tests (83); no CC2/bootstrap/full suite.
 set -euo pipefail
 case "$(uname -s)" in
   Linux|Darwin) ;;

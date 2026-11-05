@@ -150,3 +150,6 @@ mod tests;
 #[cfg(any(target_os="linux", target_os="macos"))]
 #[path="authority_persistence/file_backend.rs"]
 pub(crate) mod file_backend;
+
+#[path="authority_persistence/protocol.rs"]
+pub(crate) mod protocol;

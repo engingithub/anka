@@ -1685,7 +1685,7 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 # 18. Current Implementation Facts
 
 Status reconciled against the supplied archive and developer acceptance evidence
-on 2026-11-04: **Phase 10.8 is closed and merged to main. Phase 10.9 T1 and the initial T2 model have passing local formal gates; the Phase 10.10 Rust reference core has 13 passing developer tests; a local durable adapter is delivered with new Rust tests pending. Production integration remains pending.**
+on 2026-11-04: **Phase 10.8 is closed and merged to main. Phase 10.9 T1 and the initial T2 model have passing local formal gates; the Phase 10.10 persistence core and local durable adapter have 29 passing developer tests; the bounded protocol has passing formal gates; the codec/loopback reference has 66 passing developer tests; the bounded client is delivered with 17 new tests pending. Production integration remains pending.**
 The [DN-71 status table](DESIGN_NOTES.md#dn71-status) and
 [final evidence record](DESIGN_NOTES.md#phase-108-final-evidence) supersede older
 intermediate counts and pending labels. The 10.8 runtime/formal gates were not rerun; their acceptance applies to the
@@ -3583,7 +3583,7 @@ toolchains.
 | 10.7 | Protected local pointer ABI and application rebuild | Closed; DN-59 fixes its scope |
 | 10.8 | Shared allocation, compiler resource growth, typed modules and protected network-service rebuild | Closed; final evidence in DN-71 |
 | 10.9 | Identity/authority model, supply-chain closure and hostile CPU-to-HTTP audit | T1 and initial T2 model delivered; backend/evidence refinement, T3–T5 and integration pending; DN-72 |
-| 10.10 (proposed) | Durable network persistence using the artifact/publication foundation | Core accepted; local durable adapter delivered, new tests pending; network/evidence integration open; DN-72 |
+| 10.10 (proposed) | Durable network persistence using the artifact/publication foundation | Core/backend/codec/loopback accepted (66 tests); extended protocol gates passed (137/108); client delivered, 17 tests pending; evidence integration open; DN-72 |
 
 Phase 10.8's implementation chronology and test commands live in
 [DN-71](DESIGN_NOTES.md#dn-71). The repeated allocation/worker/compiler progress
@@ -3704,11 +3704,10 @@ The [T2 evidence record](DESIGN_NOTES.md#dn72-t2) reports 87 positive witnesses
 model separates durable conditional record commit from boot admission, bounds
 retry history to one retained outcome with a nonresetting sequence, and requires
 external fresh boot-attempt evidence after restart. A complete backend commit is
-still a trusted premise, not a demonstrated disk protocol. The Rust reference
-core passed all 13 focused tests on the developer Mac. The subsequent local
-adapter has a passing 51-positive/45-hostile backend theory gate; its new Rust
-tests remain pending. Use `scripts/check-anka110-persistence-reference.sh` to run
-29 entries without CC2/bootstrap. Kernel boot/authority wiring and network
+a trusted premise in the abstract T2 model, refined by the host-local adapter
+and its stated filesystem assumptions. The developer passed all 29 core/backend
+tests in 0.37 seconds and the 51-positive/45-hostile backend theory gate. Use
+`scripts/check-anka110-persistence-reference.sh` for those entries without CC2/bootstrap. Kernel boot/authority wiring and network
 transport remain pending. No T2/10.10 closure is implied by the initial formal results.
 
 AOM supplies structured executable-object bytes and type/interface evidence.
@@ -3730,8 +3729,10 @@ Bootstrap access to the store cannot depend solely on credentials held inside it
 A Rust reference server can run with local backing and loopback tests without
 an external cloud service. Anka64 C will implement the same defined protocol and
 state transitions, first as a client. The first host backend uses a private local snapshot file with atomic rename,
-flush barriers and a stable advisory writer lock; public wire format and cryptography
-remain unselected. Its fixed CRC-protected encoding detects corruption and is
+flush barriers and a stable advisory writer lock. A version-1 bounded reference
+wire contract is formalized; its Rust codec/dispatcher/loopback has 66 passing
+developer tests. The bounded client is delivered, pending its focused tests.
+Concrete evidence verification and production integration remain pending. Its fixed CRC-protected encoding detects corruption and is
 not authenticated remote evidence. See the [backend record](DESIGN_NOTES.md#dn72-local-backend)
 for host assumptions, uncertain-commit fencing and developer test commands. Crash injection and common Rust/C operation traces must distinguish
 volatile visibility from acknowledged durability. Replication, general filesystem
@@ -4718,3 +4719,32 @@ or DMA handle. Its captured response is passed to the TCP guest and the caller
 observes only committed NIC transmissions. An explicit application scheduling
 point allows replay of a client waiting for its response before closing.
 See DN-71 for the profile limits, accounting, and evidence.
+
+
+##### Bounded persistence protocol — formal contract, implementation next
+
+The [DN-72 protocol contract](DESIGN_NOTES.md#dn72-persistence-protocol) defines
+one 112-byte request and one 144-byte reply per connection, canonical versioned
+fields, complete request/outcome binding, current authority checks, finite work
+and bounded connection reservations. `anka110_persistence_protocol` passed
+137 positive witnesses (11 quantified laws) and 108 explicit hostile disproofs,
+including loopback and client lifecycle refinements.
+Run `scripts/check-anka109-gates.py --only-protocol` with the usual Kleis paths.
+No new runtime acceptance is claimed by these word-level contracts.
+
+The durable sequence and retained exact request determine retry identity;
+connection correlation only binds transport replies. A missing reply leaves an
+unknown outcome and cannot undo a committed record. Reopening an uncertain
+backend must settle its validated head before retry recovery. Select and
+ReserveBoot are the only operations; reservation never admits execution.
+Trusted peer/server bindings and current validator results are outside untrusted
+message fields. Loopback does not authenticate a principal. The fixed
+Rust codec/dispatcher/loopback is accepted by 66 developer tests. The server
+implements owned reservations, actual EOF, finite poll work/deadlines and
+partial-write authority rechecks. The bounded client adds default-deny server
+evidence checks, real half-close/EOF and exact retries sharing one finite budget
+and deadline; its 17 added tests remain pending (83 total).
+The 384-byte reservation is logical protocol accounting, excluding host TCP and
+allocator overhead. No loopback identity assumption replaces the verifier. See the
+[client delivery](DESIGN_NOTES.md#dn72-persistence-client). Authenticated remote storage and Anka64 enrollment/boot integration
+remain separate acceptance obligations.

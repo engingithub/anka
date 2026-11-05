@@ -56,7 +56,23 @@ The original MC68000 implementation remains in the repository as the project's
 experimental foundation. Active architecture and toolchain development targets
 Anka64.
 
-## Current checkpoint — Phase 10.8
+## Current checkpoint — Phase 10.8 complete; 10.9–10.10 in progress
+
+**Phase 10.8 is complete.** The protected network-service rebuild serves `/alive`
+through the virtual NIC. Current progress separates three kinds of evidence:
+
+| Evidence level | Current status |
+|---|---|
+| Integrated runtime features | Phase 10.8 protected network-service rebuild and `/alive` through the virtual NIC |
+| Formal contracts | Phase 10.9 Kleis formalizations for recognition, enrollment, grant admission, persistence and reboot |
+| Implemented reference mechanisms | Phase 10.10 local durable persistence backend, codec and loopback server accepted by 66 Rust tests; bounded client delivered, acceptance pending |
+
+The developer accepted all 66 persistence core/backend/codec/loopback tests
+(0.38s), plus the 127/98 protocol gate. The bounded client now adds 17 tests,
+pending developer execution. Its extended protocol gate passed 137 positive
+witnesses and 108 hostile disproofs in the authoring environment.
+Authenticated network storage remains planned; the formal contracts and local
+reference backend do not establish integrated runtime acceptance for those features.
 
 Phase 10.6 self-hosting and Phase 10.7 protected local applications are complete.
 Phase 10.8 has accepted typed I/O, protected module composition, C `malloc/free`,
@@ -85,7 +101,7 @@ acceptance, not socket/NIC acceptance.
 12 ignored in 289.36 seconds. Both the monitor bootstrap and typed AOM
 regressions passed individually as well. Ignored real gates are run separately.
 
-**Phase 10.8 remains open.** The typed socket kernel path passed its five focused Rust tests.
+**Phase 10.8 network-service evidence:** The typed socket kernel path passed its five focused Rust tests.
 The real CC2 socket HTTP witness passed in 92.83 seconds: the client kept the
 stream open and received the exact reply under backpressure. The real Ethernet/ARP/IPv4/ICMP NIC gate also passed (83.16 seconds).
 The rebuilt bounded `/alive` path passed on the virtual NIC in **124.61s**:
@@ -93,7 +109,7 @@ protected TCP delivered the split request and transmitted the protected HTTP
 reply before peer FIN. The legacy UDP oracle passed in 1.02s. In a single
 85.25s release witness the protected guest passed 17 UDP and 10 Ethernet/ARP/
 IPv4/ICMP cases, checking committed wire bytes, drops, receipts and refunds.
-Final release verification is the remaining Phase 10.8 gate.
+Phase 10.8 final release verification is complete.
 The legacy CC_B/shared-buffer stack remains the protocol reference. DN-71 also
 tracks future logical-operator support and source-order-independent C entry.
 
@@ -177,7 +193,9 @@ The current reference runtime depends on a trusted host. FPGA realization
 and an Apple Silicon/Metal execution prototype are planned directions, not
 implemented backends. They require refinement against the reference machine,
 including authority, synchronization, memory ordering and observable timing.
-The active closure work remains the software rebuild milestone.
+The immediate checkpoint is the bounded client
+[acceptance command](DESIGN_NOTES.md#dn72-persistence-client) (83 Rust tests).
+Concrete trusted evidence admission and authority/boot integration follow.
 
 ## License
 
