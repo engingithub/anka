@@ -2,7 +2,6 @@
 use super::*;
 use crate::anka64::scoped_pointers::heap::HeapReservation;
 mod execution;
-pub(crate) use execution::LinkedCompilerRunReport;
 
 pub(crate) struct PublishedCompilerLink {
     owner: AllocationOwner,
@@ -329,7 +328,7 @@ mod tests {
     #[test]
     fn c4_linked_publication_quota_denial_keeps_source_and_refunds_only_private_stage() {
         let(mut k,m)=fixture();let auth=RebuildPublicationAuthority::provision();let held=charge(&k);
-        let mut output=link(&mut k,m);
+        let output=link(&mut k,m);
         let (_,account)=output.inputs.kernel.compiler_candidate_account().unwrap();
         let current=charge(output.inputs.kernel);
         let filler=output.inputs.kernel.fabric.scoped_pointers.reserve_host_storage(account,

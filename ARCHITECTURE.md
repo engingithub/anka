@@ -4690,6 +4690,47 @@ requires that accepted TX has drained. Errors, cancellation and faults still
 tear down the endpoint. This adapter has bounded input, capture and execution,
 no packet or DMA authority, and no claim of TCP/NIC acceptance.
 
+**Phase 10.10 configurable queues (Kleis gate passed; Rust endpoint implemented).**
+At bind, the trusted adapter requests independent, positive RX and TX backing
+capacities. The Rust profile permits 1–65,536 bytes per direction, with a
+1,024-byte default for each. Admission checks each
+direction against policy and reserves the checked sum of both capacities and
+endpoint metadata; the existing heap ledger charges that logical reservation
+rounded up to pages against both owner and global budgets. Publish the ticket
+only after reservation and initialization succeed. The capacities are immutable
+for that binding; queue space grants neither memory rights nor peer authority.
+
+The protected call limit remains 1,024 bytes, even when the queue is larger.
+Conversely, a valid call may request more than a small queue can hold and
+transfer only the available prefix. Ingress retains the all-or-none ordered
+fragment and FIN rule. The transport must offer fragments that can fit and
+make progress as the reader drains them. These capacities describe local
+copy storage; they do not specify TCP's advertised receive window, a packet
+size or a storage message limit. See the Phase 10.10 socket-capacity entry
+in DESIGN_NOTES.md for the runtime acceptance criteria.
+
+**Phase 10.10 outbound storage profile (formal gate passed; Rust runtime awaiting acceptance).**
+A trusted adapter binds one guest incarnation to one configured route and a
+fresh connection. Only handshake control may precede storage-server verification.
+The guest cannot nominate a peer by putting an address or a credential in its
+request. The same current E11 evidence is required separately at enqueue and
+at each publication of a request prefix to the NIC.
+
+Write shutdown is a distinct event for the frozen 112-byte Select. It closes
+the guest's TX side to new writes once the whole request has been accepted.
+Queued bytes may still drain; FIN may commit only after the final payload byte
+and a fresh authority check. A failed NIC offer advances neither the relevant
+cursor nor FIN state. Local FIN preserves RX; 144 reply bytes alone do not
+establish an outcome. Require actual peer EOF, exact framing and correlation,
+and current storage-server evidence. Protected syscall 25 requests write shutdown.
+The Rust adapter runs one fixed virtual route. A shared verifier lock covers
+both the final evidence check and the synchronous NIC write; authority updates
+must serialize on that same lock. A busy lane or zero peer window cannot emit
+FIN. The receiver stages the bounded reply privately until peer EOF and
+rechecks evidence before each copy to the guest. The passive HTTP session is
+unchanged. This profile does not implement TCP retransmission, authenticated
+credential acquisition, or the receipt-managed CC2 guest launcher.
+
 The pre-socket checkpoint passed 1,614 tests with 12 ignored; the final DN-71
 record supersedes that count and includes protected network acceptance. C logical
 operators and symbol-selected entry retain separate future contracts.

@@ -6,7 +6,8 @@ use crate::anka64::os::CurrentHeapProcess;
 use crate::anka64::scoped_pointers::heap::HeapWorkRevision;
 use crate::anka64::state::{AgentId, AgentKind};
 mod runtime;
-pub(crate) use runtime::{HeapWorkCounts, HeapWorkOutcome};
+#[cfg(test)]
+use runtime::{HeapWorkCounts, HeapWorkOutcome};
 
 const MAX_CPU_BYTES: usize = 4096;
 

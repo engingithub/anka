@@ -1,0 +1,28 @@
+import "anka110_socket_capacity.kleis"
+
+example "hostile: default duplex reserves both queues and metadata" { assert(sc_bind(bvconst(1024,64),bvconst(1024,64),bvconst(80,64),bvconst(4096,64),bvconst(2128,64),bvconst(2128,64),sk_true())=bvconst(2048,64)) }
+example "hostile: asymmetric capacities consume exact charge" { assert(sc_bind(bvconst(64,64),bvconst(4096,64),bvconst(80,64),bvconst(4096,64),bvconst(5000,64),bvconst(5000,64),sk_true())=bvconst(2080,64)) }
+example "hostile: zero RX rejected" { assert(¬(sc_bind(bvconst(0,64),bvconst(64,64),bvconst(80,64),bvconst(4096,64),bvconst(5000,64),bvconst(5000,64),sk_true())=bvconst(0,64))) }
+example "hostile: zero TX rejected" { assert(¬(sc_bind(bvconst(64,64),bvconst(0,64),bvconst(80,64),bvconst(4096,64),bvconst(5000,64),bvconst(5000,64),sk_true())=bvconst(0,64))) }
+example "hostile: per-direction maximum enforced" { assert(¬(sc_bind(bvconst(65,64),bvconst(1,64),bvconst(8,64),bvconst(64,64),bvconst(1000,64),bvconst(1000,64),sk_true())=bvconst(0,64))) }
+example "hostile: payload arithmetic cannot wrap" { assert(¬(sc_bind(sk_error(),bvconst(1,64),bvconst(8,64),sk_error(),bvconst(9000,64),bvconst(9000,64),sk_true())=bvconst(0,64))) }
+example "hostile: metadata arithmetic cannot wrap" { assert(¬(sc_bind(sk_again(),bvconst(1,64),bvconst(8,64),sk_error(),bvconst(9000,64),bvconst(9000,64),sk_true())=bvconst(0,64))) }
+example "hostile: owner one byte short" { assert(¬(sc_bind(bvconst(64,64),bvconst(64,64),bvconst(8,64),bvconst(64,64),bvconst(135,64),bvconst(1000,64),sk_true())=bvconst(0,64))) }
+example "hostile: system one byte short" { assert(¬(sc_bind(bvconst(64,64),bvconst(64,64),bvconst(8,64),bvconst(64,64),bvconst(1000,64),bvconst(135,64),sk_true())=bvconst(0,64))) }
+example "hostile: failed backing setup preserves free bytes" { assert(¬(sc_free_after(bvconst(200,64),sc_bind(bvconst(64,64),bvconst(64,64),bvconst(8,64),bvconst(64,64),bvconst(200,64),bvconst(200,64),sk_false()))=bvconst(200,64))) }
+example "hostile: 64 byte TX returns a short prefix" { assert(¬(sc_result(sk_false(),sk_true(),bvconst(64,64),bvconst(0,64),bvconst(112,64),sk_false())=bvconst(64,64))) }
+example "hostile: full A returns again" { assert(¬(sc_result(sk_false(),sk_true(),bvconst(64,64),bvconst(64,64),bvconst(48,64),sk_false())=sk_again())) }
+example "hostile: independent B still sends after A fills" { assert(¬(sc_result(sk_false(),sk_true(),bvconst(64,64),bvconst(64,64),bvconst(48,64),sk_false())=sk_again() ∧ sc_after(sk_false(),sk_true(),bvconst(4096,64),bvconst(64,64),bvconst(48,64),sk_false(),sk_true())=bvconst(112,64))) }
+example "hostile: more than 1024 queued across bounded calls" { assert(¬(sc_after(sk_false(),sk_true(),bvconst(4096,64),sc_after(sk_false(),sk_true(),bvconst(4096,64),bvconst(0,64),bvconst(1024,64),sk_false(),sk_true()),bvconst(256,64),sk_false(),sk_true())=bvconst(1280,64))) }
+example "hostile: large queue does not widen call ABI" { assert(¬(sc_result(sk_false(),sk_true(),bvconst(4096,64),bvconst(0,64),bvconst(1025,64),sk_false())=sk_error())) }
+example "hostile: capacity never grants missing authority" { assert(¬(sc_result(sk_false(),sk_false(),bvconst(4096,64),bvconst(0,64),bvconst(4,64),sk_false())=sk_error())) }
+example "hostile: failed copy leaves queued bytes" { assert(¬(sc_after(sk_true(),sk_true(),bvconst(4096,64),bvconst(1025,64),bvconst(64,64),sk_false(),sk_false())=bvconst(1025,64))) }
+example "hostile: drop neither last byte nor FIN on refused ingress" { assert(¬(sc_in_after(sk_true(),sk_false(),bvconst(64,64),bvconst(63,64),bvconst(2,64))=bvconst(63,64) ∧ ¬sk_fin_after(sk_false(),sc_delivery(sk_true(),sk_false(),bvconst(64,64),bvconst(63,64),bvconst(2,64)),sk_true()))) }
+example "hostile: empty FIN at full capacity accepted" { assert(¬(sc_delivery(sk_true(),sk_false(),bvconst(64,64),bvconst(64,64),bvconst(0,64)))) }
+example "hostile: failed release leaves debt" { assert(¬(sc_debt(bvconst(11,64),bvconst(11,64),bvconst(136,64),sk_true(),sk_false())=bvconst(136,64))) }
+example "hostile: no refund before drop" { assert(¬(sc_refund(bvconst(11,64),bvconst(11,64),bvconst(136,64),sk_false(),sk_true())=bvconst(0,64))) }
+example "hostile: A refund leaves B charge intact" { assert(¬(sc_refund(bvconst(11,64),bvconst(11,64),bvconst(136,64),sk_true(),sk_true())=bvconst(136,64) ∧ sc_debt(bvconst(12,64),bvconst(11,64),bvconst(4240,64),sk_true(),sk_true())=bvconst(4240,64))) }
+example "hostile: C fresh binding leaves A ticket stale" { assert(¬(sc_rebind(bvconst(11,64),bvconst(13,64),sc_debt(bvconst(11,64),bvconst(11,64),bvconst(136,64),sk_true(),sk_true()),bvconst(0,64),sk_true(),sk_true()) ∧ ¬sk_ticket(sk_true(),sk_true(),sk_true(),bvconst(11,64),bvconst(13,64)))) }
+example "hostile: dirty backing blocks C" { assert(¬(¬sc_rebind(bvconst(11,64),bvconst(13,64),bvconst(0,64),bvconst(0,64),sk_false(),sk_true()))) }
+example "hostile: outstanding work blocks C" { assert(¬(¬sc_rebind(bvconst(11,64),bvconst(13,64),bvconst(0,64),bvconst(1,64),sk_true(),sk_true()))) }
+example "hostile: unpaid debt blocks C" { assert(¬(¬sc_rebind(bvconst(11,64),bvconst(13,64),bvconst(136,64),bvconst(0,64),sk_true(),sk_true()))) }

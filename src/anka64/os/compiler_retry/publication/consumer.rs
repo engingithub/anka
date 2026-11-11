@@ -4,8 +4,6 @@
 use super::*;
 mod published;
 pub(super) use published::PublishedCompilerLink;
-pub(crate) use published::LinkedCompilerReceipt;
-pub(crate) use published::LinkedCompilerRunReport;
 use crate::anka64::ankald::{self, ApplicationLinkProfile, AnkaldLinkedImage};
 use crate::anka64::dev_runner::DeveloperExecutionAuthority;
 use crate::anka64::pointer_frames::ValidatedPointerModule;

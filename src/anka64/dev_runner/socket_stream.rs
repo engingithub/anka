@@ -1,22 +1,33 @@
 //! Deterministic ordered-stream adapter for the rebuilt guest. This boundary is
 //! downstream of TCP reassembly. It cannot submit NIC work or access guest memory.
 use super::Kernel;
-use crate::anka64::os::{typed_socket::{SocketTicket,SOCKET_AGAIN,SOCKET_WINDOW},SYS_SOCKET_RECV,SYS_SOCKET_SEND};
+use crate::anka64::os::{typed_socket::{SocketCapacity,SocketTicket,SOCKET_AGAIN},SYS_SOCKET_RECV,SYS_SOCKET_SEND};
 use crate::anka64::state::ProcessKey;
+
+// This replay adapter has its own bounded input and charged output report.
+const REPLAY_BYTES: usize = 1024;
 
 pub(crate) struct DeveloperSocketAuthority { _private: () }
 impl DeveloperSocketAuthority { pub(crate) fn provision()->Self { Self{_private:()} } }
 
 pub(crate) struct OrderedStream<'a> {
     authority:&'a DeveloperSocketAuthority, first:&'a [u8], second:&'a [u8],
-    fin:bool, window:usize,
+    fin:bool, window:usize, capacity:SocketCapacity,
 }
 impl<'a> OrderedStream<'a> {
     pub(crate) fn new(authority:&'a DeveloperSocketAuthority, first:&'a [u8],second:&'a [u8],
         fin:bool,window:usize)->Result<Self,&'static str> {
-        if !(1..=SOCKET_WINDOW).contains(&window) || first.len()>SOCKET_WINDOW
-            || second.len()>SOCKET_WINDOW-first.len() { return Err("invalid stream budget"); }
-        Ok(Self{authority,first,second,fin,window})
+        Self::with_capacity(authority,first,second,fin,window,SocketCapacity::DEFAULT)
+    }
+
+    pub(crate) fn with_capacity(authority:&'a DeveloperSocketAuthority, first:&'a [u8],
+        second:&'a [u8],fin:bool,window:usize,capacity:SocketCapacity)->Result<Self,&'static str> {
+        // Second is offered only after the first has drained. Each fragment
+        // must fit intact; the combined input still obeys this adapter's budget.
+        if !(1..=capacity.tx()).contains(&window) || first.len()>capacity.rx()
+            || second.len()>capacity.rx() || first.len()>REPLAY_BYTES
+            || second.len()>REPLAY_BYTES-first.len() { return Err("invalid stream budget"); }
+        Ok(Self{authority,first,second,fin,window,capacity})
     }
 }
 #[derive(Debug,Default,Clone,Copy,PartialEq,Eq)]
@@ -33,7 +44,7 @@ impl<'a> Bridge<'a> {
         Self{stream,ticket:None,second_pending,progress:StreamProgress::default()}
     }
     pub(super) fn attach(&mut self,k:&mut Kernel,child:ProcessKey)->Result<(),()> {
-        let t=k.bind_application_socket(child,self.stream.window,self.stream.authority).map_err(|_|())?;
+        let t=k.bind_application_socket(child,self.stream.capacity,self.stream.window,self.stream.authority).map_err(|_|())?;
         self.ticket=Some(t);
         k.deliver_socket(t,self.stream.first,!self.second_pending && self.stream.fin)
     }
@@ -62,8 +73,8 @@ impl<'a> Bridge<'a> {
     fn drain(&self,k:&mut Kernel,t:SocketTicket)->Result<(),()> {
         // byte_output is the charged report buffer. Socket mode disallows
         // console writes. Limit logical wire capture independently of capacity.
-        let mut bytes=[0u8;SOCKET_WINDOW];
-        let room=SOCKET_WINDOW.checked_sub(k.byte_output.len()).ok_or(())?;
+        let mut bytes=[0u8;REPLAY_BYTES];
+        let room=REPLAY_BYTES.checked_sub(k.byte_output.len()).ok_or(())?;
         // Never dequeue a prefix that cannot fit the capture; full negotiated
         // window is an upper bound, but charge only the actual pending bytes.
         let pending=k.socket_pending_tx(t)?;
@@ -82,6 +93,13 @@ mod tests {
         let auth=DeveloperSocketAuthority::provision();let bytes=[42u8;1024];
         assert!(OrderedStream::new(&auth,&bytes[..1023],&bytes[..1],false,1).is_ok());
         assert!(OrderedStream::new(&auth,&bytes,&bytes[..1],true,1).is_err());
+        let cap=SocketCapacity::new(64,4096).unwrap();
+        assert!(OrderedStream::with_capacity(&auth,&bytes[..64],&bytes[..64],true,4096,cap).is_ok());
+        assert!(OrderedStream::with_capacity(&auth,&bytes[..65],&[],true,1,cap).is_err());
+        assert!(OrderedStream::with_capacity(&auth,&[],&bytes[..65],true,1,cap).is_err());
+        assert!(OrderedStream::with_capacity(&auth,&[],&[],true,4097,cap).is_err());
+        let large=SocketCapacity::new(4096,4096).unwrap();
+        assert!(OrderedStream::with_capacity(&auth,&bytes,&[1],true,7,large).is_err());
         for w in [0,1025,usize::MAX] {assert!(OrderedStream::new(&auth,&[],&[],true,w).is_err());}
     }
 }

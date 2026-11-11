@@ -37,11 +37,15 @@ impl Config{fn valid(self)->bool{(1..=512).contains(&self.work) && !self.timeout
 enum Phase{Send,HalfClose,Receive,Terminal(ClientResult)}
 fn invalid()->io::Error{io::Error::new(io::ErrorKind::InvalidInput,"invalid client lifecycle/configuration")}
 fn transient(e:&io::Error)->bool{matches!(e.kind(),io::ErrorKind::WouldBlock|io::ErrorKind::Interrupted)}
+// One namespace for host and virtual transports using the E11 adapter.
+pub(crate) fn fresh_connection()->io::Result<u64> {
+    CONNECTIONS.fetch_update(Ordering::Relaxed,Ordering::Relaxed,|n|n.checked_add(1))
+        .map_err(|_|io::Error::other("client connection identity exhausted"))
+}
 fn bind<S:Channel>(stream:&mut S)->io::Result<Binding>{
     let (local,remote)=stream.prepare()?;
     if !local.ip().is_loopback() || !remote.ip().is_loopback(){return Err(invalid())}
-    let connection=CONNECTIONS.fetch_update(Ordering::Relaxed,Ordering::Relaxed,|n|n.checked_add(1))
-        .map_err(|_|io::Error::other("client connection identity exhausted"))?;
+    let connection=fresh_connection()?;
     Ok(Binding{connection,local,remote})
 }
 /// One owned connection and one immutable durable request. Dropping/cancelling

@@ -15444,10 +15444,88 @@ includes all six E12 cases. The transport unwind test now waits for the actual
 binder callback before asserting that the temporary reservation was refunded.
 This run covers the persistence reference suite, not the full Anka64 regression suite.
 
-**Next:** assess the CC2 guest-to-storage boundary against
-the existing typed socket, framing, authority and retry contracts. Identify
-which handles the guest receives and which component may authenticate the
-channel before sending. Add an affected Kleis gate where those contracts leave
-a gap. The first guest milestone is one existing `Select` request over the
-virtual NIC, with a file-backed result recoverable after restart and exact
-retry. General artifact write/read remains a separate storage contract.
+#### Phase 10.10: configurable typed socket capacity before guest Select
+
+**Decision and status.** Parameterize the private RX/TX queues at trusted
+endpoint creation; keep the existing 1,024-byte default in each direction
+and the existing whole-span, 1,024-byte per-call ABI. The capacity Kleis
+gate passed (35 positive witnesses; 26/26 hostile assertions explicitly
+disproved). The new Rust endpoint implements this contract; the developer reported the final ordered-stream test passing. No CC2 guest storage I/O is claimed.
+
+**Contract.** The two capacities may differ. Require positive values within
+policy, check addition including endpoint metadata before reserving, and
+admit both or neither. No live resizing. Failure before publication must
+expose no usable endpoint and leave no net charge after rollback. On death
+or cancellation, make backing inaccessible, drop it, and refund only its
+reservation once; a failed release remains tracked debt. Reuse requires clean
+backing, no outstanding work referencing it and a fresh ticket. The model
+checks ledger isolation, occupancy bounds, overflows and default S1 behavior.
+It assumes trustworthy owner/ticket lookup, serialized admission, successful
+initialization and copy certificates. It does not prove allocator scrubbing,
+transport scheduling, payload ordering in Rust, or peer authentication.
+
+**Rust refinement (one endpoint per Kernel).** Trusted bind takes immutable
+capacities from 1 through 65,536 per direction. The RX length determines the
+TX offset. Both owners' and global quotas use the existing page-rounded ledger;
+ticket checks use the exact logical reservation including the endpoint itself.
+The ordered-stream runner can select a capacity independently of its TX throttle
+and retains its existing 1 KiB replay-input and report-output budgets.
+
+**Runtime check:** run `bash scripts/check-anka108-typed-socket.sh`.
+It requires the five existing S1 tests, four capacity tests and the ordered-stream
+plan test. The same-Fabric case uses A's endpoint, B's independent storage
+reservations and C's later endpoint; it checks global denial, B's continued
+progress, A's death, rejection of A's old ticket and C's empty queues. This
+does not claim two simultaneously bound sockets in one Kernel.
+
+#### Phase 10.10: guest-initiated Select, active open and write-half-close
+
+**Formal gate passed:** 55 positive witnesses and 50/50 hostile assertions
+explicitly disproved. Reproduce with `scripts/check-anka109-gates.py --only-outbound-select`.
+This refines the outbound path only. The TCP handshake checks the configured
+route, reverse tuple, flags, headers and acknowledgment of the guest SYN.
+Committing the final ACK establishes a stream; it conveys no storage grant.
+The bounded client keeps separate counters for request bytes accepted locally
+and request bytes committed to the ordered network path. Under backpressure,
+retire only the committed prefix. Recheck E11 for the bound channel and frozen
+request at each disclosure, including a suffix queued before revocation.
+
+After accepting all 112 bytes, latch write shutdown. A premature close is
+refused, subsequent guest writes are refused, and a failed FIN offer remains
+pending. FIN is also authority-sensitive: the storage server dispatches at
+EOF. Local FIN does not imply receipt or a durable commit. Continue RX, drain
+the 144-byte response, and revalidate at peer EOF. A tail permanently invalidates
+the exchange. Timeout, revocation, or transport loss gives no evidence of rollback.
+An uncertain retry uses a fresh connection and correlation with the identical
+logical request; the server still performs its own caller admission.
+
+**Refinement boundary.** Binding, byte-for-byte canonical prefix comparison,
+authenticated observations, actual NIC commits, ordered segment validation
+and remaining work/deadline are trusted inputs to these predicates. The gate
+does not implement cryptography, prove TCP retransmission or liveness, or claim
+a guest reached the file backend. A committed TX is local network custody, not
+a remote ACK. The adapter must serialize authority checks with wire publication
+and keep queued bytes from a dead connection out of its replacement.
+
+**Runtime implementation (acceptance pending).** The fixed-route adapter
+uses the existing bounded NIC driver for both ingress and committed egress.
+The protected caller uses the existing send/receive ABI and syscall 25 for
+write shutdown. RX stays open. A verifier lock serializes each request
+publication, including FIN, with policy changes made through the same lane.
+An ambiguous driver failure ends the exchange; a known blocked offer can be
+retried without changing the stream cursor. The ordinary passive socket cannot
+drain a Select endpoint or inject a reply into it.
+
+Run `bash scripts/check-anka110-outbound-select.sh`. Four runtime cases cover
+a split request and exact reply, revocation just before FIN, revocation after
+the storage commit but before peer EOF, and a reply with a trailing byte. They
+exercise protected syscall frames, real virtual NIC RX/TX and the reference
+dispatcher with a counted in-memory backend and test verifier. They do not
+claim file persistence or CC2 guest execution. The script also runs the typed
+socket capacity regressions. The 55/50 formal result stands independently.
+
+**Next acceptance milestone:** bind the receipt-managed CC2 guest to the same
+outbound endpoint, lower its explicit write shutdown, and run Select against
+guarded file-backed storage at 64-byte and 4 KiB queue capacities. Lose the
+first reply, reopen the file, retry the identical logical request with fresh
+connection/correlation, and verify exactly one revision advance.

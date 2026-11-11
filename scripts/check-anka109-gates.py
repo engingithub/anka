@@ -27,6 +27,12 @@ VERIFIER_PAIRS = ('anka110_caller_verifier',)
 STORAGE_VERIFIER_PAIRS = ('anka110_storage_verifier',)
 
 
+SOCKET_CAPACITY_PAIRS = ('anka110_socket_capacity',)
+
+
+OUTBOUND_SELECT_PAIRS = ('anka110_outbound_select',)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kleis', default='kleis')
@@ -43,6 +49,8 @@ def main():
     selection.add_argument('--only-peer-binder', action='store_true', help='run E7 connection-bound caller admission')
     selection.add_argument('--only-caller-verifier', action='store_true', help='run E9 caller verifier evidence derivation')
     selection.add_argument('--only-storage-verifier', action='store_true', help='run E11 storage server verification before send and at EOF')
+    selection.add_argument('--only-socket-capacity', action='store_true', help='run configurable typed socket capacity refinement')
+    selection.add_argument('--only-outbound-select', action='store_true', help='active storage connection and write-half-close')
     parser.add_argument('--timeout', type=int, default=120, help='seconds per theory file')
     args = parser.parse_args()
     if args.timeout <= 0:
@@ -62,7 +70,9 @@ def main():
              EVIDENCE_PAIRS if args.only_evidence else PROVIDER_PAIRS if args.only_provider else GUARDED_PAIRS if args.only_guarded_transport else
              BINDER_PAIRS if args.only_peer_binder else VERIFIER_PAIRS if args.only_caller_verifier else
              STORAGE_VERIFIER_PAIRS if args.only_storage_verifier else
-             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS + EVIDENCE_PAIRS + PROVIDER_PAIRS + GUARDED_PAIRS + BINDER_PAIRS + VERIFIER_PAIRS + STORAGE_VERIFIER_PAIRS)
+             SOCKET_CAPACITY_PAIRS if args.only_socket_capacity else
+             OUTBOUND_SELECT_PAIRS if args.only_outbound_select else
+             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS + EVIDENCE_PAIRS + PROVIDER_PAIRS + GUARDED_PAIRS + BINDER_PAIRS + VERIFIER_PAIRS + STORAGE_VERIFIER_PAIRS + SOCKET_CAPACITY_PAIRS + OUTBOUND_SELECT_PAIRS)
     for stem in pairs:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')

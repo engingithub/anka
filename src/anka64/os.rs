@@ -59,6 +59,7 @@ pub const SYS_NIC_RX: u64 = 18; // nic_rx(dev_slot, dev_gen, buf_slot, buf_gen) 
 pub const SYS_NIC_TX: u64 = 19; // nic_tx(dev_slot, dev_gen, buf_slot, buf_gen, len) → status, len
 pub const SYS_SOCKET_RECV: u64 = 23;
 pub const SYS_SOCKET_SEND: u64 = 24;
+pub const SYS_SOCKET_SHUT_WR: u64 = 25; // explicit outbound Select write shutdown
 pub const SYS_MALLOC: u64 = 21;
 pub const SYS_FREE: u64 = 22;
 pub const SYS_READ_BYTES: u64 = 20; // protected R2/R3 destination, R4 capacity
@@ -98,7 +99,7 @@ pub struct Process {
     pub core: Anka64Core,
     pub exit_code: u64,
     /// If Some, this process is blocked waiting for a specific child incarnation.
-    pub waiting_on: Option<WaitState>,
+    waiting_on: Option<WaitState>,
     /// If Some, process is blocked on a SYS_BLOCK_READ with its
     /// EventFrame still outstanding.  The completion path must
     /// match both RequesterKey (process incarnation) and
@@ -2754,7 +2755,7 @@ impl Kernel {
                     self.finish_process(idx, ProcessResult::Exited(words[R1 as usize]));
                 }
                 SYS_WRITE => self.handle_protected_buffer_write(idx, words, kinds),
-                SYS_SOCKET_RECV | SYS_SOCKET_SEND => self.handle_typed_socket(idx, words, kinds),
+                SYS_SOCKET_RECV | SYS_SOCKET_SEND | SYS_SOCKET_SHUT_WR => self.handle_typed_socket(idx, words, kinds),
                 SYS_READ_BYTES => self.handle_protected_buffer_read(idx, words, kinds),
                 SYS_MALLOC => self.handle_malloc(idx, words, kinds),
                 SYS_FREE => self.handle_free(idx, words, kinds),
@@ -5659,9 +5660,18 @@ mod tests {
     }
 
     fn typed_io_on_fabric(mut fabric: Fabric,length:u64,position:i64,number:u64) -> (Kernel,ObjectId) {
+        let (core,stack) = typed_io_test_core(&mut fabric,CPU0,0,4,length,position,number);
+        let mut kernel = Kernel::new(fabric); kernel.spawn(core);
+        kernel.byte_output.push(90);
+        (kernel, stack)
+    }
+
+    // Separate protected cores can share a Fabric while retaining disjoint physical objects.
+    fn typed_io_test_core(fabric: &mut Fabric, agent:AgentId, base:u64, local_bytes:u64,
+        length:u64, position:i64, number:u64) -> (Anka64Core,ObjectId) {
         use super::super::pointer_frames::{ValidatedPointerProgram, FrameManifest, LocalStorage};
         let (mut core, domain, text, _, stack) = create_process(
-            &mut fabric, CPU0, "typed_output", 0, 0x10000, 0x20000);
+            fabric, agent, "typed_output", base, base+0x10000, base+0x20000);
         let mut asm = Asm64::new();
         asm.pframe(0); asm.plocal(R2, 0);
         asm.movi(R12, 65); asm.pwrite(R12, R2, 1);
@@ -5671,24 +5681,38 @@ mod tests {
         let exit = asm.here() as u64 * 4;
         asm.punframe(); asm.ret();
         let code = asm.to_bytes();
-        fabric.write_physical(0, &code);
-        seal_code_object(&mut fabric, text, domain);
-        fabric.register_agent(CPU0, AgentKind::Cpu(CoreId(0)), domain);
+        fabric.write_physical(base, &code);
+        seal_code_object(fabric, text, domain);
+        fabric.register_agent(agent, AgentKind::Cpu(CoreId(agent.0)), domain);
         let program = ValidatedPointerProgram::validate(&code, vec![FrameManifest {
-            entry: 0, end: code.len() as u64, size: 16, exits: vec![exit],
-            locals: vec![LocalStorage { offset: 0, length: 4, alignment: 1,
+            entry: 0, end: code.len() as u64, size: local_bytes.next_multiple_of(16), exits: vec![exit],
+            locals: vec![LocalStorage { offset: 0, length: local_bytes, alignment: 1,
                 writable: true, pointer_slot: false }],
         }]).unwrap();
-        core.admit_pointer_program(&mut fabric, program, 0, 0x20000, 0x24000).unwrap();
+        core.admit_pointer_program(fabric, program, 0, 0x20000, 0x24000).unwrap();
         for _ in 0..16 {
-            if matches!(core.step(&mut fabric), StepResult::Halted) { break; }
+            if matches!(core.step(fabric), StepResult::Halted) { break; }
         }
         assert!(core.protected_syscall_image().is_some());
-        let mut kernel = Kernel::new(fabric); kernel.spawn(core);
-        kernel.byte_output.push(90);
-        (kernel, stack)
+        (core, stack)
     }
 
+    pub(crate) fn select_guest_fixture() -> (Kernel,ObjectId,ProcessKey) {
+        use crate::anka64::{placement::VirtualExtent,scoped_pointers::heap::{HeapPlacementLimits,RegistryLimits}};
+        let mut fabric=Fabric::with_private_heap(0x400000,
+            RegistryLimits{slots:64,scopes:32,owners:4,cleanup:8,global_bytes:32<<20},
+            HeapPlacementLimits{physical_pool:PhysicalExtent{base:0x300000,size:0x10000},physical_claims:8,
+                virtual_window:VirtualExtent{base:0x100000,size:0x10000},per_owner_claims:8}).unwrap();
+        let (core,stack)=typed_io_test_core(&mut fabric,CPU0,0,2048,112,0,SYS_SOCKET_SEND);
+        let mut k=Kernel::new(fabric);let key=k.spawn(core);
+        let owner=k.processes[key.slot].core.heap_owner().unwrap();
+        k.fabric.scoped_pointers.admit_owner(owner,24<<20).unwrap();
+        k.handle_syscall(key.slot); // unbound initial trap; subsequent calls retain the protected local
+        (k,stack,key)
+    }
+    pub(crate) fn select_guest_call(k:&mut Kernel,slot:usize,op:u64,n:u64)->u64 {
+        typed_socket_tests::again_at(k,slot,op,n)
+    }
     // Keep these tests in the parent fixture module; they exercise actual
     // saved trap images, the dispatcher, process teardown and Fabric writes.
     mod typed_socket_tests {
@@ -7541,7 +7565,7 @@ mod tests {
     #[test]
     fn p84b_spawn_with_grant() {
         let mut fabric = Fabric::new(0x800000);
-        let (core, dom, text, child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+        let (core, dom, text, _child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
 
         // Write child code: LD R1, [0x1C000+0]; EXIT(R1)
         // Child will have data_obj mapped at 0x1C000 via SpawnMap.
@@ -7680,7 +7704,7 @@ mod tests {
     #[test]
     fn p84b_attenuated_grant() {
         let mut fabric = Fabric::new(0x800000);
-        let (core, dom, text, child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+        let (core, dom, text, _child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
 
         // Child: try to write to data_obj at 0x1C000 (should fault — only has R)
         let mut child_asm = Asm64::new();
@@ -7744,7 +7768,7 @@ mod tests {
     #[test]
     fn p84b_escalation_rejected() {
         let mut fabric = Fabric::new(0x800000);
-        let (core, dom, text, child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+        let (core, dom, text, _child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
 
         let child_code = child_exit_code(42);
         let child_size = child_code.len() as i32;
@@ -7793,7 +7817,7 @@ mod tests {
     #[test]
     fn p84b_map_without_grant_rejected() {
         let mut fabric = Fabric::new(0x800000);
-        let (core, dom, text, child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+        let (core, dom, text, _child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
 
         let child_code = child_exit_code(42);
         let child_size = child_code.len() as i32;
@@ -7839,7 +7863,7 @@ mod tests {
     #[test]
     fn p84b_map_overlaps_code_rejected() {
         let mut fabric = Fabric::new(0x800000);
-        let (core, dom, text, child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+        let (core, dom, text, _child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
 
         let child_code = child_exit_code(42);
         let child_size = child_code.len() as i32;
@@ -7887,7 +7911,7 @@ mod tests {
     #[test]
     fn p84b_descriptor_byte_overflow() {
         let mut fabric = Fabric::new(0x800000);
-        let (mut core, dom, text, child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
+        let (mut core, dom, text, _child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
 
         let child_code = child_exit_code(42);
         let child_size = child_code.len() as i32;
@@ -7935,7 +7959,7 @@ mod tests {
     #[test]
     fn p84b_descriptor_table_cross_mapping() {
         let mut fabric = Fabric::new(0x800000);
-        let (core, dom, text, child_buf, data, stack) = ext_spawn_setup(&mut fabric);
+        let (core, dom, text, _child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
 
         let child_code = child_exit_code(42);
         let child_size = child_code.len() as i32;
@@ -7986,7 +8010,7 @@ mod tests {
     #[test]
     fn p84b_invalid_permission_bits() {
         let mut fabric = Fabric::new(0x800000);
-        let (core, dom, text, child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+        let (core, dom, text, _child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
 
         let child_code = child_exit_code(42);
         let child_size = child_code.len() as i32;
@@ -8033,7 +8057,7 @@ mod tests {
     #[test]
     fn p84b_default_spawn_env() {
         let mut fabric = Fabric::new(0x800000);
-        let (core, dom, text, output, _stack) = lifecycle_test_setup(&mut fabric);
+        let (core, dom, text, _output, _stack) = lifecycle_test_setup(&mut fabric);
 
         let child_code = child_exit_code(77);
         let child_size = child_code.len() as i32;
@@ -8064,7 +8088,7 @@ mod tests {
     #[test]
     fn p84b_default_spawn_ignores_r4_r6() {
         let mut fabric = Fabric::new(0x800000);
-        let (core, dom, text, output, _stack) = lifecycle_test_setup(&mut fabric);
+        let (core, dom, text, _output, _stack) = lifecycle_test_setup(&mut fabric);
 
         let child_code = child_exit_code(55);
         let child_size = child_code.len() as i32;
@@ -8108,7 +8132,7 @@ mod tests {
     #[test]
     fn p84b_nonzero_reserved_rejected() {
         let mut fabric = Fabric::new(0x800000);
-        let (core, dom, text, child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+        let (core, dom, text, _child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
 
         let child_code = child_exit_code(42);
         let child_size = child_code.len() as i32;
@@ -8179,7 +8203,7 @@ mod tests {
     #[test]
     fn p84b1_custom_spawn_layout() {
         let mut fabric = Fabric::new(0x800000);
-        let (core, dom, text, _child_buf, data, _stack) = ext_spawn_setup(&mut fabric);
+        let (core, dom, text, _child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
 
         // Child code: LD R1, [0x14000]; EXIT(R1)
         // Child code will be placed at vaddr 0x8000 by SpawnLayout.
@@ -8418,7 +8442,7 @@ mod tests {
     #[test]
     fn p84b1_map_vaddr_overflow() {
         let mut fabric = Fabric::new(0x800000);
-        let (mut core, dom, text, _child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
+        let (core, dom, text, _child_buf, _data, _stack) = ext_spawn_setup(&mut fabric);
 
         let child_code = child_exit_code(42);
         let child_size = child_code.len() as i32;
@@ -8690,7 +8714,7 @@ mod tests {
         fabric.configure_timer(10);
 
         // ── Process A at physical 0x000000 ──
-        let (core_a, dom_a, text_a, data_a, _stack_a) =
+        let (core_a, dom_a, text_a, _data_a, _stack_a) =
             create_process(&mut fabric, AgentId(0), "procA",
                 0x000000, 0x010000, 0x020000);
         install_trap_handler(&mut fabric, 0x000000, 0x4000);
@@ -8699,7 +8723,7 @@ mod tests {
         seal_code_object(&mut fabric, text_a, dom_a);
 
         // ── Process B at physical 0x100000 ──
-        let (core_b, dom_b, text_b, data_b, _stack_b) =
+        let (core_b, dom_b, text_b, _data_b, _stack_b) =
             create_process(&mut fabric, AgentId(1), "procB",
                 0x100000, 0x110000, 0x120000);
         install_trap_handler(&mut fabric, 0x100000, 0x4000);
@@ -8921,7 +8945,6 @@ mod tests {
 
     fn drain_wake_success(protected: bool) {
         use super::super::block::{BlockRequest, SubmitResult};
-        use super::super::state::RequestHandle;
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
         if protected {
@@ -9011,7 +9034,6 @@ mod tests {
     #[test]
     fn p91d_stale_requester_no_wake() {
         use super::super::block::{BlockRequest, SubmitResult};
-        use super::super::state::RequestHandle;
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
 
@@ -9068,7 +9090,7 @@ mod tests {
     /// R0 clobbered or state modified.
     #[test]
     fn p91d_not_blocked_no_clobber() {
-        use super::super::block::{BlockRequest, SubmitResult};
+        use super::super::block::BlockRequest;
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
 
@@ -9118,7 +9140,7 @@ mod tests {
     /// are posted on the same tick.
     #[test]
     fn p91d_timer_and_device_simultaneous() {
-        use super::super::block::{BlockRequest, BlockStorage, BlockController, SubmitResult};
+        use super::super::block::{BlockRequest, BlockStorage, BlockController};
 
         let mut asm = Asm64::new();
         for _ in 0..50 { asm.nop(); }
@@ -9486,7 +9508,6 @@ mod tests {
     #[test]
     fn p91e_stale_request_handle_no_wake() {
         use super::super::block::{BlockRequest, SubmitResult};
-        use super::super::state::RequestHandle;
 
         let (mut kernel, buf, dom) = block_kernel_setup(100, 42, 4);
         kernel.device_registry.devices[0].controller.as_block_mut()
@@ -9576,7 +9597,7 @@ mod tests {
     /// to generate instruction boundaries for tick_devices().
     #[test]
     fn p91e_all_blocked_no_progress_documented() {
-        use super::super::block::{BlockRequest, BlockStorage, BlockController, SubmitResult};
+        use super::super::block::{BlockStorage, BlockController};
 
         let buf_vaddr = 0x04000_i32;  // fits signed imm18
         let mut asm = Asm64::new();
@@ -9839,7 +9860,7 @@ mod tests {
 
         let h1 = kernel.install_capability(slot, data, 0, 4096, Permissions::READ)
             .expect("install");
-        let h2 = kernel.install_capability(slot, data, 0, 4096, Permissions::RW)
+        let _h2 = kernel.install_capability(slot, data, 0, 4096, Permissions::RW)
             .expect("install");
 
         let ct = kernel.processes[slot].cap_table.as_ref().unwrap();
@@ -11507,7 +11528,7 @@ mod tests {
 
     #[test]
     fn p93a_11_adversarial_kind_preservation() {
-        let (mut kernel, sender, receiver, dev_obj, dev_handle) = dev_transfer_setup();
+        let (mut kernel, sender, receiver, _dev_obj, dev_handle) = dev_transfer_setup();
         let recv_gen = kernel.processes[receiver].generation;
 
         // Successful device transfer
@@ -11690,7 +11711,7 @@ mod tests {
 
     #[test]
     fn p93a_15_delivery_full_device_atomic() {
-        let (mut kernel, sender, receiver, dev_obj, dev_handle) = dev_transfer_setup();
+        let (mut kernel, sender, receiver, _dev_obj, dev_handle) = dev_transfer_setup();
         let recv_gen = kernel.processes[receiver].generation;
 
         // Fill receiver mailbox to MAX_MAILBOX_SIZE
@@ -11771,7 +11792,7 @@ mod tests {
         let mut fabric = Fabric::new(0x800000);
 
         // ── Supervisor (slot 0) ──
-        let (core_sup, dom_sup, text_sup, data_sup, _stack_sup) =
+        let (core_sup, dom_sup, text_sup, _data_sup, _stack_sup) =
             create_process(&mut fabric, CPU0, "supervisor",
                 0x000000, 0x010000, 0x020000);
         install_trap_handler(&mut fabric, 0x000000, 0x4000);
@@ -11782,7 +11803,7 @@ mod tests {
         seal_code_object(&mut fabric, text_sup, dom_sup);
 
         // ── Driver (slot 1) ──
-        let (core_drv, dom_drv, text_drv, data_drv, _stack_drv) =
+        let (core_drv, dom_drv, text_drv, _data_drv, _stack_drv) =
             create_process(&mut fabric, AgentId(1), "driver",
                 0x100000, 0x110000, 0x120000);
         install_trap_handler(&mut fabric, 0x100000, 0x4000);
@@ -12130,7 +12151,7 @@ mod tests {
 
     #[test]
     fn p92b_recv_cap_bearing_message() {
-        let (mut kernel, sender, receiver, data) = send_cap_setup();
+        let (mut kernel, sender, receiver, _data) = send_cap_setup();
         let sender_key = ProcessKey {
             slot: sender,
             generation: kernel.processes[sender].generation,
@@ -12653,7 +12674,7 @@ mod tests {
 
     #[test]
     fn p92c_dev_submit_success() {
-        let (mut kernel, slot, dev_obj, data) = dev_submit_setup();
+        let (mut kernel, slot, _dev_obj, data) = dev_submit_setup();
 
         // Install a WRITE buffer cap for the driver
         let buf_handle = kernel.install_capability(slot, data, 0, 512, Permissions::WRITE)
@@ -12832,7 +12853,7 @@ mod tests {
 
         // Manually install a cap with a delegation_id naming a different driver
         let other_driver_key = ProcessKey { slot: 99, generation: 0 };
-        let current_key = ProcessKey {
+        let _current_key = ProcessKey {
             slot,
             generation: kernel.processes[slot].generation,
         };
@@ -15256,7 +15277,7 @@ mod tests {
     /// message and installs RecvWait.  Then D sends via SYS_SEND_KEY.
     #[test]
     fn p92e2_mailbox_full_direct_delivery() {
-        let (mut kernel, c, d, x, key_c, key_d, key_x) = delivery_route_setup();
+        let (mut kernel, c, d, _x, key_c, key_d, key_x) = delivery_route_setup();
 
         // Fill C's mailbox with unrelated traffic from X
         for i in 0..MAX_MAILBOX_SIZE {
@@ -15314,7 +15335,7 @@ mod tests {
     /// then X (not D) tries to send again.
     #[test]
     fn p92e2_mailbox_full_wrong_sender_rejected() {
-        let (mut kernel, c, d, x, key_c, key_d, key_x) = delivery_route_setup();
+        let (mut kernel, c, _d, x, key_c, key_d, key_x) = delivery_route_setup();
 
         // Fill C's mailbox with unrelated traffic from X
         for i in 0..MAX_MAILBOX_SIZE {
@@ -15578,7 +15599,7 @@ mod tests {
     fn p92e2_sys_send_direct_delivery() {
         let (mut kernel, c, d, _key_c, _key_d) = recv_wait_setup();
 
-        let key_c = ProcessKey {
+        let _key_c = ProcessKey {
             slot: c, generation: kernel.processes[c].generation,
         };
         let key_d_fresh = ProcessKey {
@@ -15622,7 +15643,7 @@ mod tests {
     /// (unrelated, live) sends to C.  Mailbox has room → Enqueue.
     #[test]
     fn p92e2_unrelated_sender_enqueues() {
-        let (mut kernel, c, d, x, key_c, key_d, key_x) = delivery_route_setup();
+        let (mut kernel, c, _d, x, key_c, key_d, key_x) = delivery_route_setup();
 
         // C calls SYS_RECV_WAIT(D) — no D message, D is live → blocks
         setup_recv_wait_call(&mut kernel, c, &key_d);
@@ -15662,7 +15683,7 @@ mod tests {
     /// full mailbox; cap is installed and reported with tag=2.
     #[test]
     fn p92e2_send_cap_full_mailbox_direct() {
-        let (mut kernel, c, d, x, key_c, key_d, key_x, data) =
+        let (mut kernel, c, d, _x, key_c, key_d, key_x, data) =
             delivery_route_cap_setup();
 
         // Install source cap in D (the sender)
@@ -15742,7 +15763,7 @@ mod tests {
     /// D sends via legacy SYS_SEND (pid-based).
     #[test]
     fn p92e2_sys_send_full_mailbox_direct() {
-        let (mut kernel, c, d, x, key_c, key_d, key_x) = delivery_route_setup();
+        let (mut kernel, c, d, _x, _key_c, key_d, key_x) = delivery_route_setup();
 
         // Fill C's mailbox with unrelated traffic from X
         for i in 0..MAX_MAILBOX_SIZE {
@@ -17324,14 +17345,6 @@ mod tests {
         kernel.tick_devices(d);
         kernel.drain_completions();
 
-        // Check: is A terminal and B still nonterminal?
-        // A had a 2-tick head start.  If A is completed, its entry has
-        // completion filled.  B should still be pending.
-        let a_entry = kernel.processes[d].async_requests.iter()
-            .find(|r| r.key.request.slot == h_a_slot && r.key.request.generation == h_a_gen);
-        let b_entry = kernel.processes[d].async_requests.iter()
-            .find(|r| r.key.request.slot == h_b_slot && r.key.request.generation == h_b_gen);
-
         // If A hasn't completed yet, tick more until it does
         let mut ticks = 0;
         while kernel.processes[d].async_requests.iter()
@@ -17809,12 +17822,12 @@ mod tests {
 
     #[test]
     fn p92f6_two_request_pair_quiescence() {
-        use super::super::block::{BlockStorage, BlockController, BlockRequest, SubmitResult};
+        use super::super::block::{BlockStorage, BlockController};
 
         let mut fabric = Fabric::new(0x800000);
 
         // ── Client C (slot 0) ──
-        let (core_c, dom_c, text_c, data_c, _stack_c) =
+        let (core_c, dom_c, text_c, _data_c, _stack_c) =
             create_process(&mut fabric, CPU0, "client",
                 0x000000, 0x010000, 0x020000);
         install_trap_handler(&mut fabric, 0x000000, 0x4000);
@@ -17928,8 +17941,6 @@ mod tests {
 
         let r0_b = do_async_submit(&mut kernel, d, &dev_handle, 1, &buf_b_handle);
         assert_eq!(r0_b, 0, "submit B must succeed");
-        let h_b_slot = kernel.processes[d].core.r[R1 as usize] as u8;
-        let h_b_gen = kernel.processes[d].core.r[R2 as usize];
 
         // ── Verify PairCount(C,D) = 2, D_2 = D_0 + 2 ──
         let count_initial = kernel.device_registry.devices[0].controller
@@ -18121,12 +18132,12 @@ mod tests {
 
     #[test]
     fn p92f8_recycled_driver_concurrency_adversary() {
-        use super::super::block::{BlockStorage, BlockController, BlockRequest, SubmitResult};
+        use super::super::block::{BlockStorage, BlockController};
 
         let mut fabric = Fabric::new(0x800000);
 
         // ── Client C (slot 0) ──
-        let (core_c, dom_c, text_c, data_c, _stack_c) =
+        let (core_c, dom_c, text_c, _data_c, _stack_c) =
             create_process(&mut fabric, CPU0, "client",
                 0x000000, 0x010000, 0x020000);
         install_trap_handler(&mut fabric, 0x000000, 0x4000);
@@ -18999,7 +19010,7 @@ mod tests {
         let mut fabric = Fabric::new(0x800000);
 
         // C (slot 0), D (slot 1), X (slot 2)
-        let (core_c, dom_c, text_c, data_c, _stack_c) =
+        let (core_c, dom_c, text_c, _data_c, _stack_c) =
             create_process(&mut fabric, CPU0, "client",
                 0x000000, 0x010000, 0x020000);
         install_trap_handler(&mut fabric, 0x000000, 0x4000);
@@ -19363,7 +19374,7 @@ mod tests {
     #[test]
     fn p93b4_11_dev_wait_ticket_hardening() {
         let (mut kernel, _key_c, key_d, dev_a_h, _dev_b_h, buf_h,
-             binding_a, _binding_b) = two_device_setup();
+             _binding_a, _binding_b) = two_device_setup();
         let d = key_d.slot;
 
         // Submit to A so we have a real ledger entry
@@ -19477,8 +19488,8 @@ mod tests {
         let ctrl = BlockController::new(storage, 3, AgentId(50));
 
         let mut kernel = Kernel::new(fabric);
-        let key = kernel.spawn(core);
-        let binding = kernel.register_block_device(ctrl).expect("register");
+        let _key = kernel.spawn(core);
+        let _binding = kernel.register_block_device(ctrl).expect("register");
 
         // Initial: no autonomous work, no attention
         assert!(!kernel.device_registry.devices[0].controller.has_autonomous_work(),
@@ -19585,10 +19596,9 @@ mod tests {
 
     #[test]
     fn p93c_generic_registry_pair_count_equals_block() {
-        use super::super::block::{BlockStorage, BlockController, BlockRequest, SubmitResult};
 
         let (mut kernel, key_c, key_d, dev_a_h, dev_b_h, buf_h,
-             binding_a, binding_b) = two_device_setup();
+             _binding_a, _binding_b) = two_device_setup();
         let d = key_d.slot;
 
         // Submit one request to each device
@@ -19622,10 +19632,9 @@ mod tests {
 
     #[test]
     fn p93c_generic_registry_order_independent() {
-        use super::super::block::{BlockStorage, BlockController, BlockRequest, SubmitResult};
 
         let (mut kernel, key_c, key_d, dev_a_h, dev_b_h, buf_h,
-             binding_a, binding_b) = two_device_setup();
+             _binding_a, _binding_b) = two_device_setup();
         let d = key_d.slot;
 
         // Submit one request to each device
@@ -19687,7 +19696,7 @@ mod tests {
         let ctrl = BlockController::new(storage, 1, AgentId(50));
 
         let mut kernel = Kernel::new(fabric);
-        let key = kernel.spawn(core);
+        let _key = kernel.spawn(core);
 
         // Create a delegation for provenance tracking
         let tid = kernel.alloc_delegation_id(
@@ -19699,7 +19708,7 @@ mod tests {
             dom, buf, 0, 512, Permissions::WRITE, src_aid,
         ).expect("grant tagged authority");
 
-        let binding = kernel.register_block_device(ctrl).expect("register");
+        let _binding = kernel.register_block_device(ctrl).expect("register");
 
         // Submit with explicit delegation_id and authority
         let rk = RequesterKey { slot: 0, generation: kernel.processes[0].generation };
@@ -19910,7 +19919,7 @@ mod tests {
 
     #[test]
     fn p93d_event_wait_wakes_on_completion() {
-        let (mut kernel, slot, _dev_obj, dev_handle, buf_handle, binding) = event_wait_setup();
+        let (mut kernel, slot, _dev_obj, dev_handle, _buf_handle, binding) = event_wait_setup();
 
         // Install event wait at epoch 0
         push_event_wait_frame(&mut kernel, slot, dev_handle, 0);
@@ -20307,7 +20316,7 @@ mod tests {
     fn p93d_event_wait_cross_device_isolation() {
         let mut fabric = Fabric::new(0x800000);
 
-        let (core, dom, text, data, _stack) =
+        let (core, dom, text, _data, _stack) =
             create_process(&mut fabric, CPU0, "proc",
                 0x000000, 0x010000, 0x020000);
         install_trap_handler(&mut fabric, 0x000000, 0x4000);
@@ -22121,3 +22130,6 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+pub(crate) use tests::{select_guest_fixture,select_guest_call};

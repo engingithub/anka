@@ -5,7 +5,7 @@ mod tests {
     use super::super::guest_compiler::*;
     use super::super::os::*;
     use super::super::cc::{self, Program, Function, Stmt, Expr, BinOp, Type, VarId};
-    use super::super::core::{Anka64Core, StepResult};
+    use super::super::core::Anka64Core;
     use super::super::fabric::Fabric;
     use super::super::isa::*;
     use super::super::placement::{

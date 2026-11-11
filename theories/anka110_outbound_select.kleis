@@ -1,0 +1,161 @@
+// Active-open, one frozen Select frame per connection. No new axioms.
+// Predicates authorize a single serialized effect; false means no publication
+// or cursor/phase advance. Only accepted transitions below change the state.
+// Handshake control packets have zero application payload. The ordered-stream
+// refinement is responsible for checksums, sequence checking and frame custody.
+import "anka110_storage_verifier.kleis"
+import "anka110_socket_capacity.kleis"
+import "anka94e_tcp_contract.kleis"
+
+// Phase encoding: idle=0, SYN sent=1, established=2, close latched=3, FIN committed=4.
+define os110_req() = bvconst(112,64)
+define os110_reply() = bvconst(144,64)
+
+// Trusted configuration fixes the route; a separately verified server identity
+// is required for data. live includes owner, generation, ticket and reservation.
+// usable includes remaining work and deadline. Bindings are not guest integers.
+define os110_bound(live : Bool, usable : Bool, bound : BitVec64, actual : BitVec64) =
+    live ∧ usable ∧ bvugt(bound,sk_zero()) ∧ (bound=actual)
+define os110_syn(p : BitVec8, bound : Bool, configured_route : Bool, bytes : BitVec64, tx_commit : Bool) =
+    (p=bvconst(0,8)) ∧ bound ∧ configured_route ∧ (bytes=sk_zero()) ∧ tx_commit
+// tuple_ok is the actual inbound reverse four-tuple. flags_ok requires exactly
+// SYN+ACK; wire_ok includes validated headers. final ACK must commit before Open.
+define os110_connected(p : BitVec8, bound : Bool, tuple_ok : Bool, wire_ok : Bool, flags_ok : Bool,
+                       bytes : BitVec64, iss : BitVec32, ack : BitVec32, ack_commit : Bool) =
+    (p=bvconst(1,8)) ∧ bound ∧ tuple_ok ∧ wire_ok ∧ flags_ok ∧ (bytes=sk_zero()) ∧
+    (ack=tcp94e_after_syn(iss)) ∧ ack_commit
+
+// accepted/sent are cumulative prefixes of the same immutable canonical request.
+// An accepted write copies a checked prefix of that request at the current cursor;
+// exact is a trusted byte/offset comparison, never a guest assertion. Cap is the
+// actual TX limit (including throttle). No symbol here changes durable state.
+define os110_shape(a : BitVec64,s : BitVec64,cap : BitVec64) =
+    bvugt(cap,sk_zero()) ∧ bvule(s,a) ∧ bvule(a,os110_req()) ∧ bvule(bvsub(a,s),cap)
+define os110_write(p : BitVec8, bound : Bool, current : Bool, exact : Bool,
+                   a : BitVec64,s : BitVec64,cap : BitVec64,asked : BitVec64,n : BitVec64) =
+    (p=bvconst(2,8)) ∧ bound ∧ current ∧ exact ∧ os110_shape(a,s,cap) ∧
+    bvule(asked,bvsub(os110_req(),a)) ∧ bvugt(n,sk_zero()) ∧
+    (n=sc_result(sk_false(),sk_true(),cap,bvsub(a,s),asked,sk_false()))
+    ∧ bvule(n,asked)
+// current is w110_current on the actual bound channel, frozen Select and this
+// effect. Recheck at wire publication even if queued under a prior valid grant.
+define os110_emit(p : BitVec8, bound : Bool, current : Bool, prefix_commit : Bool,
+                   a : BitVec64,s : BitVec64,cap : BitVec64,n : BitVec64) =
+    ((p=bvconst(2,8)) ∨ (p=bvconst(3,8))) ∧ bound ∧ prefix_commit ∧ os110_shape(a,s,cap) ∧
+    bvugt(n,sk_zero()) ∧ bvule(n,bvsub(a,s)) ∧ w110_can_advance(s,n,current,bound)
+define os110_close(p : BitVec8, bound : Bool, current : Bool, a : BitVec64,s : BitVec64,cap : BitVec64) =
+    (p=bvconst(2,8)) ∧ bound ∧ current ∧ os110_shape(a,s,cap) ∧ (a=os110_req())
+// FIN can cause the server to dispatch: require still-current authority even
+// when the complete payload has already left local custody.
+define os110_fin(p : BitVec8, bound : Bool, current : Bool, a : BitVec64,s : BitVec64,cap : BitVec64,fin_commit : Bool) =
+    (p=bvconst(3,8)) ∧ bound ∧ current ∧ os110_shape(a,s,cap) ∧ (s=os110_req()) ∧ fin_commit
+// The accepted control step is exactly one phase advance. A refused offer
+// must stutter. Apply only with the phase-specific guard above (never a guest bit).
+define os110_next(p : BitVec8, committed : Bool, next : BitVec8) =
+    bvult(p,bvconst(4,8)) ∧ ((committed ∧ (next=bvadd(p,bvconst(1,8)))) ∨ (¬committed ∧ (next=p)))
+define os110_cursor(old : BitVec64,n : BitVec64,committed : Bool,next : BitVec64) =
+    ((committed ∧ (next=bvadd(old,n))) ∨ (¬committed ∧ (next=old)))
+
+// Full phase transition for one observed control event (0=SYN, 1=SYN+ACK,
+// 2=guest write shutdown, 3=FIN offer). In particular a caller cannot pass
+// an unqualified "committed=true" to advance the phase. Invalid events stutter.
+define os110_control(p : BitVec8,event : BitVec8,bound : Bool,route : Bool,tuple_ok : Bool,
+                     wire_ok : Bool,flags_ok : Bool,bytes : BitVec64,iss : BitVec32,ack : BitVec32,
+                     current : Bool,a : BitVec64,s : BitVec64,cap : BitVec64,tx_commit : Bool,next : BitVec8) =
+    ((p=bvconst(4,8)) ∧ (next=p)) ∨ os110_next(p,
+      ((event=bvconst(0,8)) ∧ os110_syn(p,bound,route,bytes,tx_commit)) ∨
+      ((event=bvconst(1,8)) ∧ os110_connected(p,bound,tuple_ok,wire_ok,flags_ok,bytes,iss,ack,tx_commit)) ∨
+      ((event=bvconst(2,8)) ∧ os110_close(p,bound,current,a,s,cap)) ∨
+      ((event=bvconst(3,8)) ∧ os110_fin(p,bound,current,a,s,cap,tx_commit)), next)
+
+// After local FIN, ordered RX continues; accepted data/peer FIN are atomic.
+// Prior bytes stay readable after peer FIN. No result until the guest drains
+// the exact reply to EOF and E11 validates the frozen frame/echo and evidence.
+define os110_rx(p : BitVec8,bound : Bool,in_order : Bool,peer_fin : Bool,cap : BitVec64,used : BitVec64,total : BitVec64,n : BitVec64) =
+    (p=bvconst(4,8)) ∧ bound ∧ in_order ∧ bvule(total,os110_reply()) ∧ bvule(used,total) ∧
+    bvule(n,bvsub(os110_reply(),total)) ∧ sc_delivery(bound,peer_fin,cap,used,n)
+// In-order bytes beyond the reply extent permanently poison this exchange.
+// Do not turn an oversized reply into a valid one by discarding its suffix.
+define os110_intact(prior : Bool,total : BitVec64,n : BitVec64) =
+    prior ∧ bvule(total,os110_reply()) ∧ bvule(n,bvsub(os110_reply(),total))
+define os110_terminal(p : BitVec8,bound : Bool,total : BitVec64,used : BitVec64,intact : Bool,eof : Bool) =
+    (p=bvconst(4,8)) ∧ bound ∧ intact ∧ (total=os110_reply()) ∧ (used=sk_zero()) ∧ eof
+define os110_success(p : BitVec8,bound : Bool,total : BitVec64,used : BitVec64,intact : Bool,eof : Bool,
+                     f : N110Frame,reply : N110Reply,r : P109Request,current : Bool) =
+    os110_terminal(p,bound,total,used,intact,eof) ∧ (pr_kind(r)=bvconst(1,64)) ∧ w110_success(f,reply,r,current,bound)
+define os110_retry(unknown : Bool, old_conn : BitVec64,new_conn : BitVec64,old_corr : BitVec64,new_corr : BitVec64,r : P109Request,next : P109Request) =
+    bvugt(old_conn,sk_zero()) ∧ bvugt(new_conn,sk_zero()) ∧ ¬(new_conn=old_conn) ∧
+    (pr_kind(r)=bvconst(1,64)) ∧ n110_client_retry(unknown,old_corr,new_corr,r,next)
+
+// Concrete E11 fixture; the observation names connection 6, independent of the polled connection.
+define os110_fixture_evidence(actual_conn : BitVec64) = w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        actual_conn,
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)))
+example "owned live connection" { assert(os110_bound(sk_true(),sk_true(),bvconst(6,64),bvconst(6,64))) }
+example "foreign connection" { assert(¬(os110_bound(sk_true(),sk_true(),bvconst(6,64),bvconst(7,64)))) }
+example "exhausted work or deadline" { assert(¬(os110_bound(sk_true(),sk_false(),bvconst(6,64),bvconst(6,64)))) }
+example "SYN without payload" { assert(os110_syn(bvconst(0,8),sk_true(),sk_true(),bvconst(0,64),sk_true())) }
+example "SYN carries application data" { assert(¬(os110_syn(bvconst(0,8),sk_true(),sk_true(),bvconst(1,64),sk_true()))) }
+example "unconfigured SYN route" { assert(¬(os110_syn(bvconst(0,8),sk_true(),sk_false(),bvconst(0,64),sk_true()))) }
+example "matching SYN ACK including sequence wrap" { assert(os110_connected(bvconst(1,8),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(4294967295,32),bvconst(0,32),sk_true())) }
+example "wrong reverse tuple" { assert(¬(os110_connected(bvconst(1,8),sk_true(),sk_false(),sk_true(),sk_true(),bvconst(0,64),bvconst(4294967295,32),bvconst(0,32),sk_true()))) }
+example "wrong acknowledgment" { assert(¬(os110_connected(bvconst(1,8),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(4294967295,32),bvconst(1,32),sk_true()))) }
+example "FIN or wrong flags" { assert(¬(os110_connected(bvconst(1,8),sk_true(),sk_true(),sk_true(),sk_false(),bvconst(0,64),bvconst(4294967295,32),bvconst(0,32),sk_true()))) }
+example "unvalidated headers" { assert(¬(os110_connected(bvconst(1,8),sk_true(),sk_true(),sk_false(),sk_true(),bvconst(0,64),bvconst(4294967295,32),bvconst(0,32),sk_true()))) }
+example "early data in handshake" { assert(¬(os110_connected(bvconst(1,8),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(1,64),bvconst(4294967295,32),bvconst(0,32),sk_true()))) }
+example "failed final ACK" { assert(¬(os110_connected(bvconst(1,8),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(4294967295,32),bvconst(0,32),sk_false()))) }
+example "authorized first short copy" { assert(os110_write(bvconst(2,8),sk_true(),os110_fixture_evidence(bvconst(6,64)),sk_true(),bvconst(0,64),bvconst(0,64),bvconst(64,64),bvconst(112,64),bvconst(64,64))) }
+example "proof for previous connection" { assert(¬(os110_write(bvconst(2,8),sk_true(),os110_fixture_evidence(bvconst(7,64)),sk_true(),bvconst(0,64),bvconst(0,64),bvconst(64,64),bvconst(112,64),bvconst(64,64)))) }
+example "handshake without storage evidence" { assert(¬(os110_write(bvconst(2,8),sk_true(),sk_false(),sk_true(),bvconst(0,64),bvconst(0,64),bvconst(64,64),bvconst(112,64),bvconst(64,64)))) }
+example "wrong request suffix" { assert(¬(os110_write(bvconst(2,8),sk_true(),os110_fixture_evidence(bvconst(6,64)),sk_false(),bvconst(0,64),bvconst(0,64),bvconst(64,64),bvconst(112,64),bvconst(64,64)))) }
+example "short copy then drain then queue remainder" { assert(os110_emit(bvconst(2,8),sk_true(),sk_true(),sk_true(),bvconst(64,64),bvconst(0,64),bvconst(64,64),bvconst(64,64)) ∧ os110_write(bvconst(2,8),sk_true(),sk_true(),sk_true(),bvconst(64,64),bvconst(64,64),bvconst(64,64),bvconst(48,64),bvconst(48,64))) }
+example "backpressure cannot accept another byte" { assert(¬(os110_write(bvconst(2,8),sk_true(),sk_true(),sk_true(),bvconst(64,64),bvconst(0,64),bvconst(64,64),bvconst(48,64),bvconst(1,64)))) }
+example "cannot queue beyond frozen request" { assert(¬(os110_write(bvconst(2,8),sk_true(),sk_true(),sk_true(),bvconst(100,64),bvconst(100,64),bvconst(64,64),bvconst(13,64),bvconst(13,64)))) }
+example "no close on incomplete request" { assert(¬(os110_close(bvconst(2,8),sk_true(),sk_true(),bvconst(111,64),bvconst(111,64),bvconst(64,64)))) }
+example "close latches even with 48 pending" { assert(os110_next(bvconst(2,8),os110_close(bvconst(2,8),sk_true(),sk_true(),bvconst(112,64),bvconst(64,64),bvconst(64,64)),bvconst(3,8))) }
+example "writes rejected as soon as close is latched" { assert(¬(os110_write(bvconst(3,8),sk_true(),os110_fixture_evidence(bvconst(6,64)),sk_true(),bvconst(0,64),bvconst(0,64),bvconst(64,64),bvconst(112,64),bvconst(64,64)))) }
+example "in flight prefix on closing stream" { assert(os110_emit(bvconst(3,8),sk_true(),sk_true(),sk_true(),bvconst(112,64),bvconst(64,64),bvconst(64,64),bvconst(48,64))) }
+example "revocation between enqueue and NIC commit" { assert(¬(os110_emit(bvconst(3,8),sk_true(),sk_false(),sk_true(),bvconst(112,64),bvconst(64,64),bvconst(64,64),bvconst(48,64)))) }
+example "uncommitted wire offer keeps cursor" { assert(os110_cursor(bvconst(64,64),bvconst(48,64),os110_emit(bvconst(3,8),sk_true(),sk_true(),sk_false(),bvconst(112,64),bvconst(64,64),bvconst(64,64),bvconst(48,64)),bvconst(64,64))) }
+example "FIN overtakes last byte" { assert(¬(os110_fin(bvconst(3,8),sk_true(),sk_true(),bvconst(112,64),bvconst(111,64),bvconst(64,64),sk_true()))) }
+example "authority lost before FIN" { assert(¬(os110_fin(bvconst(3,8),sk_true(),sk_false(),bvconst(112,64),bvconst(112,64),bvconst(64,64),sk_true()))) }
+example "failed FIN stays pending" { assert(os110_next(bvconst(3,8),os110_fin(bvconst(3,8),sk_true(),sk_true(),bvconst(112,64),bvconst(112,64),bvconst(64,64),sk_false()),bvconst(3,8))) }
+example "committed FIN enables reply" { assert(os110_next(bvconst(3,8),os110_fin(bvconst(3,8),sk_true(),sk_true(),bvconst(112,64),bvconst(112,64),bvconst(64,64),sk_true()),bvconst(4,8))) }
+example "duplicate logical FIN" { assert(¬(os110_fin(bvconst(4,8),sk_true(),sk_true(),bvconst(112,64),bvconst(112,64),bvconst(64,64),sk_true()))) }
+example "ordered RX after complete local half close" { assert(os110_rx(bvconst(4,8),sk_true(),sk_true(),sk_false(),bvconst(64,64),bvconst(0,64),bvconst(0,64),bvconst(64,64)) ∧ os110_rx(bvconst(4,8),sk_true(),sk_true(),sk_false(),bvconst(64,64),bvconst(0,64),bvconst(64,64),bvconst(64,64)) ∧ os110_rx(bvconst(4,8),sk_true(),sk_true(),sk_false(),bvconst(64,64),bvconst(0,64),bvconst(128,64),bvconst(16,64))) }
+example "receive fragment would overflow" { assert(¬(os110_rx(bvconst(4,8),sk_true(),sk_true(),sk_false(),bvconst(64,64),bvconst(63,64),bvconst(63,64),bvconst(2,64)))) }
+example "data after peer FIN" { assert(¬(os110_rx(bvconst(4,8),sk_true(),sk_true(),sk_true(),bvconst(64,64),bvconst(0,64),bvconst(64,64),bvconst(1,64)))) }
+example "out of order response fragment" { assert(¬(os110_rx(bvconst(4,8),sk_true(),sk_false(),sk_false(),bvconst(64,64),bvconst(0,64),bvconst(64,64),bvconst(1,64)))) }
+example "tail cannot be discarded and salvaged" { assert(¬(os110_terminal(bvconst(4,8),sk_true(),bvconst(144,64),bvconst(0,64),os110_intact(sk_true(),bvconst(144,64),bvconst(1,64)),sk_true()))) }
+example "short reply at EOF" { assert(¬(os110_terminal(bvconst(4,8),sk_true(),bvconst(143,64),bvconst(0,64),sk_true(),sk_true()))) }
+example "144 bytes without EOF" { assert(¬(os110_terminal(bvconst(4,8),sk_true(),bvconst(144,64),bvconst(0,64),sk_true(),sk_false()))) }
+example "FIN with unread bytes" { assert(¬(os110_terminal(bvconst(4,8),sk_true(),bvconst(144,64),bvconst(1,64),sk_true(),sk_true()))) }
+example "guest accepts exact reply after both FINs" { assert(os110_success(bvconst(4,8),sk_true(),bvconst(144,64),bvconst(0,64),sk_true(),sk_true(),N110Frame(bvadd(bvshl(bvconst(3232080,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(112,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),N110Reply(bvadd(bvshl(bvconst(3232336,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(144,64),bvconst(0,64),bvconst(8,64),bvconst(99,64),bvconst(8,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),os110_fixture_evidence(bvconst(6,64)))) }
+example "EOF server evidence pertains to different connection" { assert(¬(os110_success(bvconst(4,8),sk_true(),bvconst(144,64),bvconst(0,64),sk_true(),sk_true(),N110Frame(bvadd(bvshl(bvconst(3232080,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(112,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),N110Reply(bvadd(bvshl(bvconst(3232336,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(144,64),bvconst(0,64),bvconst(8,64),bvconst(99,64),bvconst(8,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),os110_fixture_evidence(bvconst(7,64))))) }
+example "new connection exact retry after unknown" { assert(os110_retry(sk_true(),bvconst(6,64),bvconst(7,64),bvconst(42,64),bvconst(43,64),P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)))) }
+example "replaying correlation on reconnect" { assert(¬(os110_retry(sk_true(),bvconst(6,64),bvconst(7,64),bvconst(42,64),bvconst(42,64),P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))))) }
+example "old stream cannot be reused for retry" { assert(¬(os110_retry(sk_true(),bvconst(6,64),bvconst(6,64),bvconst(42,64),bvconst(43,64),P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))))) }
+example "retry changing selected value" { assert(¬(os110_retry(sk_true(),bvconst(6,64),bvconst(7,64),bvconst(42,64),bvconst(43,64),P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(98,64),bvconst(0,64))))) }
+example "admitted prefix is bounded by the request and queue" { assert(∀ a : BitVec64 . ∀ s : BitVec64 . ∀ cap : BitVec64 . ∀ n : BitVec64 . ∀ asked : BitVec64 . os110_write(bvconst(2,8),sk_true(),sk_true(),sk_true(),a,s,cap,asked,n) ⟹ (bvule(bvadd(a,n),os110_req()) ∧ bvule(bvsub(bvadd(a,n),s),cap))) }
+example "wire publication never passes accepted cursor" { assert(∀ a : BitVec64 . ∀ s : BitVec64 . ∀ cap : BitVec64 . ∀ n : BitVec64 . os110_emit(bvconst(3,8),sk_true(),sk_true(),sk_true(),a,s,cap,n) ⟹ (bvuge(bvadd(s,n),s) ∧ bvule(bvadd(s,n),a))) }
+example "FIN implies all request bytes committed" { assert(∀ a : BitVec64 . ∀ s : BitVec64 . ∀ cap : BitVec64 . os110_fin(bvconst(3,8),sk_true(),sk_true(),a,s,cap,sk_true()) ⟹ ((a=os110_req()) ∧ (s=a))) }
+example "no payload suffix after revocation" { assert(∀ a : BitVec64 . ∀ s : BitVec64 . ∀ cap : BitVec64 . ∀ n : BitVec64 . ¬os110_emit(bvconst(2,8),sk_true(),sk_false(),sk_true(),a,s,cap,n)) }
+example "terminal framing failure cannot recover" { assert(∀ total : BitVec64 . ∀ n : BitVec64 . ¬os110_intact(sk_false(),total,n)) }
+example "active open then matched final ACK" { assert(os110_control(bvconst(0,8),bvconst(0,8),sk_true(),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(9,32),bvconst(10,32),sk_false(),bvconst(0,64),bvconst(0,64),bvconst(64,64),sk_true(),bvconst(1,8)) ∧ os110_control(bvconst(1,8),bvconst(1,8),sk_true(),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(9,32),bvconst(10,32),sk_false(),bvconst(0,64),bvconst(0,64),bvconst(64,64),sk_true(),bvconst(2,8))) }
+example "close before final drain then commit FIN" { assert(os110_control(bvconst(2,8),bvconst(2,8),sk_true(),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(9,32),bvconst(10,32),sk_true(),bvconst(112,64),bvconst(64,64),bvconst(64,64),sk_true(),bvconst(3,8)) ∧ os110_control(bvconst(3,8),bvconst(3,8),sk_true(),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(9,32),bvconst(10,32),sk_true(),bvconst(112,64),bvconst(64,64),bvconst(64,64),sk_true(),bvconst(3,8)) ∧ os110_control(bvconst(3,8),bvconst(3,8),sk_true(),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(9,32),bvconst(10,32),sk_true(),bvconst(112,64),bvconst(112,64),bvconst(64,64),sk_true(),bvconst(4,8))) }
+example "early close cannot skip handshake" { assert(os110_control(bvconst(1,8),bvconst(2,8),sk_true(),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(9,32),bvconst(10,32),sk_true(),bvconst(112,64),bvconst(112,64),bvconst(64,64),sk_true(),bvconst(1,8))) }
+example "revoked FIN event cannot advance" { assert(os110_control(bvconst(3,8),bvconst(3,8),sk_true(),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(9,32),bvconst(10,32),sk_false(),bvconst(112,64),bvconst(112,64),bvconst(64,64),sk_true(),bvconst(3,8))) }
+example "late handshake does not reopen RX-only connection" { assert(os110_control(bvconst(4,8),bvconst(1,8),sk_true(),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(9,32),bvconst(10,32),sk_true(),bvconst(0,64),bvconst(0,64),bvconst(64,64),sk_true(),bvconst(4,8))) }

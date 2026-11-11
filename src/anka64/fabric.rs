@@ -15,7 +15,7 @@ use super::state::*;
 mod heap;
 mod local_frames;
 pub(crate) use heap::{HeapInitialization, HeapCleanupSnapshot};
-pub(crate) use heap::{HeapWorkCounts, HeapWorkLimits, HeapWorkOutcome, HeapWorkTicket};
+pub(crate) use heap::{HeapWorkLimits, HeapWorkTicket};
 
 // ───────────────────────────────────────────────────────────────────
 // Authorization result

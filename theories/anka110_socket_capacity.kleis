@@ -1,0 +1,86 @@
+// Phase 10.10: trusted bind chooses immutable RX/TX backing lengths.
+// Keep the 10.8 per-call span/rights/ABI rules. Capacity is not a credential,
+// a wire-message length, a Fabric transfer size or a TCP advertised window.
+import "anka108_typed_socket_io.kleis"
+
+// All sizes are unsigned. Subtract only after ordering: no wrapped charge.
+define sc_fit(a : BitVec64,b : BitVec64) = bvule(a,bvsub(sk_error(),b))
+define sc_cost(r : BitVec64,t : BitVec64,m : BitVec64) = bvadd(bvadd(r,t),m)
+define sc_admit(r : BitVec64,t : BitVec64,m : BitVec64,limit : BitVec64,owner_free : BitVec64,global_free : BitVec64) =
+    bvugt(r,sk_zero()) ∧ bvugt(t,sk_zero()) ∧ bvugt(m,sk_zero()) ∧ bvule(r,limit) ∧ bvule(t,limit)
+    ∧ sc_fit(r,t) ∧ sc_fit(bvadd(r,t),m)
+    ∧ bvule(sc_cost(r,t,m),owner_free) ∧ bvule(sc_cost(r,t,m),global_free)
+// Account projection at the bind boundary. Committed requires both exact
+// reserves, initialized backing and a current owner; denial publishes nothing.
+define sc_bind(r : BitVec64,t : BitVec64,m : BitVec64,limit : BitVec64,o : BitVec64,g : BitVec64,ready : Bool) =
+    if ready ∧ sc_admit(r,t,m,limit,o,g) then sc_cost(r,t,m) else sk_zero()
+define sc_free_after(free : BitVec64,charged : BitVec64) = bvsub(free,charged)
+
+// Copy admission includes sk_admit's whole-span certificate. n may exceed
+// the remaining room or the configured queue but cannot exceed the ABI span.
+define sc_result(rx : Bool,ok : Bool,cap : BitVec64,used : BitVec64,n : BitVec64,fin : Bool) =
+    if ¬ok ∨ (cap=sk_zero()) ∨ bvugt(used,cap) ∨ bvugt(n,sk_cap()) then sk_error()
+    else if n=sk_zero() then sk_zero()
+    else if rx then (if used=sk_zero() then (if fin then sk_zero() else sk_again()) else sk_min(n,used))
+    else if used=cap then sk_again() else sk_min(n,bvsub(cap,used))
+define sc_after(rx : Bool,ok : Bool,cap : BitVec64,used : BitVec64,n : BitVec64,fin : Bool,copy : Bool) =
+    sk_used_after(rx,used,sc_result(rx,ok,cap,used,n,fin),copy)
+// Transport delivers an already ordered fragment. No truncation to fit;
+// refused FIN stays with its data. Queued TX does not consume RX space.
+define sc_delivery(ticket_rx : Bool,fin : Bool,cap : BitVec64,used : BitVec64,n : BitVec64) =
+    ticket_rx ∧ ¬fin ∧ bvugt(cap,sk_zero()) ∧ bvule(used,cap) ∧ bvule(n,bvsub(cap,used))
+define sc_in_after(ticket_rx : Bool,fin : Bool,cap : BitVec64,used : BitVec64,n : BitVec64) =
+    if sc_delivery(ticket_rx,fin,cap,used,n) then bvadd(used,n) else used
+
+// Each reservation belongs to one ledger key (owner incarnation + ticket).
+// Project a release across ledger rows; only the matching row is consumed.
+// A failed release leaves cleanup debt. Only inaccessible, dropped backing
+// may be refunded. Physical zero-on-reuse is a bind refinement obligation.
+define sc_debt(key : BitVec64,event : BitVec64,debt : BitVec64,dropped : Bool,release_ok : Bool) =
+    if (key=event) ∧ dropped ∧ release_ok then sk_zero() else debt
+define sc_refund(key : BitVec64,event : BitVec64,debt : BitVec64,dropped : Bool,release_ok : Bool) =
+    bvsub(debt,sc_debt(key,event,debt,dropped,release_ok))
+define sc_rebind(old : BitVec64,fresh : BitVec64,debt : BitVec64,work : BitVec64,clean : Bool,dropped : Bool) =
+    clean ∧ dropped ∧ (debt=sk_zero()) ∧ (work=sk_zero()) ∧ bvugt(fresh,old)
+example "default duplex reserves both queues and metadata" { assert(sc_bind(bvconst(1024,64),bvconst(1024,64),bvconst(80,64),bvconst(4096,64),bvconst(2128,64),bvconst(2128,64),sk_true())=bvconst(2128,64)) }
+example "asymmetric capacities consume exact charge" { assert(sc_bind(bvconst(64,64),bvconst(4096,64),bvconst(80,64),bvconst(4096,64),bvconst(5000,64),bvconst(5000,64),sk_true())=bvconst(4240,64)) }
+example "zero RX rejected" { assert(sc_bind(bvconst(0,64),bvconst(64,64),bvconst(80,64),bvconst(4096,64),bvconst(5000,64),bvconst(5000,64),sk_true())=bvconst(0,64)) }
+example "zero TX rejected" { assert(sc_bind(bvconst(64,64),bvconst(0,64),bvconst(80,64),bvconst(4096,64),bvconst(5000,64),bvconst(5000,64),sk_true())=bvconst(0,64)) }
+example "per-direction maximum enforced" { assert(sc_bind(bvconst(65,64),bvconst(1,64),bvconst(8,64),bvconst(64,64),bvconst(1000,64),bvconst(1000,64),sk_true())=bvconst(0,64)) }
+example "payload arithmetic cannot wrap" { assert(sc_bind(sk_error(),bvconst(1,64),bvconst(8,64),sk_error(),bvconst(9000,64),bvconst(9000,64),sk_true())=bvconst(0,64)) }
+example "metadata arithmetic cannot wrap" { assert(sc_bind(sk_again(),bvconst(1,64),bvconst(8,64),sk_error(),bvconst(9000,64),bvconst(9000,64),sk_true())=bvconst(0,64)) }
+example "owner one byte short" { assert(sc_bind(bvconst(64,64),bvconst(64,64),bvconst(8,64),bvconst(64,64),bvconst(135,64),bvconst(1000,64),sk_true())=bvconst(0,64)) }
+example "system one byte short" { assert(sc_bind(bvconst(64,64),bvconst(64,64),bvconst(8,64),bvconst(64,64),bvconst(1000,64),bvconst(135,64),sk_true())=bvconst(0,64)) }
+example "failed backing setup preserves free bytes" { assert(sc_free_after(bvconst(200,64),sc_bind(bvconst(64,64),bvconst(64,64),bvconst(8,64),bvconst(64,64),bvconst(200,64),bvconst(200,64),sk_false()))=bvconst(200,64)) }
+example "64 byte TX returns a short prefix" { assert(sc_result(sk_false(),sk_true(),bvconst(64,64),bvconst(0,64),bvconst(112,64),sk_false())=bvconst(64,64)) }
+example "full A returns again" { assert(sc_result(sk_false(),sk_true(),bvconst(64,64),bvconst(64,64),bvconst(48,64),sk_false())=sk_again()) }
+example "independent B still sends after A fills" { assert(sc_result(sk_false(),sk_true(),bvconst(64,64),bvconst(64,64),bvconst(48,64),sk_false())=sk_again() ∧ sc_after(sk_false(),sk_true(),bvconst(4096,64),bvconst(64,64),bvconst(48,64),sk_false(),sk_true())=bvconst(112,64)) }
+example "more than 1024 queued across bounded calls" { assert(sc_after(sk_false(),sk_true(),bvconst(4096,64),sc_after(sk_false(),sk_true(),bvconst(4096,64),bvconst(0,64),bvconst(1024,64),sk_false(),sk_true()),bvconst(256,64),sk_false(),sk_true())=bvconst(1280,64)) }
+example "large queue does not widen call ABI" { assert(sc_result(sk_false(),sk_true(),bvconst(4096,64),bvconst(0,64),bvconst(1025,64),sk_false())=sk_error()) }
+example "capacity never grants missing authority" { assert(sc_result(sk_false(),sk_false(),bvconst(4096,64),bvconst(0,64),bvconst(4,64),sk_false())=sk_error()) }
+example "failed copy leaves queued bytes" { assert(sc_after(sk_true(),sk_true(),bvconst(4096,64),bvconst(1025,64),bvconst(64,64),sk_false(),sk_false())=bvconst(1025,64)) }
+example "drop neither last byte nor FIN on refused ingress" { assert(sc_in_after(sk_true(),sk_false(),bvconst(64,64),bvconst(63,64),bvconst(2,64))=bvconst(63,64) ∧ ¬sk_fin_after(sk_false(),sc_delivery(sk_true(),sk_false(),bvconst(64,64),bvconst(63,64),bvconst(2,64)),sk_true())) }
+example "empty FIN at full capacity accepted" { assert(sc_delivery(sk_true(),sk_false(),bvconst(64,64),bvconst(64,64),bvconst(0,64))) }
+example "failed release leaves debt" { assert(sc_debt(bvconst(11,64),bvconst(11,64),bvconst(136,64),sk_true(),sk_false())=bvconst(136,64)) }
+example "no refund before drop" { assert(sc_refund(bvconst(11,64),bvconst(11,64),bvconst(136,64),sk_false(),sk_true())=bvconst(0,64)) }
+example "A refund leaves B charge intact" { assert(sc_refund(bvconst(11,64),bvconst(11,64),bvconst(136,64),sk_true(),sk_true())=bvconst(136,64) ∧ sc_debt(bvconst(12,64),bvconst(11,64),bvconst(4240,64),sk_true(),sk_true())=bvconst(4240,64)) }
+example "C fresh binding leaves A ticket stale" { assert(sc_rebind(bvconst(11,64),bvconst(13,64),sc_debt(bvconst(11,64),bvconst(11,64),bvconst(136,64),sk_true(),sk_true()),bvconst(0,64),sk_true(),sk_true()) ∧ ¬sk_ticket(sk_true(),sk_true(),sk_true(),bvconst(11,64),bvconst(13,64))) }
+example "dirty backing blocks C" { assert(¬sc_rebind(bvconst(11,64),bvconst(13,64),bvconst(0,64),bvconst(0,64),sk_false(),sk_true())) }
+example "outstanding work blocks C" { assert(¬sc_rebind(bvconst(11,64),bvconst(13,64),bvconst(0,64),bvconst(1,64),sk_true(),sk_true())) }
+example "unpaid debt blocks C" { assert(¬sc_rebind(bvconst(11,64),bvconst(13,64),bvconst(136,64),bvconst(0,64),sk_true(),sk_true())) }
+example "default queue refines S1 result" { assert(∀ rx : Bool . ∀ ok : Bool . ∀ u : BitVec64 . ∀ n : BitVec64 . ∀ fin : Bool . sc_result(rx,ok,sk_cap(),u,n,fin)=sk_result(rx,ok,u,n,fin)) }
+example "default queue refines S1 ingress" { assert(∀ ok : Bool . ∀ fin : Bool . ∀ u : BitVec64 . ∀ n : BitVec64 . sc_delivery(ok,fin,sk_cap(),u,n)=sk_deliver(ok,fin,u,n)) }
+example "successful or rejected copies preserve queue bound" { assert(∀ rx : Bool . ∀ ok : Bool . ∀ c : BitVec64 . ∀ u : BitVec64 . ∀ n : BitVec64 . ∀ fin : Bool . ∀ cop : Bool . bvule(u,c) ⟹ bvule(sc_after(rx,ok,c,u,n,fin,cop),c)) }
+example "RX copy cannot grow queue" { assert(∀ c : BitVec64 . ∀ u : BitVec64 . ∀ n : BitVec64 . bvule(sc_after(sk_true(),sk_true(),c,u,n,sk_false(),sk_true()),u)) }
+example "ordered delivery preserves capacity" { assert(∀ ok : Bool . ∀ fin : Bool . ∀ c : BitVec64 . ∀ u : BitVec64 . ∀ n : BitVec64 . bvule(u,c) ⟹ bvule(sc_in_after(ok,fin,c,u,n),c)) }
+example "release repeated on resulting ledger yields no refund" { assert(∀ k : BitVec64 . ∀ e : BitVec64 . ∀ d : BitVec64 . sc_refund(k,e,sc_debt(k,e,d,sk_true(),sk_true()),sk_true(),sk_true())=bvconst(0,64)) }
+example "release of A preserves distinct B for any amount" { assert(∀ a : BitVec64 . ∀ b : BitVec64 . ∀ d : BitVec64 . ¬(a=b) ⟹ (sc_debt(b,a,d,sk_true(),sk_true())=d)) }
+
+example "reservation never overdraws either account" {
+    assert(∀ r : BitVec64 . ∀ t : BitVec64 . ∀ m : BitVec64 . ∀ lim : BitVec64 . ∀ o : BitVec64 . ∀ g : BitVec64 . ∀ ready : Bool .
+        bvule(sc_bind(r,t,m,lim,o,g,ready),o) ∧ bvule(sc_bind(r,t,m,lim,o,g,ready),g))
+}
+example "clean rebind also meets S1 ticket reuse requirements" {
+    assert(∀ old : BitVec64 . ∀ fresh : BitVec64 . ∀ debt : BitVec64 . ∀ w : BitVec64 . ∀ clean : Bool . ∀ dropped : Bool .
+        sc_rebind(old,fresh,debt,w,clean,dropped) ⟹ sk_reuse(sk_true(),dropped,sk_true(),w,old,fresh))
+}

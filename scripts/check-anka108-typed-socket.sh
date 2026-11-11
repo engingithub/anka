@@ -10,7 +10,9 @@ if [[ ! -s "$fixture" || ! -s src/anka64/os/typed_socket.rs ]] ||
 fi
 expected=(binary_split_fin_and_reply_on_open_tx full_receive_refuses_entire_fragment_including_fin
           short_send_and_backpressure_preserve_queued_prefix cancel_or_death_refunds_and_never_retargets_a_saved_call
-          wrong_kernel_ticket_and_unfunded_bind_cannot_route_bytes)
+          wrong_kernel_ticket_and_unfunded_bind_cannot_route_bytes
+          capacity_asymmetric_queues_preserve_both_streams capacity_large_queue_keeps_authenticated_call_bound
+          capacity_limits_and_owner_quota_are_atomic capacity_peer_charge_global_denial_and_reuse_on_same_fabric)
 check_list() {
   local name
   for name in "${expected[@]}"; do
@@ -34,3 +36,7 @@ for name in "${expected[@]}"; do
   grep -Fxq "test anka64::os::tests::typed_socket_tests::s1_socket_${name} ... ok" "$log" ||
     { echo "Missing passing result for s1_socket_${name}." >&2; exit 1; }
 done
+
+adapter=anka64::dev_runner::socket_stream::tests::s2_socket_plan_bounds_both_fragments_and_transmit_window
+cargo test --release --lib "$adapter" -- --exact | tee "$log"
+grep -Fxq "test $adapter ... ok" "$log" || { echo "Missing passing result for $adapter." >&2; exit 1; }

@@ -18,7 +18,7 @@ mod closure;
 mod workers;
 mod work;
 pub(crate) use workers::HeapCleanupSnapshot;
-pub(crate) use work::{HeapWorkCounts, HeapWorkLimits, HeapWorkOutcome, HeapWorkTicket};
+pub(crate) use work::{HeapWorkLimits, HeapWorkTicket};
 pub(crate) use initialization::HeapInitialization;
 
 /// Fixed composite object/placement/private-map/grant plan. An ObjectId alone
