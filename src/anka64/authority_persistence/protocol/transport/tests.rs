@@ -176,12 +176,39 @@ fn n110_transport_file_reopen_after_lost_reply_recovers_one_effect(){
 
 #[test]
 fn n110_transport_binder_unwind_refunds_temporary_reservation(){
-    let mut s=server();let _c=TcpStream::connect(s.address().unwrap()).unwrap();
-    let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{
-        s.poll(&mut |_|->Option<u64>{panic!("test binder failure")},true).unwrap();
-    }));
-    assert!(result.is_err());assert_eq!(s.usage(),(0,0));assert_eq!(s.backend.reads,0);
-    let (_c,t)=connect(&mut s);assert!(s.cancel(t));assert_eq!(s.usage(),(0,0));
+    struct BinderFailure;
+    let mut s=server();
+    let client=TcpStream::connect(s.address().unwrap()).unwrap();
+    let expected_peer=client.local_addr().unwrap();
+    let deadline=Instant::now()+Duration::from_secs(2);
+    // A nonblocking accept may return WouldBlock/Interrupted without invoking
+    // bind_peer. Only the injected unwind exercises the reservation's Drop.
+    loop {
+        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            s.poll(&mut |peer| -> Option<u64> {
+                assert_eq!(peer,expected_peer);
+                std::panic::panic_any(BinderFailure)
+            },true)
+        }));
+        match result {
+            Err(payload) if payload.is::<BinderFailure>() => break,
+            Err(payload) => std::panic::resume_unwind(payload),
+            Ok(Err(e)) => panic!("poll failed before binder unwind: {e}"),
+            Ok(Ok(report)) => {
+                assert!(report.accepted.is_none());
+                assert_eq!((report.live,report.closed),(0,0));
+                assert!(Instant::now()<deadline,"binder never reached for connected peer");
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+    assert_eq!(s.usage(),(0,0));
+    assert_eq!((s.backend.reads,s.backend.commits),(0,0));
+    drop(client);
+    let (_peer,t)=connect(&mut s);
+    assert_eq!(s.usage(),(1,CHARGE));
+    assert!(s.cancel(t));
+    assert_eq!(s.usage(),(0,0));
 }
 #[test]
 fn n110_transport_expired_connection_refunds_without_touching_peer(){

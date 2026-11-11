@@ -169,3 +169,9 @@ pub(crate) mod registry;
 
 #[path="evidence/peer_binder.rs"]
 pub(crate) mod peer_binder;
+
+#[path="evidence/caller_verifier.rs"]
+pub(crate) mod caller_verifier;
+
+#[path="evidence/storage_verifier.rs"]
+pub(crate) mod storage_verifier;

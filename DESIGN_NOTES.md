@@ -9,7 +9,7 @@ the project's purpose and development entry points. Architectural decisions
 and future directions belong in these documents rather than separate root notes.
 
 For current work, start with [DN-72: authority and persistence status](#dn72-status)
-and the [next verifier gate](#dn72-next-verifier). For the closed rebuild, see the
+and the [storage server verifier gate](#dn72-storage-verifier). For the closed rebuild, see the
 [DN-71 status table](#dn71-status) and [final 10.8 evidence](#phase-108-final-evidence).
 DN-1 through DN-71 and the detailed DN-72 entries retain decisions and test results
 at the time they were made. Read a checkpoint’s “next” or “pending” in that context;
@@ -13749,7 +13749,7 @@ This documentation update did not rerun or extend the accepted gates.
 
 <a id="dn72-status"></a>
 
-### Current status — caller-side reference binder accepted
+### Current status — two-sided host storage I/O accepted on the developer Mac
 
 **Phase 10.8 is closed and merged. Phases 10.9 and 10.10 remain open.**
 The protected virtual-NIC service can answer `/alive`. The persistence binder
@@ -13763,10 +13763,13 @@ requesters or authorize boot.
 | E1–E4: trusted evidence and serialized use | E1 admission: 119 positive / 99 hostile; E2 Rust checkpoint: 105 tests. E3 provider-use contract: 116 / 94; E4 registry and guarded dispatch: 130 tests. These checks consume trusted verifier outputs. |
 | E5–E6: guarded replies on a real stream | E5: 21 positive / 16 hostile. E6: 135 reference tests passed. Authority is checked before each reply fragment; revocation cannot recall a prefix already written or undo a durable commit. E6 is merged to main. |
 | E7–E8: caller evidence before the first storage read | [E7](#dn72-peer-binder): 26 positive / 21 explicitly disproved hostile witnesses, confirmed on the developer machine. [E8](#dn72-reference-binder): **142 reference tests passed, 0 failed, 0 ignored, in 0.79s**. Seven tests exercise the binder with real loopback streams and a deterministic verifier. |
+| E9: caller verifier before E7 admission | [Verifier contract](#dn72-next-verifier): 45 positive witnesses passed; all 39 hostile claims explicitly disproved. Confirmed on the developer Mac. |
+| E10: caller verifier adapter | Developer Mac: 148 persistence reference tests passed, 0 failed or ignored, in 1.18s. |
+| E11: client verifies the storage server | [Formal gate](#dn72-storage-verifier): 43 positive witnesses passed; all 36 hostile claims explicitly disproved. Confirmed on the developer Mac. |
+| E12: protected host storage I/O | Developer Mac: 154 persistence reference tests passed in 0.99s, including the six E12 cases. |
 
-The latest row records local acceptance, not a merge of E7/E8 or a new
-whole-system regression run. The current implementation boundary is the
-**source of the verifier verdict**; the [next gate](#dn72-next-verifier) starts there.
+E7/E8 are merged to main. The 148-test E10 run includes E8’s tests; it is a
+persistence reference result, not a whole-system regression.
 
 ### Architectural decision and scope
 
@@ -15337,22 +15340,114 @@ backend that counted reads and commits:
 
 <a id="dn72-next-verifier"></a>
 
-### Next gate — when may a concrete verifier return Valid?
+### E9 — deriving the storage caller verdict
 
-Start with the server accepting a storage caller. Specify in Kleis which inputs
-are independently observed from the live channel, which statements the configured
-anchor authenticates, and how the verifier establishes that the peer controls
-the credential’s holder key on *this* connection. Specify how current validity
-and revocation are obtained; missing or inconclusive evidence must not yield
-`Valid`. Keep the operation grant independent of successful authentication.
+A successful verifier decision requires three independent inputs:
 
-The decisive pair uses the same valid credential for A. A presents a valid
-proof for the live connection and a current grant; the verifier and binder may
-admit the funded read. B presents A’s credential with a captured proof on B’s
-connection; verification must fail before storage access. Keep a third control:
-A proves possession but lacks the grant; the binder still denies the read.
-E7/E8 exercised these decisions **given** verifier verdicts. This next gate
-must constrain **how those verdicts are obtained**, then guide the implementation
-and its real-channel test. No credential format or production verifier is
-selected here. Reciprocal verification of the storage service, enrollment/boot
-integration and the T3–T5 system gates remain open.
+1. The selected anchor’s verified credential binds its reference, subject,
+   principal kind, audience, epoch, holder key and validity interval.
+2. The current authority lookup covers that same credential, issuing anchor,
+   epoch and snapshot serial. Both the credential and status must be in their
+   half-open validity intervals at the trusted current time.
+3. The verified signer is the credential’s holder. The signed caller message
+   identifies that credential and matches the actual live channel on runtime,
+   connection, binding, endpoints, principal kind, incarnation, direction,
+   operation, serial and challenge. Copying the peer's presented values into
+   the observation would violate the input contract.
+
+Only then may the E7 binder admit the first funded read with its own current
+grant. Reusing A’s credential and proof on B’s stream fails even if the E7
+inputs proposed for B otherwise agree. A fresh proof for a new connection can
+succeed. A can authenticate without a grant and still cannot read. The adapter
+cannot substitute a different holder or extend the signed credential interval
+when projecting the identity into E7.
+
+**Formal evidence:** `scripts/check-anka109-gates.py --only-caller-verifier`
+passed 45 positive witnesses and explicitly disproved all 39 hostile claims
+on the development workspace. The positive gate includes symbolic checks
+against arbitrary alternate connection numbers and status serials for the
+fixture. No Rust code or storage protocol changed at E9.
+
+**E10 implementation:** `evidence/caller_verifier.rs` implements E8’s
+`EvidenceSource` using separate interfaces for live channel observations,
+checked credential/possession statements and current authority lookups. It
+constructs the identity from the signed interval and never saves the result
+as reusable permission. The optional grant is projected and checked by E8/E1.
+
+**Accepted on the developer Mac:** `bash scripts/check-anka110-persistence-reference.sh`
+reported 148 passed, 0 failed, 0 ignored, 0 filtered out in 1.18s.
+Six new tests cover a funded read and exact retry, captured proof on another
+stream, authenticated caller without a grant, altered receipts, loss of status
+after EOF and revocation after commit. The two admission denials require zero
+reads and zero commits. These tests use real loopback sockets and deterministic
+signature/authority inputs. No new Kleis semantics were introduced.
+
+The model assumes trustworthy time, non-reused credential
+references within an anchor, fresh channel observations across restart, and
+signature verification of the complete, unambiguously encoded statements.
+It does not implement these primitives, select a credential format, verify
+the storage server to its client, or authorize HTTP or boot.
+
+<a id="dn72-storage-verifier"></a>
+
+### E11 — which storage service may receive this request?
+
+The client selects the expected storage subject independently of the responder.
+An anchor-recognized workload with a valid permit still cannot receive even
+the first request byte if it is not that subject. E11 reuses the credential,
+status and signed interval checks from E9 and the namespace, role, identity and
+operation checks from E1’s `e110_server`. A distinct storage-server possession
+receipt binds the signer to that credential and the entire observed scope. Its
+verification primitive must check the server message domain. The trusted
+observation must come from the actual stream; neither a socket address nor an
+echoed token field supplies that evidence.
+
+The send relation uses the 112-byte **request** bound. A denied write leaves
+the sent count unchanged, including when only a suffix remains. On receive,
+authority must still be current after EOF. A matching success or a canonical
+negative reply from a now-revoked server yields **Unknown**. This describes
+what the client can disclose: the remote commit may already have happened.
+Without revocation the existing protocol still distinguishes success,
+recognized negative statuses and uncertainty. E11 changes no wire bytes.
+
+**Formal evidence:** `scripts/check-anka109-gates.py --only-storage-verifier`
+passed 43 positive witnesses and explicitly disproved 36 hostile claims in
+the development workspace. This is a formal gate, not evidence of a production
+signature verifier or a Rust storage provider. The model composes with the
+existing nonblocking client's budget, deadline, frozen request and admission
+seal; it assumes independently observed, fresh channel identities and checked
+signature/status inputs as in E9.
+
+### E12 — verify both directions on a real host storage operation
+
+`evidence/storage_verifier.rs` supplies the client-side `StorageProvider` to
+the existing `StorageAdapter`. The initiator configures the expected server,
+local principal and runtime. Each check uses the actual socket binding, a typed
+storage-server possession receipt, and current credential status and operation
+permit. E10 continues to determine whether the caller can reach the file.
+
+The integrated test uses a real TCP client, the guarded server, and `FileRecord`.
+It starts at revision 7, selects value 99 and revokes server status as the client
+reads EOF. The client must return `Unknown`. After dropping the service, the test
+opens the on-disk record and checks revision 8, value 99 and the original request.
+A fresh connection with new evidence retries that same request; it must recover
+the success with just one commit across both service instances. Separate cases
+count bytes at the receiving socket, verify a denied caller makes zero backend
+calls, and exercise short writes, replay, substituted endpoints and stale status.
+Channel observations, signature primitives and authority lookups in these tests
+are fixtures. This is host loopback storage, not a guest driver, production
+cryptography or an arbitrary-byte object store.
+
+**Runtime acceptance:** On the developer Mac, `bash scripts/check-anka110-persistence-reference.sh`
+reported **154 passed, 0 failed, 0 ignored, 0 filtered out, in 0.99s**. This
+includes all six E12 cases. The transport unwind test now waits for the actual
+binder callback before asserting that the temporary reservation was refunded.
+This run covers the persistence reference suite, not the full Anka64 regression suite.
+
+**Next:** assess the CC2 guest-to-storage boundary against
+the existing typed socket, framing, authority and retry contracts. Identify
+which handles the guest receives and which component may authenticate the
+channel before sending. Add an affected Kleis gate where those contracts leave
+a gap. The first guest milestone is one existing `Select` request over the
+virtual NIC, with a file-backed result recoverable after restart and exact
+retry. General artifact write/read remains a separate storage contract.

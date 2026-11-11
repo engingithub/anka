@@ -1,0 +1,833 @@
+// E11: client verifies the configured storage service. Zero new axioms.
+// d and s use E9's direction-independent credential and fresh status lookup.
+// This proof is a distinct primitive result: verify the STORAGE-SERVER domain
+// over (issuer, credential ref, all signed scope fields) with the actual signer.
+// A caller-domain proof cannot be decoded as this type. The verdict belongs
+// to the entire message; opaque refs model equality, not entropy or signatures.
+import "anka110_caller_verifier.kleis"
+
+data W110Possession = W110Possession(issuer : BitVec64, refid : BitVec64, signer : BitVec64, runtime : BitVec64, connection : BitVec64, binding : BitVec64, local : BitVec64, peer : BitVec64, kind : BitVec64, incarnation : BitVec64, role : BitVec64, operation : BitVec64, serial : BitVec64, challenge : BitVec64, signature : A109Verdict)
+define w110_signed(p : W110Possession, d : V110Credential, c : A109Context, o : E110Observation) = match p {
+    W110Possession(issuer,refid,signer,runtime,connection,binding,local,peer,kind,incarnation,role,operation,serial,challenge,signature) =>
+        (signature=A109Valid) ∧ (issuer=ctx_anchor(c)) ∧ (refid=v110_id(d)) ∧ (signer=v110_key(d)) ∧
+        (runtime=eo_runtime(o)) ∧ (connection=eo_connection(o)) ∧ (binding=eo_binding(o)) ∧
+        (local=eo_local(o)) ∧ (peer=eo_peer(o)) ∧ (kind=eo_kind(o)) ∧ (incarnation=eo_incarnation(o)) ∧
+        (role=eo_role(o)) ∧ (operation=eo_operation(o)) ∧ (serial=eo_serial(o)) ∧ (challenge=eo_challenge(o))
+}
+
+// runtime/connection/binding/local come from the actual client channel;
+// expected_server is selected by trusted configuration, not by the responder.
+// The binding identifies the actual endpoint pair. Socket addresses alone
+// authenticate neither end. present is current permit-lookup presence.
+define w110_current(c : A109Context, o : E110Observation, d : V110Credential, s : V110Status, p : W110Possession,
+                    runtime : BitVec64, connection : BitVec64, binding : BitVec64, local : BitVec64, expected_server : BitVec64,
+                    present : Bool, i : A109Identity, permit : E110Permit, b : E110Binding, serial : BitVec64, r : P109Request) =
+    (eo_runtime(o)=runtime) ∧ (eo_connection(o)=connection) ∧ (eo_binding(o)=binding) ∧ (eo_local(o)=local) ∧
+    v110_credential(d,c,o) ∧ v110_status(s,d,c,o) ∧ w110_signed(p,d,c,o) ∧ v110_interval(d,i) ∧
+    present ∧ e110_server(c,i,permit,b,o,serial,expected_server,r)
+
+// One send poll, not the body of the TCP stack. current is w110_current
+// evaluated for THIS poll; usable is current client budget/deadline/seal.
+// count is actual short-write progress. A denied poll emits no bytes, even
+// if the stream would accept a write; previously sent bytes stay sent.
+define w110_can_advance(sent : BitVec64, count : BitVec64, current : Bool, usable : Bool) =
+    current ∧ usable ∧ bvult(sent,bvconst(112,64)) ∧ bvule(count,bvsub(bvconst(112,64),sent))
+define w110_sent(sent : BitVec64, count : BitVec64, current : Bool, usable : Bool, next : BitVec64) =
+    (w110_can_advance(sent,count,current,usable) ∧ (next=bvadd(sent,count))) ∨
+    (¬w110_can_advance(sent,count,current,usable) ∧ (next=sent))
+
+// Receive-terminal decision ONLY, not a transition on an incomplete stream.
+// current is recomputed AFTER EOF, or false on transport/authority loss.
+// usable also requires the frozen admission/request and an unexpired budget.
+// Reuse exact wire echo, size, EOF, canonical status and success invariants.
+// N110 codes: 0=Unknown, 1=success, 2=recognized negative outcome.
+// No backend state is read or modified by this client knowledge transition.
+define w110_reply_ready(f : N110Frame, reply : N110Reply, r : P109Request, current : Bool, usable : Bool) =
+    current ∧ usable ∧ n110_frame(f) ∧ (pr_anchor(r)=nf_anchor(f)) ∧ (pr_installation(r)=nf_installation(f)) ∧ (pr_policy(r)=nf_policy(f)) ∧
+    (pr_caller(r)=nf_caller(f)) ∧ (pr_incarnation(r)=nf_incarnation(f)) ∧ (pr_sequence(r)=nf_sequence(f)) ∧
+    (pr_expected(r)=nf_expected(f)) ∧ (pr_kind(r)=nf_kind(f)) ∧ (pr_argument(r)=nf_argument(f)) ∧
+    (pr_attempt(r)=nf_attempt(f)) ∧ n110_reply_frame(f,reply)
+define w110_success(f : N110Frame, reply : N110Reply, r : P109Request, current : Bool, usable : Bool) =
+    w110_reply_ready(f,reply,r,current,usable) ∧ n110_client_accept(f,reply,current,usable)
+define w110_negative(f : N110Frame, reply : N110Reply, r : P109Request, current : Bool, usable : Bool) =
+    w110_reply_ready(f,reply,r,current,usable) ∧ ¬(nr_status(reply)=a109_z()) ∧ ¬(nr_status(reply)=bvconst(5,64))
+define w110_result(f : N110Frame, reply : N110Reply, r : P109Request, current : Bool, usable : Bool, result : BitVec8) =
+    ((result=bvconst(1,8)) ∧ w110_success(f,reply,r,current,usable)) ∨
+    ((result=bvconst(2,8)) ∧ w110_negative(f,reply,r,current,usable)) ∨
+    ((result=bvconst(0,8)) ∧ ¬w110_success(f,reply,r,current,usable) ∧ ¬w110_negative(f,reply,r,current,usable))
+
+// E11 witnesses
+example "configured storage workload may receive first bytes" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(16,64)))
+}
+example "configured installation may serve" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(2,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(2,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(2,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(2,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(2,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(2,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(16,64)))
+}
+example "substituted independently recognized workload" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(41,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(41,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(41,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(41,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(41,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(41,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "coherent person with server permit" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(1,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(1,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(1,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "reflected caller role" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(1,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "replayed proof on new stream" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(16,64),bvconst(17,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(16,64),
+        bvconst(17,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(16,64),bvconst(17,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "fresh proof on reconnect" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(16,64),bvconst(17,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(16,64),bvconst(17,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(16,64),
+        bvconst(17,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(16,64),bvconst(17,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(16,64)))
+}
+example "unexpected runtime" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(55,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "wrong accepted stream" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(16,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "different endpoint binding" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(17,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "substituted local endpoint" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(31,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "absent permit alongside cached valid permit" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(0,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "permit for different operation" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(2,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "revoked permit" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Invalid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "request names other installation" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(21,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "foreign credential issuer" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(11,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "unknown issue signature" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Unknown),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "different signer" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(89,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "wrong credential reference in server proof" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(28,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "unverified server-domain signature" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Invalid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "different signed challenge" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(72,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "wrong proof endpoint" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(32,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "serial substitution" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(10,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "status concerns other credential" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(28,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "unknown status" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Unknown),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "status expired at upper bound" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(100,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "identity interval widened" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(111,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "peer no longer live" {
+    assert(w110_sent(bvconst(0,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(0,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,64)))
+}
+example "revocation between short writes preserves prefix" {
+    assert(w110_sent(bvconst(8,64),bvconst(16,64),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Invalid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(8,64)))
+}
+example "exact success after EOF and fresh verification" {
+    assert(w110_result(N110Frame(bvadd(bvshl(bvconst(3232080,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(112,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        N110Reply(bvadd(bvshl(bvconst(3232336,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(144,64),bvconst(0,64),bvconst(8,64),bvconst(99,64),bvconst(8,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(1,8)))
+}
+example "valid reply cannot establish success after revocation" {
+    assert(w110_result(N110Frame(bvadd(bvshl(bvconst(3232080,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(112,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        N110Reply(bvadd(bvshl(bvconst(3232336,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(144,64),bvconst(0,64),bvconst(8,64),bvconst(99,64),bvconst(8,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Invalid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,8)))
+}
+example "seal or budget lost before disclosure" {
+    assert(w110_result(N110Frame(bvadd(bvshl(bvconst(3232080,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(112,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        N110Reply(bvadd(bvshl(bvconst(3232336,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(144,64),bvconst(0,64),bvconst(8,64),bvconst(99,64),bvconst(8,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(0,8)=bvconst(1,8)),bvconst(0,8)))
+}
+example "reply for other correlation" {
+    assert(w110_result(N110Frame(bvadd(bvshl(bvconst(3232080,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(112,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        N110Reply(bvadd(bvshl(bvconst(3232336,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(43,64),bvconst(144,64),bvconst(0,64),bvconst(8,64),bvconst(99,64),bvconst(8,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,8)))
+}
+example "reply lacking observed EOF" {
+    assert(w110_result(N110Frame(bvadd(bvshl(bvconst(3232080,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(112,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        N110Reply(bvadd(bvshl(bvconst(3232336,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(144,64),bvconst(0,64),bvconst(8,64),bvconst(99,64),bvconst(8,64),(bvconst(0,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,8)))
+}
+example "pending service check and reply must concern same request" {
+    assert(w110_result(N110Frame(bvadd(bvshl(bvconst(3232080,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(112,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        N110Reply(bvadd(bvshl(bvconst(3232336,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(144,64),bvconst(0,64),bvconst(8,64),bvconst(99,64),bvconst(8,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(100,64),bvconst(0,64)),
+        w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,8)))
+}
+example "authenticated status 1 retains protocol meaning" {
+    assert(w110_result(N110Frame(bvadd(bvshl(bvconst(3232080,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(112,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        N110Reply(bvadd(bvshl(bvconst(3232336,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(144,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(2,8)))
+}
+example "authenticated status 5 retains protocol meaning" {
+    assert(w110_result(N110Frame(bvadd(bvshl(bvconst(3232080,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(112,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        N110Reply(bvadd(bvshl(bvconst(3232336,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(144,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,8)))
+}
+example "law: denial preserves any already sent prefix" {
+    assert(∀ sent : BitVec64 . ∀ n : BitVec64 . w110_sent(sent,n,(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),sent))
+}
+example "law: loss after EOF makes even a previously good reply unknown" {
+    assert(w110_result(N110Frame(bvadd(bvshl(bvconst(3232080,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(112,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),N110Reply(bvadd(bvshl(bvconst(3232336,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(144,64),bvconst(0,64),bvconst(8,64),bvconst(99,64),bvconst(8,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),(bvconst(0,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),bvconst(0,8)))
+}
+example "revocation before disclosing a canonical negative reply" {
+    assert(w110_result(N110Frame(bvadd(bvshl(bvconst(3232080,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(112,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        N110Reply(bvadd(bvshl(bvconst(3232336,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(144,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Invalid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,8)))
+}
+example "lost authority hides even the negative status" {
+    assert(¬(w110_result(N110Frame(bvadd(bvshl(bvconst(3232080,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(112,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),N110Reply(bvadd(bvshl(bvconst(3232336,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(144,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Invalid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(2,8))))
+}
+example "malformed success does not expose an outcome" {
+    assert(w110_result(N110Frame(bvadd(bvshl(bvconst(3232080,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(112,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        N110Reply(bvadd(bvshl(bvconst(3232336,64),bvconst(32,64)),bvconst(1095454273,64)),bvconst(1,64),bvconst(0,64),bvconst(42,64),bvconst(144,64),bvconst(0,64),bvconst(7,64),bvconst(99,64),bvconst(8,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)),
+        w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        bvconst(6,64),
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64))),(bvconst(1,8)=bvconst(1,8)),bvconst(0,8)))
+}
+example "law: captured server proof fails for every other connection in the fixture" {
+    assert(∀ other : BitVec64 . ¬(other=bvconst(6,64)) ⟹ ¬(w110_current(A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        E110Observation(bvconst(5,64),other,bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),(bvconst(1,8)=bvconst(1,8)),A109Valid),
+        V110Credential(bvconst(27,64),bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(88,64),bvconst(90,64),bvconst(110,64),A109Valid),
+        V110Status(bvconst(27,64),bvconst(10,64),bvconst(3,64),bvconst(9,64),bvconst(96,64),bvconst(105,64),A109Valid),
+        W110Possession(bvconst(10,64),bvconst(27,64),bvconst(88,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(5,64),
+        other,
+        bvconst(7,64),
+        bvconst(30,64),
+        bvconst(40,64),
+        (bvconst(1,8)=bvconst(1,8)),
+        A109Identity(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(71,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        E110Permit(bvconst(10,64),bvconst(40,64),bvconst(3,64),bvconst(20,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(95,64),bvconst(108,64),A109Valid,A109Valid),
+        E110Binding(bvconst(5,64),other,bvconst(7,64),bvconst(30,64),bvconst(40,64),bvconst(3,64),bvconst(4,64),bvconst(2,64),bvconst(1,64),bvconst(9,64),bvconst(71,64),A109Valid),
+        bvconst(9,64),
+        P109Request(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(1,64),bvconst(99,64),bvconst(0,64)))))
+}

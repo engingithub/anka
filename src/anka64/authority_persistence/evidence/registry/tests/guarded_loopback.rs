@@ -182,3 +182,6 @@ fn e6_expired_provider_deadline_never_enters_backend() {
 
 #[path="peer_binder_loopback.rs"]
 mod peer_binder_loopback;
+
+#[path="caller_verifier_loopback.rs"]
+mod caller_verifier_loopback;
