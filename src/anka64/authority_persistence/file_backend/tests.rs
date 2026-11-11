@@ -62,9 +62,13 @@ fn d110_provision_and_reopen_never_reset_existing_installation() {
 }
 #[test]
 fn d110_lock_fences_other_openers_and_releases_on_close() {
-    let tmp=Temp::new();let b=FileRecord::create(&tmp.0,10,20,&initial()).unwrap();
-    assert!(matches!(FileRecord::open(&tmp.0,10,20),Err(Error::BackendBusy)));
-    drop(b);assert!(FileRecord::open(&tmp.0,10,20).is_ok());assert!(tmp.0.join(LOCK).exists());
+    // Open the descriptor in the child, after exec. Other tests can spawn
+    // processes in parallel without inheriting a reference to this lock.
+    let tmp=Temp::new();
+    let output=child(&tmp,"release");
+    assert!(output.status.success(), "release helper failed: {output:?}");
+    // The helper creates this path. A mismatched --exact filter cannot pass.
+    assert!(tmp.0.join(LOCK).is_file(), "release helper did not run");
 }
 #[test]
 fn d110_namespace_substitution_is_rejected_without_writes() {
@@ -72,8 +76,19 @@ fn d110_namespace_substitution_is_rejected_without_writes() {
     let bytes=fs::read(tmp.0.join(HEAD)).unwrap();
     assert_eq!(b.load(10,21),Err(Error::Authority));
     assert_eq!(b.commit(11,20,&initial(),&after()),Err(Error::Authority));drop(b);
-    assert!(matches!(FileRecord::open(&tmp.0,10,21),Err(Error::Authority)));
+    // Valid open performs orphan cleanup; a namespace mismatch must never reach it.
+    fs::write(tmp.0.join(PENDING),b"orphan").unwrap();
+    match FileRecord::open(&tmp.0,10,21) {
+        Err(Error::Authority)=>{},
+        Err(other)=>panic!("open for installation 21: expected Authority, got {other:?}"),
+        Ok(_)=>panic!("opened installation 20 as installation 21"),
+    }
     assert_eq!(fs::read(tmp.0.join(HEAD)).unwrap(),bytes);
+    assert_eq!(fs::read(tmp.0.join(PENDING)).unwrap().as_slice(),b"orphan");
+    // A rejected opener must also release its own descriptor.
+    let mut owner=FileRecord::open(&tmp.0,10,20).expect("reopen for installation 20");
+    assert_eq!(owner.load(10,20),Ok(initial()));
+    assert!(!tmp.0.join(PENDING).exists());
 }
 #[test]
 fn d110_compare_and_commit_rechecks_complete_before_state() {
@@ -159,6 +174,27 @@ fn d110_second_process_is_fenced() {
 fn d110_process_child() {
     let Some(directory)=std::env::var_os("ANKA110_CHILD_DIRECTORY") else {return};
     let mode=std::env::var("ANKA110_CHILD_MODE").unwrap();
+    if mode=="release" {
+        use std::os::unix::fs::MetadataExt;
+        let path=Path::new(&directory);
+        let lock=path.join(LOCK);
+        let owner=FileRecord::create(path,10,20,&initial()).expect("create first writer");
+        let inode=fs::metadata(&lock).unwrap();
+        match FileRecord::open(path,10,20) {
+            Err(Error::BackendBusy)=>{},
+            Err(e)=>panic!("live writer: expected BackendBusy, got {e:?}"),
+            Ok(_)=>panic!("live writer failed to fence a second opener"),
+        }
+        drop(owner);
+        // Single immediate attempt: no polling or retry that could hide a leak.
+        let mut next=FileRecord::open(path,10,20).expect("immediate reopen after sole writer dropped");
+        assert_eq!(next.load(10,20),Ok(initial()));
+        let same=fs::metadata(&lock).expect("lock file must persist");
+        assert_eq!((inode.dev(),inode.ino()),(same.dev(),same.ino()));
+        assert!(matches!(FileRecord::open(path,10,20),Err(Error::BackendBusy)),
+            "replacement writer did not fence its peer");
+        return
+    }
     if mode=="locked" {assert!(matches!(FileRecord::open(Path::new(&directory),10,20),Err(Error::BackendBusy)));return}
     let mut b=FileRecord::open(Path::new(&directory),10,20).unwrap();
     b.cut=Some(match mode.as_str(){"partial"=>Cut::PartialWrite,"flushed"=>Cut::FileSynced,"renamed"=>Cut::Renamed,"durable"=>Cut::DirectorySynced,_=>panic!("bad test mode")});

@@ -13747,14 +13747,20 @@ This documentation update did not rerun or extend the accepted gates.
 
 ## DN-72 — Identity, authority, installation and reboot (Phase 10.9)
 
-**Status, 2026-11-05: T1 and the initial T2 persistence/reboot model have local
+**Status through E6: T1 and the initial T2 persistence/reboot model have local
 Kleis acceptance. The developer confirmed T1 and all 29 Rust persistence tests
 (core plus host-local backend), with 51 positive/45 hostile backend witnesses.
 The bounded protocol formalization is accepted on the developer machine. Its
 Rust codec/dispatcher is accepted: all 48 developer tests passed in 0.33s.
 The loopback transport is accepted: all 66 developer tests passed in 0.38s.
-The bounded client is delivered below with runtime acceptance pending. Concrete evidence refinement, T3–T5 and
-production runtime integration remain pending.** Phase 10.8 is accepted and
+The client checkpoint is accepted and merged: all 83 developer tests passed in
+0.39s, with the 137/108 protocol gate. The evidence-admission contract below has
+119 positive/99 hostile witnesses confirmed by the developer. E2 Rust admission
+and verifier adapters are accepted: 105 tests passed in 0.39s. E3 provider-use
+formalization is developer-confirmed at 116/94. E4 registry/guarded dispatch is
+developer-accepted (130 tests); E5 is developer-confirmed (21/16); E6 guarded loopback passed the full persistence reference suite (135/135);
+concrete cryptographic evidence validation remains pending, along with
+T3–T5 and production runtime integration.** Phase 10.8 is accepted and
 merged. The [T1 evidence below](#dn72-t1) records the new proof results; no runtime
 authority-model integration or runtime acceptance is claimed for T1. It extends the planned 10.9 supply-chain
 and hostile CPU-to-HTTP audit with the authority model needed to interpret who
@@ -14760,11 +14766,11 @@ remain separate milestones.
 
 ### Phase 10.10 — Bounded persistence client and exact retry
 
-**Delivered, 2026-11-05; developer Rust acceptance pending.** The latest accepted
-baseline is 66 tests in 0.38s. This slice adds **17 tests**, for **83 total** on
-Linux/macOS. Rust is unavailable in the authoring environment; compilation and
-runtime acceptance are pending. The extended protocol gate passed **137 positive
-witnesses (11 quantified laws) and 108 explicit hostile disproofs** here.
+**Accepted by developer and merged, 2026-11-05:** all **83 Rust tests passed**,
+none failed or ignored, in **0.39s**. The developer also confirmed **137 positive
+protocol witnesses and 108 explicit hostile disproofs** (11 quantified laws in
+the positive file). This is reference client/server acceptance, not production
+authentication or full-system authority integration.
 
 The ten new positive and ten hostile witnesses refine current connection binding,
 trusted server evidence before I/O, finite work/deadline checks, exact request
@@ -14840,12 +14846,452 @@ python3 scripts/check-anka109-gates.py \
 bash scripts/check-anka110-persistence-reference.sh
 ```
 
-Expected: **137 positive / 108 hostile disproofs; 83 Rust tests**. The pre-existing
+Accepted result: **137 positive / 108 hostile disproofs; 83 Rust tests**. The pre-existing
 binder-unwind test intentionally catches a panic and must finish `ok`.
 
-**Next:** formalize the concrete trusted evidence admission record and its current
-anchor/policy/revocation/connection bindings before implementing the production
-verifier. Then integrate persistence with Anka64 enrollment and reboot admission.
-Keep technology choices separate until that contract is explicit. This completes
-the reference transport/client lifecycle slice only; Phases 10.9 and 10.10 remain
-open for evidence and runtime integration.
+**Follow-through:** the evidence-admission contract is recorded below. The
+accepted reference protocol/client/server checkpoint is merged to main; subsequent
+work belongs on `feat/anka110-evidence-admission`.
+
+<a id="dn72-evidence-admission"></a>
+
+### Phase 10.10 — Evidence admission contract (E1)
+
+**Formal-first delivery, 2026-11-05.** Added
+`anka110_evidence_admission.kleis` and its false-witness companion, with **119
+positive witnesses (9 quantified laws) and 99 hostile claims explicitly disproved**
+in the authoring environment, subsequently confirmed on the developer machine.
+No unknown results or new axioms. This E1 checkpoint made no Rust changes; E2
+implementation and its pending acceptance are recorded below. The accepted **83-test / 137–108 protocol**
+checkpoint remains unchanged. `check-anka109-gates.py --only-evidence` selects
+this new pair; the default sweep includes it too.
+
+This contract makes the requirements of the trusted verifier interfaces explicit.
+It composes existing T1 identity recognition and T2 persistence access instead of
+introducing another identity system. A person remains an opaque subject recognized
+by the one configured trust anchor. Installation and workload identities use the
+same anchor-scoped vocabulary; nothing is tied to a CPU/GPU serial number.
+
+| Input / decision | Meaning and required provenance |
+|---|---|
+| `A109Context` | Trusted current selected anchor, target installation, policy epoch, challenge and time. Equal stale numbers do not establish freshness. |
+| `A109Identity` | Existing T1 validator output for the peer: issuer, subject, principal kind, audience, epoch, challenge, validity and authentic/possession/current-status verdicts. |
+| `E110Observation` | Actual live channel observed by the trusted service: runtime incarnation, connection, channel binding, local and peer subjects, peer kind/incarnation, expected role/operation, authority snapshot serial and challenge. The channel verdict must be valid. |
+| `E110Binding` | Provenance-protected validator output binding all those channel/direction/scope fields to the current challenge and snapshot. Its validated verdict is never accepted from untrusted message fields. |
+| `E110Permit` | Separate direct-anchor operation permit binding issuer, subject/kind, target installation, policy, peer incarnation, role, operation and validity; authentic and current-status verdicts must both be valid. |
+| `e110_client_access` | Admits the observed caller and constrains every field of the existing `P109Access` projection. |
+| `e110_server` | Recognizes the explicitly expected storage server for this namespace and operation. It does not authorize a caller or a storage mutation. |
+
+**Recognition, permission and live-channel possession are separate checks.**
+Every relevant authentic, possession, current-status, channel and binding verdict
+must be `A109Valid`; unknown and invalid both deny. An authentic identity without
+a matching operation permit is insufficient. The selected anchor is the only
+issuer accepted by this slice. Principal kind (person/installation/workload) is
+separate from role (persistence caller/storage server).
+
+Caller admission binds request anchor, installation, policy, caller, incarnation
+and operation to the observed peer and permit. The other durable request fields
+must satisfy the existing protocol shape checks; their sequencing and state
+transition rules remain T2 responsibilities. The permission scope is one target
+installation and one persistence operation, not an execute/admin grant or generic
+Fabric object permission. Artifact validity and boot admission remain their own
+contracts. Enrollment is not implicitly performed by admission.
+
+The storage-server profile admits installation or workload principals with an
+explicit server-role permit and trusted expected-server identity. It cannot use a
+person's identity as a substitute for the service. Recognizing that service does
+not mean its identity equals the caller in a request. Server-role evidence cannot
+be projected into caller authority, and a caller permit cannot authorize the server
+role. This profile does not define identities beyond the existing T1 vocabulary.
+
+**Time, revocation and current state.** `e110_use` re-evaluates admission and fences
+it against the authority snapshot serial frozen for that use. A snapshot/policy
+change invalidates old admission; a fresh validation may establish a new one.
+Closed channels, changed bindings, process/peer incarnations, wrong challenge,
+expiry and revoked/unknown status deny. The derived `P109Access` interval is exactly
+`[max(identity.first, permit.first), min(identity.until, permit.until))`, so it cannot
+outlive either input. Identity recognition is not cached as permanent authority.
+
+The binding must remain attached to the trusted admission record. Checking only a
+previously projected `P109Access` would erase the channel/current-state conditions.
+The implementation must re-evaluate the full gate at operation admission and
+outcome disclosure, in the same serialized authority lane as the protected effect.
+A serial comparison without current trusted observations is insufficient. A
+revocation after a durable effect suppresses subsequent disclosure; it does not
+undo the committed record. Bytes already delivered cannot be recalled.
+
+**Restart and threat-model boundary.** Runtime/connection/binding handles are
+opaque equality handles, not hardware identifiers, hashes, bearer credentials or
+cryptographic nonce widths. A production provider must establish collision-safe
+binding to a fresh authenticated channel/challenge across restart. Restarting a
+local integer counter or restoring old evidence cannot establish that freshness.
+The model assumes trustworthy time and current policy/revocation observation;
+it does not prove their acquisition, solve partitions with an implicit grace period,
+or defend against a malicious host supplying fabricated trusted observations.
+The same conditions must be evaluated again on a reconnected exact retry.
+
+**Proof scope.** Tests substitute each context, identity, permit, observation,
+binding, request-scope and derived-access field; reject unknown/invalid verdicts;
+exercise coherent zero identifiers, expiry boundaries, role confusion, a changed
+snapshot and stale restart evidence; and admit freshly validated policy/channel
+changes. One refinement theorem universally quantifies **all input fields** and
+proves admitted caller evidence implies the existing `p109_authorized` predicate.
+The other eight quantified checks cover selected issuer, binding/channel verdicts,
+live state, snapshot fencing, validity bounds and projection under the fixture
+context. Hostile witnesses are explicit rejected claims, not an exhaustive proof
+of a future parser or cryptographic implementation.
+
+**Implementation boundary:** this delivery defines validator-output admission.
+It does not implement signature verification, a credential parser, a trust-anchor
+client, challenge generation, authenticated transport or a Rust verifier. The
+`Valid` verdicts represent trusted validation obligations, not a shortcut allowing
+callers to choose booleans. Technology choices remain open as requested; no
+OIDC, TLS, certificate or storage-provider requirement is introduced here.
+
+Run only the new formal pair:
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" --only-evidence
+```
+
+Accepted: **119 positive witnesses; 99/99 explicitly disproved**. E2 leaves this
+theory pair unchanged; repeating the formal gate is not necessary for E2 acceptance.
+
+**E2 scope (implemented and developer-accepted below):** a Rust evidence-admission module with
+private, typed admitted records; explicit current-observation/provider inputs;
+separate caller and storage-server checks; exact validity intersection and T2
+projection; and adapters for both existing verifier interfaces. Add focused
+substitution, expiry, revocation, snapshot/reconnect and role-confusion tests.
+Use synthetic validation only in tests and retain production default denial
+until the concrete evidence provider exists. Do not widen the wire frame or
+turn received bytes into trusted records. Provider/cryptographic refinement and
+Anka64 enrollment/reboot wiring remain subsequent gates; neither Phase 10.9 nor
+Phase 10.10 is declared closed by this contract.
+
+
+<a id="dn72-evidence-runtime"></a>
+
+### Phase 10.10 — Rust evidence admission (E2)
+
+**Accepted on the developer machine: 105 passed, 0 failed, 0 ignored, in 0.39s.**
+The developer also confirmed E1 at **119 positive / 99 hostile**. E2 adds **22
+focused tests** to the previous 83-test baseline. The intentional binder-panic
+test caught its unwind and passed; it is not a regression.
+
+`authority_persistence/evidence.rs` refines E1's validator-output predicates:
+
+- `Kind` and `Role` are separate enums. Identity recognition, operation permits,
+  current live observations and full binding proofs are independently checked.
+  Invalid/unknown/missing evidence denies. All required handles are nonzero.
+- `CallerAdapter` constructs a private `CallerAdmission` only after admission.
+  It retains the provider's authenticated peer handle and complete scope,
+  identity, permit and namespace. Every `Verifier::verify` obtains current
+  observations again, checks the retained admission, and projects the exact
+  intersection of identity/permit validity into existing T2 `Context/Access`.
+- `StorageAdapter` implements `client::ServerVerifier`, requiring the configured
+  expected server, installation/workload kind, server role and request namespace.
+  It checks the actual client connection number; the trusted provider must bind
+  the authenticated channel to the complete stream endpoints/direction. Neither
+  the peer's IP address nor the request's claimed caller grants authority.
+- A retained admission freezes snapshot serial, policy, challenge, runtime,
+  connection, binding, subjects/incarnation, role, operation and credential scope.
+  Renewal of identity/permit validity requires a fresh admission. This is a
+  conservative implementation restriction, not permission to silently refresh
+  expired or revoked handles.
+- The client adapter retains one fixed-size current admission. A newer client
+  connection can obtain fresh evidence; an older connection ID cannot replay a
+  prior cached admission. Endpoint changes with the same ID deny. The existing
+  client counter is process-local only: production restart/snapshot freshness
+  still requires the provider's fresh authenticated channel and challenge.
+
+**Integration and trust boundary.** Both adapters are available to the existing
+reference dispatcher/transport and client; they are not installed in Anka64 boot
+or exposed as an authenticated network listener. There is no wire-format change,
+credential parser, signature verification, trust-anchor network client or address
+allowlist. `Snapshot` and its constituent records are trusted crate-internal
+provider inputs; Rust visibility is not cryptographic validation. Guest/wire data
+must never be copied into their verdicts. The shipped providers deny; synthetic
+providers exist only under `cfg(test)`.
+
+Provider observations must be current, bounded/nonblocking when called from poll,
+and serialized with the protected effect by the embedding authority lane. E2
+checks the resulting records but does not create that lane or make concurrent
+revocation atomic. Existing dispatcher/transport checks run again before outcome
+release. Revocation after commit suppresses disclosure without rolling back a
+successful durable effect or recalling previously delivered bytes. Server
+recognition does not authorize a caller, select an executable or admit boot.
+
+**Focused coverage:** all scope/direction fields; identity and permit substitution;
+unknown verdicts; coherent zero handles; half-open validity; exact T2 projection;
+caller/server role separation; stale snapshot, policy and restart/reconnect
+bindings; denial before backend access; exact retry with one effect; revocation
+between commit and response; client denial before writing any request bytes; and
+revocation at EOF before accepting a successful response. The actual reference
+client and dispatcher use the new adapters in these tests.
+
+Run the short standalone suite (no CC2 bootstrap or full Rust regression):
+
+```bash
+bash scripts/check-anka110-persistence-reference.sh
+```
+
+Accepted: **105 passed, 0 failed, in 0.39s**. The next provider-use refinement is
+recorded in E3 below. Technology selection and enrollment/reboot integration remain
+open; E2 alone does not close Phase 10.9 or Phase 10.10.
+
+
+<a id="dn72-evidence-provider"></a>
+
+### Phase 10.10 — Verified-evidence registry and serialized use (E3)
+
+**Formal-first delivery, 2026-11-04 (America/Chicago).** Added
+`anka110_evidence_provider.kleis` and its hostile companion. Authoring verification:
+**116 positive witnesses, including 6 quantified laws; 84/94 hostile assertions
+explicitly disproved**. No unknown results or new axioms. Runtime source remains
+unchanged from the developer-accepted **105-test / 0.39s** E2 checkpoint.
+
+This slice makes the next reference-provider implementation concrete without
+choosing a credential technology. Its purpose is to close the check/use gap:
+E2 can validate a current Snapshot, but returning bare Context/Access through
+`Verifier::verify` does not keep revocation serialized with the later effect.
+E4 must therefore integrate a guard-scoped operation, not simply add another
+provider that returns cached valid verdicts.
+
+| Contract element | Required behavior |
+|---|---|
+| `V110Lane` | Binds the selected anchor, installation, policy, runtime, authority serial and challenge. Retains a fixed slot limit (1–64), monotonic ticket counter, current holder, remaining work and absolute deadline. |
+| `V110Slot` / `V110Handle` | Lookup matches slot index/generation, runtime, authority serial, connection and channel binding. Slots are bounded and live; stale handles cannot select a reused entry. The implementation stores validated E1 evidence in that entry. |
+| `V110Lease` | Captures a nonzero use ticket, the exact registry entry binding and all ten immutable durable-request fields. Acquire binds that request but is only a bounded reservation, not permission to touch storage. |
+| `v110_caller` / `v110_server` | Compose held-lane and registry checks with E1 admission. All ten frozen durable-request fields must match. Server recognition remains separate from caller authority. |
+| `v110_effect` | Composes caller admission with exactly one unit of work consumption in an atomic transition. The result permits an effect attempt, not a claim that the backend committed. A permitted failed backend attempt still consumes work. |
+| `v110_release` | Frees the exact current ticket without resetting its counter or creating work. Expiry/exhaustion does not prevent cleanup. Stale tickets and duplicate release deny. |
+| `v110_update` | Authority changes commit only while idle and increment the serial without wrapping, even when policy number is unchanged. All older registry entries become unusable until freshly validated and republished. |
+| `v110_retire` / `v110_rebind` | No slot mutation during a held effect. Reuse requires retirement and a strictly incremented generation; exhausted generations cannot wrap. |
+| `v110_restart` | Requires trusted fencing and freshness verdicts, drained old work, a different runtime/challenge and incremented serial. Resetting local counters or changing numbers alone is not authentication. |
+
+**Ordering of revocation.** Acquire and perform the authorized synchronous effect
+under the authority lane; consume work and release. A revocation may then advance
+the serial. Before a reply or further operation, re-evaluate current authority.
+The old handle cannot disclose the outcome under the new serial. A committed
+record is not rolled back, and already delivered bytes cannot be recalled.
+If an operation acquired the lane before revocation, revocation waits for that
+operation's completion/abort boundary; no instantaneous preemption is claimed.
+The dispatcher must retain the frozen request and evidence throughout a use.
+
+**What the model assumes and does not prove.** Transitions are atomic within one
+trusted serialization domain. E4 must implement that exclusion and bind stored
+evidence to real channel handles. The model assumes authenticated, provenance-
+protected validator output covering every field; trustworthy current time,
+policy/revocation and challenge; and honest fencing/drainage observations.
+It does not verify signatures, parse credentials, create a trust-anchor service,
+or turn loopback addresses into identities. These are unchanged E1 assumptions,
+now separated from the registry and operation-lifetime mechanics.
+
+The 64-slot bound is a reference-profile maximum, not an ISA limit. The model
+bounds legal slot indices and per-lease work (1–512); E4 must enforce actual table
+capacity, unique indexing, fixed storage and bounded callback behavior. Acquire
+cannot reset a transport/job's separately owned total retry budget. Deadline
+checks happen before effects. They do not preempt a filesystem synchronization or
+trusted callback already running, prove scheduling fairness, or justify unlocking
+while old work can still mutate state. Never hold the lane while waiting for
+network input/output. A short guarded disclosure check and write must preserve
+the same exclusion if actual bytes are released under this contract.
+
+**Proof scope.** Concrete witnesses cover lookup substitution, coherent zero
+identifiers, bounded capacity, duplicate acquisition, request substitution,
+revocation/expiry, namespace and role confusion, stale serial/runtime, work and
+deadline preservation, release, slot retirement/reuse, counter exhaustion and
+fenced restart. Six quantified laws cover idle-only authority updates, strict
+work decrease, ticket-counter preservation, restart identity change, lookup
+serial/generation binding and frozen-request preservation. The last law varies
+the lane/slot/handle/lease/request with fixture E1 evidence; E1's separate theorem
+already universally proves that admitted caller projections imply T2 authorization.
+These contracts are not a proof of an unimplemented Rust lock or of cryptography.
+
+Run just the new pair:
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" --only-provider
+```
+
+Expected: **116 positive witnesses; 94/94 explicitly disproved**. No Rust suite
+needs repeating for this formal/documentation-only delivery.
+
+**E4 scope (accepted below):** implement the fixed-capacity reference
+registry, private generation-qualified handles and scoped use guard; integrate
+an authorized-effect entry point with the existing persistence dispatcher so the
+guard survives validation through the backend effect. Add focused tests for
+revocation ordering, denial before backend access, exact retry, stale/reused
+handles, exhaustion, cleanup after errors and disclosure after revocation.
+Synthetic validated-evidence injection stays test-only; the default production
+path remains deny-only until a concrete trusted validator exists. Do not expand
+wire frames, choose a credential standard, or add enrollment/boot integration in
+this slice. Phases 10.9 and 10.10 remain open.
+
+
+<a id="dn72-evidence-registry"></a>
+
+### Phase 10.10 — Guarded reference registry and dispatch (E4)
+
+**Accepted on the developer machine: 130 passed, 0 failed, 0 ignored in 0.38s.**
+E4 adds 25 tests beyond E2. The deliberate unwind followed by poison denial
+passed. E3 remains developer-confirmed at 116 positive / 94 hostile.
+No Kleis predicates or witnesses changed in E4.
+
+`evidence/registry.rs` implements the E3 lifecycle with a fixed-capacity table
+(maximum 64 slots), a private process-local registry ID, generation-qualified
+handles and nonwrapping counters. Trusted provider publication must pass E1 and
+match the registry's authority context, runtime and serial. Full entries retain
+the provider's peer handle and frozen E2 seal. Capacity denial never evicts a
+peer. Retirement makes an entry unusable; reuse increments generation. Exhausted
+slots cannot wrap. Provider/peer objects are trusted integrations whose own
+resource bounds remain their responsibility; the registry table itself is fixed.
+
+Acquire returns a non-cloneable UseGuard holding the registry mutex. It freezes
+all ten durable-request fields. The `execute` method obtains current evidence,
+checks expiry and the shared absolute deadline, consumes one work unit and calls
+T2 `transact` using the guard's own request. The mutex stays held across backend
+load and compare-and-commit. Backend errors spend work and release through Drop;
+they do not renew the budget. Registration, retirement, shutdown, authority update
+and restart cannot interleave a held effect. Their nonblocking Busy result means
+NOT applied, so an embedding must retain/retry a requested revocation rather than
+report it as successful. When an update applies, serial increases and all earlier
+entries fail lookup even if the policy number is unchanged.
+
+Current provider observations must match the selected namespace/policy/challenge
+and runtime/serial. Time cannot move backwards relative to prior accepted
+observations. Identity/permit renewal needs a new admission, not silent extension
+of an entry. A trusted upstream revocation notification must be applied through
+the registry update lane to acquire these ordering semantics. Evidence-provider
+callbacks remain trusted, current and bounded; E4 is not their cryptographic
+implementation. The default provider still denies.
+
+`protocol/guarded.rs` is an additive guarded entry point using the existing
+canonical codec, backend transition and status mapping. Malformed/unfunded input
+is rejected before backend access. Successful or failed backend results are
+retained in a PendingReply with fixed private bytes; there is no byte getter.
+The transport must retain its owned slot reservation until completion/cancellation.
+Each `write_once` requires a trusted ReplySink bound to the actual admitted peer,
+reacquires a guard for the original request, revalidates authority, spends one unit
+and performs at most one nonblocking write under that guard. WouldBlock/Interrupted
+preserve the prefix while spending work; revoked/expired authority, unbound sinks
+and terminal write failures close the pending reply. A completed reply cannot
+replay its bytes. No guard is retained while waiting for network readiness.
+
+**Integration boundary:** the older `protocol::transport::Server` still uses its
+existing Verifier-only dispatch contract and is not automatically protected by
+the new mutex. Its external serialization assumption remains explicit. E4 tests
+exercise the new guarded entry point directly. A later authenticated transport
+integration must adopt this entry point, supply real channel-bound ReplySinks,
+retain its transport quotas and honor Busy/deadline behavior. Do not claim that
+adding the registry alone turns the current localhost listener into production
+authenticated storage.
+
+**Failure and restart:** Drop clears the current holder. An unwinding protected
+operation poisons the mutex, and later operations fail closed; E4 never clears
+poison automatically or assumes a panic implies no durable commit. Recovery needs
+backend recovery plus fresh/fenced provider initialization. In-place restart
+requires trusted fencing/freshness verdicts, drainage, a new runtime/challenge and
+an incremented serial; it preserves counters/generations and clears entries. It
+cannot forcibly unlock a live Rust guard. Counter differences alone do not prove
+cross-process/restart freshness. Shutdown is terminal for that registry instance.
+Deadlines prevent new effects; they do not interrupt an in-flight durable write.
+
+**Coverage:** configuration/default denial; bounded slots and preserved peers;
+foreign/substituted/stale handles; fixed requests; authority and slot changes
+blocked under a guard; revalidation/renewal; expiry and backwards time; budget
+consumption through errors; ticket/generation/serial exhaustion; fenced restart;
+shutdown; malformed/unfunded dispatch; guard retention through backend access;
+exact retry and partial replies; revocation after commit and between reply chunks;
+wrong sinks; nonblocking write errors; panic cleanup/poisoning; and server/caller
+role separation. All 25 passed in the developer run.
+
+Run the short suite only:
+
+```bash
+bash scripts/check-anka110-persistence-reference.sh
+```
+
+Observed: **130 passed, 0 failed**. The unwind test intentionally prints a panic
+under `--nocapture`, then verifies cleanup and poison denial. Do not rerun long
+CC2/regression suites for this isolated reference-module change.
+
+After E4 acceptance, the next integration boundary is wiring the guarded path
+into a transport-owned lifecycle while preserving connection binding, per-client
+budgets and partial-write cancellation. Assess any new lifecycle transitions in
+Kleis first. Concrete cryptographic evidence providers and enrollment/reboot
+wiring remain subsequent work; E4 does not close Phase 10.9 or Phase 10.10.
+
+
+<a id="dn72-guarded-transport"></a>
+
+### E5 — Guarded reply lifecycle (2026-11-10)
+
+The E5 Kleis pair passed with the supplied Linux binary and standard library:
+21 positive witnesses and 16/16 explicit hostile disproofs. Run it with
+`scripts/check-anka109-gates.py --only-guarded-transport` using the usual
+`--kleis` and `--kleis-root` options. It is also in the default formal suite.
+
+Scope starts at a funded slot with an exact EOF-terminated frame. N110 owns
+admission and charging; E3/E4 own the registry, freshness and serialization;
+T2 determines the durable result. Keep one frozen request, correlation, actual
+peer and absolute deadline for the lifetime of the slot. Dispatch once. Each
+nonblocking write starts exactly at the retained offset, spends work and uses
+current guard authority for that request. Completion permits no further write.
+Closing discards pending bytes and refunds one slot and 384 bytes once. Closing
+needs no current caller permission and cannot undo a durable commit.
+The hostile trace covers a commit, short write, applied revocation, attempted
+continuation on the old and replacement connection, then release. Busy retains
+ownership, exposes nothing and spends outer poll work; it does not acknowledge
+a revocation. An already written prefix cannot be recalled.
+
+This is a transition model, not a proof of socket I/O, cryptography, or
+liveness. Slot identity is interpreted inside one trusted registry instance.
+The real adapter must bind its actual stream and unforgeable ticket, retain
+private immutable reply bytes, and distinguish a retryable stall from EOF or
+a fatal zero write. Do not use a peer address or caller-provided ID as proof.
+
+**E5 handoff to E6:** adapt one bounded loopback server slot to guarded
+dispatch and per-write revalidation. Exercise authorized fragmented completion
+and revocation between writes over the actual adapter. Check the other client's
+reservation survives cancellation, stale tickets cannot route a suffix, and
+retry does not duplicate the commit. Concrete credential validation and boot
+integration remain separate. No long regression or Rust suite was rerun for E5.
+
+
+### E6 — Guarded loopback transport (reference implementation accepted)
+
+The developer confirmed the E5 21/16 formal gate. E6 implements that contract
+in `protocol/transport/guarded_server.rs`. One loopback listener owns its
+backend, registry and bounded connection table. A binder observes the actual
+accepted stream and supplies independently validated provider evidence and an
+absolute provider-clock deadline. Registration checks the caller role and a
+fresh nonwrapping process-local connection nonce before publishing. Neither the
+nonce nor a socket address authenticates a peer. There is no default credential
+provider. The old verifier-only server is separate.
+
+Reads require exact framing and EOF. A ready slot dispatches once. A pending
+reply can write only to its own stream under a fresh guard; each write offers at
+most 64 bytes. All polls share the same budget and absolute deadlines. Busy and
+transient I/O cannot refresh work. Terminal removal retires the registry entry,
+drops the private reply and releases the slot charge. A poisoned registry stays
+unusable. A dropped or revoked reply makes no claim that the commit rolled back.
+
+Five real-loopback tests exercise byte-exact resume, revocation after a prefix
+with a second reservation and a reconnect, replay of an old channel binding,
+poll-budget continuity, and expiry before durable access. On the developer
+machine, `bash scripts/check-anka110-persistence-reference.sh` reported
+**135 passed, 0 failed, 0 ignored, in 0.76s**, including the five E6 tests
+and both D110 lock-release and namespace-rejection tests. This is acceptance
+of the reference suite. E6 does not install a cryptographic credential provider.
+
+**Next Kleis gate (proposed):** specify how the installation’s one trust anchor
+recognizes a peer, how proof of possession binds that peer to the actual
+connection, and how a separate grant authorizes the requested operation.
+Require denial before storage access both when B replays A’s valid evidence
+on a new connection and when A is recognized but lacks the grant. Concrete
+credential validation and enrollment/reboot integration remain open.

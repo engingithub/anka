@@ -1684,8 +1684,12 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 
 # 18. Current Implementation Facts
 
-Status reconciled against the supplied archive and developer acceptance evidence
-on 2026-11-04: **Phase 10.8 is closed and merged to main. Phase 10.9 T1 and the initial T2 model have passing local formal gates; the Phase 10.10 persistence core and local durable adapter have 29 passing developer tests; the bounded protocol has passing formal gates; the codec/loopback reference has 66 passing developer tests; the bounded client is delivered with 17 new tests pending. Production integration remains pending.**
+**Current status:** Phase 10.8 is closed and merged to main. Phase 10.9 T1
+and the initial T2 model have passing formal gates. In Phase 10.10, the E5
+guarded transport contract passed (21 positive witnesses; 16/16 hostile
+witnesses disproved). The E6 guarded loopback server is accepted in the
+persistence reference suite: **135 passed, 0 failed, 0 ignored in 0.76s**.
+Concrete peer credential validation and production integration remain open.
 The [DN-71 status table](DESIGN_NOTES.md#dn71-status) and
 [final evidence record](DESIGN_NOTES.md#phase-108-final-evidence) supersede older
 intermediate counts and pending labels. The 10.8 runtime/formal gates were not rerun; their acceptance applies to the
@@ -3583,7 +3587,7 @@ toolchains.
 | 10.7 | Protected local pointer ABI and application rebuild | Closed; DN-59 fixes its scope |
 | 10.8 | Shared allocation, compiler resource growth, typed modules and protected network-service rebuild | Closed; final evidence in DN-71 |
 | 10.9 | Identity/authority model, supply-chain closure and hostile CPU-to-HTTP audit | T1 and initial T2 model delivered; backend/evidence refinement, T3–T5 and integration pending; DN-72 |
-| 10.10 (proposed) | Durable network persistence using the artifact/publication foundation | Core/backend/codec/loopback accepted (66 tests); extended protocol gates passed (137/108); client delivered, 17 tests pending; evidence integration open; DN-72 |
+| 10.10 (proposed) | Durable network persistence using the artifact/publication foundation | Persistence reference and E2 accepted (105 tests; protocol 137/108; evidence 119/99); E3 provider-use gate developer-confirmed (116/94); E4 accepted (130 tests); E5 formal gate passed (21/16); E6 guarded loopback accepted (135 reference tests); credential and boot integration open; DN-72 |
 
 Phase 10.8's implementation chronology and test commands live in
 [DN-71](DESIGN_NOTES.md#dn-71). The repeated allocation/worker/compiler progress
@@ -3730,8 +3734,8 @@ A Rust reference server can run with local backing and loopback tests without
 an external cloud service. Anka64 C will implement the same defined protocol and
 state transitions, first as a client. The first host backend uses a private local snapshot file with atomic rename,
 flush barriers and a stable advisory writer lock. A version-1 bounded reference
-wire contract is formalized; its Rust codec/dispatcher/loopback has 66 passing
-developer tests. The bounded client is delivered, pending its focused tests.
+wire contract is formalized; its Rust codec/dispatcher/loopback/client has 83
+passing developer tests and the checkpoint is merged.
 Concrete evidence verification and production integration remain pending. Its fixed CRC-protected encoding detects corruption and is
 not authenticated remote evidence. See the [backend record](DESIGN_NOTES.md#dn72-local-backend)
 for host assumptions, uncertain-commit fencing and developer test commands. Crash injection and common Rust/C operation traces must distinguish
@@ -4739,12 +4743,98 @@ backend must settle its validated head before retry recovery. Select and
 ReserveBoot are the only operations; reservation never admits execution.
 Trusted peer/server bindings and current validator results are outside untrusted
 message fields. Loopback does not authenticate a principal. The fixed
-Rust codec/dispatcher/loopback is accepted by 66 developer tests. The server
+Rust codec/dispatcher/loopback/client is accepted by 83 developer tests. The server
 implements owned reservations, actual EOF, finite poll work/deadlines and
 partial-write authority rechecks. The bounded client adds default-deny server
 evidence checks, real half-close/EOF and exact retries sharing one finite budget
-and deadline; its 17 added tests remain pending (83 total).
+and deadline; all 83 reference tests passed in 0.39s.
 The 384-byte reservation is logical protocol accounting, excluding host TCP and
 allocator overhead. No loopback identity assumption replaces the verifier. See the
 [client delivery](DESIGN_NOTES.md#dn72-persistence-client). Authenticated remote storage and Anka64 enrollment/boot integration
 remain separate acceptance obligations.
+
+
+### Persistence evidence admission refinement
+
+The next formal gate composes T1 recognition with T2 persistence access:
+`anka110_evidence_admission` passed **119 positive witnesses (9 quantified laws)
+and 99 explicit hostile disproofs** in the authoring environment. The gate runner
+now supports `--only-evidence`. This is a validator-output contract; no new Rust
+verifier or cryptographic mechanism is claimed.
+
+A trusted current observation identifies the actual live channel, runtime and peer
+incarnations, challenge, role/operation and authority snapshot serial. Separate
+validated identity, direct-anchor permit and channel-binding evidence must agree
+with that observation and the selected anchor/installation/policy. Unknown,
+revoked, expired, stale or substituted evidence denies. Opaque binding handles are
+not authentication by themselves, and local counters do not establish restart
+freshness. Current observation and effect must share a trusted serialized lane.
+
+Caller admission produces only an exactly scoped T2 access projection with the
+intersection of identity/permit validity. The retained binding must be rechecked
+on every use; a projected access record alone is insufficient. Storage-server
+recognition is a separate role, explicitly bound to the expected service and
+namespace, and cannot grant caller or execution authority. An all-input-field
+refinement theorem establishes that admitted caller projections satisfy
+`p109_authorized` under the stated trusted-input assumptions.
+
+See [DN-72 evidence admission](DESIGN_NOTES.md#dn72-evidence-admission) for proof
+scope, provider assumptions and the local gate command. The
+[E2 implementation](DESIGN_NOTES.md#dn72-evidence-runtime) now retains private
+caller/server admissions, rechecks current evidence on every use, and adapts
+both existing verifier interfaces. The developer
+confirmed all 105 persistence tests, including its 22 new tests, in 0.39s. Concrete evidence providers and enrollment/reboot integration
+remain open; no technology/standard is selected by this contract.
+
+
+### Serialized evidence-provider use (E3)
+
+The [DN-72 provider contract](DESIGN_NOTES.md#dn72-evidence-provider) extends E1
+with bounded registry indices, generation-qualified handles, nonwrapping use
+tickets and an exclusive authority lane. The new Kleis pair passed **116 positive
+witnesses (6 quantified laws) / 94 hostile disproofs** in the authoring environment.
+E2 remains accepted at 105 Rust tests; no runtime changes are included in E3.
+
+Authority observation and the protected effect must share the same held lane.
+Updates and slot reuse cannot interleave that effect. Release permits an authority
+update; a subsequent outcome disclosure must revalidate against current state.
+This orders revocation with effects, rather than promising that revocation can
+preempt an already admitted operation or undo its durable commit. Do not hold the
+lane across network waiting, and do not unlock an in-flight backend effect merely
+because a timer expires. Work bounds and admission deadlines are not I/O liveness
+proofs. Restart requires trusted fencing, drainage and fresh runtime/challenge
+evidence; changing an integer counter alone is insufficient.
+
+[E4](DESIGN_NOTES.md#dn72-evidence-registry) now implements the bounded reference
+registry and guard-scoped dispatch path, accepted in the developer reference run.
+The existing verifier's returned Context/Access does not itself hold a guard.
+Cryptographic evidence acquisition, policy/time/revocation sources and deployment
+integration remain explicit trust/refinement obligations.
+
+
+### Guarded registry implementation (E4)
+
+The reference implementation adds a fixed 64-slot maximum registry, private
+registry/generation/channel-bound handles, and a non-cloneable mutex guard.
+Authority updates and slot changes use `try_lock`: Busy means no change was
+applied. The guard survives the entire backend load/commit operation, including
+errors; it passes its frozen request to the backend. Retry work remains in an
+embedding-owned budget and is not refunded on release or backend failure.
+
+The additive `protocol::guarded::dispatch` entry point returns a PendingReply
+with private bytes. Each nonblocking write checks a trusted sink's actual peer
+handle and obtains a new guarded admission. The write itself occurs under that
+guard; revocation may block the next suffix without undoing a prior commit or
+recalling a prefix. No guard is held while waiting for network readiness.
+
+These are reference mechanisms, not automatic hardening of the older Verifier-
+only loopback Server. That path retains its documented host-serialization
+obligation. A concrete authenticated transport/provider integration must use the
+guarded entry point and retain its transport reservation through reply completion.
+No default allow-provider or wire credential parser is installed. E4 passed all 130 reference tests. The E5 transport contract
+requires the owning connection to retain the reservation and frozen request
+through partial writes and to reacquire authority before every suffix.
+The E6 opt-in GuardedServer now owns the accepted stream, registry entry and
+budget through cleanup. The original verifier-only Server is still available
+for reference tests; guarded admission never falls back to it. Five real-loopback tests cover the guarded adapter, including revocation
+after a partial reply. Neither server supplies cryptographic peer evidence.

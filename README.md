@@ -65,14 +65,14 @@ through the virtual NIC. Current progress separates three kinds of evidence:
 |---|---|
 | Integrated runtime features | Phase 10.8 protected network-service rebuild and `/alive` through the virtual NIC |
 | Formal contracts | Phase 10.9 Kleis formalizations for recognition, enrollment, grant admission, persistence and reboot |
-| Implemented reference mechanisms | Phase 10.10 local durable persistence backend, codec and loopback server accepted by 66 Rust tests; bounded client delivered, acceptance pending |
+| Implemented reference mechanisms | Phase 10.10 persistence backend, codec, loopback server/client and evidence registry and E6 guarded loopback server; 135 persistence reference tests passed |
 
-The developer accepted all 66 persistence core/backend/codec/loopback tests
-(0.38s), plus the 127/98 protocol gate. The bounded client now adds 17 tests,
-pending developer execution. Its extended protocol gate passed 137 positive
-witnesses and 108 hostile disproofs in the authoring environment.
-Authenticated network storage remains planned; the formal contracts and local
-reference backend do not establish integrated runtime acceptance for those features.
+The [E5 guarded transport contract](DESIGN_NOTES.md#dn72-guarded-transport)
+passed 21 positive witnesses and explicitly disproved all 16 hostile witnesses.
+E6 passed on the developer machine: **135 reference tests passed, 0 failed,
+0 ignored, in 0.76s**. The server rechecks authority before writing each reply
+fragment. Its tests supply peer evidence through a trusted binder. Validating
+credentials on a real connection and integrating enrollment and reboot remain open.
 
 Phase 10.6 self-hosting and Phase 10.7 protected local applications are complete.
 Phase 10.8 has accepted typed I/O, protected module composition, C `malloc/free`,
@@ -193,9 +193,6 @@ The current reference runtime depends on a trusted host. FPGA realization
 and an Apple Silicon/Metal execution prototype are planned directions, not
 implemented backends. They require refinement against the reference machine,
 including authority, synchronization, memory ordering and observable timing.
-The immediate checkpoint is the bounded client
-[acceptance command](DESIGN_NOTES.md#dn72-persistence-client) (83 Rust tests).
-Concrete trusted evidence admission and authority/boot integration follow.
 
 ## License
 

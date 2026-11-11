@@ -15,3 +15,6 @@ mod tests;
 pub(crate) mod transport;
 #[path="protocol/client.rs"]
 pub(crate) mod client;
+
+#[path="protocol/guarded.rs"]
+pub(crate) mod guarded;

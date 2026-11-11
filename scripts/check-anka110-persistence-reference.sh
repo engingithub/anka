@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile core/backend, codec, loopback and bounded client tests (83); no CC2/bootstrap/full suite.
+# Compile persistence, transport/client and evidence/guarded loopback tests (135); no CC2/bootstrap/full suite.
 set -euo pipefail
 case "$(uname -s)" in
   Linux|Darwin) ;;
@@ -10,4 +10,7 @@ anka_reference_tmp="$(mktemp -d "${TMPDIR:-/tmp}/anka110-reference.XXXXXX")"
 trap 'rm -rf -- "$anka_reference_tmp"' EXIT
 rustc --edition=2024 --test "$root/src/anka64/authority_persistence.rs" \
   -o "$anka_reference_tmp/persistence-tests"
-"$anka_reference_tmp/persistence-tests" --nocapture
+# Some tests spawn processes while others require an immediate last-descriptor
+# close. Isolate their schedules; the fencing tests still start a competing
+# process while the owning process holds its live lock.
+"$anka_reference_tmp/persistence-tests" --nocapture --test-threads=1

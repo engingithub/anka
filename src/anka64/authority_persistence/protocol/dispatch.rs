@@ -29,7 +29,7 @@ pub(super) fn checked<V:Verifier>(v:&mut V,peer:&V::Peer,r:Request)->Option<(Con
     let (c,a)=v.verify(peer,r)?;
     if authorized(c,r,a){Some((c,a))}else{None}
 }
-fn status(e:Error)->Status {match e {
+pub(super) fn status(e:Error)->Status {match e {
     Error::Authority|Error::BootDenied=>Status::Denied,
     Error::Conflict|Error::ExpiredRequest=>Status::Conflict,
     Error::Capacity|Error::Exhausted=>Status::Exhausted,

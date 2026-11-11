@@ -153,3 +153,7 @@ pub(crate) mod file_backend;
 
 #[path="authority_persistence/protocol.rs"]
 pub(crate) mod protocol;
+
+/// Technology-neutral trusted evidence admission (E1/E2); no credential parser.
+#[path="authority_persistence/evidence.rs"]
+pub(crate) mod evidence;

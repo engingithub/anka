@@ -141,3 +141,6 @@ impl<B:DurableRecord,V:Verifier> Server<B,V> {
 #[cfg(test)]
 #[path="transport/tests.rs"]
 mod tests;
+
+#[path="transport/guarded_server.rs"]
+pub(crate) mod guarded_server;
