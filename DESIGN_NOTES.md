@@ -8,12 +8,12 @@ rules, milestones, and implementation facts. [README.md](README.md) introduces
 the project's purpose and development entry points. Architectural decisions
 and future directions belong in these documents rather than separate root notes.
 
-For current work, use the [DN-71 status table](#dn71-status), its
-[final 10.8 evidence](#phase-108-final-evidence), and the
-[10.9 authority plan in DN-72](#dn-72). Dated implementation handoffs below are
-historical: their pending labels and intermediate counts do not override the
-final acceptance record. The later T1 delivery adds theories and a focused
-runner; it changes no runtime code.
+For current work, start with [DN-72: authority and persistence status](#dn72-status)
+and the [next verifier gate](#dn72-next-verifier). For the closed rebuild, see the
+[DN-71 status table](#dn71-status) and [final 10.8 evidence](#phase-108-final-evidence).
+DN-1 through DN-71 and the detailed DN-72 entries retain decisions and test results
+at the time they were made. Read a checkpoint’s “next” or “pending” in that context;
+counts from successive runs of the same suite are not additive.
 
 ---
 
@@ -6893,7 +6893,7 @@ cargo test -- --test-threads=1
 ```
 
 The passing long witness establishes the concrete compiler-to-AOM-to-link-to-run
-path with a retained in-memory receipt. Phase 10.8 remains open for
+path with a retained in-memory receipt. At this checkpoint, Phase 10.8 remained open for
 compiler/toolchain modularization, broader I/O and rebuilt services.
 
 ## DN-65 — Protected module composition contract (Phase 10.8)
@@ -12536,12 +12536,12 @@ cargo test --release --lib p107_concrete_cc2_rebuild_runs_typed_pointer_and_reje
 cargo test --release --lib c4_real_large_application_link_and_load -- --ignored --nocapture --test-threads=1
 ```
 
-The remaining closure obligations are the C2-C5 table above: whole-job accounting;
+At that checkpoint, the C2-C5 table still required: whole-job accounting;
 automatic workspace growth/retry; explicit large-image loading acceptance; ordinary
 admitted source-to-publication/execution service coordination; concurrent A/B/C
 exhaustion/exit/reuse with stale rejection; actual socket/HTTP rebuild and affected
-fixed-point/regression acceptance. Phase 10.8 remains open until those requirements
-have implementation and passing evidence. No additional phase is introduced.
+fixed-point/regression acceptance. Closure required implementation and passing
+evidence for each item. No additional phase is introduced.
 
 
 ### C3 automatic workspace retry — implementation, 2026-11-01
@@ -12841,8 +12841,8 @@ both reference and accounted runs, shared across attempts in each run. No
 production limit, retry count, quota, or exhaustion classification changed.
 The exact-byte and dispatched-budget parity assertions remain. Progress output
 identifies reference completion and accounted execution separately. The real
-include-growth and compiler-job acceptance tests remain pending; the chained
-job test did not execute after this failure. Phase 10.8 remains open.
+include-growth and compiler-job acceptance tests were pending at this checkpoint;
+the chained job test did not execute after this failure.
 
 
 ### C2 compiler admission arena — concrete implementation (2026-11-01)
@@ -13747,24 +13747,26 @@ This documentation update did not rerun or extend the accepted gates.
 
 ## DN-72 — Identity, authority, installation and reboot (Phase 10.9)
 
-**Status through E6: T1 and the initial T2 persistence/reboot model have local
-Kleis acceptance. The developer confirmed T1 and all 29 Rust persistence tests
-(core plus host-local backend), with 51 positive/45 hostile backend witnesses.
-The bounded protocol formalization is accepted on the developer machine. Its
-Rust codec/dispatcher is accepted: all 48 developer tests passed in 0.33s.
-The loopback transport is accepted: all 66 developer tests passed in 0.38s.
-The client checkpoint is accepted and merged: all 83 developer tests passed in
-0.39s, with the 137/108 protocol gate. The evidence-admission contract below has
-119 positive/99 hostile witnesses confirmed by the developer. E2 Rust admission
-and verifier adapters are accepted: 105 tests passed in 0.39s. E3 provider-use
-formalization is developer-confirmed at 116/94. E4 registry/guarded dispatch is
-developer-accepted (130 tests); E5 is developer-confirmed (21/16); E6 guarded loopback passed the full persistence reference suite (135/135);
-concrete cryptographic evidence validation remains pending, along with
-T3–T5 and production runtime integration.** Phase 10.8 is accepted and
-merged. The [T1 evidence below](#dn72-t1) records the new proof results; no runtime
-authority-model integration or runtime acceptance is claimed for T1. It extends the planned 10.9 supply-chain
-and hostile CPU-to-HTTP audit with the authority model needed to interpret who
-may install, execute and request work. It does not reopen C2–C5.
+<a id="dn72-status"></a>
+
+### Current status — caller-side reference binder accepted
+
+**Phase 10.8 is closed and merged. Phases 10.9 and 10.10 remain open.**
+The protected virtual-NIC service can answer `/alive`. The persistence binder
+below governs a different service: accepting E8 does not authenticate HTTP
+requesters or authorize boot.
+
+| Scope | Evidence and boundary |
+|---|---|
+| 10.9 recognition, enrollment and reboot | [T1](#dn72-t1) and the initial [T2 model](#dn72-t2) have passing formal gates. A durable reservation and an authorized boot are separate transitions. Kernel enrollment/reboot integration and the broader T3–T5 work remain open. |
+| 10.10 persistence and bounded transport | The [local durable backend](#dn72-local-backend), [codec](#dn72-persistence-codec), loopback transport and [client](#dn72-persistence-client) have accepted Rust reference evidence, including exact retry after a lost reply. The client checkpoint reached 83 tests and the protocol pair 137 positive / 108 hostile. |
+| E1–E4: trusted evidence and serialized use | E1 admission: 119 positive / 99 hostile; E2 Rust checkpoint: 105 tests. E3 provider-use contract: 116 / 94; E4 registry and guarded dispatch: 130 tests. These checks consume trusted verifier outputs. |
+| E5–E6: guarded replies on a real stream | E5: 21 positive / 16 hostile. E6: 135 reference tests passed. Authority is checked before each reply fragment; revocation cannot recall a prefix already written or undo a durable commit. E6 is merged to main. |
+| E7–E8: caller evidence before the first storage read | [E7](#dn72-peer-binder): 26 positive / 21 explicitly disproved hostile witnesses, confirmed on the developer machine. [E8](#dn72-reference-binder): **142 reference tests passed, 0 failed, 0 ignored, in 0.79s**. Seven tests exercise the binder with real loopback streams and a deterministic verifier. |
+
+The latest row records local acceptance, not a merge of E7/E8 or a new
+whole-system regression run. The current implementation boundary is the
+**source of the verifier verdict**; the [next gate](#dn72-next-verifier) starts there.
 
 ### Architectural decision and scope
 
@@ -13924,8 +13926,8 @@ by clearing one register pair while aliases remain in cells or saved contexts.
 | T5 — CPU-to-HTTP hostile closure | Compose the accepted rebuild with T1–T4; demonstrate authorized `/alive` and denial without unauthorized effects under the declared model. | Unrecognized or recognized-but-ungranted caller, wrong service/operation, stale grant/session, restart and interleaved independent clients. |
 
 T1 has the concrete theory pairs and local results recorded below. The initial
-T2 model is delivered in the [T2 evidence record](#dn72-t2); its concrete backend
-and freshness obligations remain open. T3–T5 remain proposed gates. The I7/I8 scope review establishes which earlier lemmas
+T2 model is delivered in the [T2 evidence record](#dn72-t2); its durable backend
+has a host-local reference implementation; trusted reboot freshness and Kernel integration remain open. T3–T5 remain proposed gates. The I7/I8 scope review establishes which earlier lemmas
 T1 actually uses: direct 64-bit range checks and nonwrapping admission revisions
 are explicit; the older reduced-width range-transitivity witness is not assumed.
 Later chained delegation still needs its own full-width obligation. Runtime
@@ -13954,12 +13956,9 @@ add authority-aware positive/negative evidence rather than treating the existing
 `/alive` response as an authorization test. Standards selection and real evidence
 validation require their own explicit decisions before production-security claims.
 
-**Immediate next task:** run the repaired T2 runner, the new backend gate and
-the focused Rust suite described in the [local-backend delivery](#dn72-local-backend).
-Then formalize bounded transport and request framing before adding a loopback
-service. T3–T4 still supply concrete authority validation and artifact admission;
-current evidence verdicts are trusted inputs, not network credentials.
-
+The T2 runner, local backend and framed loopback service described in this
+original plan have since been delivered. See the [checkpoint table](#dn72-status)
+for their evidence and the [verifier gate](#dn72-next-verifier) for current work.
 
 <a id="dn72-t1"></a>
 
@@ -14302,8 +14301,9 @@ coordinator replacement. It is not persistent disk storage, and those tests
 must not be described as physical crash-durability acceptance.
 
 **Developer acceptance of the original core:** all 13 focused Rust tests passed
-in 0.00s, as reported after this delivery. The authoring environment still has no
-Rust compiler; the newly added local backend tests below have not been run here.
+in 0.00s. The subsequent [backend checkpoint](#dn72-local-backend) records the
+separate file and process-exit tests.
+
 The standalone script compiles this module and its backend without the long
 CC2/bootstrap suite:
 
@@ -14322,10 +14322,9 @@ backend delivery below supersedes only the disk-adapter status. No external stor
 slice. T2 is accepted only at the stated abstract boundary; Phase 10.10 remains
 in progress and neither phase is declared closed.
 
-**Follow-through:** the local backend contract and adapter are delivered below.
-Loopback transport and concrete authority validation remain pending; mock
-validator verdicts must never become remotely supplied authorization fields.
-
+The [file backend](#dn72-local-backend) and [loopback transport](#dn72-persistence-transport)
+subsequently refined this core. Mock validator verdicts must never become
+remotely supplied authorization fields.
 
 <a id="dn72-local-backend"></a>
 
@@ -14438,13 +14437,10 @@ python3 scripts/check-anka109-gates.py \
 bash scripts/check-anka110-persistence-reference.sh
 ```
 
-**Follow-through:** the bounded protocol contract is recorded below. Next,
-implement its byte codec and local loopback service using this adapter. Keep caller evidence outside
-untrusted request fields until a concrete trusted verifier is supplied. No S3 or
-external cloud account is required. Artifact-byte import, current endorsement,
-network authentication and ordinary Anka64 client integration remain open; this
-backend delivery closes none of those gates or Phase 10.10 as a whole.
-
+The [bounded protocol](#dn72-persistence-protocol), codec and loopback service
+subsequently exercised this adapter without a cloud account. Artifact-byte
+import, current endorsement, network authentication and an ordinary Anka64
+storage client are separate obligations.
 
 <a id="dn72-persistence-protocol"></a>
 
@@ -14459,7 +14455,7 @@ laws; 89/89 hostile claims explicitly disproved** by Kleis/Z3 in the authoring
 environment. This is a word-level framing, resource and dispatch model. It is
 not a proof of a byte parser, a cryptographic protocol or a running network service.
 That formal-only delivery changed no Rust code. The codec/dispatcher implementation
-and its pending runtime checks are recorded below; the accepted backend is unchanged.
+and its accepted runtime checks are recorded below; the accepted backend is unchanged.
 
 **First service scope.** One configured anchor/installation record, one serialized
 backend owner, multiple bounded connections. The only operations are T2 Select
@@ -14587,17 +14583,10 @@ python3 scripts/check-anka109-gates.py \
   --kleis-root "$HOME/git/cee/kleis" --only-protocol
 ```
 
-**Implementation follow-through:** the fixed Rust byte codec and dispatcher are
-delivered below. The next transport implementation is bounded loopback backed by
-`FileRecord`. Acceptance must include malformed/truncated/
-extra-tail frames, fragmented reads/writes, competing clients, lost acknowledgement
-plus restart and exact retry, authority denial before storage access, resource
-refunds and uncertain-outcome recovery. Reuse the focused standalone Rust script;
-no CC2/bootstrap suite is necessary for this isolated reference slice. Actual
-transport behavior, byte refinement, authenticated remote access, artifact imports
-and kernel enrollment/reboot integration remain open. Phases 10.9/10.10 are not
-closed by this formal delivery.
-
+The [codec/dispatcher](#dn72-persistence-codec), [loopback transport](#dn72-persistence-transport)
+and [client](#dn72-persistence-client) record the concrete framing, cleanup and
+retry evidence. These later results do not establish authenticated remote
+access, artifact import or Kernel enrollment/reboot integration.
 
 <a id="dn72-persistence-codec"></a>
 
@@ -14658,8 +14647,8 @@ exact retry with a new correlation; revocation between commit and reply; capacit
 and backend errors; uncertain commit recovery; boot-reservation retry; peer commit
 followed by an expired retry; trusted client acceptance; and real `FileRecord`
 commit/reopen/retry through encoded frames. Reopen is real local file access;
-fragmented socket I/O, connection cleanup and actual process/network restart
-remain transport tests for the next slice.
+the later transport and client sections distinguish socket fragmentation and cleanup
+from backend reopen, process exit and full client-process restart.
 
 Run from the repository root:
 
@@ -14849,9 +14838,8 @@ bash scripts/check-anka110-persistence-reference.sh
 Accepted result: **137 positive / 108 hostile disproofs; 83 Rust tests**. The pre-existing
 binder-unwind test intentionally catches a panic and must finish `ok`.
 
-**Follow-through:** the evidence-admission contract is recorded below. The
-accepted reference protocol/client/server checkpoint is merged to main; subsequent
-work belongs on `feat/anka110-evidence-admission`.
+The reference protocol/client/server checkpoint was merged to main.
+[E1](#dn72-evidence-admission) then specified the evidence admission boundary.
 
 <a id="dn72-evidence-admission"></a>
 
@@ -14862,7 +14850,7 @@ work belongs on `feat/anka110-evidence-admission`.
 positive witnesses (9 quantified laws) and 99 hostile claims explicitly disproved**
 in the authoring environment, subsequently confirmed on the developer machine.
 No unknown results or new axioms. This E1 checkpoint made no Rust changes; E2
-implementation and its pending acceptance are recorded below. The accepted **83-test / 137–108 protocol**
+implementation and its acceptance are recorded below. The accepted **83-test / 137–108 protocol**
 checkpoint remains unchanged. `check-anka109-gates.py --only-evidence` selects
 this new pair; the default sweep includes it too.
 
@@ -15220,12 +15208,9 @@ Observed: **130 passed, 0 failed**. The unwind test intentionally prints a panic
 under `--nocapture`, then verifies cleanup and poison denial. Do not rerun long
 CC2/regression suites for this isolated reference-module change.
 
-After E4 acceptance, the next integration boundary is wiring the guarded path
-into a transport-owned lifecycle while preserving connection binding, per-client
-budgets and partial-write cancellation. Assess any new lifecycle transitions in
-Kleis first. Concrete cryptographic evidence providers and enrollment/reboot
-wiring remain subsequent work; E4 does not close Phase 10.9 or Phase 10.10.
-
+[E5](#dn72-guarded-transport) specified the reply lifecycle; E6 exercised it on
+real loopback streams. The verifier and enrollment/reboot obligations remained
+outside those checkpoints.
 
 <a id="dn72-guarded-transport"></a>
 
@@ -15289,9 +15274,85 @@ machine, `bash scripts/check-anka110-persistence-reference.sh` reported
 and both D110 lock-release and namespace-rejection tests. This is acceptance
 of the reference suite. E6 does not install a cryptographic credential provider.
 
-**Next Kleis gate (proposed):** specify how the installation’s one trust anchor
-recognizes a peer, how proof of possession binds that peer to the actual
-connection, and how a separate grant authorizes the requested operation.
-Require denial before storage access both when B replays A’s valid evidence
-on a new connection and when A is recognized but lacks the grant. Concrete
-credential validation and enrollment/reboot integration remain open.
+<a id="dn72-peer-binder"></a>
+
+### E7 — Peer evidence at the first storage read (formal gate)
+
+E6 is merged to main. Its guarded server consumes evidence from a trusted binder.
+E7 specifies the caller side of that interface without selecting a credential
+format. The configured anchor must recognize the subject and attest the holder
+key for that subject and kind. The verified signer must hold that key and its
+proof must name the transcript of the actual live connection. A separate current
+permit must cover the caller, installation, incarnation, role and requested
+operation. The gate reuses T1 recognition and E1 admission and access projection;
+the caller cannot manufacture authority by setting a wire field.
+
+The first-read witness is an attempted, funded operation with an observable
+read/no-read result. A recognized caller without a grant cannot enter storage,
+even with a previously valid permit in memory. Replaying A’s evidence on B’s
+stream cannot enter storage, even if the same subject is claimed. A reconnect
+with a fresh valid proof can succeed. The existing guarded dispatch, deadline,
+revocation and per-write checks still apply after binder admission.
+
+**Evidence:** the developer confirmed the focused Kleis result: 26 positive
+witnesses, including two quantified fixture laws, and 21/21 hostile claims
+explicitly disproved.
+Run the existing 10.9 gate script with `--only-peer-binder`; the pair is also
+included in its default selection. No Rust behavior changed.
+
+**Refinement obligations:** key and transcript references are trusted verifier
+handles, not public keys or wire IDs. The model assumes valid verdicts come
+from current authenticated verification, that the live channel observation is
+independent of the presented evidence, and that its transcript identifies the
+whole verified binding and cannot alias across sessions. It does not prove
+cryptographic verification, freshness generation or atomicity of concrete I/O.
+
+<a id="e8--rust-reference-peer-binder-implementation-runtime-acceptance-pending"></a>
+<a id="dn72-reference-binder"></a>
+
+### E8 — Rust reference peer binder (accepted)
+
+`evidence/peer_binder.rs` gives the E6 guarded server an opt-in
+`poll_verified` entry point. The resolver binds the actual accepted stream to
+its runtime, minted connection number and verifier transcript. The provider
+must return current, coherent verifier outputs. The binder joins the recognized
+identity to the anchor's holder-key association, checks the verified signer
+against the holder and proof transcript, and requires a present permit. It
+reuses E1's caller checks and E4's serial, seal and deadline checks. Evidence is
+obtained again under the guard before backend access and before each reply
+write. An absent grant cannot fall back to a saved permit.
+
+**Developer acceptance:** `bash scripts/check-anka110-persistence-reference.sh`
+reported **142 passed, 0 failed, 0 ignored, 0 filtered out, in 0.79s**.
+The seven E8 tests used real loopback streams, a deterministic verifier and a
+backend that counted reads and commits:
+
+| Condition | Observed result |
+|---|---|
+| Authorized request followed by an exact retry on a freshly proven connection | Two reads, one commit; both calls received the expected reply. |
+| A’s proof or entire old snapshot replayed on B’s stream; recognized peer missing its grant; key, signer or operation substituted | No backend reads or commits. |
+| Grant or signer evidence lost after the complete request and EOF, before dispatch | No backend reads or commits; the connection closed without reply bytes. |
+| Signer evidence lost after commit, before the first reply write | The one commit remained; no reply bytes were disclosed. |
+| Work exhausted before dispatch | No first read. This is distinct from T2 capacity to commit a new value: a funded exact retry may read an existing outcome. |
+
+<a id="dn72-next-verifier"></a>
+
+### Next gate — when may a concrete verifier return Valid?
+
+Start with the server accepting a storage caller. Specify in Kleis which inputs
+are independently observed from the live channel, which statements the configured
+anchor authenticates, and how the verifier establishes that the peer controls
+the credential’s holder key on *this* connection. Specify how current validity
+and revocation are obtained; missing or inconclusive evidence must not yield
+`Valid`. Keep the operation grant independent of successful authentication.
+
+The decisive pair uses the same valid credential for A. A presents a valid
+proof for the live connection and a current grant; the verifier and binder may
+admit the funded read. B presents A’s credential with a captured proof on B’s
+connection; verification must fail before storage access. Keep a third control:
+A proves possession but lacks the grant; the binder still denies the read.
+E7/E8 exercised these decisions **given** verifier verdicts. This next gate
+must constrain **how those verdicts are obtained**, then guide the implementation
+and its real-channel test. No credential format or production verifier is
+selected here. Reciprocal verification of the storage service, enrollment/boot
+integration and the T3–T5 system gates remain open.

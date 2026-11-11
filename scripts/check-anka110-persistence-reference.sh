@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile persistence, transport/client and evidence/guarded loopback tests (135); no CC2/bootstrap/full suite.
+# Compile persistence, transport/client and evidence/guarded loopback and caller binder tests (142); no CC2/bootstrap/full suite.
 set -euo pipefail
 case "$(uname -s)" in
   Linux|Darwin) ;;

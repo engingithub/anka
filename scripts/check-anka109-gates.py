@@ -21,6 +21,8 @@ PROVIDER_PAIRS = ('anka110_evidence_provider',)
 
 GUARDED_PAIRS = ('anka110_guarded_transport',)
 
+BINDER_PAIRS = ('anka110_peer_binder',)
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kleis', default='kleis')
@@ -34,6 +36,7 @@ def main():
     selection.add_argument('--only-evidence', action='store_true', help='run trusted evidence admission refinement')
     selection.add_argument('--only-provider', action='store_true', help='run bounded evidence registry and serialized provider use')
     selection.add_argument('--only-guarded-transport', action='store_true', help='run E5 transport ownership and guarded reply gate')
+    selection.add_argument('--only-peer-binder', action='store_true', help='run E7 connection-bound caller admission')
     parser.add_argument('--timeout', type=int, default=120, help='seconds per theory file')
     args = parser.parse_args()
     if args.timeout <= 0:
@@ -51,7 +54,8 @@ def main():
     pairs = (T1_PAIRS if args.only_t1 else T2_PAIRS if args.only_t2 else
              BACKEND_PAIRS if args.only_backend else PROTOCOL_PAIRS if args.only_protocol else
              EVIDENCE_PAIRS if args.only_evidence else PROVIDER_PAIRS if args.only_provider else GUARDED_PAIRS if args.only_guarded_transport else
-             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS + EVIDENCE_PAIRS + PROVIDER_PAIRS + GUARDED_PAIRS)
+             BINDER_PAIRS if args.only_peer_binder else
+             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS + EVIDENCE_PAIRS + PROVIDER_PAIRS + GUARDED_PAIRS + BINDER_PAIRS)
     for stem in pairs:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')

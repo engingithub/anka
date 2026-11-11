@@ -166,3 +166,6 @@ mod tests;
 
 #[path="evidence/registry.rs"]
 pub(crate) mod registry;
+
+#[path="evidence/peer_binder.rs"]
+pub(crate) mod peer_binder;

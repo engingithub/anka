@@ -179,3 +179,6 @@ fn e6_expired_provider_deadline_never_enters_backend() {
     assert_eq!(s.usage(),(0,0));assert!(tail(&mut c).is_empty());
     assert_eq!((store.borrow().reads,store.borrow().commits),(0,0));
 }
+
+#[path="peer_binder_loopback.rs"]
+mod peer_binder_loopback;
