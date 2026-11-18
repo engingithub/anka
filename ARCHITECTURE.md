@@ -4913,8 +4913,9 @@ It checks both 64-byte and 4-KiB queues and exactly one durable revision advance
 The extended outbound Kleis gate passed 64 positive / 60 disproved witnesses;
 The developer Mac passed nine quick tests and the explicit CC2 guest/file
 witness (83.36 seconds), including both capacities and lost-reply recovery.
-The full regression suite for this changeset remains pending. Deterministic evidence
-fixtures are not a production authentication implementation. This step does
+The developer subsequently reported **1,795 passed, 0 failed, 16 ignored** in
+**296.54 seconds** (2026-11-17); ignored cases remain separate acceptance gates.
+Deterministic evidence fixtures are not a production authentication implementation. This step does
 not store or launch executable bytes; see DN-72's stored-launch contract for
 that subsequent boundary and the live-launch/reboot distinction.
 
@@ -4923,3 +4924,28 @@ Process generation zero is a valid initial incarnation (`Kernel::spawn`).
 Outbound application binding checks the requested generation against the live
 slot rather than imposing the nonzero rule used by separate connection and
 reservation identities. Reused or mismatched process keys remain rejected.
+
+### Planned durable artifact storage boundary
+
+The next storage boundary retains executable payload bytes and their metadata,
+not only the existing Select record. The proposed first deployment is a Rust
+network service backed by host files, optionally in Podman with a persistent
+host-mounted directory. This requires no guest filesystem or disk driver.
+S3/Ceph can later supply backend adapters without defining Anka64 authority.
+
+Transfers use bounded chunks; socket-window capacity does not cap artifact size.
+Private staging, explicit quotas and cleanup precede durable finalization. A
+committed selection may reference only recoverably retained, validated artifact
+bytes and required metadata. Exact retry semantics and conditional publication
+must survive lost replies and service restart. Host filesystem durability and
+recovery assumptions remain explicit; container restart alone is not a power-loss
+proof. Stored references never confer live Fabric capabilities.
+
+The first acceptance path is compile, persist, retrieve, validate and launch a
+fresh process without restarting Anka64. Repeat after independent guest/service
+restarts with fresh authority. Production authentication, general object storage
+and this executable-byte path remain unimplemented by the accepted Select test.
+New storage transitions require Kleis gates before Rust implementation; the
+existing stored-launch gate is not a proof of blob storage or publication.
+See [DN-72 durable artifact storage plan](DESIGN_NOTES.md#durable-artifact-storage-plan)
+for the implementation order and acceptance obligations.

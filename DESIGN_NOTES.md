@@ -15661,8 +15661,12 @@ Both 64-byte and 4-KiB cases committed once, deliberately lost the first reply,
 reopened the file and returned the same outcome on a fresh-connection retry.
 The two injected-reply-loss messages and compiler errors 9/12 are expected
 negative checks. This accepts the bounded guest/file Select milestone, not
-production authentication or executable-byte persistence/launch. The full
-regression suite for this changeset remains pending. Reproduce the focused gates:
+production authentication or executable-byte persistence/launch. The developer
+subsequently reported the full regression result: **1,795 passed, 0 failed,
+16 ignored**, in **296.54 seconds** (2026-11-17). Ignored tests are not counted
+as passes; the explicit guest/file witness above has separate passing evidence.
+This is user-reported acceptance, not an independently rerun suite. Reproduce
+the focused gates:
 
 ```sh
 python3 scripts/check-anka109-gates.py \
@@ -15680,10 +15684,53 @@ production cryptographic channel, general TCP stack or remote storage server.
 Each retry run is separately admitted under a finite runner budget; this does
 not implement an autonomous guest retry coordinator.
 
-**Next after acceptance:** durable executable-byte storage and the already
-formalized stored-image launch path. A Select record holds an opaque envelope
-identity, not executable payload bytes. Normal live launch comes first; repeat
-with fresh authority after reboot. Ceph/S3/Podman demos remain later integrations.
+<a id="durable-artifact-storage-plan"></a>
+
+**Next: durable artifact storage and live launch (planned, not implemented).**
+A Select record holds an opaque envelope identity, not executable payload bytes.
+The accepted fixture exercises a real file-backed record behind a controlled
+network peer; it does not establish a deployed remote artifact server.
+
+A network-accessible durable service is sufficient; Anka64 does not need a
+mounted remote filesystem or guest inode/disk-driver implementation. The first
+proposed deployment is a Rust service with ordinary host files, optionally run
+in Podman with a persistent host-mounted directory. Guest and service lifetimes
+must be independent of the retained storage. S3/Ceph backend adapters follow
+later, behind the same Anka64 authority and artifact contracts; no external
+storage product is required for the first acceptance demonstration.
+
+| Priority | Bounded deliverable | Required acceptance |
+| --- | --- | --- |
+| 1 | Kleis refinement for immutable artifact staging, transfer and durable publication | Reject partial publication, foreign staging handles, quota bypass, conflicting retries and stale authority; specify crash recovery and backend durability assumptions. |
+| 2 | Rust file-backed artifact objects and bounded upload/download | Preserve exact bytes, declared lengths, format/profile, dependencies and provenance; charge staged and retained storage, account cleanup, and retain prior committed selection on failure. |
+| 3 | Network service plus guest artifact transfer | Transfer in bounded chunks independently of socket-window size; enforce current authority, finite work and cancellation. Lost replies permit exact retries without duplicate effects. |
+| 4 | Retrieve, validate and launch a stored executable | Compile, persist, retrieve and validate bytes/receipt/dependencies, then admit a fresh process while Anka64 continues running. |
+| 5 | Independent restart demonstration | Restart guest and storage service separately, retain host files, reacquire current authority and run the same artifact; reject stale incarnations and revoked grants. |
+
+Publication must never advertise an artifact until all required bytes and
+metadata are recoverably retained. Stage objects privately; finalize verified
+immutable objects before committing the referencing manifest/selection. A crash
+between these steps may leave an accounted orphan, never a successful reference
+to missing bytes. Specify safe cleanup and retention before reclaiming objects.
+Expected-revision checks and durable retry outcomes preserve concurrent updates;
+an uncertain client outcome does not imply an aborted commit.
+
+Persistent references must not serialize live Fabric capabilities. Define exact
+integrity bindings (including algorithm and assumptions if hashes are used);
+integrity alone grants neither read nor execute authority. Storage access and
+launch admission remain separate, with current authority checked at their
+respective boundaries. Backend authentication does not replace Anka64 grants.
+
+The accepted stored-launch theory (49 positive / 56 hostile claims explicitly
+disproved) supplies launch-admission obligations. It does not by itself establish
+blob transfer, storage durability or atomic manifest publication. Review and
+extend the affected persistence, evidence, outbound transport, publication and
+stored-launch gates before implementing these new transitions. No new theory
+filename, wire ABI, cryptographic provider or backend vendor is selected here.
+
+**Immediate next task:** formalize artifact upload/finalization and durable
+reference publication, then implement the smallest compile-to-storage-to-live-run
+path. Reboot is the subsequent acceptance case, not a prerequisite for loading.
 
 
 **Guest Select acceptance follow-up (historical failure):** the developer run passed all seven quick
