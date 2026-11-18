@@ -50,3 +50,15 @@ example "hostile: close before final drain then commit FIN" { assert(¬(os110_co
 example "hostile: early close cannot skip handshake" { assert(¬(os110_control(bvconst(1,8),bvconst(2,8),sk_true(),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(9,32),bvconst(10,32),sk_true(),bvconst(112,64),bvconst(112,64),bvconst(64,64),sk_true(),bvconst(1,8)))) }
 example "hostile: revoked FIN event cannot advance" { assert(¬(os110_control(bvconst(3,8),bvconst(3,8),sk_true(),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(9,32),bvconst(10,32),sk_false(),bvconst(112,64),bvconst(112,64),bvconst(64,64),sk_true(),bvconst(3,8)))) }
 example "hostile: late handshake does not reopen RX-only connection" { assert(¬(os110_control(bvconst(4,8),bvconst(1,8),sk_true(),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(9,32),bvconst(10,32),sk_true(),bvconst(0,64),bvconst(0,64),bvconst(64,64),sk_true(),bvconst(4,8)))) }
+
+example "unreceipted application adopts Select" { assert(os110_application_attach(sk_false(),sk_true(),sk_true(),sk_true(),bvconst(2,64),bvconst(7,64),bvconst(7,64),sk_true())) }
+example "missing NIC authority adopts Select" { assert(os110_application_attach(sk_true(),sk_false(),sk_true(),sk_true(),bvconst(2,64),bvconst(7,64),bvconst(7,64),sk_true())) }
+example "old incarnation adopts Select" { assert(os110_application_attach(sk_true(),sk_true(),sk_true(),sk_true(),bvconst(2,64),bvconst(7,64),bvconst(8,64),sk_true())) }
+example "supervisor adopts child Select" { assert(os110_application_attach(sk_true(),sk_true(),sk_true(),sk_true(),sk_zero(),bvconst(7,64),bvconst(7,64),sk_true())) }
+example "existing replay adopts Select" { assert(os110_application_attach(sk_true(),sk_true(),sk_true(),sk_false(),bvconst(2,64),bvconst(7,64),bvconst(7,64),sk_true())) }
+example "unfunded application adopts Select" { assert(os110_application_attach(sk_true(),sk_true(),sk_true(),sk_true(),bvconst(2,64),bvconst(7,64),bvconst(7,64),sk_false())) }
+example "legacy caller compiles shutdown" { assert(os110_shutdown_syntax(bvconst(1,64),sk_zero())) }
+example "shutdown accepts a forged argument" { assert(os110_shutdown_syntax(bvconst(2,64),bvconst(1,64))) }
+
+example "old zero generation adopts reused slot" { assert(os110_application_attach(sk_true(),sk_true(),sk_true(),sk_true(),bvconst(2,64),sk_zero(),bvconst(1,64),sk_true())) }
+example "future generation adopts fresh slot" { assert(os110_application_attach(sk_true(),sk_true(),sk_true(),sk_true(),bvconst(2,64),bvconst(1,64),sk_zero(),sk_true())) }

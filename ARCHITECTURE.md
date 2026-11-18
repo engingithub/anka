@@ -4886,3 +4886,40 @@ The E6 opt-in GuardedServer now owns the accepted stream, registry entry and
 budget through cleanup. The original verifier-only Server is still available
 for reference tests; guarded admission never falls back to it. Five real-loopback tests cover the guarded adapter, including revocation
 after a partial reply. Neither server supplies cryptographic peer evidence.
+
+
+### CC2 guest Select refinement (focused acceptance passed)
+
+The explicit receipt-runner Select mode connects a protected CC2 application to
+one configured storage peer through the bounded virtual NIC driver. Guest
+`ssend`/`srecv` retain their typed-pointer checks; `sshut()` is a protected,
+zero-argument builtin for syscall 25. Only a current Select binding admits it,
+and only after all canonical request bytes have been accepted. Ordinary replay
+sockets receive no new shutdown authority. Child incarnation, current receipt,
+independent NIC authority, queue charges and driver charges precede execution.
+
+The isolated application owns no NIC or DMA capability. The driver/session adds
+12 MiB to the parent admission charge, with a 16-MiB child accounting limit to
+cover its nested reservation; physical guest heap backing remains bounded by
+the existing 2-MiB pool. All other application modes retain their prior limits.
+The reference peer receives only Ethernet frames. Finite instruction/event
+budgets and the existing deadline bound every run; cancellation destroys the
+realm and refunds only its own admitted storage.
+
+The acceptance witness compiles C, links/publishes it, executes through the
+receipt runner, performs guarded FileRecord Select, loses a committed reply,
+reopens the file and retries the same logical request on a fresh connection.
+It checks both 64-byte and 4-KiB queues and exactly one durable revision advance.
+The extended outbound Kleis gate passed 64 positive / 60 disproved witnesses;
+The developer Mac passed nine quick tests and the explicit CC2 guest/file
+witness (83.36 seconds), including both capacities and lost-reply recovery.
+The full regression suite for this changeset remains pending. Deterministic evidence
+fixtures are not a production authentication implementation. This step does
+not store or launch executable bytes; see DN-72's stored-launch contract for
+that subsequent boundary and the live-launch/reboot distinction.
+
+
+Process generation zero is a valid initial incarnation (`Kernel::spawn`).
+Outbound application binding checks the requested generation against the live
+slot rather than imposing the nonzero rule used by separate connection and
+reservation identities. Reused or mismatched process keys remain rejected.

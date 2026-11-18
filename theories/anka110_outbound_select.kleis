@@ -159,3 +159,27 @@ example "close before final drain then commit FIN" { assert(os110_control(bvcons
 example "early close cannot skip handshake" { assert(os110_control(bvconst(1,8),bvconst(2,8),sk_true(),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(9,32),bvconst(10,32),sk_true(),bvconst(112,64),bvconst(112,64),bvconst(64,64),sk_true(),bvconst(1,8))) }
 example "revoked FIN event cannot advance" { assert(os110_control(bvconst(3,8),bvconst(3,8),sk_true(),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(9,32),bvconst(10,32),sk_false(),bvconst(112,64),bvconst(112,64),bvconst(64,64),sk_true(),bvconst(3,8))) }
 example "late handshake does not reopen RX-only connection" { assert(os110_control(bvconst(4,8),bvconst(1,8),sk_true(),sk_true(),sk_true(),sk_true(),sk_true(),bvconst(0,64),bvconst(9,32),bvconst(10,32),sk_true(),bvconst(0,64),bvconst(0,64),bvconst(64,64),sk_true(),bvconst(4,8))) }
+
+// Receipt-runner refinement: a distinct authority selects outbound mode before
+// the freshly spawned child runs. Neither replay mode nor a stale incarnation
+// may be adopted. receipt/authority/reserved are trusted runtime observations.
+define os110_application_attach(receipt : Bool, authority : Bool, spawned : Bool, unused : Bool,
+    child : BitVec64, generation : BitVec64, actual : BitVec64, reserved : Bool) =
+    receipt ∧ authority ∧ spawned ∧ unused ∧ (child=bvconst(2,64)) ∧
+    (generation=actual) ∧ reserved
+// Process slots start at generation zero in Kernel::spawn. Connection and
+// reservation identities have separate nonzero rules; do not conflate them.
+// sshut() is a zero-argument protected builtin. This syntax predicate does not
+// itself grant shutdown; os110_close still checks the actual complete request.
+define os110_shutdown_syntax(profile : BitVec64,argc : BitVec64) =
+    (profile=bvconst(2,64)) ∧ (argc=sk_zero())
+example "receipt child binds explicit Select" { assert(os110_application_attach(sk_true(),sk_true(),sk_true(),sk_true(),bvconst(2,64),bvconst(7,64),bvconst(7,64),sk_true())) }
+example "receipt binding refuses stale child" { assert(¬os110_application_attach(sk_true(),sk_true(),sk_true(),sk_true(),bvconst(2,64),bvconst(7,64),bvconst(8,64),sk_true())) }
+example "receipt binding refuses existing replay" { assert(¬os110_application_attach(sk_true(),sk_true(),sk_true(),sk_false(),bvconst(2,64),bvconst(7,64),bvconst(7,64),sk_true())) }
+example "receipt binding refuses missing charge" { assert(¬os110_application_attach(sk_true(),sk_true(),sk_true(),sk_true(),bvconst(2,64),bvconst(7,64),bvconst(7,64),sk_false())) }
+example "protected zero argument shutdown syntax" { assert(os110_shutdown_syntax(bvconst(2,64),sk_zero())) }
+example "legacy shutdown syntax refused" { assert(¬os110_shutdown_syntax(bvconst(1,64),sk_zero())) }
+example "shutdown argument refused" { assert(¬os110_shutdown_syntax(bvconst(2,64),bvconst(1,64))) }
+
+example "fresh application generation zero is live" { assert(os110_application_attach(sk_true(),sk_true(),sk_true(),sk_true(),bvconst(2,64),sk_zero(),sk_zero(),sk_true())) }
+example "generation zero cannot name reused slot" { assert(¬os110_application_attach(sk_true(),sk_true(),sk_true(),sk_true(),bvconst(2,64),sk_zero(),bvconst(1,64),sk_true())) }

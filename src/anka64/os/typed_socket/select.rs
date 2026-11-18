@@ -71,6 +71,26 @@ impl Kernel {
         if self.application_run.is_some(){return Err(HeapError::Busy);}
         self.bind_socket_window(key,SocketRights::Duplex,cap,cap.tx,Some(select))
     }
+    /// Only the receipt runner calls this after SPAWN, before scheduling the child.
+    /// The separate development NIC authority does not grant NIC access to the child.
+    pub(crate) fn bind_application_select(&mut self,key:ProcessKey,cap:SocketCapacity,select:Select,
+        _authority:&crate::anka64::os::compiler_retry::service::frame_port::DeveloperFrameAuthority)
+        ->Result<SocketTicket,HeapError>{
+        // Fresh process slots have generation zero; equality to the live slot
+        // authenticates an incarnation. Zero is not an invalid process key.
+        if self.processes.len()!=3 || key.slot!=2
+            || !self.application_run.as_ref().is_some_and(|r|r.spawned && !r.socket)
+            || self.processes[key.slot].parent!=Some(ProcessKey{slot:0,generation:self.processes[0].generation})
+            || self.processes[key.slot].generation!=key.generation {return Err(HeapError::Owner);}
+        self.compiler_heap_account(key)?;
+        let t=self.bind_socket_window(key,SocketRights::Duplex,cap,cap.tx,Some(select))?;
+        self.application_run.as_mut().unwrap().socket=true;
+        Ok(t)
+    }
+    pub(in crate::anka64::os) fn application_select(&self,idx:usize)->bool {
+        self.socket_endpoint.as_ref().is_some_and(|e|e.select.is_some()
+            && e.ticket.owner.process.slot==idx && self.socket_current(e.ticket))
+    }
     fn outbound(&mut self,t:SocketTicket)->Result<&mut Endpoint,()> {
         if !self.socket_current(t){return Err(());}
         self.socket_endpoint.as_mut().filter(|e|e.select.is_some()).ok_or(())

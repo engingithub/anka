@@ -57,6 +57,20 @@ pub(crate) fn build(
 #[cfg(test)]
 mod bootstrap_limits {
     #[test]
+    fn g110_stage3_else_arms_fit_bootstrap_grammar() {
+        // CC_B's compile_stmt requires a block after else. The richer CC2
+        // grammar used for ABI-2 must not leak into its own bootstrap source.
+        let source=include_str!("../../../userspace/system/compiler/ankacc2_stage3.c");
+        let bytes=source.as_bytes();
+        for (offset,_) in source.match_indices("else") {
+            let identifier=|b:u8|b.is_ascii_alphanumeric() || b==b'_';
+            if offset>0 && identifier(bytes[offset-1]) {continue;}
+            if bytes.get(offset+4).is_some_and(|b|identifier(*b)) {continue;}
+            assert!(source[offset+4..].trim_start().starts_with('{'),
+                "CC_B requires a braced else arm at source byte {offset}");
+        }
+    }
+    #[test]
     fn c3_workspace_retry_producer_fits_bootstrap_function_directory() {
         // The checked-in source has one top-level definition header per line.
         // This is a cheap source-shape regression guard, not a general C parser

@@ -237,6 +237,16 @@ pub(crate) fn run_accounted_c_application_with_socket(
     execute_prepared_run_stream(fabric,placement,prepared,config,None,true,true,Some(stream))
 }
 
+/// Receipt-managed outbound Select; the peer only sees bounded Ethernet frames.
+pub(crate) fn run_accounted_c_application_with_select(
+    registry:&DevelopmentArtifactRegistry,authority:&DeveloperExecutionAuthority,
+    fabric:&mut Fabric,placement:&mut PhysicalPlacementManager,config:DevelopmentRunConfig,
+    select:super::os::compiler_retry::service::frame_port::tcp::outbound::SelectStream<'_>)
+    ->Result<DevelopmentRunReport,DevelopmentRunError> {
+    let prepared=prepare_run(registry,authority,fabric,placement,"rebuilt-application",config)?;
+    execute_prepared_run_transport(fabric,placement,prepared,config,None,true,true,None,Some(select))
+}
+
 /// Run the exact registered artifact with an explicitly authorized input image.
 /// The trusted bridge attaches it to the actual spawned child before that child
 /// executes any instruction. No source is implicitly inherited from its parent.
@@ -536,6 +546,17 @@ fn execute_prepared_run(
 fn execute_prepared_run_stream(fabric:&mut Fabric,placement:&mut PhysicalPlacementManager,
     prepared:PreparedRun,config:DevelopmentRunConfig,input:Option<&[u8]>,callable_entry:bool,
     bounded:bool,stream:Option<OrderedStream<'_>>) -> Result<DevelopmentRunReport,DevelopmentRunError> {
+    execute_prepared_run_transport(fabric,placement,prepared,config,input,callable_entry,bounded,stream,None)
+}
+fn execute_prepared_run_transport(fabric:&mut Fabric,placement:&mut PhysicalPlacementManager,
+    prepared:PreparedRun,config:DevelopmentRunConfig,input:Option<&[u8]>,callable_entry:bool,
+    bounded:bool,stream:Option<OrderedStream<'_>>,
+    mut select:Option<super::os::compiler_retry::service::frame_port::tcp::outbound::SelectStream<'_>>)
+    ->Result<DevelopmentRunReport,DevelopmentRunError> {
+    let outbound=select.is_some();
+    if outbound && (!bounded || !callable_entry || input.is_some() || stream.is_some()) {
+        return Err(DevelopmentRunError::SocketProvisionRejected);
+    }
     let PreparedRun {
         artifact,
         supervisor_obj,
@@ -571,7 +592,7 @@ fn execute_prepared_run_stream(fabric:&mut Fabric,placement:&mut PhysicalPlaceme
     }
 
     if kernel.fabric.has_private_heap() {
-        if kernel.enable_heap_service(0x100000).is_err() {
+        if kernel.enable_heap_service(if outbound {0x1000000}else{0x100000}).is_err() {
             kernel.finish_process(0, ProcessResult::ProtectionFault);
             kernel.reclaim_process(0);
             scrub_kernel_dynamic_region(&mut kernel,kernel_phys_base);
@@ -588,7 +609,7 @@ fn execute_prepared_run_stream(fabric:&mut Fabric,placement:&mut PhysicalPlaceme
     }
     let mut input_rounds=0usize;
     let mut bridge=stream.map(socket_stream::Bridge::new);
-    if input.is_some() || bridge.is_some() {
+    if input.is_some() || bridge.is_some() || outbound {
         // One-instruction rounds until ordinary SYS_SPAWN publishes the child.
         // The scheduler captures its process range before running the parent;
         // a newly created child cannot execute in its birth round.
@@ -606,11 +627,15 @@ fn execute_prepared_run_stream(fabric:&mut Fabric,placement:&mut PhysicalPlaceme
             kernel.run(1, 1);
             input_rounds+=1;
         }
-        let attached = target.is_some_and(|key|match (&mut bridge,input) {
+        let attached = if outbound {
+            target.is_some_and(|key|select.take().unwrap().run(&mut kernel,key,
+                config.quantum.saturating_mul(config.max_rounds).saturating_sub(input_rounds).min(2_000_000))
+                .map_err(|e|eprintln!("guest Select: {e}")).is_ok())
+        } else {target.is_some_and(|key|match (&mut bridge,input) {
             (Some(b),None)=>b.attach(&mut kernel,key).is_ok(),
             (None,Some(bytes))=>kernel.provision_process_input(key,bytes).is_ok(),
             _=>false,
-        });
+        })};
         if !attached {
             kernel.finish_process(0, ProcessResult::ProtectionFault);
             kernel.reclaim_process(0);
@@ -618,12 +643,12 @@ fn execute_prepared_run_stream(fabric:&mut Fabric,placement:&mut PhysicalPlaceme
             teardown_sealed_transient(&mut kernel.fabric, placement, control_obj);
             teardown_sealed_transient(&mut kernel.fabric, placement, supervisor_obj);
             *fabric = kernel.into_fabric();
-            return Err(if bridge.is_some(){DevelopmentRunError::SocketProvisionRejected}
+            return Err(if bridge.is_some() || outbound {DevelopmentRunError::SocketProvisionRejected}
                 else{DevelopmentRunError::InputProvisionRejected});
         }
     }
 
-    if bounded {
+    if bounded && !outbound {
         // Preserve a finite aggregate dispatch ceiling. Every scheduler round
         // includes ordinary wake/wait/cleanup; no device can outlive the realm.
         let rounds=config.quantum.checked_mul(config.max_rounds)
@@ -641,7 +666,7 @@ fn execute_prepared_run_stream(fabric:&mut Fabric,placement:&mut PhysicalPlaceme
                 }
             }
         }
-    } else {kernel.run(config.quantum, config.max_rounds);}
+    } else if !outbound {kernel.run(config.quantum, config.max_rounds);}
 
     if kernel.processes.is_empty() || !kernel.processes[0].exited() {
         if !kernel.processes.is_empty() {

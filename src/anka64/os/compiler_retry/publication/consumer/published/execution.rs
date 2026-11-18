@@ -50,24 +50,32 @@ impl Kernel {
     pub(crate) fn run_linked_compiler_publication(&mut self,epoch:u64,
         authority:Option<&DeveloperExecutionAuthority>,config:DevelopmentRunConfig)
         ->Result<LinkedCompilerRunReport<'_>,CompilerLinkError> {
-        self.run_linked_compiler_publication_inner(epoch,authority,config,None,None)
+        self.run_linked_compiler_publication_inner(epoch,authority,config,None,None,None)
     }
     pub(crate) fn run_linked_compiler_publication_with_input(&mut self,epoch:u64,
         authority:Option<&DeveloperExecutionAuthority>,input_authority:Option<&DeveloperInputAuthority>,
         input:&[u8],config:DevelopmentRunConfig)->Result<LinkedCompilerRunReport<'_>,CompilerLinkError> {
         let input_authority=input_authority.ok_or(CompilerLinkError::Authority)?;
         if input.len()>INPUT_BYTES {return Err(CompilerLinkError::Binding);}
-        self.run_linked_compiler_publication_inner(epoch,authority,config,Some((input_authority,input)),None)
+        self.run_linked_compiler_publication_inner(epoch,authority,config,Some((input_authority,input)),None,None)
     }
     pub(crate) fn run_linked_compiler_publication_with_socket(&mut self,epoch:u64,
         authority:&DeveloperExecutionAuthority,stream:dev_runner::OrderedStream<'_>,
         config:DevelopmentRunConfig)->Result<LinkedCompilerRunReport<'_>,CompilerLinkError> {
-        self.run_linked_compiler_publication_inner(epoch,Some(authority),config,None,Some(stream))
+        self.run_linked_compiler_publication_inner(epoch,Some(authority),config,None,Some(stream),None)
+    }
+
+    pub(crate) fn run_linked_compiler_publication_with_select(&mut self,epoch:u64,
+        authority:&DeveloperExecutionAuthority,
+        select:crate::anka64::os::compiler_retry::service::frame_port::tcp::outbound::SelectStream<'_>,
+        config:DevelopmentRunConfig)->Result<LinkedCompilerRunReport<'_>,CompilerLinkError> {
+        self.run_linked_compiler_publication_inner(epoch,Some(authority),config,None,None,Some(select))
     }
 
     fn run_linked_compiler_publication_inner(&mut self,epoch:u64,
         authority:Option<&DeveloperExecutionAuthority>,config:DevelopmentRunConfig,
-        input:Option<(&DeveloperInputAuthority,&[u8])>,stream:Option<dev_runner::OrderedStream<'_>>)
+        input:Option<(&DeveloperInputAuthority,&[u8])>,stream:Option<dev_runner::OrderedStream<'_>>,
+        select:Option<crate::anka64::os::compiler_retry::service::frame_port::tcp::outbound::SelectStream<'_>>)
         ->Result<LinkedCompilerRunReport<'_>,CompilerLinkError> {
         let authority=authority.ok_or(CompilerLinkError::Authority)?;
         self.validate_linked_compiler_publication(epoch)?;
@@ -79,7 +87,11 @@ impl Kernel {
             || image.lit_start>=image.bytes.len() as u64 || image.bytes.len() as u64>limit {
             return Err(CompilerLinkError::Binding);
         }
-        let charge=machine_charge(image.bytes.len(),config)?.checked_add(if input.is_some(){INPUT_CHARGE}else{0})
+        // The concrete outbound adapter owns an isolated NIC/driver in addition
+        // to the ordinary application realm. Charge it before either is built.
+        let charge=machine_charge(image.bytes.len(),config)?
+            .checked_add(if select.is_some(){12*1024*1024}else{0}).ok_or(CompilerLinkError::Binding)?
+            .checked_add(if input.is_some(){INPUT_CHARGE}else{0})
             .ok_or(CompilerLinkError::Binding)?;
         let (_,account)=self.compiler_candidate_account()?;
         let report=self.fabric.scoped_pointers.reserve_host_storage(account,REPORT_CHARGE,
@@ -99,14 +111,17 @@ impl Kernel {
                 "compiler-publication-run",image).map_err(CompilerLinkError::Executable)?;
             let mut registry=DevelopmentArtifactRegistry::new();
             registry.register_linked_application(&fabric,&artifact).map_err(CompilerLinkError::Register)?;
-            let run=match (stream,input) {
+            let run=if let Some(select)=select {
+                if stream.is_some() || input.is_some() {return Err(CompilerLinkError::Binding);}
+                dev_runner::run_accounted_c_application_with_select(&registry,authority,&mut fabric,&mut placement,config,select)
+            } else {match (stream,input) {
                 (Some(stream),None)=>dev_runner::run_accounted_c_application_with_socket(
                     &registry,authority,&mut fabric,&mut placement,config,stream),
                 (Some(_),Some(_))=>return Err(CompilerLinkError::Binding),
                 (None,Some((input_authority,bytes)))=>dev_runner::run_accounted_c_application_with_input(
                     &registry,authority,Some(input_authority),&mut fabric,&mut placement,config,bytes),
                 (None,None)=>dev_runner::run_accounted_c_application(&registry,authority,&mut fabric,&mut placement,config),
-            }.map_err(CompilerLinkError::Run)?;
+            }}.map_err(CompilerLinkError::Run)?;
             if run.byte_output.capacity()>OUTPUT_BYTES {return Err(CompilerLinkError::Storage);}
             Ok(run)
         })();

@@ -112,3 +112,15 @@ fn exercise(case:Scenario){
 #[test] fn g110_outbound_revoke_before_fin(){exercise(Scenario::BeforeFin)}
 #[test] fn g110_outbound_revoke_after_commit(){exercise(Scenario::BeforeReplyEof)}
 #[test] fn g110_outbound_reply_tail_is_terminal(){exercise(Scenario::ReplyTail)}
+
+#[test]
+fn g110_outbound_application_binding_refuses_unprepared_realm(){
+    let (mut k,_,key)=select_guest_fixture();
+    let baseline=k.fabric.scoped_pointers.total_reserved_bytes();
+    let lane:ServerLane=Arc::new(Mutex::new(Server{live:true,bound:None}));
+    let flow=Select::new(LOCAL.addr(),STORAGE.addr(),envelope(),lane).unwrap();
+    assert!(k.bind_application_select(key,SocketCapacity::DEFAULT,flow,
+        &DeveloperFrameAuthority::provision()).is_err());
+    assert_eq!(k.fabric.scoped_pointers.total_reserved_bytes(),baseline);
+    assert_eq!(select_guest_call(&mut k,key.slot,SYS_SOCKET_SHUT_WR,0),u64::MAX);
+}

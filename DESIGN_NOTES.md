@@ -13456,9 +13456,38 @@ no new architectural invariant or Kleis theory was needed. Both focused tests
 subsequently passed; the pre-socket full release suite passed **1614/0/12 ignored
 in 289.36s**.
 
-**Explicit future compiler work (requested):**
+<a id="toolchain-compatibility-backlog"></a>
 
-- **Logical operators:** the current lexer splits adjacent `&&` into binary
+**Toolchain compatibility backlog — canonical open checklist**
+
+Track these items here rather than in a separate Markdown file. Historical
+failure notes may link here; this checklist owns current status and acceptance.
+All five items below remain **open**. A probe workaround is not feature support.
+
+| ID | Gap | Completion evidence |
+| --- | --- | --- |
+| TC-1 | C comments | Lexical handling of block and line comments, preserving token separation and source positions; literal and malformed-input cases. |
+| TC-2 | `&&` / `||` | True short-circuit lowering, precedence and normalized results, with skipped side effects and faults. |
+| TC-3 | `main` placement | Entry selected by symbol or validated startup trampoline, independent of function and module order. |
+| TC-4 | Array subscripting expressions | Typed `a[i]` reads and assignments with element scaling, evaluation order and protected bounds/lifetime checks. Array declarations alone do not establish expression support. |
+| TC-5 | Unary minus | Typed unary negation with correct precedence and defined integer-width/overflow behavior; reject pointer negation. |
+
+Before implementing each item, assess and extend the affected Kleis lexical,
+CC2 lowering, module/linking, entry/receipt and pointer contracts as applicable.
+Accept with focused positive/hostile cases in both compiler paths, then the
+real CC2 fixed point and affected service witnesses. Do not reopen Phase 10.8
+or silently widen its accepted language profile.
+
+- **TC-1 — Comments:** `ankapp` currently copies comment bytes into effective
+  source; the protected lexer skips whitespace but not comments. The guest
+  Select probe therefore omits comments. Implement lexical comment handling,
+  not a raw text replacement: `int/**/x` must remain two tokens; `"/*"` and
+  `"//"` inside literals must remain literal content; preserve newlines/source
+  diagnostics and reject unterminated block comments. Include adjacent tokens,
+  EOF and line-ending cases and state the supported line-splicing policy.
+
+
+- **TC-2 — Logical operators:** the current lexer splits adjacent `&&` into binary
   `&` and unary address-of. Unsupported compound tokens must be rejected as
   whole tokens before broader application ports rely on them. Proper `&&`/`||`
   support requires a formal lowering contract for precedence, left-to-right
@@ -13466,7 +13495,7 @@ in 289.36s**.
   right-hand side effects/faults. Test both compiler profiles and fixed-point
   parity; preserve valid spaced `x & &y` tokenization where type-correct.
   HTTP currently uses parenthesized, side-effect-free comparisons with `&`.
-- **Entry placement:** source-order-dependent `main` at code offset zero is a
+- **TC-3 — Entry placement:** source-order-dependent `main` at code offset zero is a
   current compiler/linker profile restriction, not a C language requirement.
   Define and prove symbol-selected entry or a validated startup trampoline
   before implementation. Preserve the exact main signature, frame entry,
@@ -13474,6 +13503,21 @@ in 289.36s**.
   Acceptance must place helper definitions before main and the main-containing
   module later in link order, while rejecting duplicate, missing or invalid
   main symbols. Until then, supported applications define main first.
+- **TC-4 — Subscripting:** the guest Select run rejected its first
+  `request[i]=0` at effective-source cursor 124 with diagnostic 10. The probe
+  now uses `*(request+i)` and `*(reply+i)`, preserving typed byte accesses.
+  Implement indexing as typed lowering equivalent to pointer addition and
+  dereference, with exactly-once operand evaluation, correct element size,
+  nested/pointer-valued elements, and stale/out-of-bounds rejection. Test reads
+  and assignments separately; parsing an array declaration is insufficient.
+
+- **TC-5 — Unary minus:** the guest Select probe reached cursor 532 and
+  rejected `n!=-2` (diagnostic 4). Its send/receive loops now use `n!=(0-2)`,
+  as the accepted HTTP socket service already does. Binary subtraction is a
+  supported workaround, not acceptance of general unary negation. Formalize
+  precedence, operand typing and the supported integer model before lowering;
+  test zero, positive/negative operands, nested expressions, width boundaries,
+  and pointer rejection in both compiler paths.
 
 **Bounded closure priority after the regression fixes:** formalize typed socket
 copying into private protected buffers (endpoint/process incarnation, RX/TX
@@ -15527,8 +15571,9 @@ does not claim two simultaneously bound sockets in one Kernel.
 
 #### Phase 10.10: guest-initiated Select, active open and write-half-close
 
-**Formal gate passed:** 55 positive witnesses and 50/50 hostile assertions
-explicitly disproved. Reproduce with `scripts/check-anka109-gates.py --only-outbound-select`.
+**Current formal gate passed:** 64 positive witnesses and 60/60 hostile assertions
+explicitly disproved (the original outbound subset was 55/50). Reproduce with
+`scripts/check-anka109-gates.py --only-outbound-select`.
 This refines the outbound path only. The TCP handshake checks the configured
 route, reverse tuple, flags, headers and acknowledgment of the guest SYN.
 Committing the final ACK establishes a stream; it conveys no storage grant.
@@ -15569,10 +15614,131 @@ the storage commit but before peer EOF, and a reply with a trailing byte. They
 exercise protected syscall frames, real virtual NIC RX/TX and the reference
 dispatcher with a counted in-memory backend and test verifier. They do not
 claim file persistence or CC2 guest execution. The script also runs the typed
-socket capacity regressions. The 55/50 formal result stands independently.
+socket capacity regressions. Their original 55/50 formal result is retained as
+a subset of the extended gate below.
 
-**Next acceptance milestone:** bind the receipt-managed CC2 guest to the same
-outbound endpoint, lower its explicit write shutdown, and run Select against
-guarded file-backed storage at 64-byte and 4 KiB queue capacities. Lose the
-first reply, reopen the file, retry the identical logical request with fresh
-connection/correlation, and verify exactly one revision advance.
+**CC2 guest/file refinement: focused formal and runtime acceptance passed.**
+`storage_select.c` constructs the canonical 112-byte request, handles short sends,
+executes the new protected zero-argument `sshut()` builtin, reads all 144 reply
+bytes to EOF, and checks the complete echo/status/outcome. Both the accepted
+stage-3 compiler and protected ABI-2 producer lower this builtin to syscall 25;
+legacy mode and arguments are rejected. Shutdown still requires the complete
+frozen request and current authority. It creates no storage grant.
+
+The receipt runner explicitly selects outbound mode before the spawned child
+runs. Its separate NIC authority cannot attach to a replay socket or foreign
+incarnation. The caller remains in the bounded CPU-only realm; a separate,
+charged driver handles actual virtual NIC RX/TX through Fabric. The reference
+peer sees only bounded Ethernet frames, never a guest pointer or Kernel.
+The runner retains its current publication/receipt validation and destruction
+path on success, transport failure, or exhausted work. Outbound runs reserve
+an additional 12 MiB in the parent ledger for the driver/session; their child
+account limit is 16 MiB so the nested 12-MiB reservation and socket queues fit.
+The physical guest heap pool remains 2 MiB. Other application modes retain their
+existing limits. At most 2,000,000 guest scheduling rounds, 128 session events,
+32 frame exchanges per pump and the existing 30-second Select deadline bound
+execution; there is no unbounded host polling loop.
+
+`g110_real_cc2_file_select` builds the actual accepted lineage, compiles and
+publishes two guest instances differing only in correlation, and executes the
+receipt-managed artifacts at 64-byte and 4-KiB socket capacities. The peer uses
+`guarded::dispatch` and guarded reply disclosure with `FileRecord`. The first
+reply is deliberately lost after commit. The fixture destroys the file handle
+and authority registry, reopens the same record, admits a fresh connection,
+and retries the identical logical request. It requires one commit total,
+revision 8/value 99/boot 8, guest exit 0 on retry, intact receipts and restoration
+of the parent ledger after each run. The quick file-peer test independently
+checks that request bytes alone cause no backend read/commit before FIN.
+
+**Verification:** the extended outbound theory passes **64 positive witnesses**
+and **60/60 explicitly disproved hostile claims** in the development workspace.
+The additional obligations cover receipt/authority/charge/child-incarnation
+binding and protected zero-argument shutdown. No solver unknown is accepted.
+The developer Mac subsequently passed **9 quick tests** (0.04 seconds) and
+**the explicit CC2 guest/file witness** (83.36 seconds), with no failures.
+The ordinary quick run's one ignored test was then explicitly run and passed.
+Both 64-byte and 4-KiB cases committed once, deliberately lost the first reply,
+reopened the file and returned the same outcome on a fresh-connection retry.
+The two injected-reply-loss messages and compiler errors 9/12 are expected
+negative checks. This accepts the bounded guest/file Select milestone, not
+production authentication or executable-byte persistence/launch. The full
+regression suite for this changeset remains pending. Reproduce the focused gates:
+
+```sh
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" --kleis-root "$HOME/git/cee/kleis" \
+  --only-outbound-select
+bash scripts/check-anka110-guest-select.sh
+bash scripts/check-anka110-guest-select.sh --real
+```
+
+The quick script verifies named passing results and cannot silently accept zero
+tests; `--real` explicitly executes the otherwise ignored CC2 witness. Existing
+socket-capacity and persistence reference suites remain regression gates.
+Providers and network peer behavior are deterministic test fixtures, not a
+production cryptographic channel, general TCP stack or remote storage server.
+Each retry run is separately admitted under a finite runner budget; this does
+not implement an autonomous guest retry coordinator.
+
+**Next after acceptance:** durable executable-byte storage and the already
+formalized stored-image launch path. A Select record holds an opaque envelope
+identity, not executable payload bytes. Normal live launch comes first; repeat
+with fresh authority after reboot. Ceph/S3/Podman demos remain later integrations.
+
+
+**Guest Select acceptance follow-up (historical failure):** the developer run passed all seven quick
+witnesses and the corrected CC_B bootstrap. CC2_1 and CC2_2 both linked at
+191,576 code/backing bytes, entry 188,888. The deliberate legacy-profile and
+extra-argument `sshut` rejection checks also completed. The actual probe then
+failed with `SourceRejected { cursor: 0, diagnostic: 1 }`: its leading block
+comment reached the protected lexer unchanged. `ankapp` currently expands
+supported directives but preserves ordinary comment bytes, while this lexer
+only skips whitespace. Both comments have been removed from `storage_select.c`,
+and a quick source-compatibility check now runs before expensive bootstrap.
+The reference probe carries no authority in its bytes; the host admits its
+peer and frozen request, and an unknown outcome cannot become a new request.
+Guest/file end-to-end acceptance remains pending. Comment support is tracked
+as TC-1 in the [canonical compatibility backlog](#toolchain-compatibility-backlog).
+
+
+**Guest Select indexed-assignment result (historical failure):** CC2 bootstrap and fixed-point convergence still
+pass. After removal of comments, the protected producer reached cursor 124 and
+rejected the first indexed assignment (diagnostic 10). The probe now uses
+supported pointer arithmetic for every element access. Its retry-source edit
+is updated and requires exactly one correlation assignment before replacement;
+the quick source check also catches accidental reintroduction of indexing.
+Runtime acceptance remains pending. The five open language/toolchain gaps are
+tracked only in the [canonical compatibility backlog](#toolchain-compatibility-backlog).
+
+
+**Guest Select fixture correction (cursor 532):** the attached developer run
+again passed CC2 bootstrap/fixed-point convergence and the expected `sshut`
+negative cases. The protected producer rejected unary `-2` in the first
+SOCKET_AGAIN comparison. Both comparisons now use `(0-2)` and the quick source
+check verifies both loops before bootstrap. This changes only the fixture;
+no compiler acceptance, authority check or protocol invariant is widened.
+The remaining fixture constructs were reviewed against the existing protected
+HTTP probe and compiler paths. Runtime acceptance is still pending; TC-5 tracks
+proper unary-minus support separately.
+
+
+**Guest Select binding correction (initial process generation):** the latest
+run passed eight quick witnesses, fixed-point convergence, and compilation of
+both guest artifacts. Execution stopped before network disclosure with
+`guest Select: Owner`. The new application binding incorrectly required a
+nonzero process generation. `Kernel::spawn` assigns zero to a fresh slot and
+increments its generation on reuse; zero is valid when it matches the live
+process. This is distinct from the nonzero connection/reservation identities.
+The same mistaken premise was present in `os110_application_attach`; its prior
+witnesses proved that stated predicate, not compatibility with initial spawn.
+
+The runtime and theory now require equality with the actual incarnation without
+rejecting zero. The extended formal gate passed **64 positive / 60 hostile
+disproved**. A quick test creates a fresh generation-zero protected child in an
+application realm, rejects a mismatched key without charge, binds the real key,
+rejects duplicate binding and verifies cancellation refunds. This runs before
+CC2 bootstrap. The loss test also checks an explicit post-dispatch injection
+marker and backend counts, so an unrelated setup failure cannot satisfy its
+expected-error assertion or lead to a misleading `Option::unwrap()` panic.
+The subsequent developer run passed the fresh-generation binding test and
+the real CC2 guest/file witness; focused acceptance is recorded above.

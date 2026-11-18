@@ -21,6 +21,7 @@ impl Kernel {
         self.application_run=Some(ApplicationRunEnvelope{spawned:false,socket:false,last_socket:None});
         Ok(())
     }
+    pub(crate) fn application_select_realm(&self)->bool {self.application_run.is_some()}
     pub(crate) fn take_socket_call(&mut self)->Option<(u64,u64,u64)> {
         self.application_run.as_mut()?.last_socket.take()
     }
@@ -37,6 +38,7 @@ impl Kernel {
             return self.processes[idx].core.protected_syscall_image().is_some_and(|(w,_)|
                 if self.application_run.as_ref().is_some_and(|r|r.socket) {
                     matches!(w[0],SYS_SOCKET_RECV|SYS_SOCKET_SEND|SYS_MALLOC|SYS_FREE)
+                        || (w[0]==SYS_SOCKET_SHUT_WR && self.application_select(idx))
                         || (w[0]==SYS_EXIT && self.socket_exit_drained(idx))
                 } else {matches!(w[0],SYS_EXIT|SYS_WRITE|SYS_READ_BYTES|SYS_MALLOC|SYS_FREE)});
         }

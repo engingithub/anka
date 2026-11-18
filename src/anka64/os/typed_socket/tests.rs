@@ -226,3 +226,35 @@ fn s1_socket_capacity_peer_charge_global_denial_and_reuse_on_same_fabric() {
     }
     assert_eq!(reg.total_reserved_bytes(),before);
 }
+
+#[test]
+fn g110_application_select_accepts_fresh_zero_generation_and_rejects_stale_key(){
+    use crate::anka64::authority_persistence::{Operation,Request,protocol::{Envelope,client::DenyServer}};
+    use crate::anka64::os::typed_socket::{SocketCapacity,select::Select};
+    use crate::anka64::os::compiler_retry::service::frame_port::DeveloperFrameAuthority;
+    use std::sync::{Arc,Mutex};
+    let mut f=Fabric::with_application_heap(0x1000000).unwrap();
+    let domain=f.create_domain();let agent=AgentId(200);
+    f.register_agent(agent,AgentKind::Cpu(CoreId(200)),domain);
+    let mut k=Kernel::new(f);let parent=k.spawn(Anka64Core::new(agent,domain));
+    k.enable_heap_service(0x1000000).unwrap();
+    k.prepare_application_run().unwrap();
+    k.processes[parent.slot].core.r[R0 as usize]=SYS_SPAWN;
+    assert!(k.application_run_syscall_allowed(parent.slot));
+    let (core,_)=typed_io_test_core(&mut k.fabric,AgentId(201),0,2048,112,0,SYS_SOCKET_SEND);
+    let key=k.spawn(core);k.processes[key.slot].parent=Some(parent);
+    assert_eq!(key,ProcessKey{slot:2,generation:0});
+    let flow=||Select::new("127.0.0.1:49154".parse().unwrap(),"127.0.0.1:49155".parse().unwrap(),
+        Envelope{correlation:42,request:Request{anchor:10,installation:20,policy:3,caller:30,incarnation:4,
+            sequence:1,expected:7,operation:Operation::Select,argument:99,attempt:0}},
+        Arc::new(Mutex::new(DenyServer))).unwrap();
+    let authority=DeveloperFrameAuthority::provision();
+    let before=k.fabric.scoped_pointers.total_reserved_bytes();
+    assert!(k.bind_application_select(ProcessKey{generation:1,..key},SocketCapacity::DEFAULT,flow(),&authority).is_err());
+    assert_eq!(k.fabric.scoped_pointers.total_reserved_bytes(),before);
+    let ticket=k.bind_application_select(key,SocketCapacity::DEFAULT,flow(),&authority).unwrap();
+    assert!(k.socket_current(ticket));
+    assert!(k.bind_application_select(key,SocketCapacity::DEFAULT,flow(),&authority).is_err());
+    k.cancel_socket(ticket).unwrap();
+    assert_eq!(k.fabric.scoped_pointers.total_reserved_bytes(),before);
+}
