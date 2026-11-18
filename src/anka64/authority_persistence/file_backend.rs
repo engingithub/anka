@@ -18,8 +18,8 @@ unsafe extern "C" { fn flock(fd:i32,operation:i32)->i32; }
 #[cfg(target_os="macos")]
 unsafe extern "C" { fn fcntl(fd:i32,command:i32,...)->i32; }
 
-fn io_error(_:std::io::Error)->Error {Error::BackendUnavailable}
-fn file_barrier(file:&File)->Result<(),Error> {
+pub(super) fn io_error(_:std::io::Error)->Error {Error::BackendUnavailable}
+pub(super) fn file_barrier(file:&File)->Result<(),Error> {
     file.sync_all().map_err(io_error)?;
     #[cfg(target_os="macos")]
     {
@@ -29,13 +29,13 @@ fn file_barrier(file:&File)->Result<(),Error> {
     }
     Ok(())
 }
-fn dir_barrier(path:&Path)->Result<(),Error> {File::open(path).and_then(|f|f.sync_all()).map_err(io_error)}
-fn regular(path:&Path)->Result<(),Error> {
+pub(super) fn dir_barrier(path:&Path)->Result<(),Error> {File::open(path).and_then(|f|f.sync_all()).map_err(io_error)}
+pub(super) fn regular(path:&Path)->Result<(),Error> {
     let meta=fs::symlink_metadata(path).map_err(io_error)?;
     if !meta.file_type().is_file() {return Err(Error::CorruptRecord)}
     Ok(())
 }
-fn lock_file(path:&Path,create:bool)->Result<File,Error> {
+pub(super) fn lock_file(path:&Path,create:bool)->Result<File,Error> {
     if !create {regular(path)?;}
     let f=OpenOptions::new().read(true).write(true).create_new(create).mode(0o600).open(path).map_err(io_error)?;
     // SAFETY: live fd and the Linux/Darwin LOCK_EX | LOCK_NB constants (2 | 4).
@@ -46,7 +46,7 @@ fn lock_file(path:&Path,create:bool)->Result<File,Error> {
     }
     Ok(f) // fd lifetime holds lock; close also releases it after process death.
 }
-fn checksum(bytes:&[u8])->u64 {
+pub(super) fn checksum(bytes:&[u8])->u64 {
     let mut crc=0u64;
     for &byte in bytes {
         crc^=(byte as u64)<<56;

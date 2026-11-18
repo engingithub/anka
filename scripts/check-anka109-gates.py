@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Phase 10.9 formal gates; unchanged 10.7/10.8 gates are not repeated.
+"""Run Phase 10.9/10.10 formal gates; unchanged 10.7/10.8 gates are not repeated.
 
 Positive assertions must pass and every hostile assertion must be explicitly
 DISPROVED. Unknown, missing witnesses, import errors and timeouts fail closed.
@@ -32,6 +32,7 @@ SOCKET_CAPACITY_PAIRS = ('anka110_socket_capacity',)
 
 OUTBOUND_SELECT_PAIRS = ('anka110_outbound_select',)
 STORED_LAUNCH_PAIRS = ('anka110_stored_launch',)
+ARTIFACT_STORAGE_PAIRS = ('anka110_artifact_storage',)
 
 
 def main():
@@ -53,6 +54,7 @@ def main():
     selection.add_argument('--only-socket-capacity', action='store_true', help='run configurable typed socket capacity refinement')
     selection.add_argument('--only-outbound-select', action='store_true', help='active storage connection and write-half-close')
     selection.add_argument('--only-stored-launch', action='store_true', help='ordinary live and post-reboot durable-image launch')
+    selection.add_argument('--only-artifact-storage', action='store_true', help='durable artifact staging, finalization and reference publication')
     parser.add_argument('--timeout', type=int, default=120, help='seconds per theory file')
     args = parser.parse_args()
     if args.timeout <= 0:
@@ -75,7 +77,8 @@ def main():
              SOCKET_CAPACITY_PAIRS if args.only_socket_capacity else
              OUTBOUND_SELECT_PAIRS if args.only_outbound_select else
              STORED_LAUNCH_PAIRS if args.only_stored_launch else
-             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS + EVIDENCE_PAIRS + PROVIDER_PAIRS + GUARDED_PAIRS + BINDER_PAIRS + VERIFIER_PAIRS + STORAGE_VERIFIER_PAIRS + SOCKET_CAPACITY_PAIRS + OUTBOUND_SELECT_PAIRS + STORED_LAUNCH_PAIRS)
+             ARTIFACT_STORAGE_PAIRS if args.only_artifact_storage else
+             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS + EVIDENCE_PAIRS + PROVIDER_PAIRS + GUARDED_PAIRS + BINDER_PAIRS + VERIFIER_PAIRS + STORAGE_VERIFIER_PAIRS + SOCKET_CAPACITY_PAIRS + OUTBOUND_SELECT_PAIRS + STORED_LAUNCH_PAIRS + ARTIFACT_STORAGE_PAIRS)
     for stem in pairs:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')

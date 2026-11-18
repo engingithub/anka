@@ -15725,12 +15725,167 @@ The accepted stored-launch theory (49 positive / 56 hostile claims explicitly
 disproved) supplies launch-admission obligations. It does not by itself establish
 blob transfer, storage durability or atomic manifest publication. Review and
 extend the affected persistence, evidence, outbound transport, publication and
-stored-launch gates before implementing these new transitions. No new theory
-filename, wire ABI, cryptographic provider or backend vendor is selected here.
+stored-launch gates before implementing these new transitions. The artifact-storage refinement below now supplies the first additional gate.
+No wire ABI, cryptographic provider or backend vendor is selected here.
 
-**Immediate next task:** formalize artifact upload/finalization and durable
-reference publication, then implement the smallest compile-to-storage-to-live-run
-path. Reboot is the subsequent acceptance case, not a prerequisite for loading.
+**Artifact-storage formal checkpoint (AS110, 2026-11-17).**
+`anka110_artifact_storage.kleis` and its false-witness pair now define the first
+bounded refinement. Local Kleis/Z3 verification passed **125 positive witnesses**
+and **89/89 hostile claims explicitly disproved**, with no accepted unknowns.
+The unchanged stored-launch dependency also passed **49 positive / 56 hostile**.
+These results cover the model below; no Rust implementation or remote artifact
+server is added by this checkpoint. The prior 1,795-test regression result applies
+to the guest Select implementation, not to an unimplemented artifact store.
+
+| Contract | Defined boundary |
+| --- | --- |
+| Reservation | Charge payload plus measured metadata, check owner/global budgets without wrap, and durably settle the reservation/serial watermark before exposing a staging handle. |
+| Upload | Freeze the manifest and owner/incarnation; admit contiguous bounded chunks or an exact repeat of the most recent chunk. Repeats consume work without advancing the cursor; altered or older retries fail closed. |
+| Finalization | Require the complete extent, independently validated exact content/profile/metadata/dependencies/provenance, drained work and successful durability barriers. Sealed objects reject further writes. |
+| Publication | Require current publish authority and expected revision. Retain object charges; commit the selected immutable object identity and exact request outcome together. Preserve prior selection on failure. |
+| Recovery | Before reference rename recover old; an uncertain rename permits old or complete new; acknowledged publication requires new. Revalidate the recovered record and current reply authority. Revocation hides an outcome without undoing a commit. |
+| Cleanup | Refund only after users drain and deletion is durably complete. Trusted retirement permits orphan cleanup after owner death/revocation. Published-object deletion is prohibited in this slice. |
+| Retrieval | Require a separate current read grant, exact verified manifest and bounded range. Reading supplies no execute authority; stored-launch admission remains separate. |
+| Isolation | Preserve the independent peer, other retained charges and service boot. A cleanup followed by C's reuse advances the ticket; A's old handle cannot select C's lane. |
+
+**Model scope and refinement obligations.** One serialized candidate slot, one
+previously selected object and an unaffected peer are modeled. Existing objects
+and metadata are conservatively retained in `other_bytes`; there is no
+multi-candidate scheduler or distributed garbage collector. `inc` is the admitted
+caller incarnation, not the raw Kernel process-generation field (where zero can
+be valid). Artifact ID plus generation resolves to an immutable full manifest;
+this mapping and the reservation ledger must survive restart without retargeting
+old references. Uncertain ledger effects must be reconciled under exclusive
+backend ownership before accepting another reservation.
+
+Content and chunk equality are abstractions of independently validated actual
+bytes, not proof that a hash implementation is collision-free. Current authority,
+retirement, outstanding-work counts and durability observations are trusted
+inputs supplied by existing admission/supervision/backend layers. The Rust
+refinement must validate their bindings, implement exact encodings and account
+all retained/staging metadata, parser buffers and recovery reservations. Failed
+requests need independent bounded transport work. No availability/fairness,
+cryptographic authentication, media-integrity or distributed-consensus theorem
+is claimed. The one-slot replay record does not establish an arbitrary historical
+request-outcome database.
+
+The initial combined five-variable arithmetic obligation hit the solver
+watchdog. It was replaced by proved compositional lemmas for payload-plus-metadata
+non-wrap, admitted global total, and the admission predicate supplying both
+premises. No timeout increase, extra axiom or accepted unknown was used. Explicit
+before/after record relations follow the existing theory style and avoid the
+available solver bridge's unresolved computed-record expressions.
+
+Run the new pair with the complete updated runner:
+
+```sh
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" \
+  --only-artifact-storage
+```
+
+The new pair is also included in the runner's default full selection. The gate
+continues to fail on unknowns, missing witnesses, import/parse errors or timeouts.
+
+**AS110 Rust backend implementation (2026-11-17; runtime acceptance pending).**
+The developer confirmed the original **125 positive / 89 hostile** gate on macOS.
+Before implementation, the theory was extended for the fixed ledger envelope and
+cleanup intent/deletion/refund ordering. The extended gate passes locally:
+**149 positive witnesses / 108 hostile claims explicitly disproved**. No unknown
+is accepted. This includes the original contract rather than replacing its gates.
+
+`src/anka64/authority_persistence/artifact.rs` now supplies a bounded host-file
+`ArtifactStore`, with `artifact/codec.rs` and 26 focused tests in
+`artifact/tests.rs`. The existing persistence reference test entry includes the
+module. FileRecord's existing lock, regular-file, checksum and durability helpers
+are shared through parent-module visibility; their behavior is unchanged.
+
+The backend retains one payload in `artifact.bytes` and one 336-byte canonical
+ledger in `artifact.record`. The ledger contains the namespace, frozen limits,
+monotonic ticket watermark, caller/incarnation, full abstract manifest, accepted
+prefix, finite work balance, charge, selected identity/revision and latest exact
+publication outcome. Its private encoding has an eight-byte magic, forty
+little-endian u64 words and CRC64-ECMA; unused words must be zero. CRC detects
+accidental corruption under the existing honest-host assumption and supplies no
+cryptographic authenticity. This is not a new network wire protocol.
+
+Reservation and its watermark become durable before a ticket escapes. Appending
+syncs payload bytes before advancing the durable prefix; reopening truncates
+only unacknowledged private suffixes. A most-recent-chunk retry compares actual
+bytes and spends the existing work budget. Exact reservation retry resumes the
+same slot rather than allocating another. Finalization consumes the complete
+payload through a trusted validator and checks every manifest field. Publication
+writes selection plus retry outcome atomically. Reopening and retrying a lost
+publication response cannot increment the revision again. Read and reply paths
+recheck current evidence before exposing results; revocation does not undo a
+completed commit.
+
+Cleanup records a durable deletion intent before unlinking payload bytes. It
+refunds only after deletion and its directory barrier complete. Runtime phase
+`Deleting` refines a still-charged private object; recovery completes that intent
+before admitting new work. Published objects cannot enter deletion. Cleanup
+preserves the generation watermark, and retired-owner cleanup uses a distinct
+trusted observation. This synchronous backend issues no external DMA/controller
+work handles: exclusive mutable calls and completed validator reads supply the
+zero-outstanding-work condition. Asynchronous hardware integration must establish
+its own drainage evidence before using these operations.
+
+Limits reserve payload plus conservative ledger/codec/scratch/buffer accounting;
+active metadata is charged with the candidate, while the service retains its
+fixed reservation when the slot is empty. `other_bytes` remains charged and
+unchanged. These are bounded reference-service accounting units, not a measurement
+of allocator internals, host filesystem overhead or a reservation of physical
+disk blocks. Disk exhaustion remains an IO failure with recovery obligations.
+Limits are persisted and must match on reopen. Prior selected artifacts are an
+external custodian retention obligation; this one-slot backend does not itself
+manage their files or a general object repository.
+
+**Trust boundary:** the default `Evidence` provider denies. Its current authority,
+retirement and full-byte inspection methods are trusted integration interfaces,
+not client-supplied success flags. Test providers compare deterministic binary
+fixtures. A real compiler-artifact/receipt validator and production credential
+provider are not supplied here. No serialized live Fabric pointer is restored;
+file bytes, manifest identifiers and tickets alone confer no execute authority.
+The service boot is supplied by trusted admission on open and is rechecked by the
+provider, independently of the retained payload and ticket watermark.
+
+The 26 focused tests cover codec damage/canonical shape, default denial, quotas,
+chunk retry/work bounds, actual-byte inspection, publication/reopen, disclosure
+revocation, owner cleanup and C reuse beside independent B, stale tickets,
+counter exhaustion, lock/namespace fencing, corruption and symlink rejection,
+bounded repeated cycles, and fault cuts around reservation, append, seal,
+publication and cleanup. Fault injection is not a physical power-loss proof.
+**Rust was unavailable in the implementation workspace, so these tests and Rust
+compilation have not yet been run.** The prior 1,795-test pass does not validate
+this new backend. Local shell syntax and packaging checks passed.
+
+Run the extended formal gate and focused Rust suite on the developer Mac:
+
+```sh
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" \
+  --only-artifact-storage &&
+bash scripts/check-anka110-artifact-storage.sh
+```
+
+Then run the existing short persistence reference suite:
+
+```sh
+bash scripts/check-anka110-persistence-reference.sh
+```
+
+The new script explicitly refuses a missing/zero-test artifact module and uses
+serial scheduling alongside the existing filesystem-lock tests. No CC2 rebuild
+or long full-system regression is required to establish this focused checkpoint.
+
+**Immediate next action:** obtain Rust compilation and focused/reference passing
+results, fixing any failures before accepting the backend. Next integration is
+the validated compiler-artifact/receipt boundary and bounded guest transfer,
+followed by stored-image live launch. Rust storage APIs alone do not establish
+that a CC2-compiled guest has uploaded or loaded a binary. Reboot follows live
+launch; S3/Ceph remains a later backend adapter.
 
 
 **Guest Select acceptance follow-up (historical failure):** the developer run passed all seven quick

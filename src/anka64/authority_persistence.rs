@@ -157,3 +157,8 @@ pub(crate) mod protocol;
 /// Technology-neutral trusted evidence admission (E1/E2); no credential parser.
 #[path="authority_persistence/evidence.rs"]
 pub(crate) mod evidence;
+
+/// AS110 bounded host-file artifact staging/publication reference.
+#[cfg(any(target_os="linux", target_os="macos"))]
+#[path="authority_persistence/artifact.rs"]
+pub(crate) mod artifact;

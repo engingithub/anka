@@ -4949,3 +4949,53 @@ New storage transitions require Kleis gates before Rust implementation; the
 existing stored-launch gate is not a proof of blob storage or publication.
 See [DN-72 durable artifact storage plan](DESIGN_NOTES.md#durable-artifact-storage-plan)
 for the implementation order and acceptance obligations.
+
+### AS110 artifact-storage formal boundary
+
+The first bounded artifact-storage refinement is now specified in
+`theories/anka110_artifact_storage.kleis` and its hostile-witness pair: **125
+positive witnesses and 89/89 hostile claims explicitly disproved** locally.
+`--only-artifact-storage` selects this gate in `check-anka109-gates.py`. The
+fixed-ledger/cleanup refinement subsequently extends the passing local gate to
+**149 positive / 108 hostile witnesses**. A bounded Rust file backend is now
+implemented, with compilation and runtime acceptance pending; a deployed remote
+binary server remains future work.
+
+The model separates private staging, durable unreferenced objects and published
+retained objects. Durable reservation precedes handle issuance; exact bounded
+chunk retry consumes work without duplicating bytes. Finalization verifies the
+complete immutable manifest after work drains and backend barriers complete.
+Publication atomically binds the immutable object reference, revision and retry
+outcome, with current authority rechecked before disclosure. A crash may leave
+an accounted orphan; cleanup cannot refund before durable deletion or reclaim a
+published object in this slice. A reader receives no implicit execute authority.
+
+Scope is one serialized candidate plus a prior selected object and independent
+peer. Trusted authority projections, byte-identity validation, reservation
+recovery and host durability are explicit implementation obligations. This is
+not a proof of arbitrary byte codecs, production cryptography, multi-candidate
+scheduling or garbage collection. DN-72's
+[artifact-storage checkpoint](DESIGN_NOTES.md#durable-artifact-storage-plan)
+records the scope, acceptance evidence and next Rust refinement.
+
+### AS110 host-file artifact backend: implementation awaiting acceptance
+
+`authority_persistence::artifact::ArtifactStore` implements one candidate payload
+plus a fixed durable ledger, using the existing host lock and barrier primitives.
+A reservation is durable before handle issuance; a payload prefix is durable
+before acknowledgement. Finalization validates complete actual bytes and their
+manifest. Selection and exact retry outcome commit together. A deletion-intent
+journal retains charges until removal is durable and permits recovery without
+reanimating an old ticket. Published objects cannot be overwritten or reclaimed.
+
+Current authority, caller retirement and artifact inspection enter through a
+trusted provider that denies by default. CRC64 detects accidental file corruption;
+it is not authentication. The configured prior selection and other retained
+objects remain an external custodian obligation. No guest transport, production
+cryptographic provider, compiler-format validator, launch adapter, asynchronous
+DMA ownership or multi-object garbage collector is introduced by this backend.
+
+Twenty-six focused Rust tests are supplied. They have **not been compiled or run
+in the implementation workspace**, which has no Rust toolchain. Run
+`scripts/check-anka110-artifact-storage.sh` and the existing persistence reference
+suite before accepting this implementation. The expanded Kleis pair passed locally.
