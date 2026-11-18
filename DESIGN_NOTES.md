@@ -15788,7 +15788,7 @@ python3 scripts/check-anka109-gates.py \
 The new pair is also included in the runner's default full selection. The gate
 continues to fail on unknowns, missing witnesses, import/parse errors or timeouts.
 
-**AS110 Rust backend implementation (2026-11-17; runtime acceptance pending).**
+**AS110 Rust backend implementation (2026-11-17; focused acceptance passed).**
 The developer confirmed the original **125 positive / 89 hostile** gate on macOS.
 Before implementation, the theory was extended for the fixed ledger envelope and
 cleanup intent/deletion/refund ordering. The extended gate passes locally:
@@ -15856,11 +15856,18 @@ revocation, owner cleanup and C reuse beside independent B, stale tickets,
 counter exhaustion, lock/namespace fencing, corruption and symlink rejection,
 bounded repeated cycles, and fault cuts around reservation, append, seal,
 publication and cleanup. Fault injection is not a physical power-loss proof.
-**Rust was unavailable in the implementation workspace, so these tests and Rust
-compilation have not yet been run.** The prior 1,795-test pass does not validate
-this new backend. Local shell syntax and packaging checks passed.
+**Developer macOS acceptance passed**, as recorded in `test-output-storage.txt`:
+149 positive Kleis witnesses and 108/108 hostile claims explicitly disproved;
+**26 focused artifact tests passed** (0 failed, 154 filtered out) in **3.46s**;
+**all 180 persistence reference tests passed** (0 failed, 0 ignored) in **4.55s**.
+Both Rust test builds completed successfully. The 26 focused tests are included
+in the 180-test reference suite and must not be added to it as distinct coverage.
+The only emitted warning is the existing unused `GuardedServer::shutdown` method
+in `protocol/transport/guarded_server.rs`; no new artifact warning is reported.
+This accepts the bounded host-file backend checkpoint. It does not establish a
+new full Anka64 regression pass, guest artifact transfer or executable launch.
 
-Run the extended formal gate and focused Rust suite on the developer Mac:
+Reproduce the accepted formal gate and focused Rust suite on the developer Mac:
 
 ```sh
 python3 scripts/check-anka109-gates.py \
@@ -15880,9 +15887,8 @@ The new script explicitly refuses a missing/zero-test artifact module and uses
 serial scheduling alongside the existing filesystem-lock tests. No CC2 rebuild
 or long full-system regression is required to establish this focused checkpoint.
 
-**Immediate next action:** obtain Rust compilation and focused/reference passing
-results, fixing any failures before accepting the backend. Next integration is
-the validated compiler-artifact/receipt boundary and bounded guest transfer,
+**Immediate next action:** commit the accepted bounded backend checkpoint.
+Next integration is the validated compiler-artifact/receipt boundary and bounded guest transfer,
 followed by stored-image live launch. Rust storage APIs alone do not establish
 that a CC2-compiled guest has uploaded or loaded a binary. Reboot follows live
 launch; S3/Ceph remains a later backend adapter.

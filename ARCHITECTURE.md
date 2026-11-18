@@ -4958,8 +4958,8 @@ positive witnesses and 89/89 hostile claims explicitly disproved** locally.
 `--only-artifact-storage` selects this gate in `check-anka109-gates.py`. The
 fixed-ledger/cleanup refinement subsequently extends the passing local gate to
 **149 positive / 108 hostile witnesses**. A bounded Rust file backend is now
-implemented, with compilation and runtime acceptance pending; a deployed remote
-binary server remains future work.
+implemented and has passed developer macOS focused/reference acceptance; a
+deployed remote binary server remains future work.
 
 The model separates private staging, durable unreferenced objects and published
 retained objects. Durable reservation precedes handle issuance; exact bounded
@@ -4978,7 +4978,7 @@ scheduling or garbage collection. DN-72's
 [artifact-storage checkpoint](DESIGN_NOTES.md#durable-artifact-storage-plan)
 records the scope, acceptance evidence and next Rust refinement.
 
-### AS110 host-file artifact backend: implementation awaiting acceptance
+### AS110 host-file artifact backend: focused acceptance passed
 
 `authority_persistence::artifact::ArtifactStore` implements one candidate payload
 plus a fixed durable ledger, using the existing host lock and barrier primitives.
@@ -4995,7 +4995,11 @@ objects remain an external custodian obligation. No guest transport, production
 cryptographic provider, compiler-format validator, launch adapter, asynchronous
 DMA ownership or multi-object garbage collector is introduced by this backend.
 
-Twenty-six focused Rust tests are supplied. They have **not been compiled or run
-in the implementation workspace**, which has no Rust toolchain. Run
-`scripts/check-anka110-artifact-storage.sh` and the existing persistence reference
-suite before accepting this implementation. The expanded Kleis pair passed locally.
+Developer macOS evidence in `test-output-storage.txt` confirms successful Rust
+compilation, **26 focused artifact tests passed in 3.46s**, and **180 persistence
+reference tests passed in 4.55s**, all with zero failures. The focused tests are
+included in the reference total. The expanded Kleis pair also passed on the Mac:
+**149 positive / 108 explicitly disproved hostile witnesses**. The existing unused
+`GuardedServer::shutdown` warning remains; no new artifact warning is reported.
+This accepts the bounded host-file backend, not guest artifact transfer, loading,
+production authentication or a new full-system regression run.
