@@ -1,0 +1,51 @@
+import "anka110_artifact_transfer.kleis"
+example "hostile wrong version" { assert(at110_frame(bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(64,64),bvconst(232,64),as110_true(),bvconst(0,64))) }
+example "hostile zero operation" { assert(at110_frame(bvconst(1,64),bvconst(0,64),bvconst(9,64),bvconst(64,64),bvconst(232,64),as110_true(),bvconst(0,64))) }
+example "hostile unknown operation" { assert(at110_frame(bvconst(1,64),bvconst(7,64),bvconst(9,64),bvconst(64,64),bvconst(232,64),as110_true(),bvconst(0,64))) }
+example "hostile zero correlation" { assert(at110_frame(bvconst(1,64),bvconst(2,64),bvconst(0,64),bvconst(64,64),bvconst(232,64),as110_true(),bvconst(0,64))) }
+example "hostile payload cap" { assert(at110_frame(bvconst(1,64),bvconst(2,64),bvconst(9,64),bvconst(4097,64),bvconst(232,64),as110_true(),bvconst(0,64))) }
+example "hostile truncated" { assert(at110_frame(bvconst(1,64),bvconst(2,64),bvconst(9,64),bvconst(64,64),bvconst(231,64),as110_true(),bvconst(0,64))) }
+example "hostile tail" { assert(at110_frame(bvconst(1,64),bvconst(2,64),bvconst(9,64),bvconst(64,64),bvconst(233,64),as110_true(),bvconst(0,64))) }
+example "hostile not EOF" { assert(at110_frame(bvconst(1,64),bvconst(2,64),bvconst(9,64),bvconst(64,64),bvconst(232,64),as110_false(),bvconst(0,64))) }
+example "hostile reserved" { assert(at110_frame(bvconst(1,64),bvconst(2,64),bvconst(9,64),bvconst(64,64),bvconst(232,64),as110_true(),bvconst(1,64))) }
+example "hostile op 1 zero size" { assert(at110_shape(bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64))) }
+example "hostile op 1 bad count" { assert(at110_shape(bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(4097,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64))) }
+example "hostile op 2 zero size" { assert(at110_shape(bvconst(2,64),bvconst(5,64),bvconst(0,64),bvconst(64,64),bvconst(0,64),bvconst(0,64),bvconst(0,64))) }
+example "hostile op 2 bad count" { assert(at110_shape(bvconst(2,64),bvconst(5,64),bvconst(0,64),bvconst(4097,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64))) }
+example "hostile op 3 zero size" { assert(at110_shape(bvconst(3,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64))) }
+example "hostile op 3 bad count" { assert(at110_shape(bvconst(3,64),bvconst(5,64),bvconst(0,64),bvconst(4097,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64))) }
+example "hostile op 4 zero size" { assert(at110_shape(bvconst(4,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(91,64),bvconst(7,64),bvconst(0,64))) }
+example "hostile op 4 bad count" { assert(at110_shape(bvconst(4,64),bvconst(5,64),bvconst(0,64),bvconst(4097,64),bvconst(91,64),bvconst(7,64),bvconst(10000,64))) }
+example "hostile op 5 zero size" { assert(at110_shape(bvconst(5,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64))) }
+example "hostile op 5 bad count" { assert(at110_shape(bvconst(5,64),bvconst(5,64),bvconst(0,64),bvconst(4097,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64))) }
+example "hostile op 6 zero size" { assert(at110_shape(bvconst(6,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(91,64),bvconst(7,64),bvconst(0,64))) }
+example "hostile op 6 bad count" { assert(at110_shape(bvconst(6,64),bvconst(0,64),bvconst(0,64),bvconst(4097,64),bvconst(91,64),bvconst(7,64),bvconst(10000,64))) }
+example "hostile append gap beyond end" { assert(at110_shape(bvconst(2,64),bvconst(5,64),bvconst(10001,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64))) }
+example "hostile append span overflow" { assert(at110_shape(bvconst(2,64),bvconst(5,64),bvconst(9999,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64))) }
+example "hostile empty append" { assert(at110_shape(bvconst(2,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64))) }
+example "hostile begin smuggled ticket" { assert(at110_shape(bvconst(1,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64))) }
+example "hostile seal smuggled offset" { assert(at110_shape(bvconst(3,64),bvconst(5,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64))) }
+example "hostile progress smuggled request" { assert(at110_shape(bvconst(5,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(10000,64))) }
+example "hostile publish missing request" { assert(at110_shape(bvconst(4,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(10000,64))) }
+example "hostile outcome ticket claim" { assert(at110_shape(bvconst(6,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(91,64),bvconst(7,64),bvconst(10000,64))) }
+example "hostile zero channel" { assert(at110_admit(bvconst(0,64),A109Valid,bvconst(30,64),bvconst(4,64),as110_true(),as110_true())) }
+example "hostile unknown peer" { assert(at110_admit(bvconst(8,64),A109Unknown,bvconst(30,64),bvconst(4,64),as110_true(),as110_true())) }
+example "hostile invalid peer" { assert(at110_admit(bvconst(8,64),A109Invalid,bvconst(30,64),bvconst(4,64),as110_true(),as110_true())) }
+example "hostile missing owner" { assert(at110_admit(bvconst(8,64),A109Valid,bvconst(0,64),bvconst(4,64),as110_true(),as110_true())) }
+example "hostile missing incarnation" { assert(at110_admit(bvconst(8,64),A109Valid,bvconst(30,64),bvconst(0,64),as110_true(),as110_true())) }
+example "hostile ticket manifest substitution" { assert(at110_admit(bvconst(8,64),A109Valid,bvconst(30,64),bvconst(4,64),as110_false(),as110_true())) }
+example "hostile unfunded" { assert(at110_admit(bvconst(8,64),A109Valid,bvconst(30,64),bvconst(4,64),as110_true(),as110_false())) }
+example "hostile no work" { assert(at110_budget(bvconst(0,64),bvconst(10000,64),bvconst(4264,64),bvconst(8600,64))) }
+example "hostile no ingress budget" { assert(at110_budget(bvconst(10,64),bvconst(4263,64),bvconst(4264,64),bvconst(8600,64))) }
+example "hostile oversized" { assert(at110_budget(bvconst(10,64),bvconst(10000,64),bvconst(4265,64),bvconst(8600,64))) }
+example "hostile unfunded scratch" { assert(at110_budget(bvconst(10,64),bvconst(10000,64),bvconst(4264,64),bvconst(8599,64))) }
+example "hostile changed request or payload" { assert(at110_reply(as110_false(),A109Valid,as110_true(),A109Valid,as110_true())) }
+example "hostile revoked connection" { assert(at110_reply(as110_true(),A109Invalid,as110_true(),A109Valid,as110_true())) }
+example "hostile unknown connection" { assert(at110_reply(as110_true(),A109Unknown,as110_true(),A109Valid,as110_true())) }
+example "hostile changed caller" { assert(at110_reply(as110_true(),A109Valid,as110_false(),A109Valid,as110_true())) }
+example "hostile revoked grant" { assert(at110_reply(as110_true(),A109Valid,as110_true(),A109Invalid,as110_true())) }
+example "hostile bad reply fields" { assert(at110_reply(as110_true(),A109Valid,as110_true(),A109Valid,as110_false())) }
+example "hostile duplicate increment" { assert(at110_published(bvconst(7,64),bvconst(9,64),bvconst(10000,64),bvconst(10000,64),as110_true(),as110_true())) }
+example "hostile short payload" { assert(at110_published(bvconst(7,64),bvconst(8,64),bvconst(9999,64),bvconst(10000,64),as110_true(),as110_true())) }
+example "hostile other artifact" { assert(at110_published(bvconst(7,64),bvconst(8,64),bvconst(10000,64),bvconst(10000,64),as110_false(),as110_true())) }
+example "hostile other generation" { assert(at110_published(bvconst(7,64),bvconst(8,64),bvconst(10000,64),bvconst(10000,64),as110_true(),as110_false())) }

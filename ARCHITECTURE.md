@@ -5003,3 +5003,111 @@ included in the reference total. The expanded Kleis pair also passed on the Mac:
 `GuardedServer::shutdown` warning remains; no new artifact warning is reported.
 This accepts the bounded host-file backend, not guest artifact transfer, loading,
 production authentication or a new full-system regression run.
+
+
+### CS110 live compiler receipt to durable artifact
+
+The host integration bridge `Kernel::persist_linked_compiler_publication` borrows
+a validated, READ-only linked publication and streams a canonical envelope into
+AS110 without cloning the whole image. It reserves bounded host scratch, retains
+all source custody/charges, and refunds only scratch on return or unwind.
+
+The version-1 `ANKACS01` envelope stores image geometry/profile, persistent
+namespace and artifact identities, ordered persistent dependencies and the exact
+linked bytes. Its header is 136 bytes; each dependency record is 40 bytes. Runtime
+publication epochs, ObjectIds and protected pointer authority are excluded.
+Complete stream comparison against the borrowed validated image precedes sealing
+and initial publication. Transfer uses at most 4096 bytes and respects the backend
+window and finite work allowance. Authorized progress and exact outcome recovery
+support retry without a new publication effect or implicit budget reset.
+
+Persistent identity mapping, dependency/provenance retention and current storage
+grants are trusted policy inputs with deny-by-default behavior. This bridge does
+not provide production credentials or a multi-object custodian. Existing honest
+host, private directory and durability assumptions still apply. Current authority
+is checked again before outcome disclosure; a denied reply cannot undo a commit.
+
+The CS110 Kleis pair passes **57 positive / 45 explicitly disproved hostile
+witnesses**. Developer macOS acceptance confirms **9 CS110 integration tests
+passed in 2.77s**, **28 artifact tests in 3.75s**, and **182 persistence reference
+tests in 4.60s**, all with zero failures. The artifact tests are included in the
+reference total; the nine integration tests ran separately in the full Anka crate.
+The AS110 26/180-test results above describe the previous backend. A subsequent
+cleanup removes two unused CS110 re-exports without changing behavior; that
+import-only edit has not been recompiled in the authoring environment. Guest upload, stored-image decoding/admission and live/reboot
+launch remain subsequent gates; storing bytes does not mint execution authority.
+See [DN-72 CS110](DESIGN_NOTES.md#compiler-storage-binding) for the exact format,
+trust obligations and focused acceptance commands.
+
+
+### AT110 bounded artifact upload protocol
+
+`authority_persistence::artifact::transfer` provides a canonical codec and
+finite-budget dispatcher for Begin, Append, Seal, Publish, Progress and Outcome.
+It connects complete bounded frames to AS110's real file backend. Requests are
+168-byte headers plus at most 4096 bytes; replies are 72-byte headers plus a full
+request echo. The echo includes append payload bytes. Role, profile, operation
+shape, bounds, EOF, reserved fields and reply results are checked before acceptance.
+
+Current channel evidence supplies caller identity. Wire tickets and manifests
+are selectors, never credentials. Default evidence denies. Backend scope checks,
+post-effect caller/channel revalidation and final operation-grant checks protect
+reply disclosure. Committed effects remain durable if their replies are withheld;
+exact outcome recovery does not publish a second time.
+
+Malformed attempts consume finite dispatch work before decoding. Retry preserves
+that allowance and backend upload work. Trusted transport must reserve at least
+8600 accounting bytes for maximum request/reply storage and establish real EOF;
+this codec does not itself create a socket, allocate a Kernel buffer, verify
+cryptography or assert a physical TCP close. Server evidence is rechecked at client
+reply admission, separately from the pre-send verification obligation.
+
+The AT110 Kleis pair passed **61 positive / 50 hostile explicitly disproved**.
+Developer macOS acceptance confirms **12 focused tests passed in 0.49s** and
+**194 persistence reference tests passed in 5.05s**, with zero failures; the 12
+are included in the 194. The first build's incorrect child-module resolution was
+corrected with explicit `transfer/codec.rs` and `transfer/tests.rs` paths. The
+subsequent passing run accepts that correction.
+Guarded transport wiring, CC2 guest upload over the virtual NIC, retrieval and
+stored-image launch remain explicit subsequent integration gates. See
+[DN-72 AT110](DESIGN_NOTES.md#artifact-transfer-protocol) for wire fields and commands.
+
+
+### AG110 serialized artifact TCP exchanges
+
+`artifact::transfer::transport::Service` owns the artifact backend and trusted
+transport evidence in one serialized lane. Its session accepts a bound localhost
+TCP stream, observes actual EOF before dispatch, and rechecks current channel,
+frozen caller, ticket/manifest and operation grant for each reply fragment. The
+lane remains held through the actual nonblocking write; provider updates use the
+same lane. No upload is reinterpreted as a legacy Select grant.
+
+Admission reserves a live slot and 32768 accounting bytes. Fixed request storage
+includes an extra byte to detect an oversized frame. A service-wide ingress
+allowance reserves 4265 bytes per connection without refund on reconnect; poll
+work and the AT110 dispatch budget also never reset on reconnect. Reads/writes
+are bounded to 64 bytes per poll, with fixed deadlines. Busy/transient IO retains
+the prefix and spends work. Cancellation clears buffers and refunds only its
+live session reservation, preserving staged or committed backend state.
+
+Binding defaults deny; loopback addresses and channel numbers do not authenticate.
+Providers must route relevant authority updates through the lane and avoid
+reentrant/blocking callbacks. File synchronization and serialized cleanup can
+still block on the host; this is not a hard real-time implementation. Poisoned
+provider state cannot authorize further IO, and stale sessions cannot redispatch.
+
+The AG110 gate passes **51 positive / 42 hostile explicitly disproved**. Twelve
+real TCP/file tests are supplied, with Rust acceptance pending. Production
+credentials, a CC2 guest upload over the virtual NIC and stored-image launch
+remain explicit integration work. See
+[DN-72 AG110](DESIGN_NOTES.md#artifact-guarded-transport) for scope and commands.
+
+
+**AG110 closure correction (acceptance pending):** the first developer build
+compiled and passed 5 of 12 transport tests; seven timed out while draining the
+response. Terminal sessions now take/drop their owned TCP stream immediately,
+rather than retaining it after an ignored shutdown result. This enforces the
+existing socket-closure invariant without changing the 51/42 Kleis contract.
+Tests assert descriptor ownership release and retain full-reply/prefix checks;
+expanded timeout diagnostics distinguish transport progress from terminal errors.
+The corrected Rust build and runtime tests still require developer verification.

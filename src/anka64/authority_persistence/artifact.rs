@@ -10,6 +10,8 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 
 #[path="artifact/codec.rs"]
 mod codec;
+#[path="artifact/transfer.rs"]
+pub(crate) mod transfer;
 use codec::{Snapshot, Phase, RECORD_BYTES};
 // Stable persisted accounting units, independent of Rust layout/compiler version.
 const _: () = assert!(std::mem::size_of::<Snapshot>()<=1024);
@@ -153,6 +155,26 @@ impl ArtifactStore {
     }
     pub(crate) fn usage(&self)->Result<Usage,Error> {
         self.live()?;Ok(Usage{candidate:self.state.charge,service:if self.state.phase==Phase::Empty {self.state.limits.fixed().ok_or(Error::CorruptRecord)?} else {0},other:self.state.limits.other_bytes})
+    }
+    /// Current authorized resume position; observation never replenishes work.
+    pub(crate) fn upload_progress(&self,t:Ticket,e:&mut impl Evidence)->Result<(u64,bool,u64),Error> {
+        let m=self.bound(t)?;self.auth(e,m,t.caller,t.serial,Action::Upload)?;
+        if !matches!(self.state.phase,Phase::Staging|Phase::Sealed) {return Err(Error::Conflict)}
+        Ok((self.state.cursor,self.state.phase==Phase::Sealed,self.state.limits.window.min(4096)))
+    }
+    /// Recover an exact published outcome after a lost acknowledgement. This
+    /// never treats a different request or publication as an upload to resume.
+    pub(crate) fn publication_outcome(&mut self,m:Manifest,c:Caller,request:u64,expected:u64,
+        e:&mut impl Evidence)->Result<Option<Selection>,Error>
+    {
+        self.live()?;
+        if !m.valid() || request==0 {return Err(Error::InvalidRequest)}
+        if (m.anchor,m.installation)!=(self.state.anchor,self.state.installation) {return Err(Error::Authority)}
+        self.auth(e,m,c,self.state.ticket,Action::Publish)?;
+        if self.state.phase!=Phase::Published {return Ok(None)}
+        if self.state.manifest!=Some(m) || self.state.caller!=c {return Err(Error::Conflict)}
+        let mut file=self.checked_file()?;self.validate(&mut file,m,e)?;
+        self.publish(self.current_ticket(),request,expected,e).map(Some)
     }
     pub(crate) fn reserve(&mut self,m:Manifest,c:Caller,e:&mut impl Evidence)->Result<Ticket,Error> {
         self.live()?;

@@ -248,3 +248,28 @@ fn as110_seal_cut_points_recover_private_or_verified_durable_bytes() {
         assert_eq!(fs::read(t.0.join(DATA)).unwrap(),payload());s.seal(h,&mut e).unwrap();assert_eq!(s.state.selected,selected());
     }
 }
+
+#[test]
+fn as110_progress_requires_current_bound_authority_and_preserves_work() {
+    let(_t,mut s,mut e,h)=reserved();let remaining=s.state.remaining;
+    assert_eq!(s.upload_progress(h,&mut e).unwrap(),(0,false,4096));
+    assert_eq!(s.state.remaining,remaining);
+    assert_eq!(s.upload_progress(h,&mut Deny),Err(Error::Authority));
+    let bad=Ticket{serial:h.serial+1,..h};assert!(s.upload_progress(bad,&mut e).is_err());
+    fill(&mut s,h,&mut e);s.seal(h,&mut e).unwrap();
+    assert_eq!(s.upload_progress(h,&mut e).unwrap(),(10000,true,4096));
+    s.publish(h,91,7,&mut e).unwrap();assert!(s.upload_progress(h,&mut e).is_err());
+}
+#[test]
+fn as110_outcome_recovery_binds_full_request_manifest_caller_and_current_grant() {
+    let(t,mut s,mut e,h)=sealed();assert_eq!(s.publication_outcome(manifest(),caller(),91,7,&mut e).unwrap(),None);
+    let selected=s.publish(h,91,7,&mut e).unwrap();let usage=s.usage().unwrap();drop(s);let mut s=reopen(&t);
+    assert_eq!(s.publication_outcome(manifest(),caller(),91,7,&mut e).unwrap(),Some(selected));
+    assert!(s.publication_outcome(manifest(),caller(),92,7,&mut e).is_err());
+    assert!(s.publication_outcome(manifest(),caller(),91,8,&mut e).is_err());
+    let mut m=manifest();m.provenance+=1;assert!(s.publication_outcome(m,caller(),91,7,&mut e).is_err());
+    assert!(s.publication_outcome(manifest(),Caller{incarnation:5,..caller()},91,7,&mut e).is_err());
+    assert!(s.publication_outcome(manifest(),caller(),91,7,&mut Deny).is_err());
+    e.bytes[0]^=1;assert!(s.publication_outcome(manifest(),caller(),91,7,&mut e).is_err());
+    assert_eq!(s.usage().unwrap(),usage);
+}

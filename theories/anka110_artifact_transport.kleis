@@ -1,0 +1,72 @@
+// AG110: serialized artifact TCP exchange. Provider updates and actual IO
+// share one trusted lane. Cryptography and provider implementation are assumptions.
+import "anka110_artifact_transfer.kleis"
+define ag110_admit(live : BitVec64,slots : BitVec64,used : BitVec64,limit : BitVec64,ingress : BitVec64,channel : BitVec64,bound : A109Verdict) =
+    bvult(live,slots) ∧ bvule(used,limit) ∧ bvule(bvconst(32768,64),bvsub(limit,used)) ∧
+    bvule(bvconst(4265,64),ingress) ∧ a109_nonzero(channel) ∧ (bound=A109Valid)
+define ag110_step(work : BitVec64,now : BitVec64,deadline : BitVec64) = a109_nonzero(work) ∧ bvult(now,deadline)
+define ag110_dispatch(phase : BitVec64,eof : Bool,n : BitVec64,canonical : Bool,lane : Bool,current : A109Verdict) =
+    (phase=a109_one()) ∧ eof ∧ bvule(bvconst(168,64),n) ∧ bvule(n,bvconst(4264,64)) ∧ canonical ∧ lane ∧ (current=A109Valid)
+define ag110_disclose(phase : BitVec64,sent : BitVec64,total : BitVec64,n : BitVec64,lane : Bool,same : Bool,bound : Bool,current : A109Verdict,grant : A109Verdict) =
+    (phase=bvconst(2,64)) ∧ bvule(sent,total) ∧ a109_nonzero(n) ∧ bvule(n,bvconst(64,64)) ∧ bvule(n,bvsub(total,sent)) ∧
+    lane ∧ same ∧ bound ∧ (current=A109Valid) ∧ (grant=A109Valid)
+define ag110_transient(before : BitVec64,after : BitVec64,work_before : BitVec64,work_after : BitVec64) =
+    (before=after) ∧ a109_nonzero(work_before) ∧ (work_after=bvsub(work_before,a109_one()))
+define ag110_close(charged : Bool,refunded : Bool,closed : Bool,scrubbed : Bool,backend_preserved : Bool) =
+    charged ∧ refunded ∧ closed ∧ scrubbed ∧ backend_preserved
+example "ag110_admit valid" { assert(ag110_admit(bvconst(1,64),bvconst(2,64),bvconst(32768,64),bvconst(65536,64),bvconst(4265,64),bvconst(9,64),A109Valid)) }
+example "full slots" { assert(¬(ag110_admit(bvconst(2,64),bvconst(2,64),bvconst(32768,64),bvconst(65536,64),bvconst(4265,64),bvconst(9,64),A109Valid))) }
+example "byte denial" { assert(¬(ag110_admit(bvconst(1,64),bvconst(2,64),bvconst(32768,64),bvconst(65535,64),bvconst(4265,64),bvconst(9,64),A109Valid))) }
+example "used beyond limit" { assert(¬(ag110_admit(bvconst(1,64),bvconst(2,64),bvconst(65537,64),bvconst(65536,64),bvconst(4265,64),bvconst(9,64),A109Valid))) }
+example "unfunded ingress" { assert(¬(ag110_admit(bvconst(1,64),bvconst(2,64),bvconst(32768,64),bvconst(65536,64),bvconst(4264,64),bvconst(9,64),A109Valid))) }
+example "zero channel" { assert(¬(ag110_admit(bvconst(1,64),bvconst(2,64),bvconst(32768,64),bvconst(65536,64),bvconst(4265,64),bvconst(0,64),A109Valid))) }
+example "unknown binder" { assert(¬(ag110_admit(bvconst(1,64),bvconst(2,64),bvconst(32768,64),bvconst(65536,64),bvconst(4265,64),bvconst(9,64),A109Unknown))) }
+example "invalid binder" { assert(¬(ag110_admit(bvconst(1,64),bvconst(2,64),bvconst(32768,64),bvconst(65536,64),bvconst(4265,64),bvconst(9,64),A109Invalid))) }
+example "ag110_step valid" { assert(ag110_step(bvconst(2,64),bvconst(99,64),bvconst(100,64))) }
+example "no work" { assert(¬(ag110_step(bvconst(0,64),bvconst(99,64),bvconst(100,64)))) }
+example "deadline reached" { assert(¬(ag110_step(bvconst(2,64),bvconst(100,64),bvconst(100,64)))) }
+example "deadline past" { assert(¬(ag110_step(bvconst(2,64),bvconst(101,64),bvconst(100,64)))) }
+example "ag110_dispatch valid" { assert(ag110_dispatch(bvconst(1,64),as110_true(),bvconst(168,64),as110_true(),as110_true(),A109Valid)) }
+example "reading cannot dispatch" { assert(¬(ag110_dispatch(bvconst(0,64),as110_true(),bvconst(168,64),as110_true(),as110_true(),A109Valid))) }
+example "sending cannot redispatch" { assert(¬(ag110_dispatch(bvconst(2,64),as110_true(),bvconst(168,64),as110_true(),as110_true(),A109Valid))) }
+example "closed cannot dispatch" { assert(¬(ag110_dispatch(bvconst(3,64),as110_true(),bvconst(168,64),as110_true(),as110_true(),A109Valid))) }
+example "missing EOF" { assert(¬(ag110_dispatch(bvconst(1,64),as110_false(),bvconst(168,64),as110_true(),as110_true(),A109Valid))) }
+example "short frame" { assert(¬(ag110_dispatch(bvconst(1,64),as110_true(),bvconst(167,64),as110_true(),as110_true(),A109Valid))) }
+example "extra byte" { assert(¬(ag110_dispatch(bvconst(1,64),as110_true(),bvconst(4265,64),as110_true(),as110_true(),A109Valid))) }
+example "bad canonical" { assert(¬(ag110_dispatch(bvconst(1,64),as110_true(),bvconst(168,64),as110_false(),as110_true(),A109Valid))) }
+example "no lane" { assert(¬(ag110_dispatch(bvconst(1,64),as110_true(),bvconst(168,64),as110_true(),as110_false(),A109Valid))) }
+example "unknown dispatch authority" { assert(¬(ag110_dispatch(bvconst(1,64),as110_true(),bvconst(168,64),as110_true(),as110_true(),A109Unknown))) }
+example "ag110_disclose valid" { assert(ag110_disclose(bvconst(2,64),bvconst(64,64),bvconst(300,64),bvconst(64,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid)) }
+example "wrong write phase" { assert(¬(ag110_disclose(bvconst(1,64),bvconst(64,64),bvconst(300,64),bvconst(64,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid))) }
+example "overrun prefix" { assert(¬(ag110_disclose(bvconst(2,64),bvconst(301,64),bvconst(300,64),bvconst(64,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid))) }
+example "zero write" { assert(¬(ag110_disclose(bvconst(2,64),bvconst(64,64),bvconst(300,64),bvconst(0,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid))) }
+example "oversize write" { assert(¬(ag110_disclose(bvconst(2,64),bvconst(64,64),bvconst(300,64),bvconst(65,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid))) }
+example "suffix overrun" { assert(¬(ag110_disclose(bvconst(2,64),bvconst(299,64),bvconst(300,64),bvconst(64,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid))) }
+example "write outside lane" { assert(¬(ag110_disclose(bvconst(2,64),bvconst(64,64),bvconst(300,64),bvconst(64,64),as110_false(),as110_true(),as110_true(),A109Valid,A109Valid))) }
+example "retargeted caller" { assert(¬(ag110_disclose(bvconst(2,64),bvconst(64,64),bvconst(300,64),bvconst(64,64),as110_true(),as110_false(),as110_true(),A109Valid,A109Valid))) }
+example "stale ticket" { assert(¬(ag110_disclose(bvconst(2,64),bvconst(64,64),bvconst(300,64),bvconst(64,64),as110_true(),as110_true(),as110_false(),A109Valid,A109Valid))) }
+example "revoked channel" { assert(¬(ag110_disclose(bvconst(2,64),bvconst(64,64),bvconst(300,64),bvconst(64,64),as110_true(),as110_true(),as110_true(),A109Invalid,A109Valid))) }
+example "revoked grant" { assert(¬(ag110_disclose(bvconst(2,64),bvconst(64,64),bvconst(300,64),bvconst(64,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Invalid))) }
+example "ag110_transient valid" { assert(ag110_transient(bvconst(64,64),bvconst(64,64),bvconst(9,64),bvconst(8,64))) }
+example "prefix advances without write" { assert(¬(ag110_transient(bvconst(64,64),bvconst(65,64),bvconst(9,64),bvconst(8,64)))) }
+example "work replenished" { assert(¬(ag110_transient(bvconst(64,64),bvconst(64,64),bvconst(9,64),bvconst(10,64)))) }
+example "busy free work" { assert(¬(ag110_transient(bvconst(64,64),bvconst(64,64),bvconst(9,64),bvconst(9,64)))) }
+example "ag110_close valid" { assert(ag110_close(as110_true(),as110_true(),as110_true(),as110_true(),as110_true())) }
+example "unreserved refund" { assert(¬(ag110_close(as110_false(),as110_true(),as110_true(),as110_true(),as110_true()))) }
+example "refund omitted" { assert(¬(ag110_close(as110_true(),as110_false(),as110_true(),as110_true(),as110_true()))) }
+example "socket retained" { assert(¬(ag110_close(as110_true(),as110_true(),as110_false(),as110_true(),as110_true()))) }
+example "bytes retained" { assert(¬(ag110_close(as110_true(),as110_true(),as110_true(),as110_false(),as110_true()))) }
+example "commit rolled back" { assert(¬(ag110_close(as110_true(),as110_true(),as110_true(),as110_true(),as110_false()))) }
+
+define ag110_next(old : BitVec64,next : BitVec64) = a109_nonzero(old) ∧ bvult(old,a109_max()) ∧ (next=bvadd(old,a109_one()))
+define ag110_refund(live : BitVec64,after_live : BitVec64,bytes : BitVec64,after_bytes : BitVec64,ingress : BitVec64,after_ingress : BitVec64,owned : Bool) =
+    (ingress=after_ingress) ∧ ((owned ∧ a109_nonzero(live) ∧ bvule(bvconst(32768,64),bytes) ∧ (after_live=bvsub(live,a109_one())) ∧ (after_bytes=bvsub(bytes,bvconst(32768,64)))) ∨
+    (¬owned ∧ (after_live=live) ∧ (after_bytes=bytes)))
+example "fresh channel" { assert(ag110_next(bvconst(4,64),bvconst(5,64))) }
+example "channel reuse" { assert(¬(ag110_next(bvconst(4,64),bvconst(4,64)))) }
+example "channel wrap" { assert(¬(ag110_next(a109_max(),a109_z()))) }
+example "refund own slot" { assert(ag110_refund(bvconst(2,64),bvconst(1,64),bvconst(65536,64),bvconst(32768,64),bvconst(100,64),bvconst(100,64),as110_true())) }
+example "repeat close no refund" { assert(ag110_refund(bvconst(1,64),bvconst(1,64),bvconst(32768,64),bvconst(32768,64),bvconst(100,64),bvconst(100,64),as110_false())) }
+example "double refund denied" { assert(¬(ag110_refund(bvconst(1,64),bvconst(0,64),bvconst(32768,64),bvconst(0,64),bvconst(100,64),bvconst(100,64),as110_false()))) }
+example "peer slot refund denied" { assert(¬(ag110_refund(bvconst(2,64),bvconst(0,64),bvconst(65536,64),bvconst(0,64),bvconst(100,64),bvconst(100,64),as110_true()))) }
+example "ingress refill denied" { assert(¬(ag110_refund(bvconst(2,64),bvconst(1,64),bvconst(65536,64),bvconst(32768,64),bvconst(100,64),bvconst(4365,64),as110_true()))) }

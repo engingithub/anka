@@ -15844,8 +15844,9 @@ manage their files or a general object repository.
 **Trust boundary:** the default `Evidence` provider denies. Its current authority,
 retirement and full-byte inspection methods are trusted integration interfaces,
 not client-supplied success flags. Test providers compare deterministic binary
-fixtures. A real compiler-artifact/receipt validator and production credential
-provider are not supplied here. No serialized live Fabric pointer is restored;
+fixtures. The original backend checkpoint did not include a compiler-artifact/receipt
+validator. CS110 below adds that integration; production credentials remain outside
+this checkpoint. No serialized live Fabric pointer is restored;
 file bytes, manifest identifiers and tickets alone confer no execute authority.
 The service boot is supplied by trusted admission on open and is rechecked by the
 provider, independently of the retained payload and ticket watermark.
@@ -15887,11 +15888,284 @@ The new script explicitly refuses a missing/zero-test artifact module and uses
 serial scheduling alongside the existing filesystem-lock tests. No CC2 rebuild
 or long full-system regression is required to establish this focused checkpoint.
 
-**Immediate next action:** commit the accepted bounded backend checkpoint.
-Next integration is the validated compiler-artifact/receipt boundary and bounded guest transfer,
-followed by stored-image live launch. Rust storage APIs alone do not establish
-that a CC2-compiled guest has uploaded or loaded a binary. Reboot follows live
-launch; S3/Ceph remains a later backend adapter.
+<a id="compiler-storage-binding"></a>
+**CS110 — receipt-bound durable compiler export (focused acceptance passed).**
+The accepted AS110 backend is pushed. The next bounded increment connects a
+current linked compiler publication to that backend. Before implementation,
+`anka110_compiler_storage_binding.kleis` passed **57 positive witnesses** and
+its false-witness pair **45/45 explicitly disproved**. These are executable
+contract witnesses, not a proof of the Rust implementation or cryptography.
+
+`Kernel::persist_linked_compiler_publication` first revalidates the linked-image
+role, exact protected heap bytes, current dependencies, linker and application
+profile through the existing publication checks. An exclusive Kernel borrow
+keeps that custody intact during synchronous file operations. Host scratch is
+reserved before allocating ordered dependency records; source image and module
+charges remain in place. Dropping the export destroys its temporary records
+before refunding only that reservation. No full image clone is required.
+
+The canonical `ANKACS01` envelope contains a 136-byte header (eight-byte magic
+and sixteen little-endian u64 words), ordered 40-byte persistent dependency
+records, then every linked-image byte. Header version 1 binds linked-image role,
+Standard/Large profile IDs 1/2, anchor and installation, artifact and generation,
+code size, literal start, entry, image length, dependency count, image identity,
+metadata identity, dependency-set identity and provenance identity. Each dependency
+record holds anchor, installation, artifact, generation and provenance identity.
+The dependency count is bounded at 4096; geometry and total length are checked.
+Kernel publication epochs, ObjectIds, heap generations, pointer tokens and process
+identities are not serialized as artifact authority. The caller remains part of
+the separate AS110 authorization/ledger scope.
+
+A trusted `CompilerStoragePolicy` maps actual live linked/module receipts and
+bytes into persistent identities. It must independently establish exact mapping,
+ordered dependency/provenance retention and current grants. All defaults deny;
+IDs alone prove none of these obligations. Production credential verification
+and the durable dependency custodian are still explicit external assumptions.
+The integration validator compares the entire file stream with the canonical
+live image/envelope, including EOF, before sealing and initial publication.
+
+Transfer chunks are at most the configured storage window and 4096-byte scratch
+limit. Authorized progress observation never replenishes the backend work budget.
+Partial uploads resume from the durable prefix; exact committed outcome recovery
+uses the same manifest, caller, request and expected revision. Denial or uncertain
+commit preserves backend charges for recovery instead of deleting potentially
+committed data. Current mapping and authority are rechecked before disclosure.
+The bridge preserves the original live publication and grants no execute authority.
+
+Nine new focused integration tests cover exact image/geometry/dependencies,
+reopen and one-effect retry, interrupted authorization/resume, default denial,
+foreign mappings, wrong role, changed heap bytes, revoked dependencies, quota
+failure/refund, provider unwind cleanup, malformed streams and profile geometry. Two additional AS110 tests
+cover authorized progress/work preservation and bound outcome recovery.
+**Developer macOS acceptance passed**, recorded in the attached
+`test-output-storage.txt`: the CS110 Kleis gate passed **57 positive / 45 hostile
+explicitly disproved**; **28 artifact tests passed in 3.75s**; **9 CS110 integration
+tests passed in 2.77s**; and **182 persistence reference tests passed in 4.60s**,
+all with zero failures. The 28 artifact tests are included in the 182-test total.
+The nine CS110 tests ran in the full Anka crate with 1839 tests filtered out;
+this is not a new full-system regression result. Intentional panic output belongs
+to passing unwind/cleanup witnesses.
+
+The full-crate test build reported 22 warnings, including two unused re-export
+warnings introduced by CS110 in `publication/consumer.rs`. Those unused re-exports
+are now removed; their defining types and implementations remain unchanged.
+This small cleanup has not been recompiled here, since Rust is unavailable.
+Other warnings remain separate maintenance work; no diagnostic payloads are erased
+and no blanket warning suppression is added.
+
+Run on the developer Mac:
+
+```sh
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" \
+  --only-compiler-storage-binding &&
+bash scripts/check-anka110-compiler-storage-binding.sh &&
+bash scripts/check-anka110-persistence-reference.sh
+```
+
+The focused script refuses missing CS110 tests and runs existing AS110 tests first.
+No expensive CC2 fixed-point run is needed for this boundary: the fixtures use the
+actual protected guest linker and existing live publication machinery. A later
+end-to-end witness must still exercise compilation, guest upload, retrieval and
+launch together.
+
+<a id="artifact-transfer-protocol"></a>
+**AT110 — bounded artifact-transfer protocol (focused acceptance passed).**
+CS110's accepted receipt-bound export remains intact. This next increment defines
+and implements the upload wire boundary against AS110 before attaching a guest
+or NIC. The new `anka110_artifact_transfer` Kleis pair passed **61 positive
+witnesses / 50 hostile assertions explicitly disproved** before Rust work.
+The gate uses the existing AS110 and CS110 contracts without new axioms.
+
+`artifact/transfer.rs` supplies a finite-budget dispatcher; its `codec.rs` defines
+canonical requests and success replies. There are six operations:
+
+| Operation | Effect and retry rule |
+|---|---|
+| Begin | Reserve or resume the exact manifest/caller candidate; return its ticket and durable cursor. |
+| Append | Append at the exact cursor, or retry the most recent exact chunk; spend existing backend work. |
+| Seal | Validate the complete actual payload through the trusted artifact inspector. |
+| Publish | Compare expected revision and atomically publish selection plus exact retry outcome. |
+| Progress | Return authorized staging/sealed progress without replenishing work. |
+| Outcome | Recover an exact committed request, including complete payload revalidation, after reconnect/reopen. |
+
+Requests use `ANKAUP01`, a fixed **168-byte header**, and up to **4096 payload
+bytes**. Twenty little-endian u64 words bind version, operation, nonzero
+correlation, ticket, offset, payload length, publication request, expected
+revision, all eleven manifest fields, and one reserved zero word. Only linked
+image role 2 and persistent Standard/Large profiles 1/2 are accepted. Each
+operation has a strict field shape; unused offsets, lengths and publication
+fields must be zero. Checked bounds reject overflow, truncation and tails.
+
+Replies use `ANKAUR01`, a **72-byte header**, and an exact echo of the entire
+request, including append bytes. Eight little-endian u64 words encode version,
+request length, ticket, cursor, phase, selected revision, artifact and generation.
+A private reply has zero selection fields. A publication reply must bind the
+manifest's artifact/generation, full length and exactly expected revision plus
+one without wrapping. Maximum request/reply sizes are **4264 / 4336 bytes**.
+Client admission checks exact shape, complete echo and current server evidence.
+Errors return no success frame; an uncertain effect remains an unknown outcome
+until an exact authorized retry resolves it.
+
+No caller/owner/incarnation field is accepted from the wire. `TransferEvidence`
+derives the caller from the actual channel and exact request. Defaults deny;
+this is a trusted integration interface, not production authentication. Ticket
+namespace and full manifest are rechecked against the backend before use.
+The dispatcher checks the same caller/channel again after the effect and checks
+the current operation grant before disclosing its reply. Revocation suppresses
+success without undoing a durable commit. The client must validate server evidence
+before sending request bytes and again at final reply admission.
+
+A shared `Budget` spends dispatch work before parsing, including malformed
+attempts. It bounds aggregate ingress bytes and never resets on retry. Oversized
+input exhausts this budget. The trusted transport must retain a real scratch
+reservation of at least **8600 bytes** (maximum request plus reply) before intake;
+the budget object checks that declared accounting limit but does not allocate a
+socket or debit a Kernel account itself. Backend payload charges and append-work
+limits remain independent and enforced by AS110. Each dispatcher invocation
+requires one complete bounded request and an actual end-of-exchange/EOF assertion
+from trusted transport; partial reads cannot trigger storage. A future NIC adapter
+must implement and test that assertion rather than trusting a guest boolean.
+
+Twelve focused Rust tests are supplied for golden bytes, every truncation,
+canonical operation shape, real-file upload/seal/publication, partial-upload
+reopen, lost commit reply, peer denial, stale tickets/manifest substitution,
+finite malformed-input budgets, exact reply/payload binding, content inspection
+and chunk-retry accounting. These exercise the real artifact backend using
+bounded in-process frames and deterministic test evidence. Developer macOS
+acceptance in `test-output-storage.txt(2).zip` confirms successful compilation,
+**12 focused tests passed in 0.49s**, and **194 persistence reference tests passed
+in 5.05s**, all with zero failures. The 12 are included in the 194. Only the
+existing unused `GuardedServer::shutdown` warning remains; printed panic messages
+belong to passing unwind tests. This is not CC2 guest upload or TCP/NIC acceptance.
+
+```sh
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" \
+  --only-artifact-transfer &&
+bash scripts/check-anka110-artifact-transfer.sh &&
+bash scripts/check-anka110-persistence-reference.sh
+```
+
+**AT110 module-path correction:** the developer confirmed the 61/50 Kleis
+results, but Rust compilation failed before tests ran. The explicit path used to
+load `artifact/transfer.rs` made its unqualified child declarations resolve beside
+that file: `mod codec` loaded `artifact/codec.rs` (the durable ledger codec), not
+`artifact/transfer/codec.rs`. The resulting `Snapshot`/`Request` mismatches and
+missing/private exports were cascading errors. Both child declarations now use
+explicit `transfer/codec.rs` and `transfer/tests.rs` paths. The archive contains
+the correct child files; no codec, authority or protocol semantics are changed.
+The subsequent 12/194 passing developer run above accepts this path correction.
+
+<a id="artifact-guarded-transport"></a>
+**AG110 — serialized artifact TCP transport (implementation awaiting Rust acceptance).**
+The accepted AT110 codec/dispatcher now has a concrete socket transport in
+`artifact/transfer/transport.rs`. The existing fixed-size Select registry/server
+uses a different request type, so this artifact adapter provides its own typed
+serialized lane; it does not reinterpret an upload as a Select grant. It shares
+the established rules: current peer evidence, exact request binding, no dispatch
+before EOF, and guarded disclosure of each reply fragment.
+
+The initial AG110 Kleis contract passed 43 positive / 37 hostile witnesses before
+Rust implementation. Final arithmetic refinements add channel non-reuse and
+idempotent, peer-preserving slot refunds: **51 positive witnesses / 42 hostile
+assertions explicitly disproved**. No unknown is accepted. These contract tests
+do not prove a provider, a Rust implementation or physical power-loss behavior.
+
+`Service` owns the actual AS110 file backend and a trusted `TransportEvidence`
+provider behind one mutex. `attach` accepts an already-established loopback
+`TcpStream`, assigns a globally nonwrapping channel identity and asks the provider
+to bind evidence to that actual stream. Addresses and generated IDs are not
+credentials. Default binding/live-channel methods deny. Only successful binding
+installs the session's slot/byte reservation; provider unwind poisons the lane.
+
+The service's `update` method serializes provider changes against storage effects
+and actual nonblocking socket writes. Trusted callbacks must be bounded and
+non-reentrant; providers must not mutate relevant shared authority behind that
+lane. This exclusion requirement is an explicit trusted integration obligation.
+Production cryptographic credentials and an external listener are not supplied.
+
+| Session phase | Enforced behavior |
+|---|---|
+| Reading | Recheck channel before each read; accept at most 64 bytes per poll into fixed storage plus one tail-detection byte; only real socket EOF permits canonical parsing. |
+| Ready | Hold the lane across caller verification and AT110/backend dispatch; mark the session terminal before callbacks so unwind cannot leave it dispatchable. |
+| Sending | Recheck frozen caller, ticket/manifest, current channel and operation grant before every write; hold the same lane during the actual write of at most 64 bytes. |
+| Closed | Shut down the socket, clear request/reply buffers and refund its session reservation once; retain backend staging/committed charges and retry state. |
+
+Short writes advance only their actual prefix. WouldBlock, Interrupted and a busy
+lane consume work while preserving that prefix. Zero/fatal writes, cancellation,
+expiry and provider denial close the exchange. A withheld or partial publication
+reply never rolls back the commit; a freshly admitted connection can request the
+same outcome. Reply backing is scrubbed when dropped. No pending reply or socket
+can be retargeted through the public session interface.
+
+Service admission limits live slots (1–64) and **32768 accounting bytes per
+session**, conservatively covering fixed buffers and bookkeeping. The request
+buffer has **4265 bytes**, including the tail sentinel. Each admitted connection
+permanently spends that worst-case amount from the service's finite ingress
+allowance, even if it closes early; slot cancellation refunds live buffer charge,
+not ingress or work. One service-wide poll/attach allowance and the retained AT110
+dispatch budget span connections without automatic reset. Exhaustion requires
+explicit fresh service admission, not an internal reconnect loop. These are host
+reference accounting limits, not measurements of TCP kernel buffers or disk blocks.
+
+Each session has a fixed absolute deadline, checked before polling and again
+before reads, dispatch and writes. Socket IO is nonblocking. File barriers,
+trusted callbacks and serialized cleanup can still take host time: this is not
+a hard real-time or asynchronous-disk guarantee. Once all sessions are dropped,
+the owned backend can be closed/reopened through ordinary service lifetime.
+
+Twelve focused tests use actual localhost TCP streams and the actual artifact
+files: fragmented upload/seal/publication/reopen, no effect before FIN, malformed
+frames, revoked reply suffix, changed caller, injected transient/zero writes,
+peer-preserving cancellation, busy-lane exclusion, fixed deadlines and global
+budgets, denied intake, and poisoned-provider cleanup. Test binders are explicit
+deterministic authority fixtures, not production authentication. **Rust compilation
+and tests remain unrun in the authoring environment**, which has no Rust toolchain.
+The prior AT110 12/194 acceptance does not cover this increment.
+
+```sh
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" \
+  --only-artifact-transport &&
+bash scripts/check-anka110-artifact-transport.sh &&
+bash scripts/check-anka110-persistence-reference.sh
+```
+
+**AG110 terminal socket ownership correction:** the developer confirmed the
+51/42 formal gate and successful Rust compilation. The focused transport run
+reported **5 passed / 7 failed in 9.37s**; all seven failures reached the same
+`bounded response wait failed` helper, including rejection paths. This localizes
+the observed symptom to response completion/closure rather than establishing
+seven independent authority or file-backend defects.
+
+Cancellation previously called `shutdown(Both)` and ignored its result while
+retaining the `TcpStream` in the session. The corrected session owns an
+`Option<TcpStream>` and takes/drops it immediately on terminal completion,
+cancellation or error, even when shutdown fails. Buffer clearing and one-time
+reservation refunds remain unchanged. This directly implements AG110's existing
+closed-socket invariant; no authority or Kleis predicate is weakened.
+
+The response helper now checks that a terminal session owns no socket and reports
+phase, server receive/send counts, client byte count and terminal error on timeout.
+It uses an elapsed-time bound instead of a scheduler-dependent iteration count.
+A reset after terminal closure ends collection, but positive cases still require
+a complete canonical reply and negative cases retain their exact-prefix/backend
+assertions. The cancellation test also asserts immediate socket release.
+`TransportError` gains Display formatting that reads its retained error payloads,
+addressing the two newly reported unused-field warnings without dropping details.
+**This correction remains uncompiled/unrun here**; rerun the two Rust scripts.
+The old unused `GuardedServer::shutdown` warning is unrelated.
+
+**Immediate next action:** accept AG110 with the focused commands above. Then
+attach this artifact exchange to the typed outbound NIC path and add the CC2 guest
+upload witness using retained compiler output and current stream-bound authority.
+Host TCP/file tests do not establish guest/NIC integration. Retrieval, stored-image
+validation and live launch under fresh execution authority follow; reboot follows
+live launch. S3/Ceph remains a later backend adapter.
 
 
 **Guest Select acceptance follow-up (historical failure):** the developer run passed all seven quick

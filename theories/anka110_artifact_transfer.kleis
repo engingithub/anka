@@ -1,0 +1,86 @@
+// AT110: bounded artifact upload frames; trusted channel evidence is separate
+// from wire fields. No new axioms. Codec/refinement correctness remains tested.
+import "anka110_compiler_storage_binding.kleis"
+define at110_frame(version : BitVec64,op : BitVec64,correlation : BitVec64,n : BitVec64,actual : BitVec64,eof : Bool,reserved : BitVec64) =
+    (version=a109_one()) ∧ a109_nonzero(correlation) ∧ bvule(a109_one(),op) ∧ bvule(op,bvconst(6,64)) ∧
+    bvule(n,bvconst(4096,64)) ∧ (actual=bvadd(bvconst(168,64),n)) ∧ eof ∧ (reserved=a109_z())
+define at110_shape(op : BitVec64,ticket : BitVec64,off : BitVec64,n : BitVec64,request : BitVec64,expected : BitVec64,size : BitVec64) =
+    a109_nonzero(size) ∧ (
+    ((op=a109_one()) ∧ (ticket=a109_z()) ∧ (off=a109_z()) ∧ (n=a109_z()) ∧ (request=a109_z()) ∧ (expected=a109_z())) ∨
+    ((op=bvconst(2,64)) ∧ a109_nonzero(ticket) ∧ a109_nonzero(n) ∧ bvule(n,bvconst(4096,64)) ∧ bvule(off,size) ∧ bvule(n,bvsub(size,off)) ∧ (request=a109_z()) ∧ (expected=a109_z())) ∨
+    (((op=bvconst(3,64)) ∨ (op=bvconst(5,64))) ∧ a109_nonzero(ticket) ∧ (off=a109_z()) ∧ (n=a109_z()) ∧ (request=a109_z()) ∧ (expected=a109_z())) ∨
+    (((op=bvconst(4,64)) ∨ (op=bvconst(6,64))) ∧ ((op=bvconst(6,64) ∧ (ticket=a109_z())) ∨ (op=bvconst(4,64) ∧ a109_nonzero(ticket))) ∧
+        (off=a109_z()) ∧ (n=a109_z()) ∧ a109_nonzero(request) ∧ a109_nonzero(expected)))
+define at110_admit(channel : BitVec64,current : A109Verdict,owner : BitVec64,incarnation : BitVec64,manifest_exact : Bool,funded : Bool) =
+    a109_nonzero(channel) ∧ (current=A109Valid) ∧ a109_nonzero(owner) ∧ a109_nonzero(incarnation) ∧ manifest_exact ∧ funded
+// Attempt work is consumed before parsing, even for malformed frames; oversized
+// frames exhaust this dispatcher's work allowance. No automatic retry refill.
+define at110_budget(work : BitVec64,bytes : BitVec64,n : BitVec64,scratch : BitVec64) =
+    a109_nonzero(work) ∧ bvule(n,bytes) ∧ bvule(n,bvconst(4264,64)) ∧ bvule(bvconst(8600,64),scratch)
+define at110_reply(echo : Bool,current : A109Verdict,caller_same : Bool,grant : A109Verdict,shape : Bool) =
+    echo ∧ (current=A109Valid) ∧ caller_same ∧ (grant=A109Valid) ∧ shape
+// In particular a response echoes the entire append payload, not merely offset
+// and correlation. Errors/uncertain commits produce no success frame.
+define at110_published(expected : BitVec64,revision : BitVec64,cursor : BitVec64,size : BitVec64,artifact_same : Bool,generation_same : Bool) =
+    bvult(expected,a109_max()) ∧ (revision=bvadd(expected,a109_one())) ∧ (cursor=size) ∧ artifact_same ∧ generation_same
+example "at110_frame valid" { assert(at110_frame(bvconst(1,64),bvconst(2,64),bvconst(9,64),bvconst(64,64),bvconst(232,64),as110_true(),bvconst(0,64))) }
+example "wrong version" { assert(¬(at110_frame(bvconst(2,64),bvconst(2,64),bvconst(9,64),bvconst(64,64),bvconst(232,64),as110_true(),bvconst(0,64)))) }
+example "zero operation" { assert(¬(at110_frame(bvconst(1,64),bvconst(0,64),bvconst(9,64),bvconst(64,64),bvconst(232,64),as110_true(),bvconst(0,64)))) }
+example "unknown operation" { assert(¬(at110_frame(bvconst(1,64),bvconst(7,64),bvconst(9,64),bvconst(64,64),bvconst(232,64),as110_true(),bvconst(0,64)))) }
+example "zero correlation" { assert(¬(at110_frame(bvconst(1,64),bvconst(2,64),bvconst(0,64),bvconst(64,64),bvconst(232,64),as110_true(),bvconst(0,64)))) }
+example "payload cap" { assert(¬(at110_frame(bvconst(1,64),bvconst(2,64),bvconst(9,64),bvconst(4097,64),bvconst(232,64),as110_true(),bvconst(0,64)))) }
+example "truncated" { assert(¬(at110_frame(bvconst(1,64),bvconst(2,64),bvconst(9,64),bvconst(64,64),bvconst(231,64),as110_true(),bvconst(0,64)))) }
+example "tail" { assert(¬(at110_frame(bvconst(1,64),bvconst(2,64),bvconst(9,64),bvconst(64,64),bvconst(233,64),as110_true(),bvconst(0,64)))) }
+example "not EOF" { assert(¬(at110_frame(bvconst(1,64),bvconst(2,64),bvconst(9,64),bvconst(64,64),bvconst(232,64),as110_false(),bvconst(0,64)))) }
+example "reserved" { assert(¬(at110_frame(bvconst(1,64),bvconst(2,64),bvconst(9,64),bvconst(64,64),bvconst(232,64),as110_true(),bvconst(1,64)))) }
+example "valid operation 1" { assert(at110_shape(bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64))) }
+example "op 1 zero size" { assert(¬(at110_shape(bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)))) }
+example "op 1 bad count" { assert(¬(at110_shape(bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(4097,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64)))) }
+example "valid operation 2" { assert(at110_shape(bvconst(2,64),bvconst(5,64),bvconst(0,64),bvconst(64,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64))) }
+example "op 2 zero size" { assert(¬(at110_shape(bvconst(2,64),bvconst(5,64),bvconst(0,64),bvconst(64,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)))) }
+example "op 2 bad count" { assert(¬(at110_shape(bvconst(2,64),bvconst(5,64),bvconst(0,64),bvconst(4097,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64)))) }
+example "valid operation 3" { assert(at110_shape(bvconst(3,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64))) }
+example "op 3 zero size" { assert(¬(at110_shape(bvconst(3,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)))) }
+example "op 3 bad count" { assert(¬(at110_shape(bvconst(3,64),bvconst(5,64),bvconst(0,64),bvconst(4097,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64)))) }
+example "valid operation 4" { assert(at110_shape(bvconst(4,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(91,64),bvconst(7,64),bvconst(10000,64))) }
+example "op 4 zero size" { assert(¬(at110_shape(bvconst(4,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(91,64),bvconst(7,64),bvconst(0,64)))) }
+example "op 4 bad count" { assert(¬(at110_shape(bvconst(4,64),bvconst(5,64),bvconst(0,64),bvconst(4097,64),bvconst(91,64),bvconst(7,64),bvconst(10000,64)))) }
+example "valid operation 5" { assert(at110_shape(bvconst(5,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64))) }
+example "op 5 zero size" { assert(¬(at110_shape(bvconst(5,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)))) }
+example "op 5 bad count" { assert(¬(at110_shape(bvconst(5,64),bvconst(5,64),bvconst(0,64),bvconst(4097,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64)))) }
+example "valid operation 6" { assert(at110_shape(bvconst(6,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(91,64),bvconst(7,64),bvconst(10000,64))) }
+example "op 6 zero size" { assert(¬(at110_shape(bvconst(6,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(91,64),bvconst(7,64),bvconst(0,64)))) }
+example "op 6 bad count" { assert(¬(at110_shape(bvconst(6,64),bvconst(0,64),bvconst(0,64),bvconst(4097,64),bvconst(91,64),bvconst(7,64),bvconst(10000,64)))) }
+example "append gap beyond end" { assert(¬(at110_shape(bvconst(2,64),bvconst(5,64),bvconst(10001,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64)))) }
+example "append span overflow" { assert(¬(at110_shape(bvconst(2,64),bvconst(5,64),bvconst(9999,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64)))) }
+example "empty append" { assert(¬(at110_shape(bvconst(2,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64)))) }
+example "begin smuggled ticket" { assert(¬(at110_shape(bvconst(1,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64)))) }
+example "seal smuggled offset" { assert(¬(at110_shape(bvconst(3,64),bvconst(5,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(10000,64)))) }
+example "progress smuggled request" { assert(¬(at110_shape(bvconst(5,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(1,64),bvconst(0,64),bvconst(10000,64)))) }
+example "publish missing request" { assert(¬(at110_shape(bvconst(4,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(7,64),bvconst(10000,64)))) }
+example "outcome ticket claim" { assert(¬(at110_shape(bvconst(6,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(91,64),bvconst(7,64),bvconst(10000,64)))) }
+example "at110_admit valid" { assert(at110_admit(bvconst(8,64),A109Valid,bvconst(30,64),bvconst(4,64),as110_true(),as110_true())) }
+example "zero channel" { assert(¬(at110_admit(bvconst(0,64),A109Valid,bvconst(30,64),bvconst(4,64),as110_true(),as110_true()))) }
+example "unknown peer" { assert(¬(at110_admit(bvconst(8,64),A109Unknown,bvconst(30,64),bvconst(4,64),as110_true(),as110_true()))) }
+example "invalid peer" { assert(¬(at110_admit(bvconst(8,64),A109Invalid,bvconst(30,64),bvconst(4,64),as110_true(),as110_true()))) }
+example "missing owner" { assert(¬(at110_admit(bvconst(8,64),A109Valid,bvconst(0,64),bvconst(4,64),as110_true(),as110_true()))) }
+example "missing incarnation" { assert(¬(at110_admit(bvconst(8,64),A109Valid,bvconst(30,64),bvconst(0,64),as110_true(),as110_true()))) }
+example "ticket manifest substitution" { assert(¬(at110_admit(bvconst(8,64),A109Valid,bvconst(30,64),bvconst(4,64),as110_false(),as110_true()))) }
+example "unfunded" { assert(¬(at110_admit(bvconst(8,64),A109Valid,bvconst(30,64),bvconst(4,64),as110_true(),as110_false()))) }
+example "at110_budget valid" { assert(at110_budget(bvconst(10,64),bvconst(10000,64),bvconst(4264,64),bvconst(8600,64))) }
+example "no work" { assert(¬(at110_budget(bvconst(0,64),bvconst(10000,64),bvconst(4264,64),bvconst(8600,64)))) }
+example "no ingress budget" { assert(¬(at110_budget(bvconst(10,64),bvconst(4263,64),bvconst(4264,64),bvconst(8600,64)))) }
+example "oversized" { assert(¬(at110_budget(bvconst(10,64),bvconst(10000,64),bvconst(4265,64),bvconst(8600,64)))) }
+example "unfunded scratch" { assert(¬(at110_budget(bvconst(10,64),bvconst(10000,64),bvconst(4264,64),bvconst(8599,64)))) }
+example "at110_reply valid" { assert(at110_reply(as110_true(),A109Valid,as110_true(),A109Valid,as110_true())) }
+example "changed request or payload" { assert(¬(at110_reply(as110_false(),A109Valid,as110_true(),A109Valid,as110_true()))) }
+example "revoked connection" { assert(¬(at110_reply(as110_true(),A109Invalid,as110_true(),A109Valid,as110_true()))) }
+example "unknown connection" { assert(¬(at110_reply(as110_true(),A109Unknown,as110_true(),A109Valid,as110_true()))) }
+example "changed caller" { assert(¬(at110_reply(as110_true(),A109Valid,as110_false(),A109Valid,as110_true()))) }
+example "revoked grant" { assert(¬(at110_reply(as110_true(),A109Valid,as110_true(),A109Invalid,as110_true()))) }
+example "bad reply fields" { assert(¬(at110_reply(as110_true(),A109Valid,as110_true(),A109Valid,as110_false()))) }
+example "at110_published valid" { assert(at110_published(bvconst(7,64),bvconst(8,64),bvconst(10000,64),bvconst(10000,64),as110_true(),as110_true())) }
+example "duplicate increment" { assert(¬(at110_published(bvconst(7,64),bvconst(9,64),bvconst(10000,64),bvconst(10000,64),as110_true(),as110_true()))) }
+example "short payload" { assert(¬(at110_published(bvconst(7,64),bvconst(8,64),bvconst(9999,64),bvconst(10000,64),as110_true(),as110_true()))) }
+example "other artifact" { assert(¬(at110_published(bvconst(7,64),bvconst(8,64),bvconst(10000,64),bvconst(10000,64),as110_false(),as110_true()))) }
+example "other generation" { assert(¬(at110_published(bvconst(7,64),bvconst(8,64),bvconst(10000,64),bvconst(10000,64),as110_true(),as110_false()))) }

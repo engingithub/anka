@@ -1,0 +1,46 @@
+import "anka110_compiler_storage_binding.kleis"
+example "hostile: zero image" { assert(cs110_geometry(bvconst(0,64),bvconst(4000,64),bvconst(4096,64),bvconst(0,64),bvconst(1,64),bvconst(2,64))) }
+example "hostile: zero code" { assert(cs110_geometry(bvconst(10000,64),bvconst(0,64),bvconst(4096,64),bvconst(0,64),bvconst(1,64),bvconst(2,64))) }
+example "hostile: literal overlaps code" { assert(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(3999,64),bvconst(0,64),bvconst(1,64),bvconst(2,64))) }
+example "hostile: literal outside image" { assert(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(10001,64),bvconst(0,64),bvconst(1,64),bvconst(2,64))) }
+example "hostile: one past entry" { assert(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(4096,64),bvconst(4000,64),bvconst(1,64),bvconst(2,64))) }
+example "hostile: unaligned entry" { assert(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(4096,64),bvconst(1,64),bvconst(1,64),bvconst(2,64))) }
+example "hostile: unaligned code" { assert(cs110_geometry(bvconst(10000,64),bvconst(3999,64),bvconst(4096,64),bvconst(0,64),bvconst(1,64),bvconst(2,64))) }
+example "hostile: producer profile" { assert(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(4096,64),bvconst(0,64),bvconst(3,64),bvconst(2,64))) }
+example "hostile: raw zero profile" { assert(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(4096,64),bvconst(0,64),bvconst(0,64),bvconst(2,64))) }
+example "hostile: empty dependency list" { assert(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(4096,64),bvconst(0,64),bvconst(1,64),bvconst(0,64))) }
+example "hostile: dependency cap" { assert(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(4096,64),bvconst(0,64),bvconst(1,64),bvconst(4097,64))) }
+example "hostile: size overflow" { assert(cs110_geometry(a109_max(),bvconst(4000,64),bvconst(4096,64),bvconst(0,64),bvconst(1,64),bvconst(2,64))) }
+example "hostile: stale receipt" { assert(cs110_admit(A109Invalid,bvconst(2,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid,as110_true(),as110_true(),as110_true())) }
+example "hostile: unknown receipt" { assert(cs110_admit(A109Unknown,bvconst(2,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid,as110_true(),as110_true(),as110_true())) }
+example "hostile: module instead of linked image" { assert(cs110_admit(A109Valid,bvconst(1,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid,as110_true(),as110_true(),as110_true())) }
+example "hostile: writable source" { assert(cs110_admit(A109Valid,bvconst(2,64),as110_false(),as110_true(),as110_true(),A109Valid,A109Valid,as110_true(),as110_true(),as110_true())) }
+example "hostile: changed heap bytes" { assert(cs110_admit(A109Valid,bvconst(2,64),as110_true(),as110_false(),as110_true(),A109Valid,A109Valid,as110_true(),as110_true(),as110_true())) }
+example "hostile: invalid layout" { assert(cs110_admit(A109Valid,bvconst(2,64),as110_true(),as110_true(),as110_false(),A109Valid,A109Valid,as110_true(),as110_true(),as110_true())) }
+example "hostile: unknown mapping" { assert(cs110_admit(A109Valid,bvconst(2,64),as110_true(),as110_true(),as110_true(),A109Unknown,A109Valid,as110_true(),as110_true(),as110_true())) }
+example "hostile: unretained dependency" { assert(cs110_admit(A109Valid,bvconst(2,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Invalid,as110_true(),as110_true(),as110_true())) }
+example "hostile: reordered dependencies" { assert(cs110_admit(A109Valid,bvconst(2,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid,as110_false(),as110_true(),as110_true())) }
+example "hostile: uncharged staging" { assert(cs110_admit(A109Valid,bvconst(2,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid,as110_true(),as110_false(),as110_true())) }
+example "hostile: detached receipt" { assert(cs110_admit(A109Valid,bvconst(2,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid,as110_true(),as110_true(),as110_false())) }
+example "hostile: foreign anchor" { assert(cs110_ref(bvconst(10,64),bvconst(20,64),bvconst(11,64),bvconst(20,64),bvconst(99,64),bvconst(2,64),bvconst(77,64))) }
+example "hostile: foreign installation" { assert(cs110_ref(bvconst(10,64),bvconst(20,64),bvconst(10,64),bvconst(21,64),bvconst(99,64),bvconst(2,64),bvconst(77,64))) }
+example "hostile: zero object" { assert(cs110_ref(bvconst(10,64),bvconst(20,64),bvconst(10,64),bvconst(20,64),bvconst(0,64),bvconst(2,64),bvconst(77,64))) }
+example "hostile: zero generation" { assert(cs110_ref(bvconst(10,64),bvconst(20,64),bvconst(10,64),bvconst(20,64),bvconst(99,64),bvconst(0,64),bvconst(77,64))) }
+example "hostile: missing receipt" { assert(cs110_ref(bvconst(10,64),bvconst(20,64),bvconst(10,64),bvconst(20,64),bvconst(99,64),bvconst(2,64),bvconst(0,64))) }
+example "hostile: tail overrun" { assert(cs110_chunk(bvconst(10216,64),bvconst(8192,64),bvconst(2025,64),bvconst(4096,64))) }
+example "hostile: window overrun" { assert(cs110_chunk(bvconst(10216,64),bvconst(0,64),bvconst(65,64),bvconst(64,64))) }
+example "hostile: scratch overrun" { assert(cs110_chunk(bvconst(10216,64),bvconst(0,64),bvconst(4097,64),bvconst(8192,64))) }
+example "hostile: empty chunk" { assert(cs110_chunk(bvconst(10216,64),bvconst(0,64),bvconst(0,64),bvconst(64,64))) }
+example "hostile: truncated stream" { assert(cs110_inspect(bvconst(10216,64),bvconst(10215,64),as110_true(),as110_true(),A109Valid)) }
+example "hostile: extra tail" { assert(cs110_inspect(bvconst(10216,64),bvconst(10217,64),as110_true(),as110_true(),A109Valid)) }
+example "hostile: changed header or payload" { assert(cs110_inspect(bvconst(10216,64),bvconst(10216,64),as110_false(),as110_true(),A109Valid)) }
+example "hostile: missing EOF" { assert(cs110_inspect(bvconst(10216,64),bvconst(10216,64),as110_true(),as110_false(),A109Valid)) }
+example "hostile: revoked mapping" { assert(cs110_inspect(bvconst(10216,64),bvconst(10216,64),as110_true(),as110_true(),A109Invalid)) }
+example "hostile: source epoch changed" { assert(cs110_finish(bvconst(9,64),bvconst(10,64),bvconst(800,64),bvconst(800,64),as110_true(),A109Valid,A109Valid,as110_true())) }
+example "hostile: source refunded" { assert(cs110_finish(bvconst(9,64),bvconst(9,64),bvconst(800,64),bvconst(0,64),as110_true(),A109Valid,A109Valid,as110_true())) }
+example "hostile: revoked before reply" { assert(cs110_finish(bvconst(9,64),bvconst(9,64),bvconst(800,64),bvconst(800,64),as110_true(),A109Valid,A109Invalid,as110_true())) }
+example "hostile: uncommitted success" { assert(cs110_finish(bvconst(9,64),bvconst(9,64),bvconst(800,64),bvconst(800,64),as110_true(),A109Valid,A109Valid,as110_false())) }
+example "hostile: foreign resume" { assert(cs110_resume(bvconst(1,64),as110_false(),A109Valid,bvconst(4096,64),bvconst(10216,64))) }
+example "hostile: unknown resume" { assert(cs110_resume(bvconst(1,64),as110_true(),A109Unknown,bvconst(4096,64),bvconst(10216,64))) }
+example "hostile: published upload resume" { assert(cs110_resume(bvconst(3,64),as110_true(),A109Valid,bvconst(4096,64),bvconst(10216,64))) }
+example "hostile: cursor beyond length" { assert(cs110_resume(bvconst(1,64),as110_true(),A109Valid,bvconst(10217,64),bvconst(10216,64))) }

@@ -1,0 +1,93 @@
+// CS110: live linked publication to durable artifact, no new axioms.
+// Kernel custody is held exclusively; evidence verdicts and persistent identity
+// mappings are trusted projections. Local epochs/ObjectIds are not portable IDs.
+// The concrete envelope serializes header + ORDERED persistent dependencies +
+// exact image bytes. CRC/integer equality is not cryptographic authentication.
+import "anka110_artifact_storage.kleis"
+define cs110_geometry(image : BitVec64,code : BitVec64,lit : BitVec64,entry : BitVec64,profile : BitVec64,count : BitVec64) =
+    a109_nonzero(image) ∧ a109_nonzero(code) ∧ bvule(code,lit) ∧ bvule(lit,image) ∧
+    bvult(entry,code) ∧ (bvand(entry,bvconst(3,64))=a109_z()) ∧ (bvand(code,bvconst(3,64))=a109_z()) ∧
+    ((profile=a109_one()) ∨ (profile=bvconst(2,64))) ∧ a109_nonzero(count) ∧ bvule(count,bvconst(4096,64)) ∧
+    bvule(image,bvsub(a109_max(),bvadd(bvconst(136,64),bvmul(count,bvconst(40,64)))))
+define cs110_length(image : BitVec64,count : BitVec64) = bvadd(image,bvadd(bvconst(136,64),bvmul(count,bvconst(40,64))))
+define cs110_admit(live : A109Verdict,role : BitVec64,read_only : Bool,heap_exact : Bool,layout : Bool,
+    mapped : A109Verdict,retained : A109Verdict,ordered : Bool,charged : Bool,borrowed : Bool) =
+    (live=A109Valid) ∧ (role=bvconst(2,64)) ∧ read_only ∧ heap_exact ∧ layout ∧
+    (mapped=A109Valid) ∧ (retained=A109Valid) ∧ ordered ∧ charged ∧ borrowed
+// Persistent profile IDs 1 and 2 denote Standard/Large; compiler producer ABI
+// is excluded. Raw linker wire profile 0 is not serialized as storage profile 0.
+define cs110_ref(anchor : BitVec64,installation : BitVec64,a : BitVec64,i : BitVec64,id : BitVec64,gen : BitVec64,receipt : BitVec64) =
+    a109_nonzero(anchor) ∧ a109_nonzero(installation) ∧ (anchor=a) ∧ (installation=i) ∧
+    a109_nonzero(id) ∧ a109_nonzero(gen) ∧ a109_nonzero(receipt)
+define cs110_chunk(total : BitVec64,off : BitVec64,n : BitVec64,window : BitVec64) =
+    a109_nonzero(n) ∧ bvule(n,window) ∧ bvule(n,bvconst(4096,64)) ∧ bvule(off,total) ∧ bvule(n,bvsub(total,off))
+// Actual inspection compares EVERY envelope byte against the canonical frozen
+// receipt-derived stream, followed by EOF. A valid prefix never authorizes seal.
+define cs110_inspect(expected : BitVec64,actual : BitVec64,exact : Bool,eof : Bool,current : A109Verdict) =
+    a109_nonzero(expected) ∧ (actual=expected) ∧ exact ∧ eof ∧ (current=A109Valid)
+// Completion does not grant execution or mutate the Kernel publication. On
+// failure, source custody is unchanged and any backend stage remains charged.
+define cs110_finish(before_epoch : BitVec64,after_epoch : BitVec64,before_charge : BitVec64,after_charge : BitVec64,
+    source_live : Bool,mapper_live : A109Verdict,authority : A109Verdict,committed : Bool) =
+    (before_epoch=after_epoch) ∧ (before_charge=after_charge) ∧ source_live ∧
+    (mapper_live=A109Valid) ∧ (authority=A109Valid) ∧ committed
+// Resume is an authorized observation, not authority conferred by a ticket.
+define cs110_resume(phase : BitVec64,bound : Bool,current : A109Verdict,cursor : BitVec64,size : BitVec64) =
+    ((phase=a109_one()) ∨ (phase=bvconst(2,64))) ∧ bound ∧ (current=A109Valid) ∧ bvule(cursor,size)
+example "standard image geometry" { assert(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(4096,64),bvconst(0,64),bvconst(1,64),bvconst(2,64))) }
+example "large image geometry" { assert(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(4096,64),bvconst(0,64),bvconst(2,64),bvconst(2,64))) }
+example "envelope exact length" { assert(cs110_length(bvconst(10000,64),bvconst(2,64))=bvconst(10216,64)) }
+example "zero image denied" { assert(¬(cs110_geometry(bvconst(0,64),bvconst(4000,64),bvconst(4096,64),bvconst(0,64),bvconst(1,64),bvconst(2,64)))) }
+example "zero code denied" { assert(¬(cs110_geometry(bvconst(10000,64),bvconst(0,64),bvconst(4096,64),bvconst(0,64),bvconst(1,64),bvconst(2,64)))) }
+example "literal overlaps code denied" { assert(¬(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(3999,64),bvconst(0,64),bvconst(1,64),bvconst(2,64)))) }
+example "literal outside image denied" { assert(¬(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(10001,64),bvconst(0,64),bvconst(1,64),bvconst(2,64)))) }
+example "one past entry denied" { assert(¬(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(4096,64),bvconst(4000,64),bvconst(1,64),bvconst(2,64)))) }
+example "unaligned entry denied" { assert(¬(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(4096,64),bvconst(1,64),bvconst(1,64),bvconst(2,64)))) }
+example "unaligned code denied" { assert(¬(cs110_geometry(bvconst(10000,64),bvconst(3999,64),bvconst(4096,64),bvconst(0,64),bvconst(1,64),bvconst(2,64)))) }
+example "producer profile denied" { assert(¬(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(4096,64),bvconst(0,64),bvconst(3,64),bvconst(2,64)))) }
+example "raw zero profile denied" { assert(¬(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(4096,64),bvconst(0,64),bvconst(0,64),bvconst(2,64)))) }
+example "empty dependency list denied" { assert(¬(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(4096,64),bvconst(0,64),bvconst(1,64),bvconst(0,64)))) }
+example "dependency cap denied" { assert(¬(cs110_geometry(bvconst(10000,64),bvconst(4000,64),bvconst(4096,64),bvconst(0,64),bvconst(1,64),bvconst(4097,64)))) }
+example "size overflow denied" { assert(¬(cs110_geometry(a109_max(),bvconst(4000,64),bvconst(4096,64),bvconst(0,64),bvconst(1,64),bvconst(2,64)))) }
+example "live current charged receipt" { assert(cs110_admit(A109Valid,bvconst(2,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid,as110_true(),as110_true(),as110_true())) }
+example "stale receipt denied" { assert(¬(cs110_admit(A109Invalid,bvconst(2,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid,as110_true(),as110_true(),as110_true()))) }
+example "unknown receipt denied" { assert(¬(cs110_admit(A109Unknown,bvconst(2,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid,as110_true(),as110_true(),as110_true()))) }
+example "module instead of linked image denied" { assert(¬(cs110_admit(A109Valid,bvconst(1,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid,as110_true(),as110_true(),as110_true()))) }
+example "writable source denied" { assert(¬(cs110_admit(A109Valid,bvconst(2,64),as110_false(),as110_true(),as110_true(),A109Valid,A109Valid,as110_true(),as110_true(),as110_true()))) }
+example "changed heap bytes denied" { assert(¬(cs110_admit(A109Valid,bvconst(2,64),as110_true(),as110_false(),as110_true(),A109Valid,A109Valid,as110_true(),as110_true(),as110_true()))) }
+example "invalid layout denied" { assert(¬(cs110_admit(A109Valid,bvconst(2,64),as110_true(),as110_true(),as110_false(),A109Valid,A109Valid,as110_true(),as110_true(),as110_true()))) }
+example "unknown mapping denied" { assert(¬(cs110_admit(A109Valid,bvconst(2,64),as110_true(),as110_true(),as110_true(),A109Unknown,A109Valid,as110_true(),as110_true(),as110_true()))) }
+example "unretained dependency denied" { assert(¬(cs110_admit(A109Valid,bvconst(2,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Invalid,as110_true(),as110_true(),as110_true()))) }
+example "reordered dependencies denied" { assert(¬(cs110_admit(A109Valid,bvconst(2,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid,as110_false(),as110_true(),as110_true()))) }
+example "uncharged staging denied" { assert(¬(cs110_admit(A109Valid,bvconst(2,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid,as110_true(),as110_false(),as110_true()))) }
+example "detached receipt denied" { assert(¬(cs110_admit(A109Valid,bvconst(2,64),as110_true(),as110_true(),as110_true(),A109Valid,A109Valid,as110_true(),as110_true(),as110_false()))) }
+example "persistent reference bound" { assert(cs110_ref(bvconst(10,64),bvconst(20,64),bvconst(10,64),bvconst(20,64),bvconst(99,64),bvconst(2,64),bvconst(77,64))) }
+example "foreign anchor denied" { assert(¬(cs110_ref(bvconst(10,64),bvconst(20,64),bvconst(11,64),bvconst(20,64),bvconst(99,64),bvconst(2,64),bvconst(77,64)))) }
+example "foreign installation denied" { assert(¬(cs110_ref(bvconst(10,64),bvconst(20,64),bvconst(10,64),bvconst(21,64),bvconst(99,64),bvconst(2,64),bvconst(77,64)))) }
+example "zero object denied" { assert(¬(cs110_ref(bvconst(10,64),bvconst(20,64),bvconst(10,64),bvconst(20,64),bvconst(0,64),bvconst(2,64),bvconst(77,64)))) }
+example "zero generation denied" { assert(¬(cs110_ref(bvconst(10,64),bvconst(20,64),bvconst(10,64),bvconst(20,64),bvconst(99,64),bvconst(0,64),bvconst(77,64)))) }
+example "missing receipt denied" { assert(¬(cs110_ref(bvconst(10,64),bvconst(20,64),bvconst(10,64),bvconst(20,64),bvconst(99,64),bvconst(2,64),bvconst(0,64)))) }
+example "header split" { assert(cs110_chunk(bvconst(10216,64),bvconst(0,64),bvconst(64,64),bvconst(64,64))) }
+example "cross metadata boundary" { assert(cs110_chunk(bvconst(10216,64),bvconst(128,64),bvconst(4096,64),bvconst(4096,64))) }
+example "exact tail" { assert(cs110_chunk(bvconst(10216,64),bvconst(8192,64),bvconst(2024,64),bvconst(4096,64))) }
+example "tail overrun denied" { assert(¬(cs110_chunk(bvconst(10216,64),bvconst(8192,64),bvconst(2025,64),bvconst(4096,64)))) }
+example "window overrun denied" { assert(¬(cs110_chunk(bvconst(10216,64),bvconst(0,64),bvconst(65,64),bvconst(64,64)))) }
+example "scratch overrun denied" { assert(¬(cs110_chunk(bvconst(10216,64),bvconst(0,64),bvconst(4097,64),bvconst(8192,64)))) }
+example "empty chunk denied" { assert(¬(cs110_chunk(bvconst(10216,64),bvconst(0,64),bvconst(0,64),bvconst(64,64)))) }
+example "inspect full exact stream" { assert(cs110_inspect(bvconst(10216,64),bvconst(10216,64),as110_true(),as110_true(),A109Valid)) }
+example "truncated stream denied" { assert(¬(cs110_inspect(bvconst(10216,64),bvconst(10215,64),as110_true(),as110_true(),A109Valid))) }
+example "extra tail denied" { assert(¬(cs110_inspect(bvconst(10216,64),bvconst(10217,64),as110_true(),as110_true(),A109Valid))) }
+example "changed header or payload denied" { assert(¬(cs110_inspect(bvconst(10216,64),bvconst(10216,64),as110_false(),as110_true(),A109Valid))) }
+example "missing EOF denied" { assert(¬(cs110_inspect(bvconst(10216,64),bvconst(10216,64),as110_true(),as110_false(),A109Valid))) }
+example "revoked mapping denied" { assert(¬(cs110_inspect(bvconst(10216,64),bvconst(10216,64),as110_true(),as110_true(),A109Invalid))) }
+example "finish preserves source" { assert(cs110_finish(bvconst(9,64),bvconst(9,64),bvconst(800,64),bvconst(800,64),as110_true(),A109Valid,A109Valid,as110_true())) }
+example "source epoch changed denied" { assert(¬(cs110_finish(bvconst(9,64),bvconst(10,64),bvconst(800,64),bvconst(800,64),as110_true(),A109Valid,A109Valid,as110_true()))) }
+example "source refunded denied" { assert(¬(cs110_finish(bvconst(9,64),bvconst(9,64),bvconst(800,64),bvconst(0,64),as110_true(),A109Valid,A109Valid,as110_true()))) }
+example "revoked before reply denied" { assert(¬(cs110_finish(bvconst(9,64),bvconst(9,64),bvconst(800,64),bvconst(800,64),as110_true(),A109Valid,A109Invalid,as110_true()))) }
+example "uncommitted success denied" { assert(¬(cs110_finish(bvconst(9,64),bvconst(9,64),bvconst(800,64),bvconst(800,64),as110_true(),A109Valid,A109Valid,as110_false()))) }
+example "resume phase 1" { assert(cs110_resume(bvconst(1,64),as110_true(),A109Valid,bvconst(4096,64),bvconst(10216,64))) }
+example "resume phase 2" { assert(cs110_resume(bvconst(2,64),as110_true(),A109Valid,bvconst(4096,64),bvconst(10216,64))) }
+example "foreign resume denied" { assert(¬(cs110_resume(bvconst(1,64),as110_false(),A109Valid,bvconst(4096,64),bvconst(10216,64)))) }
+example "unknown resume denied" { assert(¬(cs110_resume(bvconst(1,64),as110_true(),A109Unknown,bvconst(4096,64),bvconst(10216,64)))) }
+example "published upload resume denied" { assert(¬(cs110_resume(bvconst(3,64),as110_true(),A109Valid,bvconst(4096,64),bvconst(10216,64)))) }
+example "cursor beyond length denied" { assert(¬(cs110_resume(bvconst(1,64),as110_true(),A109Valid,bvconst(10217,64),bvconst(10216,64)))) }
