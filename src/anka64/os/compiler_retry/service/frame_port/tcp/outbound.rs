@@ -10,17 +10,39 @@ static NEXT_ISS:AtomicU32=AtomicU32::new(1);
 
 pub(crate) struct Session{driver:Driver,ticket:SocketTicket,snd:u32,rcv:u32,credit:usize,
     rx_window:u16,started:bool,connected:bool,local_fin:bool,ended:bool,events:u16}
-struct Cleanup<'a>{k:&'a mut Kernel,t:SocketTicket}
-impl Drop for Cleanup<'_>{fn drop(&mut self){let _=self.k.cancel_socket(self.t);}}
+struct Cleanup<'a>{k:&'a mut Kernel,t:SocketTicket,input:Option<ProcessKey>}
+impl Drop for Cleanup<'_>{fn drop(&mut self){let _=self.k.cancel_socket(self.t);if let Some(key)=self.input{self.k.detach_process_input(key);}}}
+#[cfg(test)]
 pub(crate) fn with_guest_select<T>(k:&mut Kernel,key:ProcessKey,cap:SocketCapacity,env:Envelope,
     verifier:ServerLane,net:&DeveloperFrameAuthority,
     run:impl FnOnce(&mut Kernel,&mut Session)->Result<T,String>)->Result<T,String>{
+    with_storage_request(k,key,cap,StorageRequest::Select(env),verifier,net,run)
+}
+fn with_storage_request<T>(k:&mut Kernel,key:ProcessKey,cap:SocketCapacity,request:StorageRequest<'_>,
+    verifier:ServerLane,net:&DeveloperFrameAuthority,
+    run:impl FnOnce(&mut Kernel,&mut Session)->Result<T,String>)->Result<T,String>{
+    if matches!(request,StorageRequest::Artifact(..)) && !k.application_select_realm(){
+        return Err("artifact input requires the charged receipt application realm".into());
+    }
     let owner=k.processes.get(key.slot).ok_or("invalid guest")?.core.heap_owner().map_err(err)?;
     if owner.process!=key{return Err("stale guest".into());}
-    let flow=Select::new(LOCAL.addr(),STORAGE.addr(),env,verifier).map_err(err)?;
+    let flow=match request {
+        StorageRequest::Select(env)=>Select::new(LOCAL.addr(),STORAGE.addr(),env,verifier),
+        StorageRequest::Artifact(bytes,_)=>Select::new_artifact(LOCAL.addr(),STORAGE.addr(),bytes,verifier),
+    }.map_err(err)?;
+    let artifact=flow.is_artifact();let reply_len=flow.reply_len();
     let t=if k.application_select_realm() {k.bind_application_select(key,cap,flow,net)}
         else {k.bind_select(key,cap,flow)}.map_err(err)?;
-    let guard=Cleanup{k,t};
+    let mut guard=Cleanup{k,t,input:None};
+    if let StorageRequest::Artifact(bytes,_authority)=request {
+        // The receipt runner reserves INPUT_CHARGE before this copy. This is a
+        // fresh exact input for this incarnation, not an unbounded host stream.
+        let mut input=[0u8;crate::anka64::authority_persistence::artifact::transfer::MAX_REQUEST+8];
+        input[..8].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
+        input[8..8+bytes.len()].copy_from_slice(bytes);
+        let result=guard.k.provision_process_input(key,&input[..8+bytes.len()]).map_err(err);
+        input.fill(0);result?;guard.input=Some(key);
+    }
     // Application binding first admits this exact new child account. Reserve
     // driver storage before constructing it; all failure paths cancel the socket.
     let reg=&mut guard.k.fabric.scoped_pointers;
@@ -28,10 +50,10 @@ pub(crate) fn with_guest_select<T>(k:&mut Kernel,key:ProcessKey,cap:SocketCapaci
     let token=reg.reserve_host_storage(account,SESSION_CHARGE,reg.revision()).map_err(err)?;
     let mut charge=DriverHold{kernel:&mut *guard.k,token:Some(token)};
     let result=(||{
-        let iss=NEXT_ISS.fetch_update(Ordering::Relaxed,Ordering::Relaxed,|n|n.checked_add(512)).map_err(err)?;
+        let iss=NEXT_ISS.fetch_update(Ordering::Relaxed,Ordering::Relaxed,|n|n.checked_add(8192)).map_err(err)?;
         let driver=Driver::new()?;
-        let mut s=Session{driver,ticket:t,snd:iss,rcv:0,credit:0,rx_window:cap.rx().min(144) as u16,
-            started:false,connected:false,local_fin:false,ended:false,events:128};
+        let mut s=Session{driver,ticket:t,snd:iss,rcv:0,credit:0,rx_window:cap.rx().min(reply_len) as u16,
+            started:false,connected:false,local_fin:false,ended:false,events:if artifact{4096}else{128}};
         run(&mut *charge.kernel,&mut s)
     })();
     charge.kernel.fabric.scoped_pointers.release_host_storage(token).map_err(err)?;
@@ -95,17 +117,23 @@ mod tests;
 pub(crate) trait SelectPeer {
     fn exchange(&mut self,frame:&[u8],reply:&mut [u8;N])->Result<usize,String>;
 }
+#[derive(Clone,Copy)]
+pub(crate) enum StorageRequest<'a> {
+    Select(Envelope),
+    Artifact(&'a[u8],&'a crate::anka64::dev_runner::DeveloperInputAuthority),
+}
 pub(crate) struct SelectStream<'a> {
     pub(crate) capacity:SocketCapacity,
-    pub(crate) envelope:Envelope,
+    pub(crate) request:StorageRequest<'a>,
     pub(crate) verifier:ServerLane,
     pub(crate) authority:&'a DeveloperFrameAuthority,
     pub(crate) peer:&'a mut dyn SelectPeer,
 }
 impl SelectStream<'_> {
+    pub(crate) fn artifact_input(&self)->bool{matches!(self.request,StorageRequest::Artifact(..))}
     pub(crate) fn run(self,k:&mut Kernel,key:ProcessKey,rounds:usize)->Result<(),String>{
         if rounds==0 || rounds>2_000_000{return Err("invalid Select execution budget".into());}
-        with_guest_select(k,key,self.capacity,self.envelope,self.verifier,self.authority,|k,s|{
+        with_storage_request(k,key,self.capacity,self.request,self.verifier,self.authority,|k,s|{
             let syn=s.start(k)?;
             s.exchange(k,self.peer,syn)?;
             if !s.connected {return Err("Select handshake incomplete".into());}
@@ -130,7 +158,7 @@ impl Session {
     fn exchange(&mut self,k:&mut Kernel,peer:&mut dyn SelectPeer,mut frame:Vec<u8>)->Result<(),String>{
         // ACK-driven deterministic peer. Every exchange is bounded independently
         // of guest instructions, and each RX goes through Driver/Fabric.
-        for _ in 0..32 {
+        for _ in 0..256 {
             let mut reply=[0u8;N];let n=peer.exchange(&frame,&mut reply)?;
             if n==0{return Ok(());}
             if n>N{return Err("peer frame exceeds NIC extent".into());}
@@ -141,3 +169,6 @@ impl Session {
 }
 #[cfg(test)]
 mod guest_tests;
+
+#[cfg(all(test,any(target_os="linux",target_os="macos")))]
+mod artifact_guest_tests;

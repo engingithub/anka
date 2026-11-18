@@ -36,6 +36,7 @@ ARTIFACT_STORAGE_PAIRS = ('anka110_artifact_storage',)
 COMPILER_STORAGE_BINDING_PAIRS = ('anka110_compiler_storage_binding',)
 ARTIFACT_TRANSFER_PAIRS = ('anka110_artifact_transfer',)
 ARTIFACT_TRANSPORT_PAIRS = ('anka110_artifact_transport',)
+GUEST_ARTIFACT_PAIRS = ('anka110_guest_artifact',)
 
 
 def main():
@@ -61,6 +62,7 @@ def main():
     selection.add_argument('--only-compiler-storage-binding', action='store_true', help='receipt-bound durable compiler artifact export')
     selection.add_argument('--only-artifact-transfer', action='store_true', help='bounded artifact upload framing and dispatch')
     selection.add_argument('--only-artifact-transport', action='store_true', help='serialized artifact TCP transport and guarded disclosure')
+    selection.add_argument('--only-guest-artifact', action='store_true', help='CC2 guest artifact upload through typed socket and NIC')
     parser.add_argument('--timeout', type=int, default=120, help='seconds per theory file')
     args = parser.parse_args()
     if args.timeout <= 0:
@@ -87,7 +89,8 @@ def main():
              COMPILER_STORAGE_BINDING_PAIRS if args.only_compiler_storage_binding else
              ARTIFACT_TRANSFER_PAIRS if args.only_artifact_transfer else
              ARTIFACT_TRANSPORT_PAIRS if args.only_artifact_transport else
-             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS + EVIDENCE_PAIRS + PROVIDER_PAIRS + GUARDED_PAIRS + BINDER_PAIRS + VERIFIER_PAIRS + STORAGE_VERIFIER_PAIRS + SOCKET_CAPACITY_PAIRS + OUTBOUND_SELECT_PAIRS + STORED_LAUNCH_PAIRS + ARTIFACT_STORAGE_PAIRS + COMPILER_STORAGE_BINDING_PAIRS + ARTIFACT_TRANSFER_PAIRS + ARTIFACT_TRANSPORT_PAIRS)
+             GUEST_ARTIFACT_PAIRS if args.only_guest_artifact else
+             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS + EVIDENCE_PAIRS + PROVIDER_PAIRS + GUARDED_PAIRS + BINDER_PAIRS + VERIFIER_PAIRS + STORAGE_VERIFIER_PAIRS + SOCKET_CAPACITY_PAIRS + OUTBOUND_SELECT_PAIRS + STORED_LAUNCH_PAIRS + ARTIFACT_STORAGE_PAIRS + COMPILER_STORAGE_BINDING_PAIRS + ARTIFACT_TRANSFER_PAIRS + ARTIFACT_TRANSPORT_PAIRS + GUEST_ARTIFACT_PAIRS)
     for stem in pairs:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')

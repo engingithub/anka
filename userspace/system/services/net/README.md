@@ -15,8 +15,9 @@ Implemented progression:
 - `httpd.c` — Phase 9.4g: implemented `/alive` HTTP service over the original socket IPC/shared-buffer ABI
 - `httpd_protected.c` — protected typed-input/output HTTP application; ordinary rebuild, link and finite-input execution accepted in the user-reported local run; see the separately accepted socket/NIC service below
 
-The original stack and its CC_B witnesses are implemented. Phase 10.8 requires
-additional protected rebuild acceptance; these are different claims.
+The original stack and its CC_B witnesses remain the protocol regression oracle.
+Phase 10.8's bounded protected rebuild is also accepted and closed; the sections
+below distinguish the legacy shared-buffer ABI from the protected copy-based path.
 
 These are real Anka64 system services, not examples. The end-to-end target is:
 
@@ -186,7 +187,7 @@ events, pipelining, request bodies, persistent HTTP connections, TLS, and
 concurrent clients are deferred.
 
 
-## Protected HTTP application and the remaining network boundary
+## Accepted protected HTTP application boundary
 
 `httpd_protected.c` ports the same bounded `/alive` decision and exact 200/404
 response bytes to authenticated `char *` accesses and typed `read_bytes` /
@@ -215,7 +216,7 @@ SEND notification is not architectural revocation. The protected socket/NIC
 migration now has a checked typed endpoint/copy contract. The separate S4 release witness verified
 Ethernet/TCP `/alive` through the virtual NIC in 124.61s.
 
-## Protected migration order
+## Accepted protected socket composition
 
 Keep the legacy sources and their protocol tests as the reference. The
 private-input protected HTTP application is accepted. The S1 kernel endpoint
@@ -272,3 +273,26 @@ For development acceptance use `bash scripts/check-anka108-tcp-session.sh --real
 instead: it additionally checks drops, checkpoint preservation, quota release
 and stale delivery, with one bootstrap. The public demo uses a fixed initial
 sequence number and one connection; it is not an Internet-facing TCP server.
+
+## Outbound storage clients and queue capacity
+
+Protected socket queues are configurable from 1 to 65536 bytes per direction,
+subject to owner/global admission; the default is 1024 bytes. One guest typed
+copy remains bounded to 1024 bytes. These queue/copy policies are distinct from
+the legacy shared buffer and from the HTTP application's 1024-byte request bound.
+
+The fixed-route outbound adapter supports separate Select and artifact-exchange
+modes. `storage_select.c` has accepted guest/file evidence. `storage_upload.c`
+now has accepted GA110 evidence for real compiler output, three bounded Append
+chunks, 64/1024-byte queues, and recovered publication after reply loss and file
+reopen. Artifact authority uses a separate default-deny verifier; a Select grant
+cannot authorize upload. Every frame uses the bounded NIC Driver/Fabric path.
+The driver reclaims diagnostic trace history only at clean, fully drained command
+boundaries; faults, live work and unconsumed frames prevent collection.
+
+Reproduce with `bash scripts/check-anka110-guest-artifact.sh --real` from the
+repository root. The host test peer bridges the virtual NIC to a real localhost
+TCP/file service using deterministic trusted evidence. This is not a general
+Internet-facing TCP stack, production credential provider or authenticated HTTP
+endpoint. Persistent retrieval and authorized live/reboot launch remain separate.
+See [DN-72](../../../../DESIGN_NOTES.md#guest-artifact-upload).

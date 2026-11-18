@@ -54,6 +54,13 @@ full ISO C, a GCC-compatible object format, aggregate-by-value ABI, arbitrary
 mutable globals or a complete libc. Consult current compiler code and DN-71 for
 profile-specific limits instead of extrapolating Stage 1/2 limits.
 
+The [compatibility backlog](../../../DESIGN_NOTES.md#toolchain-compatibility-backlog)
+tracks six open gaps: comments, short-circuit `&&`/`||`, source-order-independent
+`main`, array subscripting expressions, unary minus, and `>`/`>=`. Fixed array
+declarations do not imply subscripting support. Current probes use pointer
+arithmetic, `(0-2)` and reversed `<` comparisons; these workarounds are not
+implementation of the missing language features.
+
 ## Source bundles and preprocessing
 
 `ankapp` supports exact quoted inclusion from an explicit immutable bundle.
@@ -92,20 +99,28 @@ host validates exact output and publishes its receipt; it does not substitute a
 host linker. Publication is READ-only. Code loading and C startup require
 separate execution authority and the charged isolated-run profile.
 
-## Acceptance and remaining closure
+## Acceptance and current persistence work
 
-Latest ordinary-service evidence: Kleis **29 positive / 21 hostile**, six focused
-tests, **154 runtime tests with ten ignored**, and the explicit real concurrent
-compiler test **75.79s**. These overlapping groups are not a complete regression
-run. The HTTP/input packet now has user-reported Rust acceptance. Both monitor-bootstrap and AOM-version regressions passed on the pre-socket revision.
+Phase 10.8 C2–C5 and the protected network-service rebuild are closed within their
+stated profiles. The final evidence is in [DN-71](../../../DESIGN_NOTES.md#phase-108-final-evidence).
+Latest supplied CC2 lineage in the guest-upload witness: CC2_0 is 168840 bytes;
+CC2_1 and CC2_2 are byte-identical at 191576 bytes, entry 188888. These are lineage
+artifacts, not the separately compiled protected producer image.
 
-```sh
-bash scripts/check-anka108-rebuild-service.sh --real
-bash scripts/check-anka108-http-application.sh --real
+The accepted GA110 witness compiles a target C program and the uploader once,
+exports the current linked receipt's canonical reference envelope, and sends the
+actual target store all 11984 bytes through guest typed I/O, the virtual NIC and
+real guarded TCP. It verifies the file bytes and recovers the original publication
+after reply loss. This is focused acceptance, not a full-regression result or
+stored-image execution. The host coordinates requests and supplies trusted test
+evidence; no host C compilation/linking replaces guest tool execution.
+
+```bash
+bash scripts/check-anka110-guest-artifact.sh --real
 ```
 
-Use focused checks during development; run required ignored real witnesses
-explicitly and the complete single-threaded regression at the final checkpoint.
-The bounded protected NIC/TCP/HTTP rebuild passed in 124.61s; the combined
-packet/UDP guest passed in 85.25s. Final release verification remains. [DN-71](../../../DESIGN_NOTES.md#dn-71) is the authoritative
-closure checklist; historical test totals in older notes do not close this gate.
+Use focused checks during development. Ignored real witnesses must be selected
+explicitly; do not count filtered or ignored tests as passes. Retrieval, validation
+and live launch from persistent storage are the next milestone under
+[DN-72](../../../DESIGN_NOTES.md#guest-artifact-upload), followed by independent reboot
+acceptance. Existing rebuild and HTTP scripts remain regression entry points.

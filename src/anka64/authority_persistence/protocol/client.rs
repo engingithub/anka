@@ -12,6 +12,10 @@ static CONNECTIONS:AtomicU64=AtomicU64::new(1);
 // fresh authenticated channel/challenge; this counter is not durable identity.
 pub(crate) struct Binding {pub connection:u64,pub local:SocketAddr,pub remote:SocketAddr}
 pub(crate) trait ServerVerifier {
+    /// Separate artifact protocol authority. A Select grant never authorizes
+    /// upload, publication or outcome retrieval. Recheck this exact channel and
+    /// canonical request under the same policy lane as each observable effect.
+    fn verify_artifact(&mut self,_binding:Binding,_request:&[u8])->Verdict{Verdict::Invalid}
     /// Obtain CURRENT trusted evidence bound to this actual stream incarnation,
     /// expected anchor/installation/policy and server role. Addresses alone are
     /// insufficient. Implementations must not accept assertions from wire data.

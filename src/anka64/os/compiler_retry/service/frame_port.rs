@@ -89,8 +89,11 @@ impl Port {
     }
     fn step(&mut self)->Result<(),String>{
         self.k.run(1,1);
-        if !self.k.fabric.preprocessor_trace_within_bounds(self.trace_limit) || !self.k.fabric.fault_log.is_empty(){
-            return Err("driver trace/fault boundary".into());
+        if !self.k.fabric.fault_log.is_empty(){
+            return Err(format!("driver Fabric fault: {:?}",self.k.fabric.fault_log.first()));
+        }
+        if !self.k.fabric.preprocessor_trace_within_bounds(self.trace_limit){
+            return Err(format!("driver diagnostic trace exceeded {} entries/capacity",self.trace_limit));
         }
         Ok(())
     }

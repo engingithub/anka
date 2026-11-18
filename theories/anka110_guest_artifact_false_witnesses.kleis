@@ -1,0 +1,37 @@
+import "anka110_guest_artifact.kleis"
+example "hostile legacy profile cannot admit artifact" { assert(ga110_mode(bvconst(1,64),bvconst(4264,64),bvconst(4336,64),as110_true())) }
+example "hostile unknown mode" { assert(ga110_mode(bvconst(3,64),bvconst(4264,64),bvconst(4336,64),as110_true())) }
+example "hostile request oversized" { assert(ga110_mode(bvconst(2,64),bvconst(4265,64),bvconst(4336,64),as110_true())) }
+example "hostile reply tail" { assert(ga110_mode(bvconst(2,64),bvconst(4264,64),bvconst(4337,64),as110_true())) }
+example "hostile bad canonical" { assert(ga110_mode(bvconst(2,64),bvconst(4264,64),bvconst(4336,64),as110_false())) }
+example "hostile input forbidden in Select" { assert(ga110_input(bvconst(1,64),A109Valid,as110_true(),as110_true(),as110_true(),bvconst(4272,64))) }
+example "hostile unknown input authority" { assert(ga110_input(bvconst(2,64),A109Unknown,as110_true(),as110_true(),as110_true(),bvconst(4272,64))) }
+example "hostile different input" { assert(ga110_input(bvconst(2,64),A109Valid,as110_false(),as110_true(),as110_true(),bvconst(4272,64))) }
+example "hostile stale child" { assert(ga110_input(bvconst(2,64),A109Valid,as110_true(),as110_false(),as110_true(),bvconst(4272,64))) }
+example "hostile unfunded input" { assert(ga110_input(bvconst(2,64),A109Valid,as110_true(),as110_true(),as110_false(),bvconst(4272,64))) }
+example "hostile oversized input" { assert(ga110_input(bvconst(2,64),A109Valid,as110_true(),as110_true(),as110_true(),bvconst(4273,64))) }
+example "hostile wrong verifier" { assert(ga110_emit(bvconst(2,64),bvconst(1,64),A109Valid,as110_true(),as110_true(),as110_true(),as110_true())) }
+example "hostile revoked server" { assert(ga110_emit(bvconst(2,64),bvconst(2,64),A109Invalid,as110_true(),as110_true(),as110_true(),as110_true())) }
+example "hostile foreign socket" { assert(ga110_emit(bvconst(2,64),bvconst(2,64),A109Valid,as110_false(),as110_true(),as110_true(),as110_true())) }
+example "hostile guest changes request" { assert(ga110_emit(bvconst(2,64),bvconst(2,64),A109Valid,as110_true(),as110_false(),as110_true(),as110_true())) }
+example "hostile scalar pointer" { assert(ga110_emit(bvconst(2,64),bvconst(2,64),A109Valid,as110_true(),as110_true(),as110_false(),as110_true())) }
+example "hostile no guarded write" { assert(ga110_emit(bvconst(2,64),bvconst(2,64),A109Valid,as110_true(),as110_true(),as110_true(),as110_false())) }
+example "hostile early accepted FIN" { assert(ga110_fin(bvconst(4263,64),bvconst(4264,64),bvconst(4264,64),A109Valid)) }
+example "hostile early wire FIN" { assert(ga110_fin(bvconst(4264,64),bvconst(4263,64),bvconst(4264,64),A109Valid)) }
+example "hostile revoked FIN" { assert(ga110_fin(bvconst(4264,64),bvconst(4264,64),bvconst(4264,64),A109Invalid)) }
+example "hostile partial reply" { assert(ga110_deliver(bvconst(4335,64),bvconst(4336,64),as110_true(),as110_true(),A109Valid,as110_true())) }
+example "hostile missing FIN" { assert(ga110_deliver(bvconst(4336,64),bvconst(4336,64),as110_false(),as110_true(),A109Valid,as110_true())) }
+example "hostile echo mismatch" { assert(ga110_deliver(bvconst(4336,64),bvconst(4336,64),as110_true(),as110_false(),A109Valid,as110_true())) }
+example "hostile revoked final reply" { assert(ga110_deliver(bvconst(4336,64),bvconst(4336,64),as110_true(),as110_true(),A109Invalid,as110_true())) }
+example "hostile other guest" { assert(ga110_deliver(bvconst(4336,64),bvconst(4336,64),as110_true(),as110_true(),A109Valid,as110_false())) }
+example "hostile source refunded" { assert(ga110_loss(bvconst(9000,64),bvconst(0,64),bvconst(8,64),bvconst(8,64),as110_true(),as110_true())) }
+example "hostile retry duplicated publication" { assert(ga110_loss(bvconst(9000,64),bvconst(9000,64),bvconst(8,64),bvconst(9,64),as110_true(),as110_true())) }
+example "hostile old socket live" { assert(ga110_loss(bvconst(9000,64),bvconst(9000,64),bvconst(8,64),bvconst(8,64),as110_false(),as110_true())) }
+example "hostile retry not bound" { assert(ga110_loss(bvconst(9000,64),bvconst(9000,64),bvconst(8,64),bvconst(8,64),as110_true(),as110_false())) }
+example "hostile trace permits running driver" { assert(ga110_trace_collect(as110_false(),as110_true(),as110_true(),as110_true(),as110_true(),bvconst(77,64),bvconst(77,64),bvconst(12,64),bvconst(12,64))) }
+example "hostile trace permits pending DMA or completion or frame" { assert(ga110_trace_collect(as110_true(),as110_false(),as110_true(),as110_true(),as110_true(),bvconst(77,64),bvconst(77,64),bvconst(12,64),bvconst(12,64))) }
+example "hostile trace permits nonterminal Fabric transaction" { assert(ga110_trace_collect(as110_true(),as110_true(),as110_false(),as110_true(),as110_true(),bvconst(77,64),bvconst(77,64),bvconst(12,64),bvconst(12,64))) }
+example "hostile trace permits recorded fault" { assert(ga110_trace_collect(as110_true(),as110_true(),as110_true(),as110_false(),as110_true(),bvconst(77,64),bvconst(77,64),bvconst(12,64),bvconst(12,64))) }
+example "hostile trace permits overflowed trace" { assert(ga110_trace_collect(as110_true(),as110_true(),as110_true(),as110_true(),as110_false(),bvconst(77,64),bvconst(77,64),bvconst(12,64),bvconst(12,64))) }
+example "hostile trace permits transaction identity reset" { assert(ga110_trace_collect(as110_true(),as110_true(),as110_true(),as110_true(),as110_true(),bvconst(77,64),bvconst(1,64),bvconst(12,64),bvconst(12,64))) }
+example "hostile trace permits session work refill" { assert(ga110_trace_collect(as110_true(),as110_true(),as110_true(),as110_true(),as110_true(),bvconst(77,64),bvconst(77,64),bvconst(12,64),bvconst(13,64))) }

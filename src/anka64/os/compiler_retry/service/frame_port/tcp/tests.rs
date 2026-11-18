@@ -107,3 +107,42 @@ fn s4_real_nic_tcp_http_alive(){
     for epoch in [tcp,http]{assert!(s.kernel.linked_compiler_receipt(epoch).is_ok());}
     eprintln!("S4 passed: NIC handshake, exact-once split payload, protected HTTP before FIN, exact 74-byte response inside committed TCP frame, close and refund");
 }
+
+
+#[test]
+fn ga110_driver_reclaims_only_drained_trace_across_many_fragments(){
+    let mut d=Driver::new().unwrap();let binding=d.0.dev;let mut previous=None;
+    // More commands than the old lifetime-wide 4096-entry trace could hold.
+    // Exact bytes, controller binding and fixed trace capacity remain checked.
+    for i in 0..160 {
+        let bytes=[i as u8;118];
+        assert_eq!(d.rx(&bytes).unwrap(),bytes);
+        let rx_id=d.0.k.fabric.transaction(0).id.0;if let Some(old)=previous{assert!(rx_id>old); }
+        assert_eq!(d.tx(&bytes).unwrap(),bytes);
+        let tx_id=d.0.k.fabric.transaction(0).id.0;assert!(tx_id>rx_id);previous=Some(tx_id);
+        assert!(d.parked());assert_eq!(d.0.dev,binding);
+        assert!(d.0.k.fabric.preprocessor_trace_within_bounds(4096));
+    }
+}
+#[test]
+fn ga110_driver_trace_collection_refuses_pending_frames_transactions_and_faults(){
+    let mut d=Driver::new().unwrap();
+    assert!(d.0.k.inject_nic_rx(d.0.dev,&[7;60]));
+    assert!(d.collect_drained_trace().is_err());
+    assert_eq!(d.0.k.device_registry.lookup(d.0.dev).unwrap().controller.as_nic().unwrap().rx_queue_len(),1);
+    let mut d=Driver::new().unwrap();
+    let req=d.0.request(d.0.buffer,60,AccessKind::Read);
+    let index=d.0.k.fabric.submit(req,None);let id=d.0.k.fabric.transaction(index).id;
+    assert!(d.collect_drained_trace().is_err());assert_eq!(d.0.k.fabric.transaction(index).id,id);
+    assert!(!d.0.k.fabric.transaction(index).state.is_terminal());
+    let mut d=Driver::new().unwrap();
+    let req=d.0.request(d.0.buffer,N+1,AccessKind::Read);
+    assert!(d.0.k.fabric.execute_read(req).is_err());let faults=d.0.k.fabric.fault_log.len();assert!(faults>0);
+    assert!(d.collect_drained_trace().is_err());assert_eq!(d.0.k.fabric.fault_log.len(),faults);
+    let mut d=Driver::new().unwrap();
+    let req=d.0.request(d.0.buffer,60,AccessKind::Write);
+    d.0.k.fabric.execute_write(req,vec![9;60]).unwrap();d.command(60,60).unwrap();
+    assert!(d.collect_drained_trace().is_err());
+    assert_eq!(d.0.k.take_nic_tx(d.0.dev).unwrap(),vec![9;60]);
+    d.collect_drained_trace().unwrap();
+}

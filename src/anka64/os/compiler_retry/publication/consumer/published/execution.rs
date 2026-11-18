@@ -91,7 +91,7 @@ impl Kernel {
         // to the ordinary application realm. Charge it before either is built.
         let charge=machine_charge(image.bytes.len(),config)?
             .checked_add(if select.is_some(){12*1024*1024}else{0}).ok_or(CompilerLinkError::Binding)?
-            .checked_add(if input.is_some(){INPUT_CHARGE}else{0})
+            .checked_add(if input.is_some() || select.as_ref().is_some_and(|s|s.artifact_input()){INPUT_CHARGE}else{0})
             .ok_or(CompilerLinkError::Binding)?;
         let (_,account)=self.compiler_candidate_account()?;
         let report=self.fabric.scoped_pointers.reserve_host_storage(account,REPORT_CHARGE,

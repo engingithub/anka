@@ -29,6 +29,19 @@ impl Driver {
             && self.0.k.device_registry.lookup(self.0.dev).and_then(|s|s.controller.as_nic())
                .is_some_and(|n|n.tx_frame_count()==0)
     }
+    fn collect_drained_trace(&mut self)->Result<(),String>{
+        // This private driver is the sole controller in this Kernel. parked()
+        // excludes live DMA, queued RX, pending completions and unconsumed TX.
+        // Only then can terminal Fabric indices be forgotten. Never erase a
+        // fault/overflow or reset transaction IDs or outer session work limits.
+        if !self.parked() || !self.0.k.fabric.fault_log.is_empty()
+            || !self.0.k.fabric.preprocessor_trace_within_bounds(self.0.trace_limit)
+            || !self.0.k.fabric.compiler_provenance_quiescent(){
+            return Err("TCP trace collection requires a clean drained driver".into());
+        }
+        self.0.k.fabric.prepare_preprocessor_trace(self.0.trace_limit)
+            .map_err(|_|"TCP drained trace collection refused".into())
+    }
     fn command(&mut self,word:u64,n:usize)->Result<(),String>{
         let p=&mut self.0;
         let ctl=p.request(p.control,8,AccessKind::Write);
@@ -45,13 +58,16 @@ impl Driver {
         Err("TCP driver round budget exhausted".into())
     }
     fn rx(&mut self,b:&[u8])->Result<Vec<u8>,String>{
-        if !self.parked() || b.is_empty() || b.len()>N || !self.0.k.inject_nic_rx(self.0.dev,b){return Err("RX admission".into());}
+        if !self.parked() || b.is_empty() || b.len()>N{return Err("RX admission".into());}
+        self.collect_drained_trace()?;
+        if !self.0.k.inject_nic_rx(self.0.dev,b){return Err("RX admission".into());}
         self.command(u64::MAX,b.len())?;
         let req=self.0.request(self.0.buffer,b.len(),AccessKind::Read);
         self.0.k.fabric.execute_read(req).map_err(err)
     }
     fn tx(&mut self,b:&[u8])->Result<Vec<u8>,String>{
         if !self.parked() || !(14..=N).contains(&b.len()){return Err("TX admission".into());}
+        self.collect_drained_trace()?;
         let req=self.0.request(self.0.buffer,b.len(),AccessKind::Write);
         self.0.k.fabric.execute_write(req,b.to_vec()).map_err(err)?;
         self.command(b.len() as u64,b.len())?;

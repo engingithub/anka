@@ -9,7 +9,7 @@ the project's purpose and development entry points. Architectural decisions
 and future directions belong in these documents rather than separate root notes.
 
 For current work, start with [DN-72: authority and persistence status](#dn72-status)
-and the [storage server verifier gate](#dn72-storage-verifier). For the closed rebuild, see the
+and the [guest artifact upload checkpoint](#guest-artifact-upload). For the closed rebuild, see the
 [DN-71 status table](#dn71-status) and [final 10.8 evidence](#phase-108-final-evidence).
 DN-1 through DN-71 and the detailed DN-72 entries retain decisions and test results
 at the time they were made. Read a checkpoint’s “next” or “pending” in that context;
@@ -13462,7 +13462,7 @@ in 289.36s**.
 
 Track these items here rather than in a separate Markdown file. Historical
 failure notes may link here; this checklist owns current status and acceptance.
-All five items below remain **open**. A probe workaround is not feature support.
+All six items below remain **open**. A probe workaround is not feature support.
 
 | ID | Gap | Completion evidence |
 | --- | --- | --- |
@@ -13471,6 +13471,7 @@ All five items below remain **open**. A probe workaround is not feature support.
 | TC-3 | `main` placement | Entry selected by symbol or validated startup trampoline, independent of function and module order. |
 | TC-4 | Array subscripting expressions | Typed `a[i]` reads and assignments with element scaling, evaluation order and protected bounds/lifetime checks. Array declarations alone do not establish expression support. |
 | TC-5 | Unary minus | Typed unary negation with correct precedence and defined integer-width/overflow behavior; reject pointer negation. |
+| TC-6 | `>` / `>=` comparisons | Lexical distinction from `>>`, relational precedence, scalar type/width semantics and exactly-once evaluation in both compiler paths; positive and hostile lowering witnesses. |
 
 Before implementing each item, assess and extend the affected Kleis lexical,
 CC2 lowering, module/linking, entry/receipt and pointer contracts as applicable.
@@ -13793,7 +13794,7 @@ This documentation update did not rerun or extend the accepted gates.
 
 <a id="dn72-status"></a>
 
-### Current status — two-sided host storage I/O accepted on the developer Mac
+### Current status — guest artifact upload accepted; stored retrieval and live launch next
 
 **Phase 10.8 is closed and merged. Phases 10.9 and 10.10 remain open.**
 The protected virtual-NIC service can answer `/alive`. The persistence binder
@@ -13811,6 +13812,9 @@ requesters or authorize boot.
 | E10: caller verifier adapter | Developer Mac: 148 persistence reference tests passed, 0 failed or ignored, in 1.18s. |
 | E11: client verifies the storage server | [Formal gate](#dn72-storage-verifier): 43 positive witnesses passed; all 36 hostile claims explicitly disproved. Confirmed on the developer Mac. |
 | E12: protected host storage I/O | Developer Mac: 154 persistence reference tests passed in 0.99s, including the six E12 cases. |
+| Compiler output and artifact transport | CS110 receipt-bound export and AT110 framing/dispatch are implemented. AG110 has developer acceptance: 12 focused TCP/file tests and 206 reference tests, including terminal socket ownership correction; gate 51 positive / 42 hostile explicitly disproved. |
+| GA110 guest artifact upload | [Accepted bounded integration](#guest-artifact-upload): 44 positive / 36 hostile explicitly disproved; 7 quick tests and the explicit real CC2 witness passed (85.09s). Three chunks retained an 11,984-byte envelope; exact Outcome recovered revision 8 after deliberate post-commit reply loss and service recreation. No current full regression is claimed. |
+| Stored launch | Existing stored-launch gate: 49 positive / 56 hostile explicitly disproved. Retrieval, reconstruction, fresh execution admission and reboot execution are not established by upload acceptance. |
 
 E7/E8 are merged to main. The 148-test E10 run includes E8’s tests; it is a
 persistence reference result, not a whole-system regression.
@@ -15686,10 +15690,12 @@ not implement an autonomous guest retry coordinator.
 
 <a id="durable-artifact-storage-plan"></a>
 
-**Next: durable artifact storage and live launch (planned, not implemented).**
-A Select record holds an opaque envelope identity, not executable payload bytes.
-The accepted fixture exercises a real file-backed record behind a controlled
-network peer; it does not establish a deployed remote artifact server.
+**Durable artifact storage accepted through guest upload; retrieval/live launch next.**
+The earlier Select record holds an opaque envelope identity. AS110 now retains
+artifact payloads, CS110 binds compiler receipts, AT110/AG110 provide bounded
+framing and guarded TCP, and GA110 uploads through a CC2 guest and virtual NIC
+into actual durable host files. These accepted reference profiles do not yet
+establish a deployed production artifact server or stored-code execution.
 
 A network-accessible durable service is sufficient; Anka64 does not need a
 mounted remote filesystem or guest inode/disk-driver implementation. The first
@@ -15699,13 +15705,13 @@ must be independent of the retained storage. S3/Ceph backend adapters follow
 later, behind the same Anka64 authority and artifact contracts; no external
 storage product is required for the first acceptance demonstration.
 
-| Priority | Bounded deliverable | Required acceptance |
+| Priority | Bounded deliverable | Current evidence / remaining acceptance |
 | --- | --- | --- |
-| 1 | Kleis refinement for immutable artifact staging, transfer and durable publication | Reject partial publication, foreign staging handles, quota bypass, conflicting retries and stale authority; specify crash recovery and backend durability assumptions. |
-| 2 | Rust file-backed artifact objects and bounded upload/download | Preserve exact bytes, declared lengths, format/profile, dependencies and provenance; charge staged and retained storage, account cleanup, and retain prior committed selection on failure. |
-| 3 | Network service plus guest artifact transfer | Transfer in bounded chunks independently of socket-window size; enforce current authority, finite work and cancellation. Lost replies permit exact retries without duplicate effects. |
-| 4 | Retrieve, validate and launch a stored executable | Compile, persist, retrieve and validate bytes/receipt/dependencies, then admit a fresh process while Anka64 continues running. |
-| 5 | Independent restart demonstration | Restart guest and storage service separately, retain host files, reacquire current authority and run the same artifact; reject stale incarnations and revoked grants. |
+| 1 | Formal staging, transfer and durable publication contracts | AS110, CS110, AT110, AG110 and GA110 gates recorded below; preserve explicit authority, quota, crash and durability assumptions. |
+| 2 | File-backed immutable artifacts and compiler receipt binding | Implemented and focused tests accepted. Bounded backend reads exist; an integrated guest retrieval/launch path is not established. |
+| 3 | Network service plus guest artifact upload | GA110 real CC2 witness accepted: three chunks, exact retained bytes, charged cleanup, lost-reply recovery. Host coordinates exchanges and supplies trusted fixture evidence. |
+| 4 | Retrieve, validate and launch a stored executable | Next: review/extend affected Kleis gates first; retrieve exact bytes/receipt/dependencies and admit fresh runtime objects and execution authority while Anka64 keeps running. |
+| 5 | Independent restart demonstration | Pending after live launch: restart guest/service independently, retain files, reacquire current authority and reject stale incarnations or revoked grants. GA110 service recreation establishes only publication-outcome recovery. |
 
 Publication must never advertise an artifact until all required bytes and
 metadata are recoverably retained. Stage objects privately; finalize verified
@@ -15725,8 +15731,10 @@ The accepted stored-launch theory (49 positive / 56 hostile claims explicitly
 disproved) supplies launch-admission obligations. It does not by itself establish
 blob transfer, storage durability or atomic manifest publication. Review and
 extend the affected persistence, evidence, outbound transport, publication and
-stored-launch gates before implementing these new transitions. The artifact-storage refinement below now supplies the first additional gate.
-No wire ABI, cryptographic provider or backend vendor is selected here.
+stored-launch gates before implementing the remaining retrieval and execution
+transitions. AS110 and the later transfer sections below record the implemented
+canonical wire profile and file backend. No production credential provider or
+S3/Ceph backend is selected.
 
 **Artifact-storage formal checkpoint (AS110, 2026-11-17).**
 `anka110_artifact_storage.kleis` and its false-witness pair now define the first
@@ -16060,7 +16068,7 @@ the correct child files; no codec, authority or protocol semantics are changed.
 The subsequent 12/194 passing developer run above accepts this path correction.
 
 <a id="artifact-guarded-transport"></a>
-**AG110 — serialized artifact TCP transport (implementation awaiting Rust acceptance).**
+**AG110 — serialized artifact TCP transport (focused acceptance passed).**
 The accepted AT110 codec/dispatcher now has a concrete socket transport in
 `artifact/transfer/transport.rs`. The existing fixed-size Select registry/server
 uses a different request type, so this artifact adapter provides its own typed
@@ -16122,9 +16130,12 @@ files: fragmented upload/seal/publication/reopen, no effect before FIN, malforme
 frames, revoked reply suffix, changed caller, injected transient/zero writes,
 peer-preserving cancellation, busy-lane exclusion, fixed deadlines and global
 budgets, denied intake, and poisoned-provider cleanup. Test binders are explicit
-deterministic authority fixtures, not production authentication. **Rust compilation
-and tests remain unrun in the authoring environment**, which has no Rust toolchain.
-The prior AT110 12/194 acceptance does not cover this increment.
+deterministic authority fixtures, not production authentication. **Developer macOS
+acceptance passed after the terminal socket fix**, as recorded in
+`test-output-storage-3.txt.zip`: **12 focused transport tests passed in 0.46s**
+and **206 persistence reference tests passed in 5.59s**, with zero failures or
+ignored tests. The 12 transport tests are included in the 206. This is focused
+host TCP/file acceptance, not a full Anka64 regression or guest/NIC upload result.
 
 ```sh
 python3 scripts/check-anka109-gates.py \
@@ -16157,15 +16168,17 @@ a complete canonical reply and negative cases retain their exact-prefix/backend
 assertions. The cancellation test also asserts immediate socket release.
 `TransportError` gains Display formatting that reads its retained error payloads,
 addressing the two newly reported unused-field warnings without dropping details.
-**This correction remains uncompiled/unrun here**; rerun the two Rust scripts.
-The old unused `GuardedServer::shutdown` warning is unrelated.
+The subsequent developer run compiled the correction and passed all 12 focused
+transport tests and all 206 reference tests. The log starts with remnants of the
+older failed run; its final summaries establish acceptance. Printed panic messages
+are expected passing unwind witnesses. Only the existing unused
+`GuardedServer::shutdown` warning remains; the two new error-field warnings are gone.
 
-**Immediate next action:** accept AG110 with the focused commands above. Then
-attach this artifact exchange to the typed outbound NIC path and add the CC2 guest
-upload witness using retained compiler output and current stream-bound authority.
-Host TCP/file tests do not establish guest/NIC integration. Retrieval, stored-image
-validation and live launch under fresh execution authority follow; reboot follows
-live launch. S3/Ceph remains a later backend adapter.
+**Integration checkpoint accepted:** [GA110 guest upload](#guest-artifact-upload)
+now has passing quick and real CC2 evidence for the typed outbound NIC path.
+Host TCP/file acceptance and guest acceptance remain separately recorded.
+Retrieval, stored-image validation and live launch under fresh execution authority
+follow; reboot follows live launch. S3/Ceph remains a later backend adapter.
 
 
 **Guest Select acceptance follow-up (historical failure):** the developer run passed all seven quick
@@ -16224,3 +16237,177 @@ marker and backend counts, so an unrelated setup failure cannot satisfy its
 expected-error assertion or lead to a misleading `Option::unwrap()` panic.
 The subsequent developer run passed the fresh-generation binding test and
 the real CC2 guest/file witness; focused acceptance is recorded above.
+
+
+<a id="guest-artifact-upload"></a>
+
+### GA110 — CC2 guest artifact upload over the virtual NIC
+
+**Status (2026-11-17): accepted on the developer Mac.** The latest attached log
+passes **7 GA110 quick tests, 0 failed, 1 ignored in 0.10s**, and the supporting
+`g110_` filter passes **21 tests, 0 failed, 1 ignored in 0.48s**. That substring
+also matches AG110 tests; these are overlapping runs, not 28 distinct new tests.
+The explicitly selected real witness
+`ga110_real_cc2_artifact_upload` passes **1 test, 0 failed, 0 ignored in 85.09s**.
+The gate reports **44 positive / 36 hostile explicitly disproved**. Both driver
+trace regression tests and the repaired real path are now accepted.
+
+The witness uploads an **11,984-byte linked-image envelope**, including canonical
+metadata, using Append payloads of **4096 + 4096 + 3792 bytes**. Begin, all three
+Appends and Seal succeed; Publish durably commits before intentional reply loss.
+After file-service recreation, a fresh guest/channel's exact Outcome request
+recovers **revision 8**. Original publication validity, exact target bytes and
+per-run reservation refunds are checked. Latest lineage: CC2_0 **168840** bytes;
+CC2_1 = CC2_2 **191576** bytes, entry **188888**.
+
+This evidence applies to the supplied working-tree revision on
+`feat/anka110-artifact-storage`; commit/merge is not established by the log.
+The prior AG110 checkpoint remains **12 focused / 206 reference tests**. The
+latest supplied full regression is the earlier guest Select result (**1795
+passed, 16 ignored, 296.54s**), not a full run of this GA110 revision. The build
+reports **20 nonfatal dead-code warnings**; warning cleanup remains open.
+
+This milestone joins a real CC2 linked-image envelope, a CC2-compiled C uploader,
+typed socket copies, virtual NIC/Fabric DMA, bounded localhost TCP and AS110
+host files. The uploader is compiled once and reused for Begin, Append, Seal,
+Publish and Outcome. The host witness coordinates those requests; this is not
+yet a standalone guest compiler/storage coordinator or authenticated external
+deployment.
+
+Implementation boundaries:
+
+- `StorageRequest::Artifact` is distinct from the existing Select mode. It requires
+  a separate default-deny `ServerVerifier::verify_artifact` decision for the exact
+  canonical request and channel incarnation. A Select-only grant cannot upload.
+- Each artifact request is 168–4264 bytes; its full echoed reply is request length
+  plus 72, at most 4336 bytes. These are protocol framing bounds, independent of
+  configurable socket queues and the unchanged 1024-byte per-syscall copy bound.
+  A larger binary travels through multiple bounded Append exchanges.
+- The receipt runner reserves its existing input allowance before the new mode
+  provisions an exact length-prefixed request. Only that fresh artifact-mode
+  process may use protected `read_bytes` while attached to a socket. Ordinary
+  Select and socket applications gain no input permission. Input is bound to the
+  process/context and detached on completion, error or cancellation.
+- The endpoint retains charged fixed request/reply storage and checks every sent
+  prefix. FIN requires the entire request. Reply delivery requires exact length,
+  real FIN, canonical outcome, full request echo and current server authority.
+  Final reply validation and ACK hold the same verifier lane. Buffers are cleared
+  on endpoint destruction. Work, NIC events and instruction execution stay bounded.
+- The new C probe uses malloc/free, typed input and ssend/sshut/srecv; it needs no
+  raw address, file or NIC capability. It avoids the separately tracked comments,
+  `&&` and entry-order limitations rather than silently claiming those fixed.
+
+The real ignored witness compiles a bounded C program returning 42 and `storage_upload.c`
+through accepted lineage. The target contains 96 scalar increments and must yield
+more than 4096 envelope bytes, forcing multiple Append requests. A **separate reference CS110 export** supplies canonical
+expected envelope bytes from a current linked receipt. The actual target starts
+empty and receives its bytes only via guest socket/NIC/TCP traffic. Expected-byte
+and retained-dependency evidence are explicit deterministic test fixtures. The
+reference file is not substituted for the target file, and fixture trust is not
+production cryptographic authentication. The witness alternates 64/1024-byte queues,
+checks exact target bytes and original publication validity, and verifies that
+per-run reservations return to baseline. It drops the Publish reply only after
+an actual durable publication, recreates the file service, obtains the original
+revision with a new guest/channel and exact Outcome request, and rejects earlier
+setup failure as a substitute for the intended lost-reply case.
+
+**Acceptance commands**, from the repository root:
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" --only-guest-artifact
+bash scripts/check-anka110-guest-artifact.sh
+bash scripts/check-anka110-guest-artifact.sh --real
+```
+
+The quick script requires seven named GA110 tests (including two driver trace
+regressions) and reruns the inexpensive
+existing guest-Select checks. `--real` then requires exactly one passing explicit
+CC2 witness; a filtered-out or ignored test cannot satisfy acceptance. Run the
+real command once after quick checks pass; no full regression is needed to diagnose
+an initial integration failure.
+
+**Next:** assess and extend the affected Kleis contracts for bounded retrieval,
+exact receipt/dependency validation and admission before implementing live launch.
+The existing stored-launch gate (49 positive / 56 hostile) is a foundation, not
+proof of a new retrieval transport. Reconstruct
+fresh runtime objects and obtain fresh execution authority before live launch;
+prove the same path after reboot separately. An upload or persistent receipt does
+not itself grant execution. Podman-backed deployment and S3/Ceph adapters remain
+later work; ordinary durable files already support the current reference test.
+
+
+**GA110 probe correction — unsupported greater-than token (historical failure, resolved):** the earlier log
+shows successful quick checks and CC2 fixed-point convergence (CC2_1/CC2_2 both
+191576 code/backing bytes, entry 188888). The uploader then fails at cursor 558.
+In the supplied source, byte 557 is `>` in `length>4264`; the protected lexer's
+`q14` consumes this byte, accepts only a following `>` for right shift, and
+otherwise reports diagnostic 1. This is a compiler-language gap, not a transport
+hang or failed file commit. The target test source has no `>` operator.
+
+The probe now uses `4264<length` and `1024<amount` in all three chunk loops.
+These four comparisons have side-effect-free operands and identical intended
+bounds. The quick lexical-subset witness now refuses `>` in this probe before
+bootstrap. General `>`/`>=` language support is tracked as TC-6 in the existing
+compatibility backlog; it is not implemented by this fixture repair. No runtime
+permission, storage invariant or Kleis predicate changes. The log's 20 dead-code
+warnings did not cause this rejection; warning cleanup remains separate work.
+
+The subsequent passing real witness recorded above accepts this fixture repair.
+General greater-than support remains TC-6; acceptance does not close that gap.
+
+
+**GA110 drained-driver trace correction (accepted follow-up):** the earlier real guest run passed the
+syntax repair, Begin and a 4264-byte Append with a 1024-byte queue. A second full
+Append with a 64-byte queue generated enough RX/TX commands to exhaust the private
+NIC driver's cumulative 4096-entry diagnostic trace. The previous fast peer test
+used real TCP/files but bypassed the emulated Driver, so it could not expose this
+accumulation. The failure occurs in the driver trace check, not a compiler loop.
+
+Before each new RX/TX offer, the private TCP Driver now checks user PC zero,
+no exit, no process IO wait, no autonomous NIC work, no pending completion,
+empty RX and committed-TX queues, terminal Fabric transactions, empty fault log
+and the existing trace bound. Only then does it reuse the existing trace allocation
+through `prepare_preprocessor_trace`. All NIC slots are free at that boundary;
+no controller retains a transaction index. Transaction IDs continue monotonically;
+request, session and instruction budgets are not reset. No in-flight DMA trace,
+fault or overflow is discarded. The 4096-entry bound and accounting stay unchanged.
+Fault and trace-limit diagnostics now identify their separate causes.
+
+Kleis models this reclamation precondition and preservation of identity/work
+counters: eight additional positive witnesses and seven explicitly disproved
+hostile claims, total **44/36**. A fast real-Driver witness performs 160 RX/TX
+pairs, checking exact bytes, fixed capacity, binding and increasing transaction
+IDs. Another rejects collection with queued RX, unfinished Fabric work, recorded
+faults or an unconsumed TX frame. Both must pass before the script runs CC2.
+
+The subsequent developer log passed the extended 44/36 gate, both real-Driver
+regressions and the explicit guest upload witness. The acceptance record above
+supersedes the historical failure; no runtime gates were rerun for this docs review.
+
+
+### Documentation consistency review — 2026-11-17
+
+All 12 repository Markdown files were reviewed against the supplied source and
+latest GA110 log. Current summaries now distinguish historical Phase 10.8 closure,
+accepted guest upload, pending stored retrieval/live launch, and later reboot and
+production deployment. Historical checkpoint counts remain historical evidence;
+they must not be combined into a current full-suite claim.
+
+| Files | Review outcome |
+| --- | --- |
+| `ARCHITECTURE.md`, `DESIGN_NOTES.md` | Updated current status and storage roadmap, recorded GA110 acceptance, resolved obsolete pending labels, preserved explicit trust and execution boundaries. |
+| Root `README.md`, `userspace/README.md`, `userspace/bin/README.md` | Updated milestone evidence and guest upload scope; retained reproducible gate commands. |
+| `userspace/etc/README.md` | Removed an unsupported OIDC selection; the one-anchor model does not select a credential protocol. |
+| `userspace/system/README.md`, `userspace/system/compiler/README.md` | Updated accepted rebuild status, lineage sizes and the six open language/toolchain gaps. |
+| `userspace/system/services/README.md`, `userspace/system/services/net/README.md` | Clarified accepted protected networking, legacy fixtures, host persistence service and guest upload boundaries. |
+| `userspace/include/anka/README.md`, `userspace/lib/README.md` | Reviewed; existing public-header/runtime-subset descriptions remain accurate, so no content changes. |
+
+This is a documentation-only change. It neither implements runtime fixes nor
+reruns formal or regression suites. The compatibility backlog remains canonical
+for comments, logical short-circuiting, entry selection, indexing, unary minus
+and greater-than operators. Metal/Core ML exploration and future FPGA refinement
+remain separate from accepted CPU/Fabric emulator behavior. The immediate next
+bounded milestone is formal-first stored retrieval and authorized live launch;
+reboot follows that path, without expanding this milestone into a general filesystem.

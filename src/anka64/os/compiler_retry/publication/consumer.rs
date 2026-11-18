@@ -3,6 +3,8 @@
 //! also reserves the bounded isolated guest linker before constructing it.
 use super::*;
 mod published;
+#[cfg(all(test,any(target_os="linux",target_os="macos")))]
+pub(crate) use published::{LinkedCompilerReceipt,storage::{CompilerStoragePolicy,PersistentLinkIdentity,PersistentDependency}};
 pub(super) use published::PublishedCompilerLink;
 use crate::anka64::ankald::{self, ApplicationLinkProfile, AnkaldLinkedImage};
 use crate::anka64::dev_runner::DeveloperExecutionAuthority;

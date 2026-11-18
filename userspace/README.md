@@ -32,13 +32,23 @@ for lookup, including the operands of `#include`; it does not search host includ
 directories. `--input FILE --run` provides an explicitly authorized bounded input
 image to the spawned child. No input or NIC authority is inherited by name.
 
-The latest ordinary-service acceptance includes actual concurrent compiler jobs,
-A exhaustion, C reuse, stale-alias rejection and unaffected B (75.79s). The new
-protected HTTP application/input packet has user-reported local acceptance.
-The pre-socket full suite passed: 1,614 passed, 0 failed, 12 ignored.
-The bounded protected virtual NIC/TCP/socket/HTTP path passed (124.61s).
-Protected UDP parity passed in the combined 85.25s packet witness. Final release verification remains.
-See [the root README](../README.md) and [DN-71](../DESIGN_NOTES.md#dn-71).
+Phase 10.8 is closed: the protected packet/TCP/socket/HTTP path serves `/alive`
+through the virtual NIC, with the original CC_B stack retained as a regression
+oracle. Its final closure and the required post-malloc review are recorded in
+[DN-71](../DESIGN_NOTES.md#dn71-status).
+
+The accepted `bin/storage_upload.c` probe is compiled through CC2 and uploads real
+linked compiler output to a durable host file through typed sockets, NIC DMA and
+guarded localhost TCP. Its test harness supplies exact requests and trusted test
+evidence; placement in `/bin` conveys no storage grant. The guest Select and upload
+probes have separate acceptance scripts. Run the current upload witness with
+`bash scripts/check-anka110-guest-artifact.sh --real` from the repository root.
+
+Persistent artifact upload is accepted; retrieving a stored image and launching
+it under fresh authority, first live and then after reboot, remains next work.
+There is no general guest filesystem, S3/Ceph backend or production credential
+provider in this source tree. See [DN-72](../DESIGN_NOTES.md#dn72-status) for current
+evidence and [the root README](../README.md) for commands.
 
 ## Legacy development monitor
 

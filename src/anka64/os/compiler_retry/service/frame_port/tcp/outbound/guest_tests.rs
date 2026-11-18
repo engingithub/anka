@@ -124,7 +124,7 @@ impl Temp {
     fn open(&self)->FileRecord{FileRecord::open(&self.path(),10,20).unwrap()}
 }
 impl Drop for Temp {fn drop(&mut self){let _=std::fs::remove_dir_all(&self.0);}}
-fn compile(s:&mut RebuildService,source:&[u8],exec:&DeveloperExecutionAuthority,auth:&RebuildPublicationAuthority)->u64 {
+pub(super) fn compile(s:&mut RebuildService,source:&[u8],exec:&DeveloperExecutionAuthority,auth:&RebuildPublicationAuthority)->u64 {
     let bundle=SourceBundle::new("main.c",[SourceBundleMember::new("main.c",source.to_vec()).unwrap()]).unwrap();
     let job=s.submit(&bundle,0x40000,1_000_000_000,exec,auth).unwrap();
     let start=std::time::Instant::now();let mut last=start;
@@ -167,7 +167,7 @@ fn g110_real_cc2_file_select(){
             let binding=Arc::new(Mutex::new(None));
             let verifier:ServerLane=Arc::new(Mutex::new(Server{envelope:env(correlation),bound:binding.clone()}));
             let result=service.kernel.run_linked_compiler_publication_with_select(epoch,&exec,
-                SelectStream{capacity:SocketCapacity::new(cap,cap).unwrap(),envelope:env(correlation),verifier,authority:&net,peer:&mut peer},
+                SelectStream{capacity:SocketCapacity::new(cap,cap).unwrap(),request:StorageRequest::Select(env(correlation)),verifier,authority:&net,peer:&mut peer},
                 DevelopmentRunConfig::default());
             if lose {assert!(result.is_err(),"lost reply must not report success");}
             else {assert_eq!(result.as_ref().unwrap().execution().child_result,ProcessResult::Exited(0));}

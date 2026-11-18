@@ -1685,23 +1685,37 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 # 18. Current Implementation Facts
 
 **Current status:** Phase 10.8 is closed and merged to main. Phase 10.9 T1
-and the initial T2 model have passing formal gates. In Phase 10.10, the E5
-guarded transport contract passed (21 positive witnesses; 16/16 hostile
-witnesses disproved). The E6 guarded loopback server is accepted in the
-persistence reference suite: **135 passed, 0 failed, 0 ignored in 0.76s**.
-Concrete peer credential validation and production integration remain open.
+and the initial T2 model have passing formal gates; enrollment, reboot and
+production authority integration remain open. Phase 10.10 has accepted host
+file-backed persistence, verifier adapters, guarded TCP exchanges and now GA110
+CC2 guest artifact upload through the virtual NIC. The latest developer log
+passes **7 GA110 quick tests**, **21 supporting filter matches** (overlapping
+coverage), and the **real guest upload witness in 85.09s**; its Kleis gate is
+**44 positive / 36 hostile explicitly disproved**. The prior standalone
+persistence reference checkpoint passed **206 tests in 5.59s**.
+
+The guest upload retained an **11,984-byte linked-image envelope in three chunks**
+and recovered publication revision 8 after deliberate reply loss and file-service
+recreation. The host still coordinates exchanges and supplies deterministic
+trusted evidence. This does not establish production cryptographic authentication,
+stored-image retrieval/launch or reboot execution. GA110 acceptance is for the
+supplied working-tree revision on `feat/anka110-artifact-storage`, not a claim
+that those changes are merged.
+
 The [DN-71 status table](DESIGN_NOTES.md#dn71-status) and
-[final evidence record](DESIGN_NOTES.md#phase-108-final-evidence) supersede older
-intermediate counts and pending labels. The 10.8 runtime/formal gates were not rerun; their acceptance applies to the
-recorded tested revision. The 10.9 T1/T2 formal results are recorded separately
-in DN-72.
+[final evidence record](DESIGN_NOTES.md#phase-108-final-evidence) retain the
+historical 10.8 closure evidence. [DN-72](DESIGN_NOTES.md#dn72-status) records
+current persistence progress. The latest supplied full regression remains the
+earlier guest Select checkpoint: **1,795 passed, 16 ignored in 296.54s**. No full
+regression of the new GA110 revision is supplied. Documentation review reruns no
+runtime gates; the latest build still reports 20 nonfatal dead-code warnings.
 
 | Property | Status |
 |----------|--------|
 | ISA | Single-source instruction descriptions, including byte and protected-pointer operations; see `src/anka64/desc.rs` |
 | Self-hosted compiler | Exact CC2_1 == CC2_2 fixed point; CC_B == CC_C remains the bootstrap foundation |
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
-| Current CC2 witness | Accepted lineage witness: CC2_0 = 164840 bytes; exact CC2_1 = CC2_2 = 186920 bytes; entry 184232. Protected producer images are separate artifacts. |
+| Current CC2 witness | Accepted lineage witness: CC2_0 = 168840 bytes; exact CC2_1 = CC2_2 = 191576 bytes; entry 188888 (latest GA110 log). Protected producer images are separate artifacts. |
 | CC2 source | `userspace/system/compiler/ankacc2_stage3.c` and protected producer `ankacc2_abi2.c` |
 | Regression evidence | Final 10.8 acceptance: 1628 ordinary library tests passed, 15 ignored guest witnesses explicitly passed, complete Cargo suite passed; formal sweep: 48 pairs, 4467 positive witnesses and 3664 explicit hostile disproofs. See DN-71 for scope and input digest. |
 | Protected modules | Typed separate compilation, exact interface evidence, guest linking, ordered dependency receipts and separately authorized protected execution accepted, including heap-list and stale/bounds denial witnesses. |
@@ -3390,7 +3404,7 @@ for Phase 10. The historical CC_B limitations—eight-character identifiers,
 restricted literals and absent source/module composition—motivated AnkaCC2.
 Phases 10.0–10.8 have now delivered the second-generation toolchain and protected
 service rebuild. The remaining Phase 10 work includes the 10.9 authority/supply-chain
-audit and proposed 10.10 network persistence refinement; the lineage and bootstrap
+audit and the ongoing 10.10 network persistence refinement; the lineage and bootstrap
 rationale below remain applicable.
 
 Phase 10 therefore builds **AnkaCC2**, a second-generation self-hosted C
@@ -3586,13 +3600,13 @@ toolchains.
 | 10.6 | Exact AnkaCC2 self-host fixed point | Closed |
 | 10.7 | Protected local pointer ABI and application rebuild | Closed; DN-59 fixes its scope |
 | 10.8 | Shared allocation, compiler resource growth, typed modules and protected network-service rebuild | Closed; final evidence in DN-71 |
-| 10.9 | Identity/authority model, supply-chain closure and hostile CPU-to-HTTP audit | T1 and initial T2 model delivered; backend/evidence refinement, T3–T5 and integration pending; DN-72 |
-| 10.10 (proposed) | Durable network persistence using the artifact/publication foundation | Persistence reference and E2 accepted (105 tests; protocol 137/108; evidence 119/99); E3 provider-use gate developer-confirmed (116/94); E4 accepted (130 tests); E5 formal gate passed (21/16); E6 guarded loopback accepted (135 reference tests); credential and boot integration open; DN-72 |
+| 10.9 | Identity/authority model, supply-chain closure and hostile CPU-to-HTTP audit | T1 and initial T2 model delivered; persistence/evidence refinements implemented in 10.10; kernel enrollment/reboot, broader T3–T5 and production integration open; DN-72 |
+| 10.10 | Durable network persistence using the artifact/publication foundation | Host file backend, evidence adapters, guarded transport and GA110 guest artifact upload accepted within reference profiles; stored retrieval/live launch, reboot and production credential integration remain open; DN-72 |
 
 Phase 10.8's implementation chronology and test commands live in
 [DN-71](DESIGN_NOTES.md#dn-71). The repeated allocation/worker/compiler progress
 narrative formerly here has been consolidated there. Phase 10 as a whole remains
-open for 10.9 and the proposed 10.10 persistence work; producing `/alive` is not
+open for 10.9 and 10.10 persistence work; producing `/alive` is not
 evidence of requester authorization or durable storage.
 
 #### Phase 10.8 accepted architectural boundary
@@ -3693,13 +3707,17 @@ that model, building on the accepted 10.8 rebuild rather than reopening it.
 
 <a id="phase-1010-storage"></a>
 
-#### Persistence foundation and proposed Phase 10.10
+#### Persistence foundation and Phase 10.10 implementation
 
-**Initial T2 model, Rust core and host-local durable adapter delivered, 2026-11-04; no network service claimed.**
+**Historical foundation (2026-11-04):** the initial T2 model, Rust core and
+host-local durable adapter were delivered without a network service. Subsequent
+10.10 work now accepts guarded host TCP/file transport and GA110 guest upload.
+The initial results below retain their original scope; see
+[DN-72 current status](DESIGN_NOTES.md#dn72-status) for the latest evidence.
 The [DN-72 storage review](DESIGN_NOTES.md#dn72-storage-foundation) inventories the
 existing artifact, receipt and publication contracts and defines the next formal
 work. The persistence/reboot contract belongs in Phase 10.9 T2, composed with
-T3 caller authority and T4 artifact/execution admission. Proposed Phase 10.10
+T3 caller authority and T4 artifact/execution admission. Phase 10.10
 supplies the concrete durable network service. This is an explicit roadmap
 extension, not a change to the accepted Phase 10.8 boundary.
 
@@ -3718,8 +3736,10 @@ external fresh boot-attempt evidence after restart. A complete backend commit is
 a trusted premise in the abstract T2 model, refined by the host-local adapter
 and its stated filesystem assumptions. The developer passed all 29 core/backend
 tests in 0.37 seconds and the 51-positive/45-hostile backend theory gate. Use
-`scripts/check-anka110-persistence-reference.sh` for those entries without CC2/bootstrap. Kernel boot/authority wiring and network
-transport remain pending. No T2/10.10 closure is implied by the initial formal results.
+`scripts/check-anka110-persistence-reference.sh` for the expanded reference suite
+without CC2/bootstrap. Kernel boot/authority wiring remains pending; bounded
+network transport and upload acceptance are recorded later. Neither the initial
+formal results nor upload acceptance close T2 or all of 10.10.
 
 AOM supplies structured executable-object bytes and type/interface evidence.
 Full source/tool/dependency provenance and publication authority are maintained
@@ -4716,7 +4736,7 @@ copy storage; they do not specify TCP's advertised receive window, a packet
 size or a storage message limit. See the Phase 10.10 socket-capacity entry
 in DESIGN_NOTES.md for the runtime acceptance criteria.
 
-**Phase 10.10 outbound storage profile (formal gate passed; Rust runtime awaiting acceptance).**
+**Phase 10.10 outbound storage profile (guest Select accepted; artifact extension below).**
 A trusted adapter binds one guest incarnation to one configured route and a
 fresh connection. Only handshake control may precede storage-server verification.
 The guest cannot nominate a peer by putting an address or a credential in its
@@ -4736,7 +4756,8 @@ must serialize on that same lock. A busy lane or zero peer window cannot emit
 FIN. The receiver stages the bounded reply privately until peer EOF and
 rechecks evidence before each copy to the guest. The passive HTTP session is
 unchanged. This profile does not implement TCP retransmission, authenticated
-credential acquisition, or the receipt-managed CC2 guest launcher.
+credential acquisition. The later guest Select and GA110 sections add receipt-managed
+CC2 application integration without extending this TCP profile to general networking.
 
 The pre-socket checkpoint passed 1,614 tests with 12 ignored; the final DN-71
 record supersedes that count and includes protected network acceptance. C logical
@@ -4925,10 +4946,10 @@ Outbound application binding checks the requested generation against the live
 slot rather than imposing the nonzero rule used by separate connection and
 reservation identities. Reused or mismatched process keys remain rejected.
 
-### Planned durable artifact storage boundary
+### Durable artifact storage and pending launch boundary
 
-The next storage boundary retains executable payload bytes and their metadata,
-not only the existing Select record. The proposed first deployment is a Rust
+The accepted AS110/CS110/AT110/AG110/GA110 path retains executable payload bytes
+and their metadata, beyond the earlier Select record. The proposed deployment is a Rust
 network service backed by host files, optionally in Podman with a persistent
 host-mounted directory. This requires no guest filesystem or disk driver.
 S3/Ceph can later supply backend adapters without defining Anka64 authority.
@@ -4941,10 +4962,12 @@ must survive lost replies and service restart. Host filesystem durability and
 recovery assumptions remain explicit; container restart alone is not a power-loss
 proof. Stored references never confer live Fabric capabilities.
 
-The first acceptance path is compile, persist, retrieve, validate and launch a
-fresh process without restarting Anka64. Repeat after independent guest/service
-restarts with fresh authority. Production authentication, general object storage
-and this executable-byte path remain unimplemented by the accepted Select test.
+Compile, export, guest upload and durable publication now have focused acceptance.
+Next retrieve and validate the stored artifact, then admit and launch a fresh
+process without restarting Anka64. Repeat after independent guest/service restarts
+with fresh authority. File-service recreation in GA110 proves outcome recovery,
+not a rebooted guest launch. Production authentication and general object storage
+remain unimplemented.
 New storage transitions require Kleis gates before Rust implementation; the
 existing stored-launch gate is not a proof of blob storage or publication.
 See [DN-72 durable artifact storage plan](DESIGN_NOTES.md#durable-artifact-storage-plan)
@@ -5096,18 +5119,61 @@ reentrant/blocking callbacks. File synchronization and serialized cleanup can
 still block on the host; this is not a hard real-time implementation. Poisoned
 provider state cannot authorize further IO, and stale sessions cannot redispatch.
 
-The AG110 gate passes **51 positive / 42 hostile explicitly disproved**. Twelve
-real TCP/file tests are supplied, with Rust acceptance pending. Production
-credentials, a CC2 guest upload over the virtual NIC and stored-image launch
-remain explicit integration work. See
+The AG110 gate passes **51 positive / 42 hostile explicitly disproved**. Developer
+macOS acceptance confirms **12 focused TCP/file tests passed in 0.46s** and
+**206 persistence reference tests passed in 5.59s**, all with zero failures. The
+12 are included in the 206; this does not establish a full-system regression. Production
+credentials and stored-image launch remain explicit integration work. The GA110
+guest/NIC upload implementation below now has focused acceptance. See
 [DN-72 AG110](DESIGN_NOTES.md#artifact-guarded-transport) for scope and commands.
 
 
-**AG110 closure correction (acceptance pending):** the first developer build
+**AG110 closure correction (accepted):** the first developer build
 compiled and passed 5 of 12 transport tests; seven timed out while draining the
 response. Terminal sessions now take/drop their owned TCP stream immediately,
 rather than retaining it after an ignored shutdown result. This enforces the
 existing socket-closure invariant without changing the 51/42 Kleis contract.
 Tests assert descriptor ownership release and retain full-reply/prefix checks;
 expanded timeout diagnostics distinguish transport progress from terminal errors.
-The corrected Rust build and runtime tests still require developer verification.
+The subsequent developer build passed all 12 transport tests and all 206 reference
+tests. The old failure remains in the log as historical output. Only the existing
+unused `GuardedServer::shutdown` warning remains.
+
+
+### GA110 guest upload integration (developer acceptance passed)
+
+`StorageRequest::Artifact` binds one canonical AT110 request to a fresh protected
+application socket. The separate `verify_artifact` hook defaults to denial; the
+legacy Select verifier cannot authorize upload. Fixed request/reply staging is
+charged with endpoint storage. Current authority, the exact transmitted prefix,
+explicit FIN, exact reply echo and outcome are checked before guest disclosure.
+The final receive/ACK and later typed copies use the verifier's serialized lane.
+
+The receipt runner reserves input storage before provisioning a length-prefixed
+request for this exact process/context. Protected input is enabled only for this
+artifact socket mode and detached on all exit paths. `storage_upload.c` uses
+malloc/free and typed input/socket calls; a 1024-byte syscall limit does not limit
+the total binary size. Append requests carry up to 4096 bytes across configurable
+queues. Each connection carries one bounded request and reply, with finite work,
+NIC event, instruction and time budgets.
+
+The drained-driver trace refinement passes **44 positive / 36 hostile explicitly
+disproved**. The latest developer run passes **7 quick tests in 0.10s**, including
+two real-Driver trace regressions, **21 supporting matches in 0.48s** (including
+AG110 overlap), and the explicit **real CC2 witness in 85.09s**. All report zero
+failures; the real witness is ignored by ordinary test selection and was run
+explicitly. It uploads an 11,984-byte linked-image envelope in three Append
+payloads (4096, 4096 and 3792 bytes), alternating 64/1024-byte queues. Publish
+commits before deliberate reply loss; service recreation and a fresh Outcome
+exchange recover the original revision 8.
+
+The private TCP Driver reclaims terminal diagnostic history before new commands
+only at a clean, fully drained checkpoint. Existing trace capacity, transaction
+identity counters, session work and DMA checks are preserved. The previously
+reported trace-limit failure is resolved by this tested refinement.
+Canonical expected bytes come from a separate CS110
+reference export. The test coordinator and deterministic authority/dependency
+providers are trusted fixtures, not guest-controlled identities or production
+credentials. Upload completion does not establish retrieval, authorized live
+launch or reboot execution. See [DN-72 GA110](DESIGN_NOTES.md#guest-artifact-upload)
+for commands, accounting and the acceptance boundary.

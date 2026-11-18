@@ -50,68 +50,64 @@ and forced the abstractions beneath it to become more precise.
 | Protected allocation | Shared allocation/free service, supported C `malloc/free`, initialized heap/local storage, cleanup and independent-client reuse with stale-alias rejection |
 | Compiler resources | Charged source/tool custody, protected ABI-2 producer, bounded output retry, retained artifacts and atomic publication; described workspace tables exercised by real guest CC2 |
 | Module composition | Separately compiled protected C modules, merged frame metadata, ordered dependency receipts, publication and ordinary process execution |
+| Durable compiler artifacts | Receipt-bound export and CC2 guest upload through the virtual NIC to a host-file store, including lost-reply recovery; retrieval/live launch pending |
 | Formal development | Kleis/Z3 contracts, positive witnesses, and deliberately false claims that must be explicitly disproved |
 
 The original MC68000 implementation remains in the repository as the project's
 experimental foundation. Active architecture and toolchain development targets
 Anka64.
 
-## Current checkpoint — Phase 10.8 complete; 10.9–10.10 in progress
+## Current checkpoint — guest artifact upload accepted
 
-**Phase 10.8 is complete.** The protected network-service rebuild serves `/alive`
-through the virtual NIC. Current progress separates three kinds of evidence:
+**Phase 10.8 is closed and merged. Phases 10.9 and 10.10 remain open.**
+The protected service stack serves `/alive` through the virtual NIC. A CC2-compiled
+guest can now upload actual linked compiler output through typed sockets, NIC DMA,
+guarded localhost TCP and a durable host-file artifact store.
 
-| Evidence level | Current status |
+| Evidence | Accepted scope |
 |---|---|
-| Integrated runtime features | Phase 10.8 protected network-service rebuild and `/alive` through the virtual NIC |
-| Formal contracts | Phase 10.9 Kleis formalizations for recognition, enrollment, grant admission, persistence and reboot |
-| Implemented reference mechanisms | Phase 10.10 persistence backend, codec, loopback server/client and evidence registry and E6 guarded loopback server; 135 persistence reference tests passed |
+| Phase 10.8 closure | Protected allocation/free, post-malloc whole-stack review, concurrent compiler jobs, typed modules, charged linking/execution and rebuilt network services; historical final verification: 1,628 ordinary tests, 15 explicit guest witnesses and 48 Kleis pairs |
+| Authority and persistence | T1/T2 formal contracts, evidence admission/verifier adapters, durable records and bounded transport; production credentials and Kernel enrollment/reboot integration remain open |
+| Host artifact storage | Receipt-bound compiler export, bounded upload protocol and guarded TCP/file transport; last standalone persistence reference result: 206 passed, with 12 focused AG110 tests included |
+| Guest artifact upload (GA110) | Latest supplied log: 44 positive / 36 hostile explicitly disproved; 7 quick tests passed in 0.10s; real CC2 upload/recovery witness passed in 85.09s |
 
-The [E5 guarded transport contract](DESIGN_NOTES.md#dn72-guarded-transport)
-passed 21 positive witnesses and explicitly disproved all 16 hostile witnesses.
-E6 passed on the developer machine: **135 reference tests passed, 0 failed,
-0 ignored, in 0.76s**. The server rechecks authority before writing each reply
-fragment. Its tests supply peer evidence through a trusted binder. Validating
-credentials on a real connection and integrating enrollment and reboot remain open.
+The real witness transfers an **11,984-byte canonical linked-image envelope** in
+three Append chunks (4,096 + 4,096 + 3,792 bytes), alternates 64/1,024-byte queues,
+and recovers publication revision 8 after deliberate reply loss and service/file
+reopen. The compiled guest performs the typed I/O; a trusted test coordinator
+supplies bounded requests and deterministic authority/dependency evidence.
+This does not yet provide a standalone external storage deployment or guest
+filesystem. Stored bytes do not grant execution authority.
 
-Phase 10.6 self-hosting and Phase 10.7 protected local applications are complete.
-Phase 10.8 has accepted typed I/O, protected module composition, C `malloc/free`,
-independent-client allocation/reuse and compiler artifact publication. The
-required post-malloc whole-stack review is recorded in
-[DESIGN_NOTES.md, DN-71](DESIGN_NOTES.md#dn-71).
+The supporting `g110_` filter passed 21 tests with one ignored in 0.48s; it also
+matches AG110 tests, so overlapping groups must not be added. The latest supplied
+whole-suite result remains the earlier **1,795 passed, 16 ignored in 296.54s**.
+No complete regression for the current upload revision is claimed. The current
+focused build reports 20 nonfatal dead-code warnings.
 
-| Closure area | Verified progress |
-|---|---|
-| C2 resources | Shared allocation, charged preprocessing/admission/link/run, retained provenance, checked retries and actual cleanup |
-| C3 language/growth | Source beyond 64 KiB, table growth, recursive declarations, typed heap lists, automatic directory retry with exact AOM parity |
-| C4 linking/execution | Typed guest linking, persistent receipts, large-image load, explicit C startup and separately charged execution |
-| C5 ordinary service | Normal rebuild coordinator, actual concurrent compiler jobs, A exhaustion, C reuse, unaffected B and stale-alias rejection |
+**Next milestone:** retrieve and validate a stored image and its dependencies,
+reconstruct fresh runtime objects, and launch under current execution authority
+without restarting Anka64. Separate guest/service reboot acceptance follows.
+The stored-launch Kleis gate (49 positive / 56 hostile) is a foundation; extend
+affected retrieval/transport/admission contracts before implementing new behavior.
+Podman with persistent host files, S3/Ceph adapters and Metal execution are later
+work, not prerequisites for the accepted file-backed upload.
 
-Latest supplied ordinary-service evidence: **6 focused tests**, **154 runtime
-tests with 10 ignored**, and the explicit real concurrent test in **75.79s**.
-The associated Kleis gate passed **29 positive / 21 explicitly disproved hostile
-witnesses**. These groups overlap and are not a fresh complete regression run.
-**Protected HTTP application accepted (user-reported, 2026-11-01):**
-`httpd_protected.c` now compiles, links and runs through the ordinary rebuild
-service with private request storage and typed input/output. The HTTP Kleis gate
-passes **34 positive / 21 hostile witnesses**. This is finite-input application
-acceptance, not socket/NIC acceptance.
+Reproduce the upload acceptance from the repository root:
 
-**Last complete regression before typed sockets:** 1,614 passed, 0 failed,
-12 ignored in 289.36 seconds. Both the monitor bootstrap and typed AOM
-regressions passed individually as well. Ignored real gates are run separately.
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" --only-guest-artifact &&
+bash scripts/check-anka110-guest-artifact.sh --real
+```
 
-**Phase 10.8 network-service evidence:** The typed socket kernel path passed its five focused Rust tests.
-The real CC2 socket HTTP witness passed in 92.83 seconds: the client kept the
-stream open and received the exact reply under backpressure. The real Ethernet/ARP/IPv4/ICMP NIC gate also passed (83.16 seconds).
-The rebuilt bounded `/alive` path passed on the virtual NIC in **124.61s**:
-protected TCP delivered the split request and transmitted the protected HTTP
-reply before peer FIN. The legacy UDP oracle passed in 1.02s. In a single
-85.25s release witness the protected guest passed 17 UDP and 10 Ethernet/ARP/
-IPv4/ICMP cases, checking committed wire bytes, drops, receipts and refunds.
-Phase 10.8 final release verification is complete.
-The legacy CC_B/shared-buffer stack remains the protocol reference. DN-71 also
-tracks future logical-operator support and source-order-independent C entry.
+The script runs quick checks before one explicit CC2 witness. See
+[DN-72 current status](DESIGN_NOTES.md#dn72-status),
+[GA110 evidence](DESIGN_NOTES.md#guest-artifact-upload) and the
+[compiler compatibility backlog](DESIGN_NOTES.md#toolchain-compatibility-backlog).
+The legacy CC_B/shared-buffer network stack remains a protocol regression oracle;
+its retention does not reopen Phase 10.8.
 
 ## Build and explore
 
@@ -140,7 +136,7 @@ The ordinary protected path is available separately:
 cargo run --release -- rebuild --include shared.h --run main.c helper.c
 ```
 
-For the current HTTP application packet:
+For the accepted finite-input HTTP application witness:
 
 ```sh
 bash scripts/check-anka108-http-application.sh --real
