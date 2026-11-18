@@ -329,6 +329,12 @@ impl Fabric {
         Some(hwm)
     }
 
+    /// Final destruction of a privately owned, synchronous isolated realm.
+    /// The caller must stop scheduling it and retain no external DMA borrower.
+    pub(crate) fn scrub_retired_private_memory(&mut self) {
+        for byte in &mut self.memory { unsafe { std::ptr::write_volatile(byte,0) }; }
+    }
+
     /// Zero the entire physical extent of a placed Active object.
     ///
     /// This guarantees declarative payload semantics: the loader

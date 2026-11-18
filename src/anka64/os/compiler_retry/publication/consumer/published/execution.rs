@@ -23,13 +23,14 @@ impl LinkedCompilerRunReport<'_> {
 }
 impl Drop for LinkedCompilerRunReport<'_> {
     fn drop(&mut self) {
+        crate::anka64::os::typed_socket::select::download::scrub(&mut self.execution.byte_output);
         drop(std::mem::take(&mut self.execution.byte_output));
         if let Some(r)=self.reservation.take() {
             let _=self.kernel.fabric.scoped_pointers.release_host_storage(r);
         }
     }
 }
-fn machine_charge(image:usize,config:DevelopmentRunConfig)->Result<u64,CompilerLinkError> {
+pub(super) fn machine_charge(image:usize,config:DevelopmentRunConfig)->Result<u64,CompilerLinkError> {
     let d=DevelopmentRunConfig::default();
     if image==0 || image>0x200000 || config.quantum==0 || config.max_rounds==0
         || config.quantum>d.quantum || config.max_rounds>d.max_rounds
@@ -101,7 +102,7 @@ impl Kernel {
             Ok(r)=>r,
             Err(e)=>{let _=self.fabric.scoped_pointers.release_host_storage(report);return Err(e.into());}
         };
-        let result=(||->Result<DevelopmentRunReport,CompilerLinkError> {
+        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||->Result<DevelopmentRunReport,CompilerLinkError> {
             let image=self.compiler_publications.links[&epoch].image.as_ref().ok_or(CompilerLinkError::Binding)?;
             let mut fabric=Fabric::with_application_heap(0x1000000)?;
             if !fabric.application_run_storage_ok() {return Err(CompilerLinkError::Storage);}
@@ -121,10 +122,21 @@ impl Kernel {
                 (None,Some((input_authority,bytes)))=>dev_runner::run_accounted_c_application_with_input(
                     &registry,authority,Some(input_authority),&mut fabric,&mut placement,config,bytes),
                 (None,None)=>dev_runner::run_accounted_c_application(&registry,authority,&mut fabric,&mut placement,config),
-            }}.map_err(CompilerLinkError::Run)?;
+            }};
+            // The synchronous child/driver are gone. Erase the entire private
+            // physical backing before releasing this realm's reservation.
+            fabric.scrub_retired_private_memory();
+            let run=run.map_err(CompilerLinkError::Run)?;
             if run.byte_output.capacity()>OUTPUT_BYTES {return Err(CompilerLinkError::Storage);}
             Ok(run)
-        })();
+        }));
+        let result=match result{Ok(result)=>result,Err(payload)=>{
+            // Provider unwind destroys the isolated realm before refunding its
+            // backing. Do not leak the enclosing Kernel reservations on panic.
+            let _=self.fabric.scoped_pointers.release_host_storage(machine);
+            let _=self.fabric.scoped_pointers.release_host_storage(report);
+            std::panic::resume_unwind(payload)
+        }};
         // The closure has destroyed Fabric, placement, registry and all CPU /
         // cleanup state, including on timeout/fault. No device exists to retain
         // an external borrow. Report output has a separate live reservation.

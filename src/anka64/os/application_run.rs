@@ -40,6 +40,7 @@ impl Kernel {
                     matches!(w[0],SYS_SOCKET_RECV|SYS_SOCKET_SEND|SYS_MALLOC|SYS_FREE)
                         || (w[0]==SYS_SOCKET_SHUT_WR && self.application_select(idx))
                         || (w[0]==SYS_READ_BYTES && self.application_artifact_input(idx))
+                        || (w[0]==SYS_WRITE && self.application_download_output(idx,w[4]))
                         || (w[0]==SYS_EXIT && self.socket_exit_drained(idx))
                 } else {matches!(w[0],SYS_EXIT|SYS_WRITE|SYS_READ_BYTES|SYS_MALLOC|SYS_FREE)});
         }

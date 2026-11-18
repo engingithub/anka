@@ -12,6 +12,15 @@ static CONNECTIONS:AtomicU64=AtomicU64::new(1);
 // fresh authenticated channel/challenge; this counter is not durable identity.
 pub(crate) struct Binding {pub connection:u64,pub local:SocketAddr,pub remote:SocketAddr}
 pub(crate) trait ServerVerifier {
+    /// GD110 authority is separate from Select and upload. The trusted adapter
+    /// supplies the actual virtual stream binding and the complete pinned range.
+    fn verify_read(&mut self,_binding:Binding,_request:super::super::artifact::transfer::read::ReadRequest)->Verdict{Verdict::Invalid}
+    /// Independently validate current read authority AND exact immutable content.
+    /// Canonical framing/echo alone is insufficient. Called at EOF and commit.
+    fn verify_read_reply(&mut self,_binding:Binding,_request:super::super::artifact::transfer::read::ReadRequest,_reply:&[u8])->Verdict{Verdict::Invalid}
+    /// Current read authority, full image/metadata and ordered dependency/provenance validation.
+    /// This does not grant execution. Called while the private image is borrowed.
+    fn verify_download(&mut self,_envelope:super::super::artifact::retrieval::StoredEnvelope<'_>)->Verdict{Verdict::Invalid}
     /// Separate artifact protocol authority. A Select grant never authorizes
     /// upload, publication or outcome retrieval. Recheck this exact channel and
     /// canonical request under the same policy lane as each observable effect.

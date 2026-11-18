@@ -5,6 +5,9 @@ use crate::anka64::authority_persistence::{Error as StoreError,Verdict};
 use crate::anka64::authority_persistence::artifact::{ArtifactStore,Caller,Evidence,Manifest,Scope,Selection};
 use std::io::Read;
 mod envelope;
+pub(crate) mod retrieval;
+pub(crate) mod download;
+pub(crate) mod launch;
 use envelope::Envelope;
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]

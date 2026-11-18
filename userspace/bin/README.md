@@ -25,6 +25,13 @@ capabilities and does not imply a Unix process or library ABI.
   reply and file-service reopen. Run `bash scripts/check-anka110-guest-artifact.sh --real`;
   the script checks the quick witnesses first. Stored-image retrieval/launch is
   separate work; this probe does not confer execution authority.
+- `storage_download.c` is the distinct protected AR110 read pump. It sends one
+  exact 168-byte command, receives `200 + count` response bytes and waits for real
+  EOF before writing the payload into its charged private report. The trusted
+  Kernel adapter compares those bytes with authenticated receive custody and
+  assembles contiguous ranges under one budget/deadline. Run
+  `bash scripts/check-anka110-guest-download.sh --real` for the real CC2/NIC/file
+  witness. Downloaded bytes remain non-executable private custody.
 - `local_initialization_probe.c` exercises initialized local bytes and pointer kinds.
 
 Some probes intentionally fault or reject malformed inputs; their Rust harnesses

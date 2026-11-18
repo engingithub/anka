@@ -1698,17 +1698,26 @@ The guest upload retained an **11,984-byte linked-image envelope in three chunks
 and recovered publication revision 8 after deliberate reply loss and file-service
 recreation. The host still coordinates exchanges and supplies deterministic
 trusted evidence. This does not establish production cryptographic authentication,
-stored-image retrieval/launch or reboot execution. GA110 acceptance is for the
-supplied working-tree revision on `feat/anka110-artifact-storage`, not a claim
-that those changes are merged.
+stored-image retrieval/launch or reboot execution. GA110 was merged through PR #35 at
+`8038bc21a8161443fcab1a45bb4b6295ae118e44`. SR110 now has a passing formal
+retrieval/admission refinement (92 positive / 78 hostile). Its first Rust slice
+implements charged private file retrieval and canonical envelope decoding; all
+20 focused tests passed on macOS in 7.20s. AR110 now formalizes concrete read wire
+framing and guarded disclosure (117 positive / 98 hostile witnesses). The Rust
+read codec/client and host guarded TCP path passed their 47-test focused runtime
+gate on macOS. GD110 guest-download orchestration now has a passing formal gate
+(174 positive / 149 hostile explicitly disproved). The runtime adapter now
+implements charged guest retrieval into private image custody; fresh executable
+admission remains open.
 
 The [DN-71 status table](DESIGN_NOTES.md#dn71-status) and
 [final evidence record](DESIGN_NOTES.md#phase-108-final-evidence) retain the
 historical 10.8 closure evidence. [DN-72](DESIGN_NOTES.md#dn72-status) records
 current persistence progress. The latest supplied full regression remains the
 earlier guest Select checkpoint: **1,795 passed, 16 ignored in 296.54s**. No full
-regression of the new GA110 revision is supplied. Documentation review reruns no
-runtime gates; the latest build still reports 20 nonfatal dead-code warnings.
+regression of the current revision is claimed. GD110 runtime evidence and its
+environment-limited broader regression are recorded below and in DESIGN_NOTES.md.
+The current release library-test build reports 21 nonfatal warnings.
 
 | Property | Status |
 |----------|--------|
@@ -5177,3 +5186,245 @@ providers are trusted fixtures, not guest-controlled identities or production
 credentials. Upload completion does not establish retrieval, authorized live
 launch or reboot execution. See [DN-72 GA110](DESIGN_NOTES.md#guest-artifact-upload)
 for commands, accounting and the acceptance boundary.
+
+
+
+### SR110 stored retrieval and live-launch refinement
+
+The next stage is formalized in `anka110_stored_retrieval.kleis` and its hostile
+pair: **92 positive witnesses passed and 78/78 hostile claims explicitly disproved**
+locally on 2026-11-18. Select it with `--only-stored-retrieval` in the 10.9/10.10
+gate runner. This is a formal contract; it does not claim a completed retrieval
+transport, executable importer or reboot runtime.
+
+SR110 separates charged private reception, complete validation, runnable child
+custody and closing/reclamation. It pins the full immutable CS110 manifest and
+accepts only contiguous bounded reads. Lost responses spend the same cumulative
+work/deadline budget without advancing the cursor. Complete canonical reply and
+EOF checks bind the current request/channel; current read authority is separate
+from the execute grant consumed at launch. The final authority observation must
+use the launch commit's current time, not a cached timestamp.
+
+The CS110 envelope length includes its header, ordered dependencies and image;
+it is not the code extent. Exact content, metadata, profile, entry geometry and
+retained provenance/dependencies must be checked before an immutable private
+image can enter fresh execution admission. Reconstruct new Fabric/frame/context
+objects; never restore pointer kinds, live ObjectIds, saved event contexts or
+runtime capabilities from stored bytes. Require sealed code and drained work.
+The prior boot selection and independent peer remain unchanged.
+
+Owned failure retains charges until local revocation, physical-work drainage
+and scrubbing complete. Foreign or stale tickets cannot refund a new occupant.
+A successful launch transfers custody and charge to the child rather than
+reclaiming its backing. Fresh process incarnation zero remains valid when it
+matches actual liveness; nonzero, nonwrapping retrieval tickets are separate.
+
+Authority projections, byte/parser validation, monotonic time, measured charge,
+fresh issuance, sealing and physical cleanup observations are explicit trusted
+runtime obligations. This bounded transition theory does not prove a concrete
+codec or cryptographic provider. The host backend already reads bounded file
+ranges, but the AT110 wire enum still has no read operation. Start with charged
+host retrieval and envelope validation; refine concrete read framing/disclosure
+before transport implementation, then integrate live launch. Reboot acceptance
+follows. See [DN-72 SR110](DESIGN_NOTES.md#stored-retrieval-launch) for scope,
+witnesses and the bounded implementation sequence.
+
+
+#### SR110 R1 — Private file retrieval (accepted 2026-11-18)
+
+`ArtifactStore::read_published_into` receives a pinned published manifest into
+already charged private storage, with current read checks before and after each
+bounded copy. It checks the file checksum and trusted streaming inspection once
+per retrieval, avoiding a full-file scan for every chunk. `StoredEnvelope`
+validates the exact CS110 header, ordered dependency extents and image geometry.
+`RetrievalPolicy::validate_retrieved` must independently establish current image,
+metadata, dependencies and provenance; its default verdict denies admission.
+Header identity equality and CRC alone are insufficient.
+
+`Kernel::retrieve_stored_compiler_image` reserves shared host-storage capacity
+before allocation. Its immutable borrowed result retains that charge and exclusive
+Kernel custody. Drop, failure and unwinding scrub private bytes, destroy the
+allocation and then refund only that reservation. No guest alias, DMA handle,
+receipt, executable object or execute grant is issued. Network retry and physical
+work drainage are not exercised by this synchronous host-only slice.
+
+A cumulative scan/chunk budget and monotonic deadline bound cooperative work;
+blocking host I/O and trusted callbacks are not preempted. AS110's private-directory,
+honest-host and immutable-publication assumptions remain. Storage `Caller`
+identities retain AS110's nonzero incarnation convention; these are not raw Kernel
+process incarnations. Fresh runtime admission must still support live process
+incarnation zero as specified by SR110.
+
+Run `bash scripts/check-anka110-stored-retrieval.sh` for 20 focused tests without
+CC2 bootstrap. The supplied macOS log records 20 passed, zero failed/ignored,
+in 7.20s, with 19 nonfatal dead-code warnings. The injected validator panic is
+expected and its unwind/refund test passed. This accepts the focused private
+retrieval slice, not a new whole-suite regression. Reopening the file service is
+tested, but guest reboot execution and stored-image launch are not implemented.
+
+
+### AR110 — Bounded artifact read protocol (formal gate accepted)
+
+`anka110_artifact_read.kleis` and its hostile pair refine SR110 retrieval and
+AT110/AG110 framing/disclosure. Local Kleis validation on 2026-11-18 passed
+**117 positive witnesses / 98 hostile claims explicitly disproved**. The wire
+extension now has a separate Rust read decoder and dispatcher. The upload-only
+decoder still accepts operations 1–6; the shared TCP service routes opcode 7 through
+the read path. Existing upload byte representations and behavior are preserved.
+
+Read uses operation **7**, the existing `ANKAUP01` version-1 header, exactly
+**168 request bytes**, and no request payload. Header word 5 is the requested
+count (1–4096); ticket, publication-request, expected-revision and reserved words
+must be zero. Offset/count select a checked range in the complete pinned CS110
+manifest. Role is checked at its full 64-bit wire width, preventing truncation
+such as 258 becoming linked role 2.
+
+The new `ANKARD01` reply comprises a 32-byte prefix (magic, version 1, echo length
+168, data length), all 168 request bytes echoed exactly, and the requested data:
+**200 + count bytes**, maximum **4296**. Real EOF is required; truncation, tails,
+wrong channel/correlation or any substituted manifest/range reject. Read failure
+closes without a success frame. No guessed CRC or identity word authenticates
+content; independently validated exact immutable range evidence is mandatory.
+
+Current storage-server/read evidence is checked before client request disclosure
+and again at complete reply acceptance. The server checks current caller/read
+scope before backend access and before every response write, including metadata.
+The provider and I/O remain in AG110's serialized lane. Revocation suppresses the
+remaining suffix; it cannot retract an earlier authorized prefix. A partial reply
+never advances the SR110 private-image cursor. Execute authority remains separate.
+
+Charge request/reply buffers including a one-byte overflow sentinel plus measured
+metadata before allocation, separately from private-image custody and AS110 disk
+charges. Reuse AG110's 32-KiB reservation only after measuring the concrete new
+session layout. Retries retain exact manifest/range and the cumulative work and
+deadline; a new bound stream and nonwrapping fresh correlation do not refill them.
+Existing socket capacity and 64-byte disclosure steps stay independent of the
+4-KiB artifact-range limit.
+
+The theory uses trusted decoded fields, authority/content verdicts and current
+channel binding; it does not prove Rust serialization, cryptography or arbitrary
+host I/O liveness. The implementation below passed its focused runtime gate;
+GD110 now specifies guest download, with fresh executable admission to follow. See
+[DN-72 AR110](DESIGN_NOTES.md#artifact-read-protocol) for the exact field map.
+
+
+#### AR110 Rust codec and guarded TCP read (focused acceptance passed)
+
+`artifact/transfer/read.rs` implements the fixed read request and reply, exact
+manifest/range binding, full-width role checks and default-deny server evidence.
+The dispatcher uses actual published files, charges both checksum/inspection
+scans to the existing cumulative dispatch budget, and retains response bytes in
+the charged session buffer. It changes neither persistent selection nor ledger.
+The backend's configured read window may be smaller than 4096; such oversized
+requests are rejected rather than silently shortening the requested range.
+
+AG110's TCP service now routes reads separately from upload decode. Read caller,
+manifest, local backend ticket and current read/content scope are rechecked before
+each response write under the existing serialized lane. Its 32-KiB slot reservation
+and actual session-layout check remain in force. Reply buffers are scrubbed on
+failure, cancellation and completion before slot refund. Full-file validation
+occurs once per requested range, not per 64-byte response write; reading many
+ranges still repeats those scans and is not yet a throughput optimization.
+
+`read/client.rs` owns bounded request/reply buffers and one monotonic deadline and
+work allowance. It checks authority before each exposed request fragment, requires
+real EOF and exact current evidence for reply acceptance, and keeps private bytes
+unavailable until completion. Lost-response retry changes only bound channel and
+nonwrapping correlation; it retains the range, work and deadline and scrubs the
+old partial response. This is an exchange helper: the embedding owns the socket,
+actual stream binding, reservation and serialization of evidence with I/O. Passing
+a channel number or scratch-size number is not authentication or a Kernel charge.
+The helper does not claim to implement the guest download syscall or SR110 image
+assembly; trusted integration must supply these retained obligations.
+
+Run `bash scripts/check-anka110-artifact-read.sh`: 9 codec/dispatcher tests,
+6 bounded-client tests, 8 actual localhost TCP/file tests, then the existing
+12 AT110 and 12 AG110 compatibility tests. The supplied Mac log on 2026-11-18
+confirms **23 + 12 + 12 passed**, in 1.65s, 0.46s and 0.47s respectively. The
+printed provider panic is the deliberate unwind test, which passed. This is
+focused acceptance; no new full regression, production authentication or
+executable launch is claimed.
+
+
+### GD110 — Guest download into private image custody
+
+**Formal and focused runtime gates passed.** The 2026-11-18 Kleis/Z3 run
+passed 174 positive witnesses, including a connected three-range trace and three
+quantified arithmetic/work laws; all 149 hostile claims were explicitly disproved.
+Run `scripts/check-anka109-gates.py --only-guest-download` with the normal Kleis
+binary and standard-library options.
+
+The refinement composes AR110's existing read protocol with SR110 private custody.
+A local exchange is bound to the boot, retrieval ticket, owner/incarnation, actual
+socket, monotone correlation, exact manifest and contiguous range. Request bytes
+accepted by typed I/O and bytes actually sent are separate counters. Half-close
+requires both to reach 168. Reply length alone cannot establish EOF. Only the
+exact response with real EOF and current evidence can commit its range once.
+
+All progress, including transient polls, new ranges and reconnects, consumes one
+retained session work allowance and preserves the original deadline. Socket and
+NIC scratch is reserved separately from the full private image. Cancellation
+retains both charges; socket cleanup requires termination, revoked aliases, DMA
+drain and scrubbed storage. It cannot refund retained image bytes or another
+client's charge. SR110 remains responsible for private-image cleanup.
+
+A complete canonical envelope with current byte, metadata and ordered-dependency
+validation reaches only SR110 phase 2, privately validated and non-runnable.
+Fresh objects, tags, frames and execution admission remain the separate SL110/SR110
+launch boundary. There is no new upload wire format, execution authority,
+publication, durable selection or reboot behavior. See [GD110 design and runtime
+obligations](DESIGN_NOTES.md#guest-artifact-download).
+
+
+The GD110 runtime uses a distinct `StorageRequest::Download` mode, default-deny
+read/content/final-envelope verifier methods, and the compiled
+`userspace/bin/storage_download.c` pump. `Kernel::download_stored_compiler_image`
+reserves the complete private image and exchange scratch, runs each range in a
+charged receipt application realm, and compares guest output against authenticated
+AR110 bytes before contiguous assembly. The socket realm admits bounded private
+output only for a complete download with current read authority. One shared budget
+and deadline survive all ranges and reconnects; a validated range cannot retry.
+
+The returned `RetrievedCompilerImage` guard keeps its image charge until drop.
+All temporary child/driver/queue/report backing is destroyed and scrubbed before
+refund, including provider unwind. The final canonical envelope and ordered
+dependencies are checked under serialized current evidence. No stored program is
+executed and no receipt, selection or execute grant is minted. Run
+`bash scripts/check-anka110-guest-download.sh --real` for the focused gates and
+actual CC2/typed-socket/NIC/guarded-TCP/reopened-file witness. See the
+[GD110 runtime record](DESIGN_NOTES.md#guest-artifact-download) for evidence and
+limits; fresh executable admission remains the next task.
+
+The 2026-11-18 Linux acceptance passed **18 GD110 quick tests + the real witness
+in 259.66s**, plus 10 plain-socket/binding regressions, AR110/AT110/AG110 (47),
+GA110 quick (7) and SR110 (20).
+The real witness retrieved 11,984 bytes and retained a page-rounded **45,056-byte**
+private-image/decoder reservation after socket scratch release; dropping the
+result or rejecting a hostile transfer restored the exact root ledger baseline.
+
+Final broad rerun: **1,922 passed, 18 ignored, 2 filtered out (386.48s)**; production
+`cargo check --release` passed. The existing arena test was SIGKILLed; the long
+P107 rebuild witness passed in the preceding run and was not repeated for the
+final ordinary-socket accounting fix. All **26 typed-socket tests** and both real
+transfer witnesses pass after that fix. See the GD110 design record for exact
+commands/exclusions; this is not an unfiltered full-suite pass.
+
+#### Stored-image live admission — SR110 R2 implementation, validation pending
+
+The charged private CS110 image now has a consuming live-launch adapter. Its
+original retrieval budget/deadline and exact read origin survive into admission.
+Current read/dependency/provenance evidence and an independent T1 execute grant
+are checked at the staged child's first-dispatch boundary. A Kernel-owned,
+nonwrapping ledger prevents challenge/revision replay. The adapter reconstructs
+fresh sealed code, protected metadata and ordinary spawn state; it does not
+compile stored bytes, restore capabilities or update durable selection.
+
+Execution uses the existing synchronous isolated application realm charged to
+the still-live service Kernel. Machine backing is scrubbed before refund; the
+returned report retains image/output quota until drop. This does not implement
+general concurrent application scheduling or reboot authority. Production
+identity/content providers remain explicit integration obligations.
+
+No Rust compilation or tests were run for this delivery. See the SR110 R2
+section in `DESIGN_NOTES.md` and `scripts/check-anka110-stored-live-launch.sh`
+for the focused and optional real-path laptop acceptance gates.

@@ -13814,7 +13814,7 @@ requesters or authorize boot.
 | E12: protected host storage I/O | Developer Mac: 154 persistence reference tests passed in 0.99s, including the six E12 cases. |
 | Compiler output and artifact transport | CS110 receipt-bound export and AT110 framing/dispatch are implemented. AG110 has developer acceptance: 12 focused TCP/file tests and 206 reference tests, including terminal socket ownership correction; gate 51 positive / 42 hostile explicitly disproved. |
 | GA110 guest artifact upload | [Accepted bounded integration](#guest-artifact-upload): 44 positive / 36 hostile explicitly disproved; 7 quick tests and the explicit real CC2 witness passed (85.09s). Three chunks retained an 11,984-byte envelope; exact Outcome recovered revision 8 after deliberate post-commit reply loss and service recreation. No current full regression is claimed. |
-| Stored launch | Existing stored-launch gate: 49 positive / 56 hostile explicitly disproved. Retrieval, reconstruction, fresh execution admission and reboot execution are not established by upload acceptance. |
+| Stored retrieval / live launch | SL110 foundation: 49 positive / 56 hostile explicitly disproved. [SR110 refinement](#stored-retrieval-launch): 92 positive / 78 hostile explicitly disproved locally. SR110 R1 accepted: 20 focused Rust tests passed in 7.20s. [AR110 read protocol](#artifact-read-protocol) formal gate passed: 117 positive / 98 hostile. AR110 Rust read codec/client and host TCP path accepted: 23 focused + 24 compatibility tests passed. [GD110 guest download](#guest-artifact-download) formal gate: 174 positive / 149 hostile explicitly disproved. GD110 runtime now implements charged guest retrieval and private assembly; fresh loader admission and reboot execution remain pending. |
 
 E7/E8 are merged to main. The 148-test E10 run includes E8’s tests; it is a
 persistence reference result, not a whole-system regression.
@@ -16260,8 +16260,9 @@ recovers **revision 8**. Original publication validity, exact target bytes and
 per-run reservation refunds are checked. Latest lineage: CC2_0 **168840** bytes;
 CC2_1 = CC2_2 **191576** bytes, entry **188888**.
 
-This evidence applies to the supplied working-tree revision on
-`feat/anka110-artifact-storage`; commit/merge is not established by the log.
+This evidence applies to the supplied GA110 revision. GitHub PR #35 subsequently
+merged on 2026-11-17 (Chicago), at `8038bc21a8161443fcab1a45bb4b6295ae118e44`.
+The merge was independently checked; it does not turn focused tests into a full regression.
 The prior AG110 checkpoint remains **12 focused / 206 reference tests**. The
 latest supplied full regression is the earlier guest Select result (**1795
 passed, 16 ignored, 296.54s**), not a full run of this GA110 revision. The build
@@ -16411,3 +16412,627 @@ and greater-than operators. Metal/Core ML exploration and future FPGA refinement
 remain separate from accepted CPU/Fabric emulator behavior. The immediate next
 bounded milestone is formal-first stored retrieval and authorized live launch;
 reboot follows that path, without expanding this milestone into a general filesystem.
+
+
+
+<a id="stored-retrieval-launch"></a>
+
+### SR110 — Stored-envelope retrieval and fresh live-launch admission
+
+**2026-11-18: formal gate and SR110 R1 private-retrieval Rust slice accepted.**
+`anka110_stored_retrieval.kleis` passes **92 positive witnesses**; its paired
+hostile file has **78/78 claims explicitly disproved**. The gate runner rejects
+unknowns, missing cases, import errors and timeouts. The formal-only delivery was
+followed by R1 implementation and a supplied 20-test macOS pass (7.20s). No new
+full-suite regression is claimed. The source baseline
+is merged PR #35, commit `8038bc21a8161443fcab1a45bb4b6295ae118e44`.
+
+The next outcome is concrete: retrieve an already published linked image from
+persistent storage, validate it, reconstruct fresh local objects and run it in
+a fresh process **while Anka64 remains running**. This neither changes the boot
+selection nor reserves a boot incarnation. Reboot acceptance follows later.
+A stored receipt, a read grant and a valid CRC supply no execute authority.
+
+**Gap confirmed in the source.** `ArtifactStore::read` already performs bounded
+host-file reads under current evidence, including a post-read check. AT110's
+operation enum currently has only Begin, Append, Seal, Publish, Progress and
+Outcome. GA110 therefore uploads bytes but cannot download and launch them.
+CS110 supplies the canonical `ANKACS01` envelope: 136-byte header, ordered
+40-byte dependency entries and the exact linked image. SR110 imports that
+geometry and the existing SL110/T1 authority foundation; it does not invent a
+second object format or serialize Fabric capabilities.
+
+| Transition | Required boundary |
+| --- | --- |
+| Reserve private retrieval | Freeze the exact published manifest and namespace; independently validate current read/server evidence. Charge the complete envelope plus measured staging, metadata and placement capacity before allocation or fetch. Check owner/global limits and nonwrapping ticket issuance. Process incarnation zero is valid when it matches the actual live process. |
+| Receive a range | Freeze the actual request/channel/correlation and verify the complete reply echo, exact length, canonical framing, real EOF and range content. Accept only the next contiguous nonempty range, at most 4096 bytes and within the manifest extent. Recheck current read/server evidence at use. Socket-window and syscall-copy sizes remain independent limits. |
+| Retry or fail | An incomplete/lost response advances no cursor and spends the existing cumulative work budget. Reconnection cannot reset work or deadline. Invalid authority, malformed completion, expiry or exhaustion closes the private lane and retains its charge. Foreign saved events cannot mutate another lane. |
+| Validate complete envelope | Require exact final extent and all manifest fields: namespace, artifact/generation, linked role, supported profile, image, metadata, ordered dependencies and provenance. Derive code/literal/entry/dependency geometry from the private bytes using the CS110 rules, and independently validate current dependency/provenance evidence. Freeze the validated buffer; it is still non-runnable. |
+| Commit fresh live launch | Recheck actual boot/owner liveness, deadline, read evidence and dependency evidence. Use the existing T1 execute grant predicate and consume its admission record atomically with child custody. Authority time must equal the commit's current time. Require freshly reconstructed objects, clean initial pointer kinds, sealed code, valid layout and drained work. Retained charge moves to child custody; it is not refunded at launch. |
+| Cancel and reclaim | Invalidate all local authority, account/drain captured physical work and scrub backing before refund. Remote-grant revocation must not prevent trusted local cleanup. Cleanup failure retains custody and charge. Tickets never rewind; stale A cannot affect C after reuse, and B's identity, charge and runnable state remain unchanged. |
+
+**Model boundary and explicit assumptions.** This is one serialized retrieval
+lane with an arbitrary independent peer; the peer charge represents all other
+retained allocation charges. The manifest is pinned to immutable content, not a
+mutable name or a “latest” selection re-resolved between chunks. Fixed service
+metadata is governed by the existing charged service lifetime. General multi-slot
+scheduling, published-object garbage collection and distributed consensus are
+outside this refinement.
+
+The `scope`, full-reply binding, range-content and parsed-envelope predicates are
+trusted projections of actual bytes and current verifier state. They are not
+client booleans, cryptographic implementations or new axioms. The Rust adapter
+must derive them from the frozen request and canonical decoder, bind the exact
+namespace/owner/incarnation/manifest/range, and serialize authority updates with
+disclosure and final admission. The state machine's safety is conditional on
+those projections. Current monotonic time, measured storage cost, fresh object
+issuance, tag initialization, sealing and revoke/drain/scrub completion likewise
+remain concrete runtime obligations. No physical-DMA drainage or freshness proof
+is inferred merely from a timeout or a queue entry.
+
+The before/after relations cover every state field, including charges, serial
+watermark, durable-selection snapshot and independent peer. Witnesses include
+quota/overflow denial, malformed and stale responses, lost-reply retry, wrong
+manifest fields, incomplete images, expired/revoked execution, stale authority
+time, duplicate admission and A/B/C cleanup/reuse. Three small quantified laws
+check range arithmetic, budget monotonicity and peer-charge preservation at the
+modeled transition. Witness counts are not a claim of correctness for a future
+Rust decoder, network implementation or hardware backend.
+
+**Bounded implementation order after this gate:**
+
+1. Implement charged private retrieval and exact CS110 envelope decoding against
+   the accepted file backend. Independently validate retained dependencies and
+   provenance; reject truncation, tails, wrong identity/profile and bad geometry.
+2. Add the bounded read request/reply to the existing guarded transport, refining
+   AT110/AG110 framing and disclosure gates for its concrete wire representation
+   before changing the runtime. Preserve GA110 upload compatibility. Do not grow
+   this milestone into a filesystem or an S3/Ceph adapter.
+3. Connect the validated private image to fresh local publication/receipt and
+   execution admission. Test compile/store/retrieve/launch without recompiling
+   during retrieval or restarting Anka64. Preserve B while A fails/exits and C
+   reuses released backing; reject A's saved handles and aliases.
+4. Test independent service and Anka64 restarts with retained files and new
+   authority/boot bindings. This later gate must not resurrect saved process,
+   pointer-kind, call-stack or event-context authority.
+
+No read opcode or new wire layout is assigned in SR110; that representation must
+be pinned down in step 2. R1 implements step 1 using actual durable
+files and a bounded read-into path with one full-file validation per retrieval.
+It needs no CC2 bootstrap to test parser, quota and custody failures.
+
+Run from the repository root:
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" \
+  --only-stored-retrieval
+```
+
+The unchanged SL110 foundation remains selectable with `--only-stored-launch`;
+SR110 and its hostile pair also participate in the default 10.9/10.10 gate sweep.
+
+
+#### SR110 R1 implementation — charged private retrieval
+
+**Accepted: 20 passed, zero failed/ignored in 7.20s on macOS (2026-11-18).** The accepted 92/78
+Kleis pair is unchanged. The new `artifact/retrieval.rs` decoder rejects incomplete
+or trailing bytes, unsupported roles/profiles, overflowing extents, invalid
+code/literal/entry geometry and mismatched namespace, identity or dependencies.
+It returns a borrowed immutable view, never restored runtime capabilities.
+
+The file-store read pins the published manifest and actual service boot/ticket,
+checks current read authority around each bounded copy, and rechecks it after
+independent final validation. Full checksum and trusted streaming inspection run
+once, rather than once per small range. The integration policy must independently
+validate current exact image/metadata and ordered dependency/provenance bindings;
+its default is Unknown and therefore denial. The test policy compares fixture
+bytes and bindings; it is not a production signature or credential provider.
+
+The Kernel reserves the complete envelope plus 32 KiB of fixed validation/custody
+allowance through the shared heap host-storage account before allocating. The
+backend's checksum window remains covered by its AS110 ledger. The immutable
+result holds an exclusive Kernel borrow and its reservation until destruction;
+all error/unwind paths scrub and free the private buffer before refunding only
+that charge. Existing publications and unrelated retained charges stay intact.
+No guest pointer or work handle escapes, so this slice issues no physical work
+requiring a separate drain transition. The actual fresh-object/child transfer
+and A/B/C executable-reuse tests remain step 3, not claims of this host-only guard.
+
+Limits are caller-selected maximum envelope bytes, cumulative work and a
+monotonic deadline. Work counts 4-KiB scan units and explicit chunks/validation
+units; it is not a CPU instruction limit. Deadline observations are cooperative:
+blocking host I/O and trusted callbacks are not forcibly interrupted. The
+private-directory/honest-host assumptions of AS110 remain in force.
+
+The focused script requires exactly **20 tests** to prevent a silent zero-test
+pass: 13 backend/decoder cases and 7 Kernel integration cases. Coverage includes
+actual CS110 export/read parity, invalid framing/geometry, quota denial before
+file access, revocation during copying and after validation, dependency rejection,
+work/deadline denial, unwind refunds, preserved peer charge and file-service reopen
+without recompilation. Reopen is not Anka64 reboot or executable admission.
+
+```bash
+bash scripts/check-anka110-stored-retrieval.sh
+```
+
+Rust/Cargo were unavailable in the implementation environment; the subsequent
+user-supplied Mac log supplies compilation and runtime acceptance. All 20 tests
+passed in 7.20s. The validator panic is intentional and its unwind/refund test
+passed. The build reports 19 dead-code warnings, not test failures. No new
+whole-suite regression is claimed.
+
+**Next boundary (updated 2026-11-18):** AR110 below has accepted codec, dispatcher
+and guarded transport implementation. GD110 now formalizes guest download into
+private SR110 custody; implement that adapter next, then fresh local executable
+admission under SL110/SR110.
+Preserve the accepted upload protocol; no S3/Ceph adapter or filesystem expansion
+is required for this milestone.
+
+
+**SR110 R1 test-discovery correction (2026-11-18).** The supplied Mac log
+confirms release compilation succeeded with 19 dead-code warnings, but the
+inventory guard found only 7 of 20 SR110 tests and stopped before execution.
+`artifact/retrieval.rs` is loaded through an explicit `#[path]`; its bare
+`mod tests` selected the neighboring artifact test module instead of
+`artifact/retrieval/tests.rs`. The test declaration now names that path explicitly,
+matching the existing AS110/AT110 module layout. The script separately requires
+13 backend/decoder cases and 7 Kernel cases and prints the discovered inventory
+on mismatch. No runtime acceptance is inferred from the successful compilation.
+The subsequent supplied run found all 20 cases and passed them in 7.20s. The
+original discovery failure is resolved; Kleis contracts were unchanged.
+
+
+<a id="artifact-read-protocol"></a>
+
+### AR110 — Artifact read framing and guarded disclosure
+
+**2026-11-18 formal delivery: 117 positive witnesses passed; 98/98 hostile claims
+explicitly disproved locally.** This is the next refinement after SR110 R1's
+accepted private-file retrieval. The subsequent Rust implementation is recorded
+below; its focused runtime gate has passed. Stored executable admission and reboot
+execution remain unimplemented.
+The unchanged AT110 operations 1–6 and GA110 guest upload remain the compatibility
+baseline; the read extension must be explicitly routed before upload-only decode.
+
+**Canonical request.** All integers are unsigned 64-bit little-endian. The eight
+magic bytes are `ANKAUP01`; exactly twenty words follow (168 bytes total). There
+is no request payload, even though word 5 is nonzero. Require real request EOF.
+
+| Header word (after magic) | Read value |
+| --- | --- |
+| 0 | Version 1 |
+| 1 | Operation 7 (Read) |
+| 2 | Nonzero correlation bound to the actual outstanding exchange |
+| 3 | Zero: an upload ticket cannot authorize read |
+| 4 | Byte offset in the full stored envelope |
+| 5 | Requested count, 1–4096 |
+| 6–7 | Zero: no publication request or expected revision |
+| 8–18 | Exact CS110 manifest: anchor, installation, artifact, generation, role, profile, size, image, metadata, dependencies, provenance |
+| 19 | Zero reserved word |
+
+Require a published linked artifact, full-width role 2, profile 1 or 2, nonzero
+persistent identities and checked `offset <= size`, `count <= size - offset`.
+Keep full-width wire checks before any conversion to the older 8-bit formal role.
+A mutable name, prefix match or newest-generation lookup cannot substitute for
+the frozen manifest. Raw process incarnation zero remains valid in SR110;
+AS110 storage caller identities are a separate nonzero identity domain.
+
+**Canonical success reply.** Magic `ANKARD01`, followed by three LE64 words:
+version 1, echo length 168, data length equal to the request count. Then echo the
+entire 168-byte canonical request, followed by exactly that many artifact bytes.
+Data starts at byte 200; the largest reply is 4296 bytes. Require actual reply EOF.
+Reject the upload reply magic `ANKAUR01`, wrong fields, tails/truncation, wrong
+stream/correlation, changed manifest and unvalidated range content. On failure,
+close without a success frame; no new error wire or status word is introduced.
+
+**Authority and custody.** Resolve caller/server identity from the actual guarded
+stream, never from request claims. Check server/read evidence before emitting
+client request bytes; check caller/read/published-content evidence before server
+file access and before each bounded response write. The same serialized provider
+lane must cover the authority observation and I/O. Revalidate server/read/range
+binding at EOF before handing a complete range to SR110. These observations are
+trusted runtime projections; the formal model does not replace a credential
+provider or independently establish authenticity from CRC/header equality.
+
+The request echo binds all wire fields; locally retained boot, owner, incarnation,
+retrieval ticket and actual channel bind that exchange to its private lane. The
+zero wire upload ticket is not the local retrieval ticket. The `ar110_receive`
+bridge uses SR110's complete before/after relation, preserving charge, peer state,
+boot selection and publication revision. Incomplete replies advance no cursor;
+invalid replies close the owned lane. Foreign/stale local tickets leave it alone.
+A read never grants execution or turns received bytes into live capabilities.
+
+**Bounds and retry.** Account for both request and reply capacities plus measured
+metadata, including one extra byte for overlength detection (minimum read-only
+capacities 169 and 4297). Combined upload/read sessions may retain larger existing
+buffers; charge their actual capacities. AG110's current 32-KiB slot allowance is
+not an automatic exemption: check the concrete new layout before allocation.
+Private image custody and persistent backend accounting remain separate charges.
+A retried range keeps all manifest/range fields, consumes the same work budget,
+retains the original deadline, and requires a newly bound stream and strictly
+increasing nonzero correlation without wrap. Revocation stops unsent suffixes;
+previously authorized disclosure cannot be undone. Cooperative deadline/work
+observations do not claim preemption of blocking host I/O or unbounded providers.
+
+**Verification scope.** Positive/hostile witnesses cover request/reply geometry,
+full manifest substitution, EOF, authority before disclosure and at completion,
+quota arithmetic, replay, changed ranges, exhausted/renewed budgets and SR110
+cursor/custody behavior. Two quantified laws cover nonwrapping range addition and
+maximum reply size. The request model is flat to avoid nested selector expansion
+in the available Kleis/Z3 path; it still binds every wire field explicitly.
+Witnesses are not a proof of the forthcoming Rust codec or an exhaustive hardware
+security proof. Existing AT110/AG110 definitions are unchanged.
+
+Run only the new gate:
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" \
+  --only-artifact-read
+```
+
+**Implementation milestone:** the AR110 Rust slice below now supplies the read
+codec/dispatcher and guarded host transport, with its focused runtime gate passed.
+GD110 below specifies guest retrieval before fresh executable admission; keep
+reboot and S3/Ceph adapters separate.
+
+
+#### AR110 Rust delivery — read codec, dispatcher and guarded exchange
+
+**Implemented, focused runtime acceptance passed (2026-11-18).** The user passed the unchanged
+117/98 Kleis gate on macOS. New `artifact/transfer/read.rs` and `read/client.rs`
+refine its concrete framing and finite client exchange, and the existing AG110
+TCP service now routes opcode 7 independently from the upload-only codec. There
+is no wire-layout change for accepted operations 1–6.
+
+The dispatcher rejects malformed input before evidence/backend access, derives
+the caller through the new default-deny `TransferEvidence::read_caller` hook,
+pins the exact published manifest and local backend ticket, and requires read
+scope separately from upload permission. The trusted hook covers current caller,
+read grant and immutable-content/provenance binding; `Evidence::inspect` validates
+actual file content independently. Range, manifest and authority are rechecked
+before reply exposure and before every TCP write under the existing provider lane.
+No publication request, ledger mutation, new receipt or execute grant occurs.
+
+Responses use fixed precharged session storage, with volatile scrubbing before
+refund even when read/validation fails. Two complete-file scans (checksum and
+trusted inspection) cost two times ceil(size/4096) shared dispatch units before
+I/O; each transport poll also spends the pre-existing shared service budget.
+The host read window remains an additional upper bound. Checks remain cooperative,
+not preemption of blocking file I/O or trusted callbacks. Full-file scans repeat
+per range, so large downloads may warrant a later immutable validated-file lease;
+this delivery does not silently weaken validation or claim measured speedups.
+
+The bounded client exchange checks server/read evidence before each request
+fragment and at real EOF, with exact complete request echo, length, profile,
+manifest and range binding. It exposes only a complete private range. The socket
+adapter must use the actual bound stream and serialize evidence with I/O; the
+helper owns buffers, not a socket or Kernel allocation account. Its 32-KiB scratch
+argument asserts an existing trusted reservation, matching the other host
+reference adapters. Guest-facing integration must derive that reservation from
+actual accounting rather than accept guest numbers. Retry keeps the original
+work/deadline and exact range, requires a fresh bound channel and incremented
+nonwrapping correlation, and scrubs partial response bytes. A completed or closed
+exchange cannot retry. Revocation stops future disclosure; earlier authorized
+prefixes cannot be recalled.
+
+**Focused gate:** `bash scripts/check-anka110-artifact-read.sh` compiles the
+standalone authority-persistence tests once and refuses an incomplete inventory:
+9 codec/dispatcher + 6 client + 8 TCP cases. It then runs the existing 12 AT110 and
+12 AG110 tests for upload compatibility. The new cases exercise actual immutable
+files, fragmented requests/replies, FIN/EOF, reply corruption/tails, default denial,
+read revocation before file access and between writes, changed caller, exhausted
+scan/client budgets, retry after lost response, deadline expiry, partial-response
+scrubbing and cancellation preserving another session's charge. TCP tests use an
+explicit deterministic test binder, not cryptographic client certificates.
+
+At the original delivery, Rust/Cargo were unavailable and runtime acceptance was
+pending. The subsequent user-supplied Mac log confirms all **47 tests passed**:
+23 AR110 in 1.65s, 12 AT110 in 0.46s and 12 AG110 in 0.47s. The intentional
+`injected provider unwind` panic is caught by its test and ends in `ok`. These
+three filters are disjoint; this is focused acceptance, not a whole-system
+regression. The accepted AR110 formal files are unchanged. GD110 below specifies
+the next guest retrieval boundary. No S3/Ceph installation is needed.
+
+
+<a id="guest-artifact-download"></a>
+
+### GD110 — Charged guest download and private assembly
+
+**2026-11-18 formal delivery: 174 positive witnesses passed; 149/149 hostile
+claims explicitly disproved using the supplied Linux Kleis executable and
+standard library.** Those formal files remain unchanged by the runtime delivery
+below. The formal and runtime evidence are separate.
+
+The new `anka110_guest_download.kleis` imports the accepted AR110 contract and
+therefore composes its exact request/reply binding with SR110 custody. Its hostile
+pair imports those same definitions. The gate runner selects both with
+`--only-guest-download`; they also participate in the unfiltered gate run.
+
+| Exchange phase | Permitted progress |
+| --- | --- |
+| 0: reserved, unopened | Open a currently authorized, bound socket with charged buffers |
+| 1: sending | Advance typed accepted/wire sent prefixes; transient polls still spend work |
+| 2: receiving | Accumulate bounded candidate bytes; exact length still waits for real EOF |
+| 3: EOF validated | Recheck authority and copy exactly once into private contiguous custody |
+| 5: committed range | Open the next contiguous range, or release socket scratch |
+| 4: closing | Retain charges until the socket/alias/DMA cleanup obligations hold |
+| 6: scratch released | No more socket operations; full-envelope validation may proceed |
+
+`GD110Exchange` retains the local owner/boot/ticket, channel, correlation,
+offset/count, independent accepted/sent/received counters, last observed time and
+scratch charge. SR110 retains the exact manifest, image cursor, one session work
+budget and deadline, private-image charge, durable selection/revision and peer
+state. Complete frame relations constrain every output field. One exchange
+lifecycle belongs to one retrieval ticket; there is no phase-6-to-phase-0 reset
+within that lifecycle. A foreign or stale cancellation is an explicit no-op on
+both states.
+
+**Accounting.** Before opening, actual reservations must cover request capacity
+at least 169, reply capacity at least 4,297, measured metadata and both typed
+socket queues plus outstanding NIC/DMA and command-input storage. The extra bytes
+are overlength probes. These scratch charges are additional to SR110's complete
+image/decoder reservation. All arithmetic uses subtraction guards before sums.
+The owner's existing charge is a subset of SR110's aggregate peer charge; the
+owner and global limits are checked independently without counting that subset
+twice. Runtime observations must come from the real reservation ledger and actual
+allocation capacities, never guest-provided byte counts.
+
+**Progress and authority.** Every socket poll, including zero progress, consumes
+one unit of the same retrieval work allowance. Adapters must also charge their
+bounded parser, copy, scan and dependency work; the formal transition unit is not
+a claim that those operations cost one CPU instruction. New range/open and retry
+preserve the original deadline and work remainder. Observed time cannot move
+backward. They require a fresh bound channel and increasing nonzero correlation;
+retry preserves the exact old range and manifest, terminates and drains the old
+channel, and scrubs its partial reply before reuse. Phase 3 must commit or cancel;
+it cannot retry an already validated response.
+
+All typed writes and reads are tied to the actual stream and serialized current
+evidence. Request acceptance by `ssend` is distinct from actual wire progress;
+FIN requires both counters to equal 168. A full candidate response is still
+private until real EOF verifies the complete AR110 header/echo/content. A tail,
+truncation or substituted correlation cannot commit. Authority and exact private
+copy are checked again at the commit point. Each commit advances only the image
+cursor by the requested count, exactly once, with no publication or execute grant.
+Previously authorized network disclosure cannot be recalled after revocation.
+
+**Cleanup and handoff.** Cancellation needs the exact local ticket, not continuing
+remote read authority. It retains both image and scratch charges. Socket scratch
+is released once only after socket termination, local alias revocation, physical
+work drain and scrubbing. A queued death event or expired timer is not drain
+evidence. Releasing socket scratch preserves the private image and peer state;
+SR110's separate release protocol later disposes of private image custody when
+needed. Complete-envelope validation uses `sr110_envelope` and `sr110_validate`,
+including canonical geometry and current byte/metadata/ordered-dependency checks.
+It produces phase 2, not a runnable child. Fresh local executable admission remains
+`sr110_launch`, with its current execution grant and fresh-object obligations.
+
+**Evidence and limits.** The 174 positive assertions include allowed operations,
+rejection witnesses, stale-owner no-ops, three quantified arithmetic/work laws,
+and one connected trace: 4,096 + 4,096 + 3,792 bytes, complete EOF checks, private
+commits, socket-scratch release and final private validation of an 11,984-byte
+envelope. Every transition consumes the prior output state, preserving one
+budget/deadline throughout. The 149 hostile assertions try to permit the forbidden
+operations and must be explicitly disproved; unknown/errors/timeouts do not pass.
+These are finite transition witnesses and the listed laws, not a proof of the
+future Rust/C implementation or a cryptographic proof. Actual channel binding,
+typed-pointer ownership, exact byte observations, immutable copy custody, ledger
+measurements, provider serialization and physical cleanup remain refinement
+obligations. Cooperative deadlines do not preempt blocking host callbacks.
+
+Reproduce:
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" \
+  --only-guest-download
+```
+
+Expected output:
+
+```text
+PASS: anka110_guest_download.kleis: 174 positive witnesses
+PASS: anka110_guest_download_false_witnesses.kleis: 149/149 explicitly disproved
+```
+
+#### GD110 runtime: distinct read mode and charged adapter
+
+`StorageRequest::Download` binds a canonical 168-byte AR110 read request to one
+fresh guest socket. Its reply is `200 + count` bytes, independently of the upload
+formula. `ServerVerifier::verify_read`, `verify_read_reply` and `verify_download`
+all deny by default. Upload or Select authority cannot authorize a download.
+
+`userspace/bin/storage_download.c` is compiled by the actual CC2 pipeline. It
+reads the exact length-prefixed command, sends through protected `ssend`, calls
+`sshut`, and receives the bounded response through `srecv`. It waits for real EOF,
+checks the echoed request, then writes only the payload into the charged private
+run report. The receipt realm permits this bounded `SYS_WRITE` only in download
+mode after the complete authenticated reply has been consumed, and rechecks read
+authority at each output call. Other socket modes retain their existing policy.
+
+`Kernel::download_stored_compiler_image` requires a current locally compiled pump
+receipt plus the existing explicit execution/input/virtual-NIC authorities. That
+execution authority runs the pump; it does not admit the downloaded image. The
+adapter reserves SR110's exact image capacity plus 32 KiB decoder overhead before
+allocation (ledger reservations are rounded up to pages), separately reserves
+64 KiB exchange scratch plus measured verifier
+state, and uses the existing charged isolated application/driver/queue machinery.
+Optional Select/upload/download state is separately allocated and charged only
+when bound. Ordinary sockets no longer inherit the large storage request/reply
+buffers in their endpoint footprint. Admission and current-ticket validation use
+one shared charge calculation, preserving owner/global quota checks. The trusted
+transport owns the actual peer until drop and receives neither a
+Kernel nor access to the private destination. These conservative reservations
+cover adapter-owned backing; external service/provider storage retains its own
+accounting obligations.
+
+One retained `Download` state owns the original monotonic deadline, remaining
+work, pinned manifest, contiguous cursor, channel and increasing correlation.
+Every scheduling round and socket/NIC operation spends shared work, including
+zero-progress polls. A reconnect occurs only after the old child realm and peer
+have been destroyed; it preserves the range and budget. A validated response can
+only commit or fail, never retry. EOF framing/content validation captures bounded
+trusted response custody. A second current check under the provider lock compares
+the guest's output byte-for-byte before copying it once into the image.
+
+Socket queues, retained replies, driver memory, isolated application memory and
+reports are scrubbed before their charges are refunded. Provider unwind also
+clears the interrupted child realm and releases the root Kernel's machine/report
+reservations. The private image guard clears its bytes before releasing its own
+reservation. Independent exchange state and unrelated account reservations are
+preserved. This synchronous reference path retains no asynchronous DMA borrower
+or background worker after a driver is dropped; a future asynchronous adapter
+must provide its own actual drain evidence.
+
+After all ranges, the adapter decodes the canonical stored envelope and checks
+current content/metadata/ordered-dependency evidence under the provider lock,
+charges bounded scan/dependency work, rechecks the real owner/reservation, and
+releases exchange scratch. The returned immutable `RetrievedCompilerImage` keeps
+only private image custody charged until drop. It publishes no new receipt or
+selection, creates no executable object, and changes no publication epoch.
+
+Run from the repository root (Linux/macOS, release mode):
+
+```bash
+bash scripts/check-anka110-guest-download.sh --real
+```
+
+The script checks the GD110 test inventory, runs the focused exchange/Kernel/peer
+cases, the 10 plain-socket/binding regressions, AR110/AT110/AG110 and GA110 quick
+compatibility, and SR110 retrieval tests.
+`--real` also runs the explicit CC2 fixed-point/download witness. That witness
+compiles both a target program and the download pump, exports the target through
+CS110, closes/reopens its actual file service, and retrieves all 11,984 envelope
+bytes through guest typed sockets, virtual NIC/Fabric DMA and guarded localhost
+TCP. It exercises alternating 64/1,024-byte queues, three contiguous ranges,
+reply loss after a 64-byte prefix before FIN, a fresh-channel retry, corruption,
+tail bytes, absent FIN, later-range revocation, denied dependencies and provider
+unwind. It checks exact private bytes and root-ledger refunds, unchanged durable
+record/payload and unchanged publication epoch. The stored target is not executed.
+
+**2026-11-18 Linux runtime acceptance:** `check-anka110-guest-download.sh --real`
+passed 18 GD110 quick tests and the explicit real witness (**259.66s**), plus
+10 plain-socket/binding, 23 AR110, 12 AT110, 12 AG110, 7 GA110 quick and 20 SR110
+tests. The real witness
+kept exactly **45,056 bytes** reserved for the 11,984-byte image plus decoder
+allowance after releasing exchange scratch (the ledger rounds to 4-KiB pages),
+then returned to the exact original charge on drop. The deliberate read-provider
+and final-dependency panics were caught and passed their cleanup assertions.
+
+The existing real GA110 upload witness also passed (**267.93s**), including
+Begin/Append/Seal/Publish, lost Publish reply, service reopen and exact Outcome
+recovery at revision 8. Its command was:
+
+```bash
+cargo test --release --lib ga110_real_cc2_artifact_upload -- --ignored --nocapture --test-threads=1
+```
+
+The unfiltered library regression was also attempted single-threaded: 607 tests
+passed before SIGKILL terminated the process at the existing
+`p93e2_arena_tripwire` bootstrap test. It did not report an assertion failure;
+this attempt is not a completed full-suite pass.
+
+Final broad rerun: **1,922 passed, 0 failed, 18 ignored, 2 filtered out in
+386.48s**. `cargo check --release` also passed. The final socket accounting was
+independently checked by **26 passing typed-socket tests**, and both real transfer
+witnesses were rerun successfully after that fix.
+
+The broad rerun command was:
+
+```bash
+cargo test --release --lib -- --test-threads=1 \
+  --skip p93e2_arena_tripwire \
+  --skip p107_concrete_cc2_rebuild_runs_typed_pointer_and_rejects_raw_address
+```
+
+The arena test was excluded after the SIGKILL described above. The long P107
+userspace rebuild witness **passed in the preceding broad run** and was not
+repeated for the final socket-footprint/accounting-only fix. That earlier run
+exposed eight ordinary-socket quota failures: inline storage buffers inflated
+even endpoints without a storage mode. Separately charged optional state fixes
+those failures; the final rerun has none. This evidence does not claim a completed
+unfiltered full-suite pass. Logs for the prior run and final checks are included.
+
+The transport and providers are deterministic trusted fixtures, not production
+cryptographic authentication. Deadlines remain cooperative at host callbacks.
+
+**Next implementation slice:** fresh live executable admission from this private
+validated stored image, without recompiling it, under current execution authority
+and fresh-object/tag/frame/context obligations. Guest/service reboot execution
+remains a separate acceptance boundary.
+
+### SR110 R2 — fresh live admission implementation (2026-11-18)
+
+**Delivered for laptop validation; not compiled or tested in this delivery.**
+This is the next slice after GD110's charged private download. The accepted
+SR110 92/78, SL110 49/56 and GD110 174/149 formal files are unchanged; their
+previous results do not constitute acceptance of this Rust implementation.
+
+`RetrievedCompilerImage::launch` consumes the private image and retains its
+original deadline and remaining work. Both host-file retrieval and guest
+reception now transfer that budget instead of dropping it. Guest downloads
+also retain the original read provider and final authenticated channel/request.
+Launch rechecks that provider and the independently supplied current image,
+ordered dependency, provenance and execute evidence under exclusive guards.
+File-based policies must revalidate the pinned service boot/ticket/read scope.
+No provider implementing these obligations is implicitly installed: all new
+policy methods deny by default, and the positive providers are test fixtures.
+
+The execute-only Rust predicate refines T1's existing recognition/grant model:
+selected anchor, installation/policy epoch, challenge-bound identity possession,
+current status, enrollment, exact artifact/generation, purpose/resource kind 3,
+zero memory range/rights, validity windows, actual owner/Kernel binding, current
+commit time and a nonwrapping admission revision. The fixed Kernel ledger
+retains consumed challenges through exit, denial and cleanup. Its process-local
+Kernel identity and attempt watermark never wrap; neither is a durable reboot
+credential. A matching header, checksum, read grant or developer run token
+cannot substitute for execute evidence.
+
+The adapter reserves the full bounded application realm and report before
+copying or parsing executable bytes. It reconstructs a sealed image in fresh
+private Fabric backing, uses the existing protected-program validator, VLB
+layout, fresh stack/frame/context initialization and ordinary `SYS_SPAWN`.
+The trusted supervisor stages the child; the scheduler cannot run a child in
+its birth round. The new gate commits admission after child construction and
+before the first child instruction. Failed admission destroys that private
+realm. No compiler or linker is invoked by launch, and no saved process,
+capability or call-stack authority is restored.
+
+The enclosing service Kernel remains alive and owns every reservation. As with
+the current C4 runner, the child runs synchronously in an isolated application
+realm; this does **not** add general concurrent live-child scheduling to the
+service Kernel. The fresh launch identity is paired with its Kernel identity,
+not an isolated realm's reusable numeric object ID. No cancel/use interface
+accepts saved launch IDs. Independent service processes, publication receipts
+and quota reservations remain untouched. Durable selection is never modified.
+
+The private realm and image copy are scrubbed before machine quota is released;
+output and the original private image remain charged until the report drops.
+Provider unwind scrubs the staged realm before refund. An admission consumed
+before a later execution timeout remains consumed. All production providers
+must obey the common mutex serialization contract; these reference policies
+are not a credential protocol, cryptographic verifier, or hardware-DMA proof.
+
+The delivery adds four authority tests, seven Kernel custody/admission tests,
+and one ignored real CC2/typed-socket/NIC/guarded-TCP/reopened-file/live-launch
+witness. The real witness compiles the target and pump only before persistence,
+discards the original target receipt, then downloads and runs the exact stored
+target to exit 42; it rejects replay
+and revoked read dependencies while preserving independent quota and files.
+The small A/B/C tests preserve a peer reservation and existing publication;
+concurrent execution of a separate peer application is outside this runner.
+
+User-run validation, from the repository root:
+
+```bash
+bash scripts/check-anka110-stored-live-launch.sh
+bash scripts/check-anka110-stored-live-launch.sh --real
+```
+
+Until those runs pass, fresh live admission remains **implementation pending
+validation**, and reboot/restart acceptance remains a subsequent task.

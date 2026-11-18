@@ -1,6 +1,9 @@
 //! One outbound storage transaction. The trusted scheduling thread serializes
 //! verifier observations and effects; providers must honor E11's guard contract.
 use super::*;
+pub(crate) mod download;
+use download::{DownloadLane,scrub};
+use artifact::read::{self,ReadRequest};
 use crate::anka64::authority_persistence::{Operation,Verdict,protocol::{
     Envelope,REPLY_BYTES,ClientResult,ClientEvidence,accept_reply,
     client::{self,Binding,ServerVerifier}}};
@@ -16,7 +19,7 @@ pub(crate) struct Select {
     phase:Phase, binding:Binding, pub(super) verifier:ServerLane, verifier_size:u64, envelope:Option<Envelope>,
     request:[u8;artifact::MAX_REQUEST], request_len:usize, accepted:usize, sent:usize,
     reply:[u8;artifact::MAX_REPLY], reply_len:usize, received:usize, delivered:usize,
-    work:u16, deadline:Instant,
+    work:u16, deadline:Instant, download:Option<(ReadRequest,DownloadLane)>,
 }
 impl Select {
     pub(crate) fn new(local:SocketAddr,remote:SocketAddr,env:Envelope,v:ServerLane)
@@ -30,6 +33,13 @@ impl Select {
         artifact::decode(bytes,true).map_err(|_|HeapError::Configuration)?;
         Self::create(local,remote,None,bytes,bytes.len()+72,v)
     }
+    pub(crate) fn new_download(local:SocketAddr,remote:SocketAddr,r:ReadRequest,v:ServerLane,d:DownloadLane)
+        ->Result<Self,HeapError>{
+        let frame=read::encode_read(r).map_err(|_|HeapError::Configuration)?;
+        let mut s=Self::create(local,remote,None,&frame,read::READ_REPLY_PREFIX+r.count as usize,v)?;
+        d.try_lock().map_err(|_|HeapError::Busy)?.bind(r,s.binding).map_err(|_|HeapError::Configuration)?;
+        s.download=Some((r,d));Ok(s)
+    }
     fn create(local:SocketAddr,remote:SocketAddr,envelope:Option<Envelope>,bytes:&[u8],reply_len:usize,v:ServerLane)
         ->Result<Self,HeapError>{
         if bytes.len()>artifact::MAX_REQUEST || reply_len>artifact::MAX_REPLY{return Err(HeapError::Configuration);}
@@ -38,15 +48,32 @@ impl Select {
         Ok(Self{phase:Phase::Idle,binding:Binding{connection:client::fresh_connection().map_err(|_|HeapError::Capacity(Resource::Identity))?,local,remote},
             verifier:v,verifier_size,envelope,request,request_len:bytes.len(),
             accepted:0,sent:0,reply:[0;artifact::MAX_REPLY],reply_len,received:0,delivered:0,
-            work:if envelope.is_some(){512}else{4096},deadline:Instant::now()+Duration::from_secs(30)})
+            work:if envelope.is_some(){512}else{4096},deadline:Instant::now()+Duration::from_secs(30),download:None})
     }
     pub(crate) fn is_artifact(&self)->bool{self.envelope.is_none()}
     pub(crate) fn reply_len(&self)->usize{self.reply_len}
+    fn allow_download_output(&mut self,used:usize,count:u64)->bool {
+        let Some((r,_))=&self.download else{return false};
+        if self.phase!=Phase::Reply || self.delivered!=self.reply_len
+            || used as u64>r.count || count>r.count-used as u64 {return false;}
+        self.current().is_some()
+    }
     fn validate_reply_using(&mut self,end:usize,v:&mut dyn ServerVerifier)->bool {
         if end!=self.reply_len{return false;}
         if let Some(env)=self.envelope {
             return !matches!(accept_reply(&self.reply[..end],true,env,
                 ClientEvidence{server:Verdict::Valid,pending_current:true}),ClientResult::Unknown);
+        }
+        if let Some((r,_))=&self.download {
+            struct ReadCheck<'a>{v:&'a mut dyn ServerVerifier,b:Binding}
+            impl read::ReadServerEvidence for ReadCheck<'_>{
+                fn current(&mut self,c:u64,r:&ReadRequest,reply:&[u8])->Verdict{
+                    if c!=self.b.connection{return Verdict::Invalid}self.v.verify_read_reply(self.b,*r,reply)
+                }
+            }
+            return read::accept_read_reply(&self.request[..self.request_len],&self.reply[..end],true,self.binding.connection,
+                &mut ReadCheck{v,b:self.binding}).is_ok() && self.download.as_ref().unwrap().1.try_lock()
+                    .is_ok_and(|d|d.matches(*r,self.binding));
         }
         struct Check<'a>{v:&'a mut dyn ServerVerifier,b:Binding,request:&'a[u8]}
         impl artifact::ServerEvidence for Check<'_>{
@@ -66,6 +93,10 @@ impl Select {
     }
     pub(super) fn verifier_bytes(&self)->u64{self.verifier_size}
     fn tick(&mut self)->Option<()>{
+        if let Some((_,d))=&self.download {
+            if self.phase==Phase::Failed{return None}
+            if d.try_lock().ok()?.spend(1).is_err(){self.phase=Phase::Failed;return None}return Some(())
+        }
         if self.phase==Phase::Failed || self.work==0 || Instant::now()>=self.deadline {
             self.phase=Phase::Failed;return None;
         }
@@ -78,9 +109,15 @@ impl Select {
     }
     fn check_using(&mut self,v:&mut dyn ServerVerifier)->Option<()> {
         self.tick()?;
-        let verdict=match self.envelope {Some(env)=>v.verify(self.binding,env),
-            None=>v.verify_artifact(self.binding,&self.request[..self.request_len])};
-        if verdict!=Verdict::Valid || Instant::now()>=self.deadline {
+        let verdict=if let Some((r,d))=&self.download {
+            if !d.try_lock().ok()?.matches(*r,self.binding){return None}
+            let current=v.verify_read(self.binding,*r);
+            if current==Verdict::Valid && self.phase==Phase::Reply {v.verify_read_reply(self.binding,*r,&self.reply[..self.received])}else{current}
+        }else{match self.envelope {Some(env)=>v.verify(self.binding,env),
+            None=>v.verify_artifact(self.binding,&self.request[..self.request_len])}};
+        let expired=if let Some((_,d))=&self.download {d.try_lock().ok()?.check().is_err()}else{Instant::now()>=self.deadline};
+        if verdict!=Verdict::Valid || expired {
+            if let Some((_,d))=&self.download{if let Ok(mut d)=d.try_lock(){d.fail();}}
             self.phase=Phase::Failed;return None;
         }
         Some(())
@@ -93,7 +130,9 @@ impl Select {
         self.accepted+=bytes.len();true
     }
     pub(super) fn read_ready(&mut self,v:&mut dyn ServerVerifier)->Option<bool>{
-        if self.phase==Phase::Reply {self.check_using(v)?;Some(true)} else { self.tick()?;Some(false) }
+        if self.phase==Phase::Reply {self.check_using(v)?;Some(true)} else {
+            if self.download.is_some(){self.check_using(v)?;}else{self.tick()?;}Some(false)
+        }
     }
     pub(super) fn refill(&mut self,queue:&mut [u8],used:&mut usize,fin:&mut bool){
         let n=(self.reply_len-self.delivered).min(queue.len()-*used);
@@ -103,7 +142,7 @@ impl Select {
 }
 
 impl Drop for Select {
-    fn drop(&mut self){self.request.fill(0);self.reply.fill(0);self.accepted=0;self.sent=0;self.received=0;self.delivered=0;}
+    fn drop(&mut self){scrub(&mut self.request);scrub(&mut self.reply);self.accepted=0;self.sent=0;self.received=0;self.delivered=0;}
 }
 
 impl Kernel {
@@ -136,7 +175,16 @@ impl Kernel {
     }
     pub(in crate::anka64::os) fn application_artifact_input(&self,idx:usize)->bool {
         self.application_select(idx) && self.socket_endpoint.as_ref()
-            .and_then(|e|e.select.as_ref()).is_some_and(Select::is_artifact)
+            .and_then(|e|e.select.as_ref()).is_some_and(|s|s.is_artifact())
+    }
+    // Only a fully received download may emit a bounded private report. Upload
+    // and Select never gain SYS_WRITE; the adapter still compares every byte
+    // against authenticated custody before advancing the image cursor.
+    pub(in crate::anka64::os) fn application_download_output(&mut self,idx:usize,count:u64)->bool {
+        if !self.socket_exit_drained(idx){return false;}
+        let used=self.byte_output.len();
+        self.socket_endpoint.as_mut().and_then(|e|e.select.as_mut())
+            .is_some_and(|s|s.allow_download_output(used,count))
     }
     fn outbound(&mut self,t:SocketTicket)->Result<&mut Endpoint,()> {
         if !self.socket_current(t){return Err(());}
@@ -181,18 +229,27 @@ impl Kernel {
         if s.phase!=Phase::Fin{return Err(());}
         let lane=s.verifier.clone();let mut v=lane.try_lock().map_err(|_|())?;
         s.check_using(&mut *v).ok_or(())?;
-        if bytes.len()>s.reply_len-s.received {s.phase=Phase::Failed;return Err(());}
+        if bytes.len()>s.reply_len-s.received {
+            if let Some((_,d))=&s.download{if let Ok(mut d)=d.try_lock(){d.fail();}}
+            s.phase=Phase::Failed;return Err(());
+        }
         if bytes.len()>e.capacity.rx{return Err(());} // whole fragment or nothing
         let end=s.received+bytes.len();
         s.reply[s.received..end].copy_from_slice(bytes);
         if eof {
             s.check_using(&mut *v).ok_or(())?;
             if !s.validate_reply_using(end,&mut *v){
+                if let Some((_,d))=&s.download{if let Ok(mut d)=d.try_lock(){d.fail();}}
                 s.phase=Phase::Failed;return Err(());
             }
         }
         if ack().is_err(){s.phase=Phase::Failed;return Err(());}
-        s.received=end;if eof{s.phase=Phase::Reply;} Ok(())
+        s.received=end;if eof{
+            if let Some((r,d))=&s.download{
+                d.try_lock().map_err(|_|())?.capture(*r,s.binding,&s.reply[..end]).map_err(|_|())?;
+            }
+            s.phase=Phase::Reply;
+        } Ok(())
     }
 }
 

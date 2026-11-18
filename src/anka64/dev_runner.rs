@@ -115,6 +115,7 @@ pub enum DevelopmentRunError {
     InputTooLarge,
     InputProvisionRejected,
     SocketProvisionRejected,
+    StoredAdmissionRejected,
     HeapServiceUnavailable,
     ResourceEnvelope,
     Artifact(DevelopmentShellError),
@@ -330,6 +331,11 @@ fn prepare_run(
     selector: &str,
     config: DevelopmentRunConfig,
 ) -> Result<PreparedRun, DevelopmentRunError> {
+    prepare_run_geometry(registry,fabric,placement,selector,config)
+}
+fn prepare_run_geometry(registry:&DevelopmentArtifactRegistry,fabric:&mut Fabric,
+    placement:&mut PhysicalPlacementManager,selector:&str,config:DevelopmentRunConfig)
+    ->Result<PreparedRun,DevelopmentRunError> {
     let artifact = resolve_artifact(registry, fabric, selector)?.clone();
     validate_artifact_geometry(fabric, placement, &artifact)?;
 
@@ -551,8 +557,28 @@ fn execute_prepared_run_stream(fabric:&mut Fabric,placement:&mut PhysicalPlaceme
 fn execute_prepared_run_transport(fabric:&mut Fabric,placement:&mut PhysicalPlacementManager,
     prepared:PreparedRun,config:DevelopmentRunConfig,input:Option<&[u8]>,callable_entry:bool,
     bounded:bool,stream:Option<OrderedStream<'_>>,
-    mut select:Option<super::os::compiler_retry::service::frame_port::tcp::outbound::SelectStream<'_>>)
+    select:Option<super::os::compiler_retry::service::frame_port::tcp::outbound::SelectStream<'_>>)
     ->Result<DevelopmentRunReport,DevelopmentRunError> {
+    execute_prepared_run_gated(fabric,placement,prepared,config,input,callable_entry,bounded,stream,select,None)
+}
+
+/// The stored-image caller supplies current execution admission. No developer
+/// token is manufactured. Only the trusted supervisor executes before the gate;
+/// the new child's first instruction is scheduled only after successful commit.
+pub(crate) fn run_accounted_stored_application(
+    registry:&DevelopmentArtifactRegistry,fabric:&mut Fabric,placement:&mut PhysicalPlacementManager,
+    config:DevelopmentRunConfig,admit:&mut dyn FnMut()->bool,
+)->Result<DevelopmentRunReport,DevelopmentRunError> {
+    let prepared=prepare_run_geometry(registry,fabric,placement,"rebuilt-application",config)?;
+    execute_prepared_run_gated(fabric,placement,prepared,config,None,true,true,None,None,Some(admit))
+}
+fn execute_prepared_run_gated(fabric:&mut Fabric,placement:&mut PhysicalPlacementManager,
+    prepared:PreparedRun,config:DevelopmentRunConfig,input:Option<&[u8]>,callable_entry:bool,
+    bounded:bool,stream:Option<OrderedStream<'_>>,
+    mut select:Option<super::os::compiler_retry::service::frame_port::tcp::outbound::SelectStream<'_>>,
+    mut admit:Option<&mut dyn FnMut()->bool>)
+    ->Result<DevelopmentRunReport,DevelopmentRunError> {
+    let gated=admit.is_some();
     let outbound=select.is_some();
     if outbound && (!bounded || !callable_entry || input.is_some() || stream.is_some()) {
         return Err(DevelopmentRunError::SocketProvisionRejected);
@@ -609,7 +635,7 @@ fn execute_prepared_run_transport(fabric:&mut Fabric,placement:&mut PhysicalPlac
     }
     let mut input_rounds=0usize;
     let mut bridge=stream.map(socket_stream::Bridge::new);
-    if input.is_some() || bridge.is_some() || outbound {
+    if input.is_some() || bridge.is_some() || outbound || gated {
         // One-instruction rounds until ordinary SYS_SPAWN publishes the child.
         // The scheduler captures its process range before running the parent;
         // a newly created child cannot execute in its birth round.
@@ -627,10 +653,29 @@ fn execute_prepared_run_transport(fabric:&mut Fabric,placement:&mut PhysicalPlac
             kernel.run(1, 1);
             input_rounds+=1;
         }
-        let attached = if outbound {
-            target.is_some_and(|key|select.take().unwrap().run(&mut kernel,key,
+        let attached = if gated {
+            // Child construction, pointer-program validation and ordinary spawn
+            // have completed. No child instruction has run or handle escaped.
+            // Panic destroys/scrubs this private realm before outer quota refund.
+            let decision=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                target.is_some() && admit.as_mut().unwrap()()));
+            match decision {Ok(ok)=>ok,Err(payload)=>{
+                kernel.fabric.scrub_retired_private_memory();
+                super::os::typed_socket::select::download::scrub(&mut kernel.byte_output);
+                std::panic::resume_unwind(payload)
+            }}
+        } else if outbound {
+            let run=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||target.is_some_and(|key|select.take().unwrap().run(&mut kernel,key,
                 config.quantum.saturating_mul(config.max_rounds).saturating_sub(input_rounds).min(2_000_000))
-                .map_err(|e|eprintln!("guest Select: {e}")).is_ok())
+                .map_err(|e|eprintln!("guest Select: {e}")).is_ok())));
+            match run {Ok(attached)=>attached,Err(payload)=>{
+                // The Select stack has unwound: no driver/DMA borrower remains.
+                // Scrub the privately owned child realm and partial output
+                // before propagating a provider panic to the charged runner.
+                kernel.fabric.scrub_retired_private_memory();
+                super::os::typed_socket::select::download::scrub(&mut kernel.byte_output);
+                std::panic::resume_unwind(payload)
+            }}
         } else {target.is_some_and(|key|match (&mut bridge,input) {
             (Some(b),None)=>b.attach(&mut kernel,key).is_ok(),
             (None,Some(bytes))=>kernel.provision_process_input(key,bytes).is_ok(),
@@ -643,7 +688,8 @@ fn execute_prepared_run_transport(fabric:&mut Fabric,placement:&mut PhysicalPlac
             teardown_sealed_transient(&mut kernel.fabric, placement, control_obj);
             teardown_sealed_transient(&mut kernel.fabric, placement, supervisor_obj);
             *fabric = kernel.into_fabric();
-            return Err(if bridge.is_some() || outbound {DevelopmentRunError::SocketProvisionRejected}
+            return Err(if gated {DevelopmentRunError::StoredAdmissionRejected}
+                else if bridge.is_some() || outbound {DevelopmentRunError::SocketProvisionRejected}
                 else{DevelopmentRunError::InputProvisionRejected});
         }
     }

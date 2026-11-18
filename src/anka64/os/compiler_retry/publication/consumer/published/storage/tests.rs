@@ -140,3 +140,7 @@ fn cs110_policy_unwind_refunds_export_scratch_without_touching_backend() {
     assert!(failed.is_err());assert_eq!(charge(&k),before);assert_eq!(s.usage().unwrap(),usage);
     assert!(k.linked_compiler_receipt(e).is_ok());
 }
+
+mod retrieval;
+
+mod download;

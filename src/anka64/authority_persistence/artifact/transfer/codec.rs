@@ -18,9 +18,14 @@ impl Outcome {
     pub(super) fn private(ticket:u64,cursor:u64,sealed:bool)->Self {Self{ticket,cursor,phase:if sealed{2}else{1},revision:0,artifact:0,generation:0}}
     pub(super) fn published(ticket:u64,cursor:u64,s:Selection)->Self {Self{ticket,cursor,phase:3,revision:s.revision,artifact:s.artifact,generation:s.generation}}
 }
-pub(crate) struct Reply {bytes:[u8;MAX_REPLY],len:usize}
+pub(crate) struct Reply {pub(super) bytes:[u8;MAX_REPLY],pub(super) len:usize}
 impl Reply {pub(crate) fn bytes(&self)->&[u8] {&self.bytes[..self.len]}}
-impl Drop for Reply {fn drop(&mut self){self.bytes.fill(0);self.len=0;}}
+impl Drop for Reply {fn drop(&mut self){
+    // Private response bytes may contain code or metadata. Scrub before the
+    // transport refunds custody, including errors and unwinding.
+    for b in &mut self.bytes {unsafe {std::ptr::write_volatile(b,0)}}
+    self.len=0;
+}}
 fn word(bytes:&[u8],index:usize)->u64 {u64::from_le_bytes(bytes[8+index*8..16+index*8].try_into().unwrap())}
 fn put(bytes:&mut[u8],index:usize,n:u64) {bytes[8+index*8..16+index*8].copy_from_slice(&n.to_le_bytes());}
 fn valid(r:&Request<'_>)->bool {

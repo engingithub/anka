@@ -57,7 +57,7 @@ The original MC68000 implementation remains in the repository as the project's
 experimental foundation. Active architecture and toolchain development targets
 Anka64.
 
-## Current checkpoint — guest artifact upload accepted
+## Current checkpoint — artifact read accepted
 
 **Phase 10.8 is closed and merged. Phases 10.9 and 10.10 remain open.**
 The protected service stack serves `/alive` through the virtual NIC. A CC2-compiled
@@ -90,6 +90,27 @@ reconstruct fresh runtime objects, and launch under current execution authority
 without restarting Anka64. Separate guest/service reboot acceptance follows.
 The stored-launch Kleis gate (49 positive / 56 hostile) is a foundation; extend
 affected retrieval/transport/admission contracts before implementing new behavior.
+The [SR110 retrieval/admission refinement](DESIGN_NOTES.md#stored-retrieval-launch)
+now passes 92 positive witnesses and 78 explicit hostile disproofs. The first
+Rust slice implements charged private file retrieval and exact envelope decoding;
+its 20 focused tests passed on macOS in **7.20s**. Run
+`bash scripts/check-anka110-stored-retrieval.sh`. The next network read contract,
+[AR110](DESIGN_NOTES.md#artifact-read-protocol), passes **117 positive / 98 hostile**
+Kleis witnesses. Its Rust codec, bounded client exchange and guarded TCP read
+path now have local acceptance: **23 focused + 24 upload-compatibility tests
+passed** (`bash scripts/check-anka110-artifact-read.sh`, 2026-11-18). The next
+[GD110 guest-download contract](DESIGN_NOTES.md#guest-artifact-download) passes
+**174 positive / 149 explicitly disproved hostile witnesses** with Kleis/Z3.
+It specifies charged typed I/O, contiguous multi-range assembly, bounded retries,
+cleanup and private envelope validation. GD110 guest-runtime integration and
+SR110 R2 fresh live admission are implemented, with laptop validation pending.
+The repaired source includes the complete download prerequisites; see
+`GD110_SR110_REPAIR.md`. Run
+`bash scripts/check-anka110-stored-live-launch.sh --real` to validate the real
+CC2/typed-socket/NIC/file/live-launch path. Reboot execution remains pending.
+Select the gates with
+`--only-stored-retrieval`, `--only-artifact-read` or `--only-guest-download` in
+`scripts/check-anka109-gates.py`.
 Podman with persistent host files, S3/Ceph adapters and Metal execution are later
 work, not prerequisites for the accepted file-backed upload.
 
@@ -196,3 +217,4 @@ Anka, including Anka64, is available under the [non-commercial license](LICENSE)
 Non-commercial use, modification and redistribution are permitted subject to
 its terms. Commercial use requires prior written permission from Engin Atik;
 contact **atik@kleis.io**. Third-party components retain their own licenses.
+

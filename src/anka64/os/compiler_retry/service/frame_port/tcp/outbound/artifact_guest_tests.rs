@@ -58,6 +58,9 @@ impl store::Evidence for Proof{
     }
 }
 impl at::TransferEvidence for Proof{
+    fn read_caller(&mut self,c:u64,r:&at::read::ReadRequest)->Result<store::Caller,ap::Error>{
+        if self.channels.contains(&c) && r.manifest==self.manifest{Ok(caller())}else{Err(ap::Error::Authority)}
+    }
     fn caller(&mut self,c:u64,r:&at::Request<'_>)->Result<store::Caller,ap::Error>{
         if self.channels.contains(&c) && r.manifest==self.manifest{Ok(caller())}else{Err(ap::Error::Authority)}
     }
@@ -258,3 +261,5 @@ fn ga110_real_cc2_artifact_upload(){
     assert_eq!(fs::read(temp.0.join("artifact.bytes")).unwrap(),*payload);
     eprintln!("GA110: actual CC2 linked image -> guest malloc/read/ssend/sshut/srecv -> NIC DMA -> guarded TCP -> durable file; lost publish reply + reopened exact Outcome revision 8 passed");
 }
+
+mod download_tests;

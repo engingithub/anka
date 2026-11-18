@@ -1069,6 +1069,8 @@ pub struct Kernel {
     compiler_inputs: compiler_retry::inputs::CompilerInputs,
     compiler_candidates: compiler_retry::retained::CompilerCandidates,
     compiler_publications: compiler_retry::publication::CompilerPublications,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    stored_launch: compiler_retry::publication::consumer::stored_launch::LaunchState,
     heap_service: Option<HeapService>,
     pub fabric: Fabric,
     pub processes: Vec<Process>,
@@ -1125,6 +1127,8 @@ impl Kernel {
             compiler_inputs: Default::default(),
             compiler_candidates: Default::default(),
             compiler_publications: Default::default(),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            stored_launch: Default::default(),
             heap_service: None,
             fabric,
             processes: Vec::new(),

@@ -3,13 +3,15 @@
 use super::{Driver,DriverHold,DeveloperFrameAuthority,Kernel,SESSION_CHARGE,N,err};
 use crate::anka64::{state::ProcessKey,os::typed_socket::{select::{Select,ServerLane},SocketCapacity,SocketTicket},
     authority_persistence::protocol::Envelope};
+use crate::anka64::os::typed_socket::select::download::DownloadLane;
+use crate::anka64::authority_persistence::artifact::transfer::read::{ReadRequest,encode_read};
 use std::sync::atomic::{AtomicU32,Ordering};
 mod wire;
 use wire::*;
 static NEXT_ISS:AtomicU32=AtomicU32::new(1);
 
 pub(crate) struct Session{driver:Driver,ticket:SocketTicket,snd:u32,rcv:u32,credit:usize,
-    rx_window:u16,started:bool,connected:bool,local_fin:bool,ended:bool,events:u16}
+    rx_window:u16,started:bool,connected:bool,local_fin:bool,ended:bool,events:u16,download:Option<DownloadLane>}
 struct Cleanup<'a>{k:&'a mut Kernel,t:SocketTicket,input:Option<ProcessKey>}
 impl Drop for Cleanup<'_>{fn drop(&mut self){let _=self.k.cancel_socket(self.t);if let Some(key)=self.input{self.k.detach_process_input(key);}}}
 #[cfg(test)]
@@ -21,20 +23,25 @@ pub(crate) fn with_guest_select<T>(k:&mut Kernel,key:ProcessKey,cap:SocketCapaci
 fn with_storage_request<T>(k:&mut Kernel,key:ProcessKey,cap:SocketCapacity,request:StorageRequest<'_>,
     verifier:ServerLane,net:&DeveloperFrameAuthority,
     run:impl FnOnce(&mut Kernel,&mut Session)->Result<T,String>)->Result<T,String>{
-    if matches!(request,StorageRequest::Artifact(..)) && !k.application_select_realm(){
+    if matches!(&request,StorageRequest::Artifact(..)|StorageRequest::Download(..)) && !k.application_select_realm(){
         return Err("artifact input requires the charged receipt application realm".into());
     }
     let owner=k.processes.get(key.slot).ok_or("invalid guest")?.core.heap_owner().map_err(err)?;
     if owner.process!=key{return Err("stale guest".into());}
-    let flow=match request {
-        StorageRequest::Select(env)=>Select::new(LOCAL.addr(),STORAGE.addr(),env,verifier),
+    let download=match &request{StorageRequest::Download(_,_,d)=>Some(d.clone()),_=>None};
+    let flow=match &request {
+        StorageRequest::Select(env)=>Select::new(LOCAL.addr(),STORAGE.addr(),*env,verifier),
         StorageRequest::Artifact(bytes,_)=>Select::new_artifact(LOCAL.addr(),STORAGE.addr(),bytes,verifier),
+        StorageRequest::Download(r,_,d)=>Select::new_download(LOCAL.addr(),STORAGE.addr(),*r,verifier,d.clone()),
     }.map_err(err)?;
     let artifact=flow.is_artifact();let reply_len=flow.reply_len();
     let t=if k.application_select_realm() {k.bind_application_select(key,cap,flow,net)}
         else {k.bind_select(key,cap,flow)}.map_err(err)?;
     let mut guard=Cleanup{k,t,input:None};
-    if let StorageRequest::Artifact(bytes,_authority)=request {
+    let read_frame=match &request{StorageRequest::Download(r,_,_)=>Some(encode_read(*r).map_err(err)?),_=>None};
+    let input_bytes=match &request{StorageRequest::Artifact(bytes,_)=>Some(*bytes),
+        StorageRequest::Download(_,_,_)=>Some(read_frame.as_ref().unwrap().as_slice()),_=>None};
+    if let Some(bytes)=input_bytes {
         // The receipt runner reserves INPUT_CHARGE before this copy. This is a
         // fresh exact input for this incarnation, not an unbounded host stream.
         let mut input=[0u8;crate::anka64::authority_persistence::artifact::transfer::MAX_REQUEST+8];
@@ -53,7 +60,7 @@ fn with_storage_request<T>(k:&mut Kernel,key:ProcessKey,cap:SocketCapacity,reque
         let iss=NEXT_ISS.fetch_update(Ordering::Relaxed,Ordering::Relaxed,|n|n.checked_add(8192)).map_err(err)?;
         let driver=Driver::new()?;
         let mut s=Session{driver,ticket:t,snd:iss,rcv:0,credit:0,rx_window:cap.rx().min(reply_len) as u16,
-            started:false,connected:false,local_fin:false,ended:false,events:if artifact{4096}else{128}};
+            started:false,connected:false,local_fin:false,ended:false,events:if artifact{4096}else{128},download};
         run(&mut *charge.kernel,&mut s)
     })();
     charge.kernel.fabric.scoped_pointers.release_host_storage(token).map_err(err)?;
@@ -61,7 +68,7 @@ fn with_storage_request<T>(k:&mut Kernel,key:ProcessKey,cap:SocketCapacity,reque
 }
 
 impl Session{
-    fn tick(&mut self)->Result<(),String>{self.events=self.events.checked_sub(1).ok_or("Select NIC work exhausted")?;Ok(())}
+    fn tick(&mut self)->Result<(),String>{if let Some(d)=&self.download {return d.try_lock().map_err(err)?.spend(1).map_err(err)}self.events=self.events.checked_sub(1).ok_or("Select NIC work exhausted")?;Ok(())}
     pub(crate) fn start(&mut self,k:&mut Kernel)->Result<Vec<u8>,String>{
         self.tick()?;if self.started{return Err("active open already started".into());}
         let syn=make(LOCAL,STORAGE,Segment{seq:self.snd,ack:0,flags:SYN,window:self.rx_window,body:&[]});
@@ -117,10 +124,11 @@ mod tests;
 pub(crate) trait SelectPeer {
     fn exchange(&mut self,frame:&[u8],reply:&mut [u8;N])->Result<usize,String>;
 }
-#[derive(Clone,Copy)]
+#[derive(Clone)]
 pub(crate) enum StorageRequest<'a> {
     Select(Envelope),
     Artifact(&'a[u8],&'a crate::anka64::dev_runner::DeveloperInputAuthority),
+    Download(ReadRequest,&'a crate::anka64::dev_runner::DeveloperInputAuthority,DownloadLane),
 }
 pub(crate) struct SelectStream<'a> {
     pub(crate) capacity:SocketCapacity,
@@ -130,7 +138,7 @@ pub(crate) struct SelectStream<'a> {
     pub(crate) peer:&'a mut dyn SelectPeer,
 }
 impl SelectStream<'_> {
-    pub(crate) fn artifact_input(&self)->bool{matches!(self.request,StorageRequest::Artifact(..))}
+    pub(crate) fn artifact_input(&self)->bool{matches!(&self.request,StorageRequest::Artifact(..)|StorageRequest::Download(..))}
     pub(crate) fn run(self,k:&mut Kernel,key:ProcessKey,rounds:usize)->Result<(),String>{
         if rounds==0 || rounds>2_000_000{return Err("invalid Select execution budget".into());}
         with_storage_request(k,key,self.capacity,self.request,self.verifier,self.authority,|k,s|{
@@ -138,6 +146,7 @@ impl SelectStream<'_> {
             s.exchange(k,self.peer,syn)?;
             if !s.connected {return Err("Select handshake incomplete".into());}
             for _ in 0..rounds {
+                if let Some(d)=&s.download{d.try_lock().map_err(err)?.spend(1).map_err(err)?;}
                 if k.processes[0].exited(){return Ok(());}
                 k.run(1,1);
                 if let Some((op,_,result))=k.take_socket_call() {

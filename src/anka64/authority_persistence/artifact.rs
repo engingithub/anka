@@ -12,6 +12,8 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 mod codec;
 #[path="artifact/transfer.rs"]
 pub(crate) mod transfer;
+#[path="artifact/retrieval.rs"]
+pub(crate) mod retrieval;
 use codec::{Snapshot, Phase, RECORD_BYTES};
 // Stable persisted accounting units, independent of Rust layout/compiler version.
 const _: () = assert!(std::mem::size_of::<Snapshot>()<=1024);

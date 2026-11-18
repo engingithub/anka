@@ -5,6 +5,8 @@
 use super::*;
 #[path="transfer/codec.rs"]
 mod codec;
+#[path="transfer/read.rs"]
+pub(crate) mod read;
 #[path="transfer/transport.rs"]
 pub(crate) mod transport;
 pub(crate) use codec::{Operation,Request,Outcome,Reply,decode,encode,accept_reply,ServerEvidence,HEADER,MAX_REQUEST,MAX_REPLY};
@@ -12,6 +14,10 @@ pub(crate) use codec::{Operation,Request,Outcome,Reply,decode,encode,accept_repl
 /// Must bind the actual connection/incarnation, exact request and current grant.
 /// The backend separately rechecks Evidence for every operation/disclosure.
 pub(crate) trait TransferEvidence:Evidence {
+    /// Current stream-bound caller AND read/content scope for this exact immutable
+    /// manifest/range. Upload authority never implies this permission. Updates
+    /// must share the transport lane; defaults deny before file access.
+    fn read_caller(&mut self,_connection:u64,_request:&read::ReadRequest)->Result<Caller,Error> {Err(Error::Authority)}
     fn caller(&mut self,_connection:u64,_request:&Request<'_>)->Result<Caller,Error> {Err(Error::Authority)}
 }
 /// Trusted transport reserves this scratch BEFORE receiving data. This struct
@@ -24,6 +30,11 @@ impl Budget {
         Ok(Self{work,ingress})
     }
     pub(crate) fn remaining(&self)->(u64,u64) {(self.work,self.ingress)}
+    fn scan(&mut self,size:u64)->Result<(),Error> {
+        let units=(size/4096+u64::from(size%4096!=0)).checked_mul(2).ok_or(Error::Capacity)?;
+        self.work=match self.work.checked_sub(units) {Some(n)=>n,None=>{self.work=0;return Err(Error::Capacity)}};
+        Ok(())
+    }
     fn spend(&mut self,n:usize)->Result<(),Error> {
         if self.work==0 {return Err(Error::Capacity)}
         self.work-=1;

@@ -33,6 +33,12 @@ impl SocketCapacity {
         let bytes = pool.checked_add(std::mem::size_of::<Endpoint>()).ok_or(HeapError::Size)?;
         Ok((pool, u64::try_from(bytes).map_err(|_| HeapError::Size)?))
     }
+    fn bound_layout(self,select:Option<&select::Select>)->Result<(usize,u64),HeapError>{
+        let (pool,base)=self.layout()?;
+        let extra=match select{Some(s)=>(std::mem::size_of::<select::Select>() as u64)
+            .checked_add(s.verifier_bytes()).ok_or(HeapError::Size)?,None=>0};
+        Ok((pool,base.checked_add(extra).ok_or(HeapError::Size)?))
+    }
 }
 pub(crate) const SOCKET_AGAIN: u64 = u64::MAX - 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +58,9 @@ pub(super) struct Endpoint {
     tx: usize,
     tx_limit: usize,
     fin: bool,
-    select: Option<select::Select>,
+    // Ordinary sockets must not pay for inline artifact request/reply buffers.
+    // The optional storage state is reserved separately before Box allocation.
+    select: Option<Box<select::Select>>,
 }
 
 
@@ -76,8 +84,7 @@ impl Kernel {
         -> Result<SocketTicket,HeapError> {
         if self.socket_endpoint.is_some() {return Err(HeapError::Busy);}
         if !(1..=capacity.tx).contains(&tx_limit) {return Err(HeapError::Configuration);}
-        let (pool, base_charge) = capacity.layout()?;
-        let charge=base_charge.checked_add(select.as_ref().map_or(0,|s|s.verifier_bytes())).ok_or(HeapError::Size)?;
+        let (pool, charge) = capacity.bound_layout(select.as_ref())?;
         let p = self.processes.get(key.slot).ok_or(HeapError::Owner)?;
         let owner = CurrentHeapProcess::from_processes(&self.processes,key).ok_or(HeapError::Owner)?.owner();
         if p.socket_was_bound || !p.core.protected_application() || p.core.heap_owner()? != owner {
@@ -89,7 +96,7 @@ impl Kernel {
             |n| n.checked_add(1)).map_err(|_| HeapError::Capacity(Resource::Identity))?;
         let storage = reg.reserve_host_storage(account, charge, reg.revision())?;
         let ticket = SocketTicket { epoch, owner, storage };
-        let e = self.socket_endpoint.insert(Endpoint { ticket, rights, queues:Vec::new(),capacity,rx:0,tx:0,tx_limit,fin:false,select });
+        let e = self.socket_endpoint.insert(Endpoint { ticket, rights, queues:Vec::new(),capacity,rx:0,tx:0,tx_limit,fin:false,select:select.map(Box::new) });
         if e.queues.try_reserve_exact(pool).is_err() || e.queues.capacity() != pool {
             self.discard_socket()?;
             return Err(HeapError::HostAllocation);
@@ -115,8 +122,7 @@ impl Kernel {
 
     pub(crate) fn socket_current(&self, ticket: SocketTicket) -> bool {
         let Some(e) = self.socket_endpoint.as_ref() else { return false };
-        let Ok((pool, charge)) = e.capacity.layout() else { return false };
-        let Some(total)=charge.checked_add(e.select.as_ref().map_or(0,|s|s.verifier_bytes())) else {return false};
+        let Ok((pool, total)) = e.capacity.bound_layout(e.select.as_deref()) else { return false };
         e.ticket == ticket && e.queues.len() == pool
             && CurrentHeapProcess::from_processes(&self.processes,ticket.owner.process)
                 .is_some_and(|p|p.owner()==ticket.owner)
@@ -171,6 +177,7 @@ impl Kernel {
     }
     pub(super) fn discard_socket(&mut self) -> Result<(),HeapError> {
         if let Some(e)=self.socket_endpoint.as_mut() {
+            select::download::scrub(&mut e.queues);
             drop(std::mem::take(&mut e.queues));
             e.select.take();
             self.fabric.scoped_pointers.release_host_storage(e.ticket.storage)?;

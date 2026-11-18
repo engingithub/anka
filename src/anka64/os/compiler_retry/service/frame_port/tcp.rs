@@ -9,6 +9,13 @@ const RX_BUDGET:usize=16;
 // Private driver plus 4096 fixed trace entries and bounded protocol staging.
 const SESSION_CHARGE:u64=DRIVER_CHARGE+4*1024*1024;
 struct Driver(Port);
+impl Drop for Driver {
+    fn drop(&mut self) {
+        // This driver has no external worker/borrower: all NIC/Fabric work is
+        // advanced synchronously by this owner. No scheduling follows drop.
+        self.0.k.fabric.scrub_retired_private_memory();
+    }
+}
 impl Driver {
     fn new()->Result<Self,String>{
         // Each command begins/ends at user PC 0. No guest is scheduled while

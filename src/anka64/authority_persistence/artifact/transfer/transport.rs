@@ -107,7 +107,7 @@ impl<P:TransportEvidence> Session<'_,P> {
                 if Instant::now()>=self.deadline {return Err(TransportError::Deadline)}
                 let end=(self.received+64).min(self.input.len());
                 match self.stream.as_mut().ok_or(TransportError::Closed)?.read(&mut self.input[self.received..end]) {
-                    Ok(0)=>{decode(&self.input[..self.received],true)?;self.phase=Phase::Ready;},
+                    Ok(0)=>{read::validate_frame(&self.input[..self.received],true)?;self.phase=Phase::Ready;},
                     Ok(n)=>{self.received+=n;if self.received>MAX_REQUEST {return Err(Error::InvalidRequest.into())}self.phase=Phase::Reading;},
                     Err(e) if transient(&e)=>self.phase=Phase::Reading,
                     Err(e)=>return Err(e.into()),
@@ -115,6 +115,17 @@ impl<P:TransportEvidence> Session<'_,P> {
                 Ok(false)
             }
             Phase::Ready=>{
+                if read::is_read(&self.input[..self.received]) {
+                    let request=read::decode_read(&self.input[..self.received],true)?;
+                    let State{store,proof,dispatch:budget,..}=&mut *lane;
+                    let caller=read::authorize_read(store,self.channel,&request,None,proof)?;
+                    if Instant::now()>=self.deadline {return Err(TransportError::Deadline)}
+                    let reply=read::dispatch_read(store,self.channel,&self.input[..self.received],true,budget,proof)?;
+                    read::authorize_read(store,self.channel,&request,Some((caller,store.current_ticket().serial)),proof)?;
+                    if Instant::now()>=self.deadline {return Err(TransportError::Deadline)}
+                    self.caller=Some(caller);self.ticket=store.current_ticket().serial;
+                    self.reply=Some(reply);self.phase=Phase::Sending;return Ok(false)
+                }
                 let request=decode(&self.input[..self.received],true)?;
                 let caller=lane.proof.caller(self.channel,&request)?;
                 if Instant::now()>=self.deadline {return Err(TransportError::Deadline)}
@@ -125,14 +136,21 @@ impl<P:TransportEvidence> Session<'_,P> {
                 self.reply=Some(reply);self.phase=Phase::Sending;Ok(false)
             }
             Phase::Sending=>{
-                let request=decode(&self.input[..self.received],true)?;
-                let caller=lane.proof.caller(self.channel,&request)?;
-                if Some(caller)!=self.caller {return Err(Error::Authority.into())}
-                let ticket=Ticket{anchor:request.manifest.anchor,installation:request.manifest.installation,serial:self.ticket,caller};
-                let State{store,proof,..}=&mut *lane;
-                if store.bound(ticket)?!=request.manifest {return Err(Error::Authority.into())}
-                let action=if matches!(request.operation,Operation::Publish|Operation::Outcome){Action::Publish}else{Action::Upload};
-                store.auth(proof,request.manifest,caller,self.ticket,action)?;
+                if read::is_read(&self.input[..self.received]) {
+                    let request=read::decode_read(&self.input[..self.received],true)?;
+                    let State{store,proof,..}=&mut *lane;
+                    let saved=(self.caller.ok_or(Error::Authority)?,self.ticket);
+                    read::authorize_read(store,self.channel,&request,Some(saved),proof)?;
+                } else {
+                    let request=decode(&self.input[..self.received],true)?;
+                    let caller=lane.proof.caller(self.channel,&request)?;
+                    if Some(caller)!=self.caller {return Err(Error::Authority.into())}
+                    let ticket=Ticket{anchor:request.manifest.anchor,installation:request.manifest.installation,serial:self.ticket,caller};
+                    let State{store,proof,..}=&mut *lane;
+                    if store.bound(ticket)?!=request.manifest {return Err(Error::Authority.into())}
+                    let action=if matches!(request.operation,Operation::Publish|Operation::Outcome){Action::Publish}else{Action::Upload};
+                    store.auth(proof,request.manifest,caller,self.ticket,action)?;
+                }
                 if Instant::now()>=self.deadline {return Err(TransportError::Deadline)}
                 let reply=self.reply.as_ref().ok_or(TransportError::Closed)?.bytes();
                 let end=(self.sent+64).min(reply.len());
@@ -180,3 +198,7 @@ fn transient(e:&io::Error)->bool {matches!(e.kind(),io::ErrorKind::WouldBlock|io
 #[cfg(test)]
 #[path="transport/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path="transport/read_tests.rs"]
+mod read_tests;
