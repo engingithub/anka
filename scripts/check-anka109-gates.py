@@ -31,6 +31,7 @@ SOCKET_CAPACITY_PAIRS = ('anka110_socket_capacity',)
 
 
 OUTBOUND_SELECT_PAIRS = ('anka110_outbound_select',)
+STORED_LAUNCH_PAIRS = ('anka110_stored_launch',)
 
 
 def main():
@@ -51,6 +52,7 @@ def main():
     selection.add_argument('--only-storage-verifier', action='store_true', help='run E11 storage server verification before send and at EOF')
     selection.add_argument('--only-socket-capacity', action='store_true', help='run configurable typed socket capacity refinement')
     selection.add_argument('--only-outbound-select', action='store_true', help='active storage connection and write-half-close')
+    selection.add_argument('--only-stored-launch', action='store_true', help='ordinary live and post-reboot durable-image launch')
     parser.add_argument('--timeout', type=int, default=120, help='seconds per theory file')
     args = parser.parse_args()
     if args.timeout <= 0:
@@ -72,7 +74,8 @@ def main():
              STORAGE_VERIFIER_PAIRS if args.only_storage_verifier else
              SOCKET_CAPACITY_PAIRS if args.only_socket_capacity else
              OUTBOUND_SELECT_PAIRS if args.only_outbound_select else
-             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS + EVIDENCE_PAIRS + PROVIDER_PAIRS + GUARDED_PAIRS + BINDER_PAIRS + VERIFIER_PAIRS + STORAGE_VERIFIER_PAIRS + SOCKET_CAPACITY_PAIRS + OUTBOUND_SELECT_PAIRS)
+             STORED_LAUNCH_PAIRS if args.only_stored_launch else
+             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS + EVIDENCE_PAIRS + PROVIDER_PAIRS + GUARDED_PAIRS + BINDER_PAIRS + VERIFIER_PAIRS + STORAGE_VERIFIER_PAIRS + SOCKET_CAPACITY_PAIRS + OUTBOUND_SELECT_PAIRS + STORED_LAUNCH_PAIRS)
     for stem in pairs:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')

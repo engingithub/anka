@@ -1,0 +1,934 @@
+// SL110: bounded ordinary launch. Scope: one installation, one serialized allocator,
+// one loader slot, one arbitrary unaffected peer. No compiler or boot selector input
+// is used to choose code. No new axioms. All keys are nonportable abstract equality
+// identities for independently validated content; no cryptographic hash is specified.
+import "anka109_reboot.kleis"
+import "anka109_grant_admission.kleis"
+import "anka108_protected_modules.kleis"
+data SL110Artifact = SL110Artifact(anchor : BitVec64,installation : BitVec64,artifact : BitVec64,generation : BitVec64,role : BitVec8,profile : BitVec64,size : BitVec64,image : BitVec64,metadata : BitVec64,dependencies : BitVec64,provenance : BitVec64)
+define sa_anchor(x : SL110Artifact) = match x { SL110Artifact(anchor,installation,artifact,generation,role,profile,size,image,metadata,dependencies,provenance) => anchor }
+define sa_installation(x : SL110Artifact) = match x { SL110Artifact(anchor,installation,artifact,generation,role,profile,size,image,metadata,dependencies,provenance) => installation }
+define sa_artifact(x : SL110Artifact) = match x { SL110Artifact(anchor,installation,artifact,generation,role,profile,size,image,metadata,dependencies,provenance) => artifact }
+define sa_generation(x : SL110Artifact) = match x { SL110Artifact(anchor,installation,artifact,generation,role,profile,size,image,metadata,dependencies,provenance) => generation }
+define sa_role(x : SL110Artifact) = match x { SL110Artifact(anchor,installation,artifact,generation,role,profile,size,image,metadata,dependencies,provenance) => role }
+define sa_profile(x : SL110Artifact) = match x { SL110Artifact(anchor,installation,artifact,generation,role,profile,size,image,metadata,dependencies,provenance) => profile }
+define sa_size(x : SL110Artifact) = match x { SL110Artifact(anchor,installation,artifact,generation,role,profile,size,image,metadata,dependencies,provenance) => size }
+define sa_image(x : SL110Artifact) = match x { SL110Artifact(anchor,installation,artifact,generation,role,profile,size,image,metadata,dependencies,provenance) => image }
+define sa_metadata(x : SL110Artifact) = match x { SL110Artifact(anchor,installation,artifact,generation,role,profile,size,image,metadata,dependencies,provenance) => metadata }
+define sa_dependencies(x : SL110Artifact) = match x { SL110Artifact(anchor,installation,artifact,generation,role,profile,size,image,metadata,dependencies,provenance) => dependencies }
+define sa_provenance(x : SL110Artifact) = match x { SL110Artifact(anchor,installation,artifact,generation,role,profile,size,image,metadata,dependencies,provenance) => provenance }
+define sl110_exact(a : SL110Artifact,b : SL110Artifact) =
+    (sa_anchor(a)=sa_anchor(b)) ∧
+    (sa_installation(a)=sa_installation(b)) ∧
+    (sa_artifact(a)=sa_artifact(b)) ∧
+    (sa_generation(a)=sa_generation(b)) ∧
+    (sa_role(a)=sa_role(b)) ∧
+    (sa_profile(a)=sa_profile(b)) ∧
+    (sa_size(a)=sa_size(b)) ∧
+    (sa_image(a)=sa_image(b)) ∧
+    (sa_metadata(a)=sa_metadata(b)) ∧
+    (sa_dependencies(a)=sa_dependencies(b)) ∧
+    (sa_provenance(a)=sa_provenance(b))
+data SL110Lane = SL110Lane(phase : BitVec64,boot : BitVec64,ticket : BitVec64,owner : BitVec64,incarnation : BitVec64,artifact : BitVec64,generation : BitVec64,receipt : BitVec64,charge : BitVec64,image : BitVec64,metadata : BitVec64,dependencies : BitVec64,profile : BitVec64,size : BitVec64)
+define ll_phase(x : SL110Lane) = match x { SL110Lane(phase,boot,ticket,owner,incarnation,artifact,generation,receipt,charge,image,metadata,dependencies,profile,size) => phase }
+define ll_boot(x : SL110Lane) = match x { SL110Lane(phase,boot,ticket,owner,incarnation,artifact,generation,receipt,charge,image,metadata,dependencies,profile,size) => boot }
+define ll_ticket(x : SL110Lane) = match x { SL110Lane(phase,boot,ticket,owner,incarnation,artifact,generation,receipt,charge,image,metadata,dependencies,profile,size) => ticket }
+define ll_owner(x : SL110Lane) = match x { SL110Lane(phase,boot,ticket,owner,incarnation,artifact,generation,receipt,charge,image,metadata,dependencies,profile,size) => owner }
+define ll_incarnation(x : SL110Lane) = match x { SL110Lane(phase,boot,ticket,owner,incarnation,artifact,generation,receipt,charge,image,metadata,dependencies,profile,size) => incarnation }
+define ll_artifact(x : SL110Lane) = match x { SL110Lane(phase,boot,ticket,owner,incarnation,artifact,generation,receipt,charge,image,metadata,dependencies,profile,size) => artifact }
+define ll_generation(x : SL110Lane) = match x { SL110Lane(phase,boot,ticket,owner,incarnation,artifact,generation,receipt,charge,image,metadata,dependencies,profile,size) => generation }
+define ll_receipt(x : SL110Lane) = match x { SL110Lane(phase,boot,ticket,owner,incarnation,artifact,generation,receipt,charge,image,metadata,dependencies,profile,size) => receipt }
+define ll_charge(x : SL110Lane) = match x { SL110Lane(phase,boot,ticket,owner,incarnation,artifact,generation,receipt,charge,image,metadata,dependencies,profile,size) => charge }
+define ll_image(x : SL110Lane) = match x { SL110Lane(phase,boot,ticket,owner,incarnation,artifact,generation,receipt,charge,image,metadata,dependencies,profile,size) => image }
+define ll_metadata(x : SL110Lane) = match x { SL110Lane(phase,boot,ticket,owner,incarnation,artifact,generation,receipt,charge,image,metadata,dependencies,profile,size) => metadata }
+define ll_dependencies(x : SL110Lane) = match x { SL110Lane(phase,boot,ticket,owner,incarnation,artifact,generation,receipt,charge,image,metadata,dependencies,profile,size) => dependencies }
+define ll_profile(x : SL110Lane) = match x { SL110Lane(phase,boot,ticket,owner,incarnation,artifact,generation,receipt,charge,image,metadata,dependencies,profile,size) => profile }
+define ll_size(x : SL110Lane) = match x { SL110Lane(phase,boot,ticket,owner,incarnation,artifact,generation,receipt,charge,image,metadata,dependencies,profile,size) => size }
+define sl110_lane_same(a : SL110Lane,b : SL110Lane) =
+    (ll_phase(a)=ll_phase(b)) ∧
+    (ll_boot(a)=ll_boot(b)) ∧
+    (ll_ticket(a)=ll_ticket(b)) ∧
+    (ll_owner(a)=ll_owner(b)) ∧
+    (ll_incarnation(a)=ll_incarnation(b)) ∧
+    (ll_artifact(a)=ll_artifact(b)) ∧
+    (ll_generation(a)=ll_generation(b)) ∧
+    (ll_receipt(a)=ll_receipt(b)) ∧
+    (ll_charge(a)=ll_charge(b)) ∧
+    (ll_image(a)=ll_image(b)) ∧
+    (ll_metadata(a)=ll_metadata(b)) ∧
+    (ll_dependencies(a)=ll_dependencies(b)) ∧
+    (ll_profile(a)=ll_profile(b)) ∧
+    (ll_size(a)=ll_size(b))
+data SL110Peer = SL110Peer(serial : BitVec64,context : BitVec64,charge : BitVec64,runnable : BitVec64)
+define lc_serial(x : SL110Peer) = match x { SL110Peer(serial,context,charge,runnable) => serial }
+define lc_context(x : SL110Peer) = match x { SL110Peer(serial,context,charge,runnable) => context }
+define lc_charge(x : SL110Peer) = match x { SL110Peer(serial,context,charge,runnable) => charge }
+define lc_runnable(x : SL110Peer) = match x { SL110Peer(serial,context,charge,runnable) => runnable }
+define sl110_peer_same(a : SL110Peer,b : SL110Peer) =
+    (lc_serial(a)=lc_serial(b)) ∧
+    (lc_context(a)=lc_context(b)) ∧
+    (lc_charge(a)=lc_charge(b)) ∧
+    (lc_runnable(a)=lc_runnable(b))
+
+// phase 0 = empty, 1 = private stage, 2 = runnable. charge follows the
+// slot: private -> child on commit, private -> zero on owned failure.
+// The global boot-local watermark is never decremented, even on failure.
+define sl110_empty(l : SL110Lane) =
+    ll_phase(l)=a109_z() ∧ ll_boot(l)=a109_z() ∧ ll_ticket(l)=a109_z() ∧ ll_owner(l)=a109_z() ∧ ll_incarnation(l)=a109_z() ∧ ll_artifact(l)=a109_z() ∧ ll_generation(l)=a109_z() ∧ ll_receipt(l)=a109_z() ∧ ll_charge(l)=a109_z() ∧ ll_image(l)=a109_z() ∧ ll_metadata(l)=a109_z() ∧ ll_dependencies(l)=a109_z() ∧ ll_profile(l)=a109_z() ∧ ll_size(l)=a109_z()
+define sl110_room(peer : BitVec64,n : BitVec64,limit : BitVec64) =
+    a109_nonzero(n) ∧ bvule(peer,limit) ∧ bvule(n,bvsub(limit,peer))
+define sl110_frame(head : P109State,next_head : P109State,peer : SL110Peer,next_peer : SL110Peer) =
+    p109_same(head,next_head) ∧ sl110_peer_same(peer,next_peer)
+
+// The trusted fetch grant and durable manifest are for the actual namespace.
+// The receipt identity binds the entire immutable expected manifest, not just
+// the image bytes. The measured charge includes staging, metadata and placement.
+define sl110_reserve(head : P109State,next_head : P109State,peer : SL110Peer,next_peer : SL110Peer,
+    old : SL110Lane,next : SL110Lane,high : BitVec64,nh : BitVec64,m : SL110Artifact,
+    id : BitVec64,gen : BitVec64,owner : BitVec64,inc : BitVec64,n : BitVec64,limit : BitVec64,fetch : A109Verdict) =
+    sl110_frame(head,next_head,peer,next_peer) ∧
+    (if sl110_empty(old) ∧ (fetch=A109Valid) ∧ a109_nonzero(ps_boot(head)) ∧
+        (ps_anchor(head)=sa_anchor(m)) ∧ (ps_installation(head)=sa_installation(m)) ∧
+        (id=sa_artifact(m)) ∧ (gen=sa_generation(m)) ∧ a109_nonzero(id) ∧ a109_nonzero(gen) ∧
+        (sa_role(m)=bvconst(2,8)) ∧ a109_nonzero(owner) ∧ a109_nonzero(inc) ∧ a109_nonzero(sa_provenance(m)) ∧
+        a109_nonzero(sa_size(m)) ∧ bvule(sa_size(m),n) ∧ sl110_room(lc_charge(peer),n,limit) ∧
+        bvule(lc_serial(peer),high) ∧ bvult(high,a109_max())
+     then (nh=bvadd(high,a109_one())) ∧ (ll_phase(next)=a109_one()) ∧ (ll_ticket(next)=nh) ∧
+        (ll_boot(next)=ps_boot(head)) ∧ (ll_owner(next)=owner) ∧ (ll_incarnation(next)=inc) ∧
+        (ll_artifact(next)=id) ∧ (ll_generation(next)=gen) ∧ (ll_receipt(next)=sa_provenance(m)) ∧ (ll_charge(next)=n) ∧
+        (ll_image(next)=sa_image(m)) ∧ (ll_metadata(next)=sa_metadata(m)) ∧ (ll_dependencies(next)=sa_dependencies(m)) ∧ (ll_profile(next)=sa_profile(m)) ∧ (ll_size(next)=sa_size(m))
+     else (nh=high) ∧ sl110_lane_same(old,next))
+
+// Observations made in the admission lane, never guest-supplied success bits.
+// The byte/profile/ordered-dependency and metadata identities in 'actual' must
+// come from the bytes presented for loading. pm108_execute enforces linked role.
+define sl110_image(l : SL110Lane,m : SL110Artifact,actual : SL110Artifact,verified : A109Verdict,
+    unresolved : BitVec64,unapplied : BitVec64,placement : Bool,layout : Bool) =
+    (verified=A109Valid) ∧ sl110_exact(m,actual) ∧ (ll_artifact(l)=sa_artifact(m)) ∧
+    (ll_generation(l)=sa_generation(m)) ∧ (ll_receipt(l)=sa_provenance(m)) ∧
+    (ll_image(l)=sa_image(m)) ∧ (ll_metadata(l)=sa_metadata(m)) ∧ (ll_dependencies(l)=sa_dependencies(m)) ∧ (ll_profile(l)=sa_profile(m)) ∧ (ll_size(l)=sa_size(m)) ∧
+    a109_nonzero(sa_image(m)) ∧ a109_nonzero(sa_metadata(m)) ∧ a109_nonzero(sa_profile(m)) ∧
+    pm108_execute(sa_role(actual),unresolved,unapplied,(verified=A109Valid),
+       sl110_exact(m,actual),(ll_artifact(l)=sa_artifact(m)),(verified=A109Valid),placement,layout)
+
+define sl110_auth(c : A109Context,e : A109Identity,en : A109Enrollment,g : A109Grant,q : A109Request,
+    old : A109Admission,expected : BitVec64,l : SL110Lane,m : SL110Artifact) =
+    (ctx_anchor(c)=sa_anchor(m)) ∧ (ctx_installation(c)=sa_installation(m)) ∧
+    (rq_subject(q)=ll_owner(l)) ∧ (rq_purpose(q)=bvconst(3,64)) ∧ (rq_resource(q)=sa_artifact(m)) ∧
+    a109_grant_allowed(c,e,en,g,q,sa_size(m),(bvconst(1,8)=bvconst(1,8)),sa_generation(m),old,expected,(bvconst(1,8)=bvconst(1,8)))
+
+// A launch can settle only its live stage. Foreign tickets cannot even refund
+// another owner's charge. The caller must refine the T1 current-authority check
+// and local issuance as one serialized transaction; the grant ledger itself
+// remains governed by T1. A commit does not revive a stored process capability.
+define sl110_finish(head : P109State,next_head : P109State,peer : SL110Peer,next_peer : SL110Peer,
+    l : SL110Lane,next : SL110Lane,high : BitVec64,nh : BitVec64,active : Bool,boot : BitVec64,
+    ticket : BitVec64,who : BitVec64,inc : BitVec64,m : SL110Artifact,actual : SL110Artifact,
+    verified : A109Verdict,unresolved : BitVec64,unapplied : BitVec64,placement : Bool,layout : Bool,limit : BitVec64,
+    c : A109Context,e : A109Identity,en : A109Enrollment,g : A109Grant,q : A109Request,ad : A109Admission,expected : BitVec64,next_ad : A109Admission) =
+    sl110_frame(head,next_head,peer,next_peer) ∧ (nh=high) ∧
+    (if (ll_phase(l)=a109_one()) ∧ b109_context(active,ps_boot(head),boot) ∧ (boot=ll_boot(l)) ∧
+       (ticket=ll_ticket(l)) ∧ (ticket=high) ∧ (who=ll_owner(l)) ∧ (inc=ll_incarnation(l))
+     then (if sl110_image(l,m,actual,verified,unresolved,unapplied,placement,layout) ∧
+               (ps_anchor(head)=sa_anchor(m)) ∧ (ps_installation(head)=sa_installation(m)) ∧
+               sl110_room(lc_charge(peer),ll_charge(l),limit) ∧ sl110_auth(c,e,en,g,q,ad,expected,l,m)
+           then a109_admit_step(c,e,en,g,q,sa_size(m),(bvconst(1,8)=bvconst(1,8)),sa_generation(m),ad,expected,(bvconst(1,8)=bvconst(1,8)),next_ad) ∧
+               (ll_phase(next)=bvconst(2,64)) ∧
+               (ll_boot(next)=ll_boot(l)) ∧ (ll_ticket(next)=ll_ticket(l)) ∧ (ll_owner(next)=ll_owner(l)) ∧ (ll_incarnation(next)=ll_incarnation(l)) ∧ (ll_artifact(next)=ll_artifact(l)) ∧ (ll_generation(next)=ll_generation(l)) ∧ (ll_receipt(next)=ll_receipt(l)) ∧ (ll_charge(next)=ll_charge(l)) ∧ (ll_image(next)=ll_image(l)) ∧ (ll_metadata(next)=ll_metadata(l)) ∧ (ll_dependencies(next)=ll_dependencies(l)) ∧ (ll_profile(next)=ll_profile(l)) ∧ (ll_size(next)=ll_size(l))
+           else (sl110_empty(next) ∧ a109_same_admission(ad,next_ad)))
+     else (sl110_lane_same(l,next) ∧ a109_same_admission(ad,next_ad)))
+
+// A=55, B=40, peer C=6; execute evidence and staged bytes are independently varied.
+example "reserve stage for B alongside peer C" {
+    assert(sl110_reserve(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        bvconst(8,64),bvconst(9,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        bvconst(40,64),bvconst(2,64),bvconst(30,64),bvconst(4,64),bvconst(48,64),bvconst(128,64),
+        A109Valid))
+}
+example "module is not a launch candidate" {
+    assert(sl110_reserve(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(8,64),bvconst(8,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(1,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        bvconst(40,64),bvconst(2,64),bvconst(30,64),bvconst(4,64),bvconst(48,64),bvconst(128,64),
+        A109Valid))
+}
+example "quota one byte short" {
+    assert(sl110_reserve(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(8,64),bvconst(8,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        bvconst(40,64),bvconst(2,64),bvconst(30,64),bvconst(4,64),bvconst(48,64),bvconst(127,64),
+        A109Valid))
+}
+example "wrapping charge" {
+    assert(sl110_reserve(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(8,64),bvconst(8,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        bvconst(40,64),bvconst(2,64),bvconst(30,64),bvconst(4,64),a109_max(),a109_max(),
+        A109Valid))
+}
+example "undercharge below payload" {
+    assert(sl110_reserve(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(8,64),bvconst(8,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        bvconst(40,64),bvconst(2,64),bvconst(30,64),bvconst(4,64),bvconst(31,64),bvconst(128,64),
+        A109Valid))
+}
+example "unverified fetch" {
+    assert(sl110_reserve(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(8,64),bvconst(8,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        bvconst(40,64),bvconst(2,64),bvconst(30,64),bvconst(4,64),bvconst(48,64),bvconst(128,64),
+        A109Unknown))
+}
+example "unrequested selection A" {
+    assert(sl110_reserve(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(8,64),bvconst(8,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        bvconst(55,64),bvconst(2,64),bvconst(30,64),bvconst(4,64),bvconst(48,64),bvconst(128,64),
+        A109Valid))
+}
+example "wrong generation" {
+    assert(sl110_reserve(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(8,64),bvconst(8,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        bvconst(40,64),bvconst(3,64),bvconst(30,64),bvconst(4,64),bvconst(48,64),bvconst(128,64),
+        A109Valid))
+}
+example "watermark exhausted" {
+    assert(sl110_reserve(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        a109_max(),a109_max(),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        bvconst(40,64),bvconst(2,64),bvconst(30,64),bvconst(4,64),bvconst(48,64),bvconst(128,64),
+        A109Valid))
+}
+example "live launch B with A selected and C runnable" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(1,64),bvconst(9,64),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(1,8)))))
+}
+example "same loader in new active boot" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(10,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(10,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(10,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(2,64),bvconst(10,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(10,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(10,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(10,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(1,64),bvconst(10,64),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(1,8)))))
+}
+example "old boot ticket" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(8,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "not an active boot" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(0,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "foreign ticket" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(8,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "foreign principal" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(31,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "old caller incarnation" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(3,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "ticket already consumed" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "no reservation" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "substitution of anchor" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(999,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "substitution of installation" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(999,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "substitution of artifact" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(999,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "substitution of generation" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(999,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "substitution of role" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(1,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "substitution of profile" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(999,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "substitution of size" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(999,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "substitution of image" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(999,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "substitution of metadata" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(999,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "substitution of dependencies" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(999,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "substitution of provenance" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(999,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "coherent relocatable module is not executable" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(1,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(1,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "foreign provenance in both offered manifests" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(9,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(9,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "substitute image and manifest together" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(999,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(999,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "revoked after fetch" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Invalid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "unknown grant status" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Unknown),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "expired at commit" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(110,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "old recognition after reboot" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(8,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "invoke-only authority" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(2,64),bvconst(40,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(2,64),bvconst(40,64),bvconst(2,64),bvconst(2,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "grant only for A" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(55,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "stale admission revision" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(1,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "not a durable authenticated publication" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Unknown,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "unresolved symbols" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(1,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "unapplied relocations" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "invalid placement" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(0,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "invalid virtual layout" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(0,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "quota exhausted during staging" {
+    assert(sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(127,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))))
+}
+example "law: no charge arithmetic wrap" { assert(∀ p : BitVec64 . ∀ n : BitVec64 . ∀ l : BitVec64 . sl110_room(p,n,l) ⟹ (bvuge(bvadd(p,n),p) ∧ bvule(bvadd(p,n),l))) }
+example "law: any allowed finish preserves boot selection" {
+    assert(∀ selected : BitVec64 . sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),selected,bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(1,64),bvconst(9,64),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(1,8)))) ⟹ (selected=bvconst(55,64)))
+}
+example "law: any allowed finish preserves boot counter" {
+    assert(∀ epoch : BitVec64 . sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),epoch,bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(2,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(1,64),bvconst(9,64),bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(1,8)))) ⟹ (epoch=bvconst(9,64)))
+}
+example "law: failed admission cannot charge the peer" {
+    assert(∀ n : BitVec64 . sl110_finish(P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        P109State(bvconst(8,64),bvconst(55,64),bvconst(9,64),bvconst(1,64),bvconst(30,64),bvconst(4,64),bvconst(1,64),bvconst(7,64),bvconst(55,64),bvconst(0,64),bvconst(10,64),bvconst(20,64),bvconst(3,64)),
+        SL110Peer(bvconst(6,64),bvconst(77,64),bvconst(80,64),bvconst(1,64)),SL110Peer(bvconst(6,64),bvconst(77,64),n,bvconst(1,64)),
+        SL110Lane(bvconst(1,64),bvconst(9,64),bvconst(9,64),bvconst(30,64),bvconst(4,64),bvconst(40,64),bvconst(2,64),bvconst(104,64),bvconst(48,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(4,64),bvconst(32,64)),
+        SL110Lane(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),
+        bvconst(9,64),bvconst(9,64),(bvconst(1,8)=bvconst(1,8)),bvconst(9,64),bvconst(9,64),
+        bvconst(30,64),bvconst(4,64),SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        SL110Artifact(bvconst(10,64),bvconst(20,64),bvconst(40,64),bvconst(2,64),bvconst(2,8),bvconst(4,64),bvconst(32,64),bvconst(101,64),bvconst(102,64),bvconst(103,64),bvconst(104,64)),
+        A109Valid,bvconst(0,64),bvconst(0,64),(bvconst(1,8)=bvconst(1,8)),(bvconst(1,8)=bvconst(1,8)),
+        bvconst(128,64),A109Context(bvconst(10,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(100,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Identity(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(9,64),bvconst(90,64),bvconst(110,64),A109Valid,A109Valid,A109Valid),
+        A109Enrollment(bvconst(10,64),bvconst(20,64),bvconst(30,64),bvconst(1,64),(bvconst(1,8)=bvconst(1,8))),
+        A109Grant(bvconst(10,64),bvconst(30,64),bvconst(1,64),bvconst(20,64),bvconst(3,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),bvconst(90,64),bvconst(110,64),A109Valid,A109Invalid),
+        A109Request(bvconst(30,64),bvconst(1,64),bvconst(3,64),bvconst(40,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(0,64),bvconst(0,8)),
+        A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8))),
+        bvconst(0,64),A109Admission(bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,8),(bvconst(1,8)=bvconst(0,8)))) ⟹ (n=bvconst(80,64)))
+}

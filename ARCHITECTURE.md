@@ -3703,6 +3703,13 @@ T3 caller authority and T4 artifact/execution admission. Proposed Phase 10.10
 supplies the concrete durable network service. This is an explicit roadmap
 extension, not a change to the accepted Phase 10.8 boundary.
 
+**Launching a stored program (SL110 formal gate passed; loader pending).** A running Anka64 installation must
+be able to start a fresh process from a durable linked image named by artifact
+identity. This ordinary launch neither reads the boot selection to choose the
+program nor changes it, and does not reserve a boot incarnation. After a normal
+reboot, the same loader must work with fresh local bindings and current execute
+authority. See the [live and post-reboot acceptance tests](DESIGN_NOTES.md#dn72-stored-launch).
+
 The [T2 evidence record](DESIGN_NOTES.md#dn72-t2) reports 87 positive witnesses
 (including 15 quantified laws) and 72 explicit hostile disproofs. The initial
 model separates durable conditional record commit from boot admission, bounds

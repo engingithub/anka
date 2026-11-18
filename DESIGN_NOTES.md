@@ -14079,6 +14079,53 @@ such as enrollment, current artifact selection and boot-incarnation reservation.
 An authority record is data, not an AOM module; it needs its own schema and
 validation. Storage custody never grants enrollment, endorsement or execution.
 
+<a id="dn72-stored-launch"></a>
+
+#### Launching a durable executable: live first, then after reboot
+
+**SL110 formal gate passed; runtime implementation follows the CC2 guest Select witness.** Select commits a selection
+record; it does not upload a linked image or start a process. Store the exact
+linked image, protected metadata and bound provenance under a durable artifact
+identity. Ordinary launch takes that identity directly. Storage read access
+and a valid receipt alone do not grant execution.
+
+Run `python3 scripts/check-anka109-gates.py --only-stored-launch` with the usual
+Kleis executable and stdlib paths. The stored-launch theory passed 49 positive
+witnesses (including four quantified laws); its hostile file explicitly
+disproved 56/56 assertions. The gate composes T1 execute-grant admission, the
+protected linked-image execution checks and the current boot incarnation.
+Neither storage read authority nor a previously valid grant suffices.
+
+Reservation freezes the artifact and its content identities and charges the
+requester's private stage. Admission rechecks the materialized image, protected
+metadata, ordered dependencies, provenance, layout, resources and current
+execute authority. Success creates a fresh boot-local child and retains the T1
+admission together; failure by the current owner releases only its stage and
+preserves the previous admission. A foreign or stale completion cannot consume
+or refund another caller's reservation. Both transitions preserve the complete
+T2 head (including selection and retry fields) and the modeled peer state.
+
+**Refinement boundary.** Exact content keys stand for independent validation
+of the actual bytes and durable provenance, not host object IDs or a chosen
+hash. The model assumes an admitted, fresh boot, serialized checks/commit, a
+nonreusing allocator and accurate charges. The prior boot does not provide
+live bindings. This gate does not write a blob, authenticate storage, execute
+instructions or prove scheduler progress. The two positive runtime witnesses
+and their denial checks remain to be implemented:
+
+1. **Live launch.** Compile and link a C program that returns 70. Persist it,
+   release the compiler job and its in-memory publication, and keep a separate
+   process running. Load by durable identity with a different artifact selected
+   for boot. Require exit 70, continued progress by the peer, and unchanged boot
+   selection and boot-incarnation counter.
+2. **Post-reboot launch.** Reboot normally, keeping the artifact on storage.
+   Without a compiler or the former publication in memory, use the same launch
+   path and require exit 70. The launch itself must not change boot selection
+   or consume an additional boot incarnation.
+3. **Denials.** A modified image, mismatched metadata or provenance, or execute
+   authority revoked before admission must prevent the child from starting.
+   Check that the peer remains runnable and no launch reservation is stranded.
+
 #### Source inventory: what is reusable and what is still missing
 
 | Reviewed source / contract | Existing mechanism | Persistence refinement required |
