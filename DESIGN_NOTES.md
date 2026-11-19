@@ -5314,6 +5314,8 @@ pointer storage, descriptor reclamation, scoped allocation registration and
 access/invalidation serialization. The descriptor candidate remains provisional
 until these costs and enforcement mechanisms are reviewed against the codebase.
 
+<a id="thread-lifetime-foundation"></a>
+
 ## DN-53 — Threads, SMP and DMA allocation lifetime gates
 
 `anka107_pointer_concurrency.kleis` proposes a serialized lifecycle refinement:
@@ -13794,7 +13796,7 @@ This documentation update did not rerun or extend the accepted gates.
 
 <a id="dn72-status"></a>
 
-### Current status — bounded stored restart accepted; integration pending
+### Current status — bounded stored restart merged; performance baseline next
 
 **Phase 10.8 is closed and merged. Phases 10.9 and 10.10 remain open.**
 The protected virtual-NIC service can answer `/alive`. The persistence binder
@@ -13817,7 +13819,7 @@ requesters or authorize boot.
 | Stored retrieval / live launch | SL110 foundation: 49 positive / 56 hostile explicitly disproved. [SR110 refinement](#stored-retrieval-launch): 92 positive / 78 hostile explicitly disproved locally. SR110 R1 accepted: 20 focused Rust tests passed in 7.20s. [AR110 read protocol](#artifact-read-protocol) formal gate passed: 117 positive / 98 hostile. AR110 Rust read codec/client and host TCP path accepted: 23 focused + 24 compatibility tests passed. [GD110 guest download](#guest-artifact-download) formal gate: 174 positive / 149 hostile explicitly disproved. GD110 retrieval and SR110 R2 fresh live admission are accepted and merged to main (user confirmation, 2026-11-18): 11 focused live-admission tests and the real witness passed (84.35s); full library suite: 1,935 passed, 0 failed, 19 ignored (307.91s). The subsequent bounded restart acceptance is recorded below. |
 | RR110 independent restart | [Composition gate](#stored-restart-contract): 234 positive / 192 explicitly disproved hostile witnesses. [Runtime acceptance](#stored-restart-runtime): 14 focused tests passed in 4.21s; real CC2/socket/NIC/file restart witness passed in 92.13s. Service-only, guest-only and combined restart cases launch the retained target to exit 42 without recompilation. |
 | Latest full release library regression | Developer-reported on 2026-11-19: **1,949 passed, 0 failed, 20 ignored, 0 measured, 0 filtered out in 317.84s**, after the GD110 deterministic deadline-test correction. The ignored real RR110 witness has its separate passing result above. |
-| Integration status | RR110, its formal pair and script, and the GD110 test correction remain uncommitted on `main`; the committed tip matches `origin/main`. Branch/commit/PR integration is the next action. No RR110 push or merge is claimed. |
+| Integration status | The user confirmed RR110 merged to `main` on 2026-11-19, after the passing focused/real gates and 1,949-test suite. The [agreed next task](#post-rr110-plan) is an Xcode performance baseline, followed by Keycloak, enrollment/boot authorization and the installation wizard. |
 
 E7/E8 are merged to main. The 148-test E10 run includes E8’s tests; it is a
 persistence reference result, not a whole-system regression.
@@ -15722,7 +15724,7 @@ storage product is required for the first acceptance demonstration.
 | 2 | File-backed immutable artifacts and compiler receipt binding | Implemented and accepted, now including the bounded GD110/SR110 guest retrieval/live-launch path recorded below. |
 | 3 | Network service plus guest artifact upload | GA110 real CC2 witness accepted: three chunks, exact retained bytes, charged cleanup, lost-reply recovery. Host coordinates exchanges and supplies trusted fixture evidence. |
 | 4 | Retrieve, validate and launch a stored executable | Accepted and merged to main: exact stored bytes run in a fresh, charged isolated realm while the service Kernel remains alive; real witness passed in 84.35s. General concurrent peer application progress remains outside this bounded runner. |
-| 5 | Independent restart demonstration | RR110 accepted: 234 positive / 192 hostile; 14 focused Rust cases and the real witness (92.13s), followed by the 1,949-pass full suite. Uses current boot/read/execute evidence after independent bounded service/guest restarts; retained files/selection and stale-incarnation rejection checked. Changes await commit/PR; production freshness and whole-machine reboot remain open. |
+| 5 | Independent restart demonstration | RR110 accepted: 234 positive / 192 hostile; 14 focused Rust cases and the real witness (92.13s), followed by the 1,949-pass full suite. Uses current boot/read/execute evidence after independent bounded service/guest restarts; retained files/selection and stale-incarnation rejection checked. Merged to main by user confirmation on 2026-11-19; production freshness and whole-machine reboot remain open. |
 
 Publication must never advertise an artifact until all required bytes and
 metadata are recoverably retained. Stage objects privately; finalize verified
@@ -17058,15 +17060,15 @@ bash scripts/check-anka110-stored-live-launch.sh --real
 ```
 
 These live-admission gates have passed. The independent bounded restart acceptance
-described below has also passed. Branch/commit/PR integration is now next; Xcode
-profiling remains a separate recorded measurement follow-up.
+described below has also passed and was merged to main. Xcode profiling is now
+the next bounded task in the [agreed post-RR110 plan](#post-rr110-plan).
 
 
 <a id="stored-restart-next"></a>
 
 ### Independent restart and stored-image launch — accepted bounded task
 
-**RR110 accepted, 2026-11-19; commit/PR pending:** the earlier live-launch work
+**RR110 accepted and merged to main, user confirmation 2026-11-19:** the earlier live-launch work
 remains accepted and merged. The new `anka110_stored_restart` pair composes the existing T2 reservation/
 boot admission, T1 execute admission, SR110 custody and GD110 authenticated EOF
 contracts. Local Kleis validation passed **234 positive witnesses and 192/192
@@ -17075,7 +17077,7 @@ see the refinement record below. The bounded runtime adapter and real
 CC2/typed-socket/NIC/file restart witness are now implemented in the RR110 runtime
 slice below. The developer passed the 14 focused cases, real restart witness and
 full release library suite (1,949 passed, 0 failed, 20 ignored). These runtime
-results supplement the formal gate; RR110 itself remains uncommitted on `main`.
+results supplement the formal gate; the user subsequently confirmed RR110 merged to `main`.
 
 The bounded acceptance target is to retain the published file and its bound
 metadata/dependencies, independently restart the storage service and Anka64,
@@ -17187,7 +17189,7 @@ predates RR110; the current full-suite result is 1,949 passed with 20 ignored.
 
 ### RR110 — bounded restart adapter and real witness (2026-11-19)
 
-**Accepted on the developer Mac; uncommitted on `main` (2026-11-19).**
+**Accepted on the developer Mac and merged to `main` (user confirmation, 2026-11-19).**
 The supplied Kleis results are 234 positive / 192 explicitly disproved hostile
 witnesses. The supplied `check-anka110-stored-restart.sh --real` log shows
 **14 focused RR110 cases passed in 4.21s**, all selected regression groups passed,
@@ -17205,9 +17207,10 @@ reported **1,949 passed, 0 failed, 20 ignored, 0 measured, 0 filtered out in
 Ignored tests are not counted as executed by the full suite; the RR110 real case
 has its separate result above. This documentation review ran no Rust or Kleis.
 
-The supplied git status has modified and untracked RR110 files on `main`, whose
-committed tip matches `origin/main`. Passing acceptance does not imply a commit,
-push or merge: the current slice still needs branch/commit/PR integration.
+The earlier supplied git status showed uncommitted changes on `main`. The user
+then created `feat/anka110-stored-restart`, opened a PR and confirmed merge to
+`main` on 2026-11-19. This supersedes the pre-merge integration status; the test
+results alone were not treated as proof of a merge.
 
 `stored_restart::Authority<P>` and `RestartGuest<P>` connect the actual T2
 reservation and `BootLatch` predicates to a fresh, privately owned, accounted
@@ -17276,14 +17279,18 @@ runs the focused RR110 and T2 filters and existing stored-live-launch regression
 gates, then selects the real restart witness. Omitting `--real` skips that costly
 witness. The focused/real gates and the subsequent full release library suite
 have now passed as recorded above. Re-run affected checks if runtime code changes.
-The next action is branch/commit/PR integration of the tested slice. The Xcode
-measurement proposal below remains a separate follow-up; broader T3–T5,
-production authority/deployment, whole-machine reboot and the compiler
-compatibility backlog remain open work, not silently added to RR110 acceptance.
+RR110 integration is complete by the user's merge confirmation. The next bounded
+task is the Xcode baseline in the [agreed plan](#post-rr110-plan). Keycloak,
+enrollment and boot authorization follow; broader T3–T5, production deployment,
+whole-machine reboot and the compiler backlog are not silently added to RR110
+acceptance.
 
 <a id="rr110-documentation-review"></a>
 
 ### Documentation consistency review — RR110 acceptance (2026-11-19)
+
+**Historical pre-merge review:** its worktree/PR instructions below describe the
+state at review time. RR110 was subsequently merged, as recorded above.
 
 Reviewed all 12 Markdown files in the supplied repository archive against its
 source, the supplied focused/real test log, the final full-suite result and git
@@ -17308,11 +17315,293 @@ builder is not evidence of an accepted standalone persistent storage deployment.
 The Xcode note is retained unchanged. No source, formal contract, Cargo profile
 or acceptance script is modified by this documentation-only delivery.
 
+<a id="threading-literature-survey"></a>
+
+### Guest threading — literature survey and proposed milestone
+
+**Reviewed 2026-11-19.** This is a focused design survey of primary research,
+specifications and implementer documentation, emphasizing 2023–2026 developments
+and relevant established foundations. It is not an exhaustive systematic review
+or a claim of consensus. Published research, deployed mechanisms and proposals
+have different maturity; dates below describe the cited work, not when every
+underlying idea originated. No thread API, scheduler, ISA change or new proof is
+implemented by this note. Research findings and Anka64 proposals are separated.
+See also the [architecture summary](ARCHITECTURE.md#guest-threads-plan).
+
+#### Findings and applicability
+
+| Work / evidence | Finding | Implication and limit for Anka64 |
+| --- | --- | --- |
+| seL4 thread and MCS documentation, current reference [TH1–TH2] | Thread configuration includes capability and address spaces; MCS represents CPU supply with budget/period scheduling contexts and supports donation to passive servers. | Separate execution, access authority and accounting. Donation across IPC must conserve and return the original charge. This is an established capability-OS precedent, not evidence that all MCS/SMP configurations have identical verification coverage. |
+| CHERIoT RTOS, SOSP 2025, and current programmer guide [TH3–TH4] | Threads and compartments are distinct: execution may cross compartment boundaries with restricted state transfer. Current threads are statically provisioned, and exit does not reclaim their stacks. | A thread need not define the protection domain. Static slots are a credible bounded alternative; CHERIoT's lifecycle does not validate dynamic stack allocation/reclamation for Anka64. |
+| CHERIoT time API update, September 2026 [TH5] | Absolute monotonic deadlines supplement composable blocking-time budgets. | CPU consumption, time blocked and end-to-end elapsed deadlines need distinct meanings. Carry the operation deadline through waits and retries; a blocking allowance is not a total execution-time bound. |
+| Dynamic Region Ownership for Concurrency Safety, PLDI 2025 [TH6] | Dynamically enforced region ownership restricts shared mutation; the evaluation includes a Python-like interpreter and initial Python integration work. | Explore owned mutable regions and explicit sharing/transfer for C guests. This is research evidence for a discipline, not an available CC2 type system or proof that arbitrary C programs become race-free. |
+| Capstone, USENIX Security 2023; CapsLock, CCS 2025 [TH7–TH8] | Capstone investigates architectural delegation/revocation; CapsLock detects ownership/borrowing violations across mixed Rust and foreign code using revoke-on-use capabilities in a QEMU prototype. | Consider enforcement below the source language when guests may be hostile. Borrow rules and revocation costs require a distinct Anka contract; prototype measurements are not FPGA performance or a production SMP implementation. |
+| Java 27 virtual threads and structured concurrency, 2026 documentation [TH9–TH10] | Virtual threads multiplex work onto OS threads; structured scopes govern related tasks' lifetimes, completion and cancellation. Structured concurrency is a preview API in this cited release. | Scheduling representation and lifecycle structure are independent choices. Structured joins suit bounded cleanup, but do not restrict memory authority or make uncooperative guests terminate. More lightweight threads improve waiting-workload scale, not individual CPU execution speed. |
+| WG21 P3135R1, April 2024 [TH11] | The paper records basic hazard-pointer adoption for C++26 and discusses extensions for reclamation timing, batching, counting and execution policy. | Distinguish removal from reclamation and account retained objects. Hazard protection alone supplies neither access authorization nor bounded cleanup under hostile stalled participants. The extensions in this paper are proposals, not all established standard facilities. |
+| GenMC, TACAS 2024; Relinche and Mixer, POPL 2025 [TH12–TH14] | Work advances weak-memory model checking, bounded library refinement and mixed-size accesses. Relinche checks both outcomes and required synchronization; Mixer addresses overlapping atomic accesses of different widths. | Check the concrete implementation against the chosen memory model, including pointer payload/tag publication. Tool input languages, bounds and modeled operations limit coverage; no automatic proof of Anka protected metadata, DMA or unbounded liveness follows. |
+| RISC-V RVWMO v2.0, ISA release v20260120 [TH15] | The ISA specifies legal inter-hart memory observations and synchronization constraints; regular-memory ordering is not a complete I/O or instruction-fetch model. | Define guest-visible memory semantics first and prove their implementation on each target. RISC-V is a comparison point, not a decision to adopt its memory model for Anka64 or FPGA. |
+
+**Synthesis (our inference):** the useful direction is to separate protection,
+scheduling and lifetime, while making shared mutation explicit. There is no single
+replacement for threads: lightweight execution contexts, structured task scopes,
+ownership restrictions and hardware capability checks address different problems.
+For Anka64, the unresolved question is not simply whether two threads receive the
+same grants, but whether shared state permits one to acquire or exercise the
+other's rights despite nominally narrower grants.
+
+#### Existing Anka64 foundation and proposed decisions
+
+[DN-53](#thread-lifetime-foundation) already records allocation admission leases,
+Live/Closing/Retired transitions, CPU/DMA draining and pointer publication gates.
+It explicitly distinguishes pinned backing from current Fabric commit authority,
+and warns that selected interleavings are not an exhaustive weak-memory or liveness
+proof. Existing private context/scope-stack requirements also matter. Extend these
+contracts; do not introduce a second, inconsistent lifetime manager. The accepted
+RR110 evidence remains bounded restart evidence, not general thread acceptance.
+
+The following are candidate choices to settle through Kleis before implementation:
+
+1. **Execution and authority.** Each thread has private registers, stack, scope
+   ancestry and a non-reused live identity. Configure initial grants within the
+   creator's delegable rights and process policy. Decide whether the first slice
+   shares a process protection domain or actually enforces narrower thread domains.
+   If narrower, specify how capability-bearing shared memory, handle lookup,
+   delegation and service calls preserve that restriction. Thread identity alone
+   cannot supply it. A lock followed voluntarily is not a protection boundary.
+2. **Shared objects and C semantics.** Compare exclusive ownership transfer,
+   immutable sharing and synchronized mutable sharing. Read-only access by one
+   thread does not imply immutability if another may write. Specify synchronization
+   operations, atomic widths/alignment and ordering, then CC2 lowering and runtime
+   enforcement. Ordinary C loads/stores and `volatile` are not a synchronization
+   contract. Decide how guest races are treated while preserving Kernel/Fabric
+   isolation; do not promise race-free arbitrary C or allow guest races to induce
+   undefined behavior in the Rust host implementation.
+3. **Lifetime and publication.** Serialize admission with closure, and commit
+   with current Fabric revocation state. Cover coherent multiword pointer payload,
+   protected kind/tag, descriptor lifetime and generation exhaustion. Draining a
+   lease permits reclamation only when every required CPU/DMA terminal condition
+   holds. A coherent pointer snapshot alone is not permission to dereference it.
+4. **Resource conservation.** Reserve thread control state, stack/scope storage,
+   wait queues and outstanding work from the process's configured budget before
+   making the thread runnable. Specify CPU charging and any service donation;
+   creating, waking or replacing a thread must not refill operation work/deadlines.
+   Keep reusable periodic CPU supply, if introduced, distinct from finite request
+   budgets. Retained backing stays charged until cleanup; one thread cannot refund
+   a sibling's resources. Choose lock-owner death and priority-inversion policies.
+5. **Structured lifecycle.** Prefer bounded children and explicit join initially.
+   Define failure propagation, cooperative cancellation, forced stop boundaries,
+   process exit and ownership of shared objects after a creator exits. A cancellation
+   request is not termination or drain evidence. An uncooperative child requires
+   enforceable scheduling limits; cleanup may have to retain charged backing.
+   Do not grant an unbounded wait or unsafe lock recovery merely to make join finish.
+
+An initial single-core scheduler can expose interleavings before SMP, but yielding
+alone cannot enforce fairness or finite CPU consumption against a hostile guest.
+Static thread slots versus dynamic creation, preemption points, lock primitives
+and the exact C ABI remain open. M:N scheduling, detached threads and lock-free
+reclamation are later candidates, each requiring its own accounting and lifecycle
+refinement. Do not infer that adopting structured concurrency settles these choices.
+
+**Multicore belongs in the model now; SMP implementation comes later.** The first
+single-core slice must not rely on global exclusivity from local interrupt masking.
+Before permitting simultaneous cores, specify cross-core publication and memory
+ordering, authoritative validation of cached rights, and serialization of revocation
+with commit. Drain all relevant CPU and DMA activity before reuse. Migration must
+transfer exclusive execution ownership while preserving thread identity, authority,
+private stack/scope state, pending operations and charges; stale source-core state
+must not resume the migrated context. Concurrent budget debits/refunds must not
+overspend or refund twice. Add migration/revocation races and simultaneous budget
+exhaustion to the later SMP gates. Record fairness and contention assumptions for
+shared caches, memory and Fabric separately: functional access control alone does
+not establish timing isolation. This extends the proposed contracts above without
+selecting a core topology or claiming current multicore acceptance.
+
+#### Gates, acceptance and cost evidence
+
+Review existing theories first, then add positive and hostile gates for authority
+attenuation/delegation, stack isolation, shared publication, revoke-versus-commit,
+free/reuse, blocked cancellation, thread-ID exhaustion and conservation of charges.
+State progress/fairness assumptions separately from safety. Model the actual
+synchronization events and memory orders; model-check small implementation kernels
+where the tool supports them, recording bounds and unsupported behavior. These
+checks supplement Kleis and real-path evidence rather than replacing either.
+
+The first runtime witness should use real CC2-compiled producer/consumer guest
+threads with explicit sharing, synchronization and join. Add hostile grant
+recovery through shared state, concurrent free/revoke, pointer publication races,
+lock-owner exit, deadline exhaustion and exact peer-accounting checks. Before SMP,
+add message-passing/store-buffering litmus tests, mixed-width/tag tests and CPU/DMA
+visibility/drain cases for the selected memory model. A sequentially interleaved
+emulator cannot by itself validate weak-memory hardware, cache coherence or a
+device's physical access restrictions.
+
+Preserve the two-stage performance plan: laptop profiles identify avoidable work
+and emulator overhead; architectural counts record switches, instructions, bytes
+copied, metadata checks, synchronization, queueing and retained memory. Hardware
+evaluation separately assigns latency/bandwidth, arbitration, cache coherence,
+area and power costs. More software threads do not establish hardware speedup.
+The Xcode baseline remains next. This threading milestone is recorded for future
+work; its priority relative to CRUD and identity integration remains undecided.
+
+#### Primary source register
+
+All links checked on 2026-11-19. Living documentation may change. Conference
+dates/DOIs identify research versions; the CHERIoT SOSP paper's project abstract
+and programmer guide were accessible, while its ACM PDF was not. Java 27's
+official guide/API is the version-specific reference here; no claim about a
+later release's final API is needed. The survey does not transfer any reported
+benchmark or verification coverage to Anka64.
+
+- **TH1:** seL4, [Threads tutorial](https://docs.sel4.systems/Tutorials/threads.html), current documentation; capability/address-space configuration.
+- **TH2:** seL4, [MCS tutorial](https://docs.sel4.systems/Tutorials/mcs.html), current documentation; scheduling contexts and passive-server donation.
+- **TH3:** Amar et al., *CHERIoT RTOS: An OS for Fine-Grained Memory-Safe Compartments on Low-Cost Embedded Devices*, SOSP 2025, pp. 67–84, DOI `10.1145/3731569.3764844`; [project publication and abstract](https://cheriot.org/publications.html).
+- **TH4:** Chisnall, *CHERIoT Programmers' Guide*, [concepts](https://cheriot.org/book/concepts.html) and [communicating between threads](https://cheriot.org/book/threads.html), current documentation.
+- **TH5:** Chisnall, [Summertime and the refactoring is easy](https://cheriot.org/time/rtos/2026/09/09/time-improvements.html), 2026-09-09; implementer report on monotonic deadlines.
+- **TH6:** Stoldt et al., [Dynamic Region Ownership for Concurrency Safety](https://www.microsoft.com/en-us/research/publication/dynamic-region-ownership-for-concurrency-safety/), PLDI 2025, DOI `10.1145/3729313`.
+- **TH7:** Yu et al., [Capstone: A Capability-based Foundation for Trustless Secure Memory Access](https://www.usenix.org/conference/usenixsecurity23/presentation/yu-jason), USENIX Security 2023, pp. 787–804.
+- **TH8:** Yu et al., [Securing Mixed Rust with Hardware Capabilities](https://www.comp.nus.edu.sg/~prateeks/papers/CapsLock.pdf), CCS 2025, DOI `10.1145/3719027.3744861`; CapsLock prototype.
+- **TH9:** Oracle, [Virtual Threads](https://docs.oracle.com/en/java/javase/27/core/virtual-threads.html), Java 27 core libraries guide, 2026.
+- **TH10:** Oracle, [Structured Concurrency](https://docs.oracle.com/en/java/javase/27/core/structured-concurrency.html) and [StructuredTaskScope API](https://docs.oracle.com/en/java/javase/27/docs/api/java.base/java/util/concurrent/StructuredTaskScope.html), Java 27 preview, 2026.
+- **TH11:** Michael, Wong and McKenney, [P3135R1: Hazard Pointer Extensions](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2024/p3135r1.pdf), WG21, 2024-04-12.
+- **TH12:** Kokologiannakis, Majumdar and Vafeiadis, *Enhancing GenMC's Usability and Performance*, TACAS 2024; [authors' tool and paper index](https://plv.mpi-sws.org/wmc/).
+- **TH13:** Golovin, Kokologiannakis and Vafeiadis, [Relinche: Automatically Checking Linearizability under Relaxed Memory Consistency](https://plv.mpi-sws.org/wmc/popl2025-relinche.pdf), POPL 2025, DOI `10.1145/3704906`.
+- **TH14:** Marmanis, Kokologiannakis and Vafeiadis, [Model Checking C/C++ with Mixed-Size Accesses](https://plv.mpi-sws.org/wmc/popl2025-mixer.pdf), POPL 2025, DOI `10.1145/3704911`.
+- **TH15:** RISC-V International, [RVWMO Memory Consistency Model v2.0](https://docs.riscv.org/reference/isa/v20260120/unpriv/rvwmo.html), versioned ISA documentation v20260120.
+
+<a id="guest-file-crud-plan"></a>
+
+### Future milestone — guest C persistent file CRUD
+
+**Goal recorded 2026-11-19; planning only.** Guest C programs must eventually be
+able to create, read, update and delete persistent files through an authorized
+file service. Earlier statements that general CRUD is outside RR110's scope
+describe the present implementation; they do not exclude this future goal.
+Artifact staging/upload/publication and AR110/GD110 reads are useful foundations,
+but they do not already provide a general mutable guest filesystem.
+
+Define a bounded first interface and its Kleis gates before adding runtime code:
+
+- **Names and authority:** specify the logical namespace, file identity and
+  separate create/read/write/delete rights. Bind handles to the authorized caller,
+  service and incarnation; forbid ambient access to host paths. Choose the minimal
+  C API explicitly without promising a complete libc/POSIX filesystem.
+- **I/O and resources:** use protected guest buffers and Kernel-accounted service
+  exchanges. Bound offsets, lengths, handles, bytes, metadata and outstanding work;
+  preserve deadlines and quotas across retries without affecting peer charges.
+- **Mutation and durability:** define create conflicts, concurrent update/version
+  checks, partial-write behavior, durable completion and exact retry outcomes.
+  State what survives service/guest restart and what power-loss durability is
+  actually guaranteed. Keep mutable files separate from immutable executable
+  publication and admission contracts.
+- **Deletion and lifecycle:** specify namespace removal, authority revocation,
+  already-open handle behavior, stale-generation rejection and reclamation after
+  outstanding access drains. Deleting or reusing a name must not revive old handles.
+
+Acceptance should include a real CC2-compiled C guest creating a file, writing
+bytes, closing and reopening it, verifying reads, updating and verifying content,
+then deleting it and checking the specified subsequent-access behavior. Exercise
+the typed-socket/NIC/file-backed service path with independent guest/service
+restarts, denied operations, stale handles, conflicting updates, interrupted
+requests, exact retries and quota exhaustion. New protocol/ABI operations require
+their own formal contracts; reuse of existing transport is not proof of CRUD.
+
+The Xcode performance baseline remains the next bounded task. Record CRUD now as
+a separate future milestone; its exact ordering relative to Keycloak/enrollment
+implementation is not yet fixed, and it need not wait for native FPGA hardware.
+See the [architecture boundary](ARCHITECTURE.md#guest-file-crud-plan) and
+[current sequence](#post-rr110-plan).
+
+<a id="post-rr110-plan"></a>
+
+### Agreed plan — performance baseline, Keycloak, enrollment and native boot
+
+**Decision recorded 2026-11-19, after RR110 merge.** Put the installation wizard,
+trusted bootstrap and Keycloak integration on the roadmap now. Establish the
+performance baseline next, then build real identity integration. No identity
+provider, enrollment UI, native boot firmware or new performance instrumentation
+is implemented by this documentation change.
+
+| Sequence | Task and evidence required |
+| --- | --- |
+| 1 — design now | Define the host-independent boot/enrollment responsibilities: installation credential, selected trust anchor, enrollment entitlement, machine boot versus personal login, selected workload admission, one-use freshness, recovery and online/offline policy. Settle precise contracts before coding them. |
+| 2 — next bounded task | Capture Xcode Instruments baselines for a representative rebuild and the accepted stored restart/launch workload. Record source revision, build/profile, hardware/tool versions, workload and profiler settings. Separate bootstrap/compilation, retrieval, validation, admission, execution and cleanup; distinguish CPU cost, allocations and elapsed waits. Retain unprofiled comparisons. |
+| 3 | Add a minimal command-line Keycloak integration. Start with a separate Podman Keycloak service and persistent database, independent of Anka and artifact-service restarts. Replace selected deterministic evidence fixtures with verified identity/permission evidence. Test allowed and denied operations, wrong issuer/audience, expiration, revocation and authority outage. |
+| 4 | Implement installation enrollment and boot authorization with explicit machine-credential provisioning, authenticated trust selection and externally retained attempt consumption. Specify rollback/crash/retry behavior and verify the platform-independent flow in the emulator. |
+| 5 | Build the installation wizard on the tested CLI enrollment/recovery operations. Implement the native/FPGA bootstrap adapter when a concrete hardware target determines firmware, key storage and communication facilities. |
+
+Performance work is measurement first. Investigate clear consequential hotspots;
+do not turn it into an open-ended optimization prerequisite for authentication.
+The 92.13-second RR110 result includes the original compiler/bootstrap work and
+all restart scenarios; it is not a standalone restart-latency measurement. The
+existing Xcode note below supplies the measurement procedure. Optional phase
+instrumentation, Cargo profile changes and any optimizations need their own
+implementation and validation; none is introduced here.
+
+**Keycloak's role.** Keycloak is the intended first deployed identity and
+authorization provider. Its product/protocol choices belong in an adapter, not
+the ISA or Kernel/Fabric contract. The adapter must validate issuer, audience,
+credential authenticity/possession, validity and current permission evidence and
+bind them to Anka's exact installation, artifact generation, operation and live
+session. A valid token alone is not a Fabric capability or an execute admission.
+Define policy for cached observations, revocation delay, authority outage and
+serialization with use; remote introspection alone is not atomic with local
+admission. Pin the actual configuration and credential/channel-binding mechanism
+in the implementation contract rather than assuming ordinary bearer tokens meet
+all these requirements.
+
+Podman is the initial development/deployment vehicle for the external service.
+Keycloak and its persistent database remain separate from the artifact service
+and guest lifecycle. Container persistence alone does not provide rollback
+protection. A first local experiment may use development startup; the later
+acceptance configuration must state its transport trust, stable issuer, database,
+credential storage and recovery assumptions. No Keycloak extension or particular
+credential encoding has been implemented or mandated by this note.
+
+**Host-independent boot.** The initial installation credential and configured
+trust belong to the installation's trusted boot environment. The emulator may
+place that role in a host-side adapter. Future bare-metal Anka64 must provide the
+same role using trusted bootstrap code and protected state, without a host OS.
+Firmware/FPGA logic and a secure element are possible realizations, not a fixed
+hardware choice. Minimal trusted bootstrap runs before the selected workload and
+must acquire required evidence without relying on that unadmitted workload.
+Do not place a JVM or Keycloak server inside the guest bootstrap as a prerequisite.
+
+The intended user experience is first-install enrollment, followed by power-on
+and optional personal sign-in. Initial enrollment authenticates an entitled
+administrator and provisions the machine identity/trust configuration. Later
+boots use installation authority; unattended services do not require a person's
+login at each restart. An interactive login grants its own user authority.
+Users should not have to obtain and paste boot tokens manually. Online-required
+policy denies workload admission when fresh evidence cannot be obtained and may
+retain an explicitly authorized recovery environment. Offline boot needs its
+own stated policy and freshness mechanism; no universal online-boot requirement
+is imposed here.
+
+**Boot permission versus freshness.** Initial authentication may obtain permission
+to request a boot; it need not start with a pre-issued access token. Separately,
+a trusted authority binds a fresh attempt to the installation and boot scope and
+records consumption atomically. A still-unexpired token in a restored snapshot
+cannot authorize reuse of that consumed attempt. Specify exact retry versus new
+admission, uncertain consumption and recovery before implementation. The durable
+consumption state must survive or detect rollback of the guest/storage snapshot.
+If that authority's state can also be rolled back, a separate protected freshness
+source or a narrower explicit threat model is required. A token or container
+restart does not supply this property by itself.
+
+**Formal-first gate.** Review the existing T1/T2, evidence, stored-launch and RR110
+theories before each feature/subfeature. Extend and pass the relevant Kleis gates
+before implementing any new authority, lifecycle, object-format or ABI rule.
+Pure profiling observation needs no new architectural contract. Any optimization
+that changes those properties must undergo the same formal review and appropriate
+runtime regressions. Keep these future obligations separate from RR110's already
+accepted bounded trusted-provider assumptions.
+
 <a id="xcode-performance-probing"></a>
 
-### Follow-up note — Xcode Instruments performance probing
+### Next bounded task — Xcode Instruments performance probing
 
-**Discussion recorded 2026-11-19; proposed measurement work, not implemented.**
+**Discussion recorded 2026-11-19; selected as the next bounded task after RR110 merge. Measurement work is not yet implemented.**
 Use Instruments on the developer's Apple Silicon Mac to measure host cost in the
 Rust Anka64 emulator. Start with sampling before adding instrumentation. The
 question is how much host work is spent per unit of guest work, and where it
@@ -17334,8 +17623,9 @@ strip = false
 Cargo release defaults disable debug information; they do not enable symbol
 stripping. Retain matching executable/debug artifacts for symbolization. Select
 the actual workload executable: `anka rebuild ...` profiles the CLI rebuild path,
-whereas the accepted `sr110_live_real_cc2_download_and_launch` witness runs inside
-the library-test executable. Build it separately on the laptop, then launch that
+whereas the accepted `sr110_live_real_cc2_download_and_launch` and
+`rr110_real_cc2_independent_restart_and_stored_launch` witnesses run inside the
+library-test executable. Build it separately on the laptop, then launch that
 specific executable with the intended test filter and ignored-test selection;
 profiling Cargo or a gate script would mix in builds and other tests.
 

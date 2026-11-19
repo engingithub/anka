@@ -959,6 +959,9 @@ unless the architecture explicitly defines grandfathered in-flight transactions.
 
 This is a central future concurrency theorem.
 
+The [threading survey and proposed milestone](#guest-threads-plan) connects these
+rules to explicit thread authority, shared-memory ordering and resource ownership.
+
 ---
 
 # 7. Secure OS Principles
@@ -1002,6 +1005,11 @@ Device C: W
 ## File handles and services
 
 Handles should represent capabilities to objects or services, not merely integer indices without authority semantics.
+
+Guest C programs creating, reading, updating and deleting persistent files are an
+explicit future goal. See the [guest file CRUD milestone](#guest-file-crud-plan)
+for its authority boundary and planned acceptance; general file CRUD is not yet
+implemented by the stored-artifact download and launch path.
 
 ## Drivers
 
@@ -1694,9 +1702,10 @@ The formal gate passed **234 positive / 192 explicit hostile disproofs**.
 After correcting the GD110 test's one-nanosecond constructor race with the
 existing test-only expiry hook, the full release library suite passed
 **1,949 tests, 0 failed, 20 ignored, 0 measured, 0 filtered out in 317.84s**.
-The 20 ignored tests are not claimed as run by that suite. RR110 remains
-uncommitted on `main` according to the supplied status; its committed tip is
-up to date with `origin/main`. Branch/commit/PR integration is next.
+The 20 ignored tests are not claimed as run by that suite. The user subsequently
+confirmed that RR110 was merged to `main` on 2026-11-19. The next bounded task is
+an Xcode Instruments performance baseline, followed by the agreed
+[identity, enrollment and bootstrap plan](#post-rr110-plan).
 
 The accepted persistence chain covers AS110/CS110 file custody and receipt
 binding, AT110/AG110 guarded transfer, GA110 guest upload, AR110 bounded reads,
@@ -3609,7 +3618,7 @@ toolchains.
 | 10.7 | Protected local pointer ABI and application rebuild | Closed; DN-59 fixes its scope |
 | 10.8 | Shared allocation, compiler resource growth, typed modules and protected network-service rebuild | Closed; final evidence in DN-71 |
 | 10.9 | Identity/authority model, supply-chain closure and hostile CPU-to-HTTP audit | T1 and initial T2 model delivered; persistence/evidence refinements implemented in 10.10; bounded RR110 boot admission accepted; general enrollment/whole-machine reboot, broader T3–T5 and production integration open; DN-72 |
-| 10.10 | Durable network persistence using the artifact/publication foundation | File backend, guarded transfer, guest upload/download, fresh live launch and bounded RR110 restart accepted; RR110 commit/PR pending. Production credentials, broader deployment and whole-machine reboot remain open; DN-72 |
+| 10.10 | Durable network persistence using the artifact/publication foundation | File backend, guarded transfer, guest upload/download, fresh live launch and bounded RR110 restart accepted; RR110 merged to main (user confirmation, 2026-11-19). Performance baseline next; production credentials, broader deployment and whole-machine reboot remain open; DN-72 |
 
 Phase 10.8's implementation chronology and test commands live in
 [DN-71](DESIGN_NOTES.md#dn-71). The repeated allocation/worker/compiler progress
@@ -5436,9 +5445,10 @@ regression snapshots for the current milestone; it does not establish reboot
 admission or general concurrent peer execution.
 
 The subsequent [RR110 restart task](DESIGN_NOTES.md#stored-restart-next) is now
-accepted below. Its changes are still uncommitted on `main`; branch/commit/PR
-integration is the immediate next action. [Xcode performance probing](DESIGN_NOTES.md#xcode-performance-probing)
-remains a separate measurement follow-up with no results or optimizations claimed.
+accepted and merged below. [Xcode performance probing](DESIGN_NOTES.md#xcode-performance-probing)
+is the next bounded task; the subsequent Keycloak/enrollment/bootstrap work is
+recorded in the [agreed plan](#post-rr110-plan). No profiling results or
+optimizations are claimed.
 
 
 #### RR110 independent restart — accepted on the developer Mac
@@ -5469,9 +5479,148 @@ cases passed in 4.21s and the separately selected ignored witness passed in
 92.13s. The full release library suite subsequently passed 1,949 tests, with
 0 failures and 20 ignored, in 317.84s after the GD110 deadline-test correction.
 This supersedes the earlier pending RR110 validation label, not the stated
-scope limits. The supplied worktree is uncommitted on `main`. Run
+scope limits. The user subsequently confirmed merge to `main` on 2026-11-19. Run
 `bash scripts/check-anka110-stored-restart.sh --real` on the laptop. This bounded
 adapter is not a whole-machine reboot or concurrent peer scheduler. Current
 freshness/bootstrap/content verdicts remain trusted integration obligations;
 a process-local counter or rolled-back file does not supply external nonrollback
-freshness. Xcode profiling remains a separate follow-up.
+freshness. Xcode profiling is the next bounded task in the plan below.
+
+
+<a id="post-rr110-plan"></a>
+
+#### After RR110 — performance baseline, identity and native boot plan
+
+**Agreed 2026-11-19; planned work, not new implementation acceptance.** Record
+the boot/enrollment design now; measure the accepted runtime before introducing
+identity-service costs. Measurement is a bounded task, not a requirement to finish
+all optimization before progressing with identity integration.
+
+| Order | Work | Completion boundary |
+| --- | --- | --- |
+| 1 | Host-independent boot and enrollment design | Separate installation identity, personal login, workload execution admission and one-use boot freshness; specify initial trust provisioning, recovery and online/offline policy. This note records the direction; detailed contracts and gates precede implementation. |
+| 2 — next implementation task | Xcode Instruments baseline | Reproducible representative rebuild and stored restart/launch workloads; CPU/elapsed time and allocation observations, phase attribution and retained unprofiled baselines. Fix only clear consequential bottlenecks within separately validated changes. |
+| 3 | Keycloak integration through a minimal CLI | First real identity/authorization provider in a separate Podman container, with persistent database state; verify credentials and exact Anka bindings, including wrong issuer/audience, expiry, revocation and unavailable-authority denial. |
+| 4 | Installation enrollment and boot authorization | Provision machine identity and implement externally recorded boot-attempt consumption under an explicit rollback threat model; exercise the platform-independent flow in the emulator. |
+| 5 | Installation wizard and later native adapter | Expose tested enrollment/recovery operations through the wizard. Implement the hardware-specific bootstrap adapter when the native/FPGA target is concrete. |
+
+A host OS is not an architectural requirement. The installation's trusted boot
+environment owns its initial credential and configured trust anchor. The present
+emulator may use a host-side adapter; native Anka64 needs an equivalent trusted
+bootstrap and protected persistent state. Firmware, FPGA boot logic and secure
+storage are platform choices, not implemented hardware claims.
+
+Minimal trusted bootstrap execution precedes admission of the selected workload.
+It must have sufficient provisioned authority and communication support to obtain
+required evidence without depending on that unadmitted workload. Machine boot
+authorization is distinct from user login: unattended services may start under
+installation authority, while interactive users authenticate separately. Offline
+boot and recovery require explicit policy; this plan does not silently require
+an online Keycloak round trip for every possible deployment.
+
+Keycloak is the intended first provider integration, not an ISA/Kernel dependency.
+The trusted adapter validates external credentials and maps them to the existing
+Anka evidence contracts; Kernel/Fabric retains enforcement. Permission to request
+a boot and consumption of a particular boot attempt are separate checks. A
+still-valid token, a new container, or a counter restored with the guest snapshot
+does not establish one-use freshness. The consumption authority must survive or
+detect rollback of the protected guest/storage state under the declared model.
+
+Review existing Kleis coverage before every subtask. New authority, lifecycle,
+format or ABI contracts require updated theories and passing gates before runtime
+implementation. Observation alone requires no new architectural contract; an
+optimization changing semantics must go through the same formal review.
+See [the detailed plan](DESIGN_NOTES.md#post-rr110-plan) and the retained
+[Xcode measurement note](DESIGN_NOTES.md#xcode-performance-probing).
+
+<a id="guest-file-crud-plan"></a>
+
+#### Future milestone — persistent file CRUD for guest C programs
+
+**Goal recorded 2026-11-19; not implemented or accepted.** Guest C programs
+should be able to create persistent files, read their contents, update them and
+delete them through an explicitly authorized file service. This extends beyond
+the existing immutable artifact upload, publication and authenticated download
+operations. Mutable file data and namespace operations need their own contracts;
+they must preserve the immutable artifact and executable-admission guarantees.
+
+File access must use scoped authority, protected buffers and handles bound to the
+caller and relevant incarnation. Logical names, service file identities and host
+backend paths remain distinct; a guest pathname does not confer host filesystem
+authority. The initial C interface need not imply a complete POSIX filesystem.
+
+Before implementation, define and verify the Kleis contracts for operation
+rights, namespace resolution, bounded I/O and accounting, concurrent updates,
+retry/crash behavior, deletion and stale-handle rejection. The acceptance target
+is a real CC2-compiled C program performing create/write/close/reopen/read,
+update and delete through the accounted service path, with restart persistence
+and hostile authority/resource cases checked separately.
+
+This is a separate planned milestone, not added to RR110 acceptance. The Xcode
+baseline remains next; exact CRUD implementation sequencing with the identity
+and enrollment work remains to be decided. See the
+[detailed CRUD plan](DESIGN_NOTES.md#guest-file-crud-plan).
+
+<a id="guest-threads-plan"></a>
+
+#### Future milestone — guest threads, shared memory and authority
+
+**Literature reviewed 2026-11-19; proposed design, not implementation acceptance.**
+Guest threading requires a separate Kleis-first milestone. Existing IPC, concurrent
+service work and bounded restart acceptance do not establish a general guest C
+thread API or an SMP memory model. The
+[survey and source register](DESIGN_NOTES.md#threading-literature-survey) covers
+2023–2026 research and current primary documentation, alongside older foundations.
+It extends the [existing lifetime gates](DESIGN_NOTES.md#thread-lifetime-foundation)
+rather than replacing their revocation and reclamation rules.
+
+The survey motivates separating execution context, protection domain and resource
+ownership. seL4 configures thread capability/address spaces and separately accounts
+CPU supply through MCS scheduling contexts; CHERIoT distinguishes threads from
+compartments. These are useful precedents, not a requirement to adopt either OS's
+ABI. See [seL4 threads](https://docs.sel4.systems/Tutorials/threads.html),
+[MCS](https://docs.sel4.systems/Tutorials/mcs.html) and
+[CHERIoT concepts](https://cheriot.org/book/concepts.html).
+
+The candidate first design is bounded threads within one process, private register
+and protected stack/scope state, explicit shared objects, structured join/exit,
+and process-funded reservations for thread memory, CPU work and pending I/O.
+Creation must neither amplify authority nor refill budgets. Initial authority
+should be explicitly selected within the creator's delegable rights and the
+process policy. This is a proposal: whether threads share one protection domain
+or support enforceable narrower domains remains a gate decision. A narrower
+initial grant is not isolation if shared capability-bearing memory or confused
+service delegation lets the thread recover greater authority.
+
+Memory safety, data-race freedom and program correctness are separate obligations.
+Define atomic widths/alignment, synchronization and publication ordering, including
+coherent protected pointer payload/tag access and CC2 lowering. Locks cannot be
+an authority boundary against a guest that bypasses them. A lifetime lease pins
+backing only: current Fabric authority must still permit commit. Retire/reuse
+requires drained CPU/DMA operations, safe cleanup and a fresh generation.
+Cancellation or a timeout alone never proves that draining has finished.
+
+**Multicore design boundary.** Define threading contracts with simultaneous cores
+in mind even if the first runtime uses one core. They must cover cross-core memory
+ordering, coherent pointer/tag publication, authority-cache validity and revocation,
+CPU/DMA draining, and atomic shared-budget accounting. Thread migration must
+preserve identity, authority, stack/scope ownership and charges; it must neither
+leave the old core executing the same context nor create fresh grants. Disabling
+local interrupts is not cross-core exclusion. SMP implementation and acceptance
+remain a later refinement; shared-cache, memory and Fabric contention also require
+separate performance and isolation analysis.
+
+Start by specifying a small single-core interleaving model and bounded thread
+lifecycle; evaluate static thread slots versus dynamic creation before freezing
+the ABI. True SMP, unrestricted detached threads, lock-free reclamation and an
+M:N user scheduler require separate refinements. Cooperative guest yielding alone
+does not bound hostile CPU use. Structured lifetime rules also need a policy for
+non-cooperative children, lock-owner death and resources awaiting cleanup.
+
+The first acceptance target is real CC2-compiled producer/consumer threads with
+explicit sharing, join, denial, revoke/free races and exact resource accounting.
+Later SMP acceptance must cover weak-memory behavior, cache/metadata visibility
+and DMA; emulator interleavings alone do not prove it. Profile context-switch,
+contention, copying and reclamation costs separately from architectural operation
+counts and target-specific hardware costs. The Xcode baseline remains next;
+thread implementation priority relative to CRUD and identity work is not yet set.
