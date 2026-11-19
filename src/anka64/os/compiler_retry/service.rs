@@ -180,7 +180,8 @@ impl RebuildService {
             .map_err(error)?.link(Some(execution)).map_err(error)?.publish(prior,Some(publication)).map_err(error)
     }
 }
-fn realm()->Result<(Kernel,HostStorageReservation,u64),String> {
+// Fresh accounted custodian only; no compiler, linker, or guest code runs here.
+pub(crate) fn realm()->Result<(Kernel,HostStorageReservation,u64),String> {
         let fabric=Fabric::with_private_heap_cpu_work(0x4000000,
             // Two CPU-only jobs each have a bounded local-frame allowance.
             // Heap identities retain 4096 slots of headroom. with_limits charges

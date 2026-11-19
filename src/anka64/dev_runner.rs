@@ -572,6 +572,16 @@ pub(crate) fn run_accounted_stored_application(
     let prepared=prepare_run_geometry(registry,fabric,placement,"rebuilt-application",config)?;
     execute_prepared_run_gated(fabric,placement,prepared,config,None,true,true,None,None,Some(admit))
 }
+/// RR110 bootstrap pump: current boot admission precedes the first child
+/// instruction, then the ordinary typed socket/NIC adapter runs that child.
+pub(crate) fn run_accounted_stored_application_with_select(
+    registry:&DevelopmentArtifactRegistry,fabric:&mut Fabric,placement:&mut PhysicalPlacementManager,
+    config:DevelopmentRunConfig,select:super::os::compiler_retry::service::frame_port::tcp::outbound::SelectStream<'_>,
+    admit:&mut dyn FnMut()->bool,
+)->Result<DevelopmentRunReport,DevelopmentRunError> {
+    let prepared=prepare_run_geometry(registry,fabric,placement,"rebuilt-application",config)?;
+    execute_prepared_run_gated(fabric,placement,prepared,config,None,true,true,None,Some(select),Some(admit))
+}
 fn execute_prepared_run_gated(fabric:&mut Fabric,placement:&mut PhysicalPlacementManager,
     prepared:PreparedRun,config:DevelopmentRunConfig,input:Option<&[u8]>,callable_entry:bool,
     bounded:bool,stream:Option<OrderedStream<'_>>,
@@ -653,7 +663,7 @@ fn execute_prepared_run_gated(fabric:&mut Fabric,placement:&mut PhysicalPlacemen
             kernel.run(1, 1);
             input_rounds+=1;
         }
-        let attached = if gated {
+        let admitted = if gated {
             // Child construction, pointer-program validation and ordinary spawn
             // have completed. No child instruction has run or handle escaped.
             // Panic destroys/scrubs this private realm before outer quota refund.
@@ -664,7 +674,8 @@ fn execute_prepared_run_gated(fabric:&mut Fabric,placement:&mut PhysicalPlacemen
                 super::os::typed_socket::select::download::scrub(&mut kernel.byte_output);
                 std::panic::resume_unwind(payload)
             }}
-        } else if outbound {
+        } else { true };
+        let attached = if !admitted { false } else if outbound {
             let run=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||target.is_some_and(|key|select.take().unwrap().run(&mut kernel,key,
                 config.quantum.saturating_mul(config.max_rounds).saturating_sub(input_rounds).min(2_000_000))
                 .map_err(|e|eprintln!("guest Select: {e}")).is_ok())));
@@ -676,7 +687,7 @@ fn execute_prepared_run_gated(fabric:&mut Fabric,placement:&mut PhysicalPlacemen
                 super::os::typed_socket::select::download::scrub(&mut kernel.byte_output);
                 std::panic::resume_unwind(payload)
             }}
-        } else {target.is_some_and(|key|match (&mut bridge,input) {
+        } else if gated { true } else {target.is_some_and(|key|match (&mut bridge,input) {
             (Some(b),None)=>b.attach(&mut kernel,key).is_ok(),
             (None,Some(bytes))=>kernel.provision_process_input(key,bytes).is_ok(),
             _=>false,

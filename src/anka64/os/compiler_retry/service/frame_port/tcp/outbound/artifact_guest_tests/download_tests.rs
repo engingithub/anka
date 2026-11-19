@@ -181,3 +181,5 @@ fn gd110_real_cc2_guest_download(){
 }
 
 mod launch_tests;
+
+mod restart_tests;

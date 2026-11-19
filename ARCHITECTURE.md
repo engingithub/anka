@@ -5,7 +5,9 @@
 **Anka** is a vertically integrated computer architecture project built from the bottom up.
 See [README.md](README.md) for the project rationale, current acceptance evidence
 and development entry points. [DESIGN_NOTES.md](DESIGN_NOTES.md) records decisions
-and deferred work.
+and deferred work. Current acceptance is summarized in
+[Section 18](#18-current-implementation-facts); dated implementation checkpoints
+below retain their original scope and counts.
 
 The project began as an MC68000 emulator written in Rust and quickly grew into a complete experimental computing stack:
 
@@ -1684,49 +1686,46 @@ Both are exactly the class of bugs that self-hosting is designed to find: code p
 
 # 18. Current Implementation Facts
 
-**Current status:** Phase 10.8 is closed and merged to main. Phase 10.9 T1
-and the initial T2 model have passing formal gates; enrollment, reboot and
-production authority integration remain open. Phase 10.10 has accepted host
-file-backed persistence, verifier adapters, guarded TCP exchanges and now GA110
-CC2 guest artifact upload through the virtual NIC. The latest developer log
-passes **7 GA110 quick tests**, **21 supporting filter matches** (overlapping
-coverage), and the **real guest upload witness in 85.09s**; its Kleis gate is
-**44 positive / 36 hostile explicitly disproved**. The prior standalone
-persistence reference checkpoint passed **206 tests in 5.59s**.
+**Current status (2026-11-19):** Phase 10.8 and the earlier stored live-launch
+milestone are accepted and merged. RR110's bounded independent guest/service
+restart is now accepted on the developer Mac: **14 focused tests in 4.21s** and
+its separately selected **real CC2/typed-socket/NIC/file witness in 92.13s**.
+The formal gate passed **234 positive / 192 explicit hostile disproofs**.
+After correcting the GD110 test's one-nanosecond constructor race with the
+existing test-only expiry hook, the full release library suite passed
+**1,949 tests, 0 failed, 20 ignored, 0 measured, 0 filtered out in 317.84s**.
+The 20 ignored tests are not claimed as run by that suite. RR110 remains
+uncommitted on `main` according to the supplied status; its committed tip is
+up to date with `origin/main`. Branch/commit/PR integration is next.
 
-The guest upload retained an **11,984-byte linked-image envelope in three chunks**
-and recovered publication revision 8 after deliberate reply loss and file-service
-recreation. The host still coordinates exchanges and supplies deterministic
-trusted evidence. This does not establish production cryptographic authentication,
-stored-image retrieval/launch or reboot execution. GA110 was merged through PR #35 at
-`8038bc21a8161443fcab1a45bb4b6295ae118e44`. SR110 now has a passing formal
-retrieval/admission refinement (92 positive / 78 hostile). Its first Rust slice
-implements charged private file retrieval and canonical envelope decoding; all
-20 focused tests passed on macOS in 7.20s. AR110 now formalizes concrete read wire
-framing and guarded disclosure (117 positive / 98 hostile witnesses). The Rust
-read codec/client and host guarded TCP path passed their 47-test focused runtime
-gate on macOS. GD110 guest-download orchestration now has a passing formal gate
-(174 positive / 149 hostile explicitly disproved). The runtime adapter now
-implements charged guest retrieval into private image custody; fresh executable
-admission remains open.
+The accepted persistence chain covers AS110/CS110 file custody and receipt
+binding, AT110/AG110 guarded transfer, GA110 guest upload, AR110 bounded reads,
+GD110 charged private download, SR110 fresh live execute admission and RR110
+restart composition. The restart witness persists a precompiled pump and target,
+drops the original compiler/lineage, and runs the retained target to exit 42
+after service-only, guest-only and combined restarts. Current boot/read/execute
+evidence remains distinct from validated bytes. Ordinary launch preserves the
+durable boot record and selection; service-only restart preserves the surviving
+peer's exact charge and state.
 
-The [DN-71 status table](DESIGN_NOTES.md#dn71-status) and
-[final evidence record](DESIGN_NOTES.md#phase-108-final-evidence) retain the
-historical 10.8 closure evidence. [DN-72](DESIGN_NOTES.md#dn72-status) records
-current persistence progress. The latest supplied full regression remains the
-earlier guest Select checkpoint: **1,795 passed, 16 ignored in 296.54s**. No full
-regression of the current revision is claimed. GD110 runtime evidence and its
-environment-limited broader regression are recorded below and in DESIGN_NOTES.md.
-The current release library-test build reports 21 nonfatal warnings.
+Phases 10.9 and 10.10 remain open for broader authority and deployment work.
+The bounded restart adapter does not replace whole-machine boot or supply
+production credentials/external nonrollback freshness. General guest file CRUD,
+concurrent peer scheduling and distributed storage are outside this acceptance.
+The [DN-71 status table](DESIGN_NOTES.md#dn71-status) and its
+[final evidence](DESIGN_NOTES.md#phase-108-final-evidence) preserve historical
+10.8 closure. [DN-72](DESIGN_NOTES.md#dn72-status) and the
+[RR110 record](DESIGN_NOTES.md#stored-restart-runtime) own current persistence
+acceptance. Older dated counts below are historical, not additional current passes.
 
 | Property | Status |
 |----------|--------|
 | ISA | Single-source instruction descriptions, including byte and protected-pointer operations; see `src/anka64/desc.rs` |
 | Self-hosted compiler | Exact CC2_1 == CC2_2 fixed point; CC_B == CC_C remains the bootstrap foundation |
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
-| Current CC2 witness | Accepted lineage witness: CC2_0 = 168840 bytes; exact CC2_1 = CC2_2 = 191576 bytes; entry 188888 (latest GA110 log). Protected producer images are separate artifacts. |
+| Current CC2 witness | Accepted lineage witness: CC2_0 = 168840 bytes; exact CC2_1 = CC2_2 = 191576 bytes; entry 188888 (confirmed again by the RR110 witness). Protected producer images are separate artifacts. |
 | CC2 source | `userspace/system/compiler/ankacc2_stage3.c` and protected producer `ankacc2_abi2.c` |
-| Regression evidence | Final 10.8 acceptance: 1628 ordinary library tests passed, 15 ignored guest witnesses explicitly passed, complete Cargo suite passed; formal sweep: 48 pairs, 4467 positive witnesses and 3664 explicit hostile disproofs. See DN-71 for scope and input digest. |
+| Regression evidence | Current: 1,949 passed, 0 failed, 20 ignored in 317.84s; RR110 real witness separately passed in 92.13s. Historical final 10.8 acceptance: 1628 ordinary library tests passed, 15 ignored guest witnesses explicitly passed, complete Cargo suite passed; formal sweep: 48 pairs, 4467 positive witnesses and 3664 explicit hostile disproofs. See DN-71 for scope and input digest. |
 | Protected modules | Typed separate compilation, exact interface evidence, guest linking, ordered dependency receipts and separately authorized protected execution accepted, including heap-list and stale/bounds denial witnesses. |
 | Module formal gate | Included in the final 48-pair sweep; per-theory counts and development history are retained in DN-65 through DN-71. |
 | Shared allocation and compiler resources | Shared protected allocation/free, C malloc/free, post-malloc review and R1 local initialization accepted. C1–C5 resource growth, charged preprocessing/link/run storage, retained publication and concurrent compiler/rebuild jobs accepted within configured profiles. |
@@ -1756,7 +1755,7 @@ The current release library-test build reports 21 nonfatal warnings.
 | SYS_WRITE | Buffer-based, capability-checked, output-atomic |
 | Literal authority | Immutable R-only, two-ended image allocator |
 | Bootstrap development model | CC_A frozen; new features via canonical source + CC_B |
-| Boot contract | `kernel.boot(BootInfo)` establishes runtime root authority from trusted boot state. Persistent enrollment and reboot authority validation are Phase 10.9 work. |
+| Boot contract | `kernel.boot(BootInfo)` establishes runtime root authority from trusted boot state. RR110 composes T2/BootLatch with a private accounted guest; general installation/enrollment and whole-machine reboot integration remain Phase 10.9 work. |
 | Shared process primitive | `prepare_process()` used by boot, SYS_EXEC, and SYS_SPAWN |
 | Process lifecycle | SYS_SPAWN (R1-R8) / SYS_WAIT with capability-shaped authority |
 | Initial environment | SpawnGrant (authority) ≠ SpawnMap (placement) ≠ SpawnLayout (process structure) |
@@ -3609,8 +3608,8 @@ toolchains.
 | 10.6 | Exact AnkaCC2 self-host fixed point | Closed |
 | 10.7 | Protected local pointer ABI and application rebuild | Closed; DN-59 fixes its scope |
 | 10.8 | Shared allocation, compiler resource growth, typed modules and protected network-service rebuild | Closed; final evidence in DN-71 |
-| 10.9 | Identity/authority model, supply-chain closure and hostile CPU-to-HTTP audit | T1 and initial T2 model delivered; persistence/evidence refinements implemented in 10.10; kernel enrollment/reboot, broader T3–T5 and production integration open; DN-72 |
-| 10.10 | Durable network persistence using the artifact/publication foundation | Host file backend, evidence adapters, guarded transport and GA110 guest artifact upload accepted within reference profiles; stored retrieval/live launch, reboot and production credential integration remain open; DN-72 |
+| 10.9 | Identity/authority model, supply-chain closure and hostile CPU-to-HTTP audit | T1 and initial T2 model delivered; persistence/evidence refinements implemented in 10.10; bounded RR110 boot admission accepted; general enrollment/whole-machine reboot, broader T3–T5 and production integration open; DN-72 |
+| 10.10 | Durable network persistence using the artifact/publication foundation | File backend, guarded transfer, guest upload/download, fresh live launch and bounded RR110 restart accepted; RR110 commit/PR pending. Production credentials, broader deployment and whole-machine reboot remain open; DN-72 |
 
 Phase 10.8's implementation chronology and test commands live in
 [DN-71](DESIGN_NOTES.md#dn-71). The repeated allocation/worker/compiler progress
@@ -3720,17 +3719,18 @@ that model, building on the accepted 10.8 rebuild rather than reopening it.
 
 **Historical foundation (2026-11-04):** the initial T2 model, Rust core and
 host-local durable adapter were delivered without a network service. Subsequent
-10.10 work now accepts guarded host TCP/file transport and GA110 guest upload.
+10.10 work now accepts guarded host TCP/file transport, guest upload/download,
+fresh live launch and bounded RR110 restart.
 The initial results below retain their original scope; see
 [DN-72 current status](DESIGN_NOTES.md#dn72-status) for the latest evidence.
 The [DN-72 storage review](DESIGN_NOTES.md#dn72-storage-foundation) inventories the
-existing artifact, receipt and publication contracts and defines the next formal
-work. The persistence/reboot contract belongs in Phase 10.9 T2, composed with
+existing artifact, receipt and publication contracts and records the original
+formal work sequence. The persistence/reboot contract belongs in Phase 10.9 T2, composed with
 T3 caller authority and T4 artifact/execution admission. Phase 10.10
 supplies the concrete durable network service. This is an explicit roadmap
 extension, not a change to the accepted Phase 10.8 boundary.
 
-**Launching a stored program (SL110 formal gate passed; loader pending).** A running Anka64 installation must
+**Launching a stored program (SL110 foundation; SR110 live and RR110 bounded restart accepted).** A running Anka64 installation must
 be able to start a fresh process from a durable linked image named by artifact
 identity. This ordinary launch neither reads the boot selection to choose the
 program nor changes it, and does not reserve a boot incarnation. After a normal
@@ -3746,9 +3746,9 @@ a trusted premise in the abstract T2 model, refined by the host-local adapter
 and its stated filesystem assumptions. The developer passed all 29 core/backend
 tests in 0.37 seconds and the 51-positive/45-hostile backend theory gate. Use
 `scripts/check-anka110-persistence-reference.sh` for the expanded reference suite
-without CC2/bootstrap. Kernel boot/authority wiring remains pending; bounded
-network transport and upload acceptance are recorded later. Neither the initial
-formal results nor upload acceptance close T2 or all of 10.10.
+without CC2/bootstrap. RR110 now wires T2/BootLatch into bounded guest admission;
+general installation/enrollment and whole-machine boot integration remain open.
+Neither this bounded acceptance nor the earlier results close all of T2 or 10.10.
 
 AOM supplies structured executable-object bytes and type/interface evidence.
 Full source/tool/dependency provenance and publication authority are maintained
@@ -4803,7 +4803,7 @@ point allows replay of a client waiting for its response before closing.
 See DN-71 for the profile limits, accounting, and evidence.
 
 
-##### Bounded persistence protocol — formal contract, implementation next
+##### Bounded persistence protocol — formal contract and accepted reference implementation
 
 The [DN-72 protocol contract](DESIGN_NOTES.md#dn72-persistence-protocol) defines
 one 112-byte request and one 144-byte reply per connection, canonical versioned
@@ -4955,7 +4955,7 @@ Outbound application binding checks the requested generation against the live
 slot rather than imposing the nonzero rule used by separate connection and
 reservation identities. Reused or mismatched process keys remain rejected.
 
-### Durable artifact storage and pending launch boundary
+### Durable artifact storage and accepted launch boundaries
 
 The accepted AS110/CS110/AT110/AG110/GA110 path retains executable payload bytes
 and their metadata, beyond the earlier Select record. The proposed deployment is a Rust
@@ -4971,12 +4971,12 @@ must survive lost replies and service restart. Host filesystem durability and
 recovery assumptions remain explicit; container restart alone is not a power-loss
 proof. Stored references never confer live Fabric capabilities.
 
-Compile, export, guest upload and durable publication now have focused acceptance.
-Next retrieve and validate the stored artifact, then admit and launch a fresh
-process without restarting Anka64. Repeat after independent guest/service restarts
-with fresh authority. File-service recreation in GA110 proves outcome recovery,
-not a rebooted guest launch. Production authentication and general object storage
-remain unimplemented.
+Compile/export/upload/publication, charged retrieval and fresh live launch now
+have acceptance, followed by RR110's independent bounded guest/service restarts.
+RR110 adds boot admission and reconstructs a retained precompiled pump without
+CC2 after restart. GA110's earlier file-service recreation remains outcome-recovery
+evidence only. Production authentication, whole-machine reboot and general object
+storage remain unimplemented.
 New storage transitions require Kleis gates before Rust implementation; the
 existing stored-launch gate is not a proof of blob storage or publication.
 See [DN-72 durable artifact storage plan](DESIGN_NOTES.md#durable-artifact-storage-plan)
@@ -5191,11 +5191,11 @@ for commands, accounting and the acceptance boundary.
 
 ### SR110 stored retrieval and live-launch refinement
 
-The next stage is formalized in `anka110_stored_retrieval.kleis` and its hostile
+The SR110 contract is formalized in `anka110_stored_retrieval.kleis` and its hostile
 pair: **92 positive witnesses passed and 78/78 hostile claims explicitly disproved**
 locally on 2026-11-18. Select it with `--only-stored-retrieval` in the 10.9/10.10
-gate runner. This is a formal contract; it does not claim a completed retrieval
-transport, executable importer or reboot runtime.
+gate runner. Those formal results are distinct from the subsequent accepted
+SR110/GD110 runtime and RR110 restart evidence below.
 
 SR110 separates charged private reception, complete validation, runnable child
 custody and closing/reclamation. It pins the full immutable CS110 manifest and
@@ -5393,7 +5393,8 @@ executed and no receipt, selection or execute grant is minted. Run
 `bash scripts/check-anka110-guest-download.sh --real` for the focused gates and
 actual CC2/typed-socket/NIC/guarded-TCP/reopened-file witness. See the
 [GD110 runtime record](DESIGN_NOTES.md#guest-artifact-download) for evidence and
-limits; fresh executable admission remains the next task.
+limits. Fresh executable admission is accepted under SR110 R2 below;
+independent bounded guest/service restart is accepted under RR110.
 
 The 2026-11-18 Linux acceptance passed **18 GD110 quick tests + the real witness
 in 259.66s**, plus 10 plain-socket/binding regressions, AR110/AT110/AG110 (47),
@@ -5409,7 +5410,7 @@ final ordinary-socket accounting fix. All **26 typed-socket tests** and both rea
 transfer witnesses pass after that fix. See the GD110 design record for exact
 commands/exclusions; this is not an unfiltered full-suite pass.
 
-#### Stored-image live admission — SR110 R2 implementation, validation pending
+#### Stored-image live admission — SR110 R2 accepted and merged
 
 The charged private CS110 image now has a consuming live-launch adapter. Its
 original retrieval budget/deadline and exact read origin survive into admission.
@@ -5425,6 +5426,52 @@ returned report retains image/output quota until drop. This does not implement
 general concurrent application scheduling or reboot authority. Production
 identity/content providers remain explicit integration obligations.
 
-No Rust compilation or tests were run for this delivery. See the SR110 R2
-section in `DESIGN_NOTES.md` and `scripts/check-anka110-stored-live-launch.sh`
-for the focused and optional real-path laptop acceptance gates.
+Developer Mac acceptance: 11 focused live-admission cases passed, and the real
+CC2/typed-socket/NIC/file/live-launch witness passed separately in 84.35s with
+exit 42, replay/revocation denial and preserved peer quota/durable state. The
+user then reported the full release library suite: **1,935 passed, 0 failed,
+19 ignored, 0 filtered out in 307.91s**, and confirmed merge to `main` on
+2026-11-18. This supersedes earlier pending-validation labels and partial
+regression snapshots for the current milestone; it does not establish reboot
+admission or general concurrent peer execution.
+
+The subsequent [RR110 restart task](DESIGN_NOTES.md#stored-restart-next) is now
+accepted below. Its changes are still uncommitted on `main`; branch/commit/PR
+integration is the immediate next action. [Xcode performance probing](DESIGN_NOTES.md#xcode-performance-probing)
+remains a separate measurement follow-up with no results or optimizations claimed.
+
+
+#### RR110 independent restart — accepted on the developer Mac
+
+The [restart composition gate](DESIGN_NOTES.md#stored-restart-contract) passes
+234 positive witnesses and 192/192 explicitly disproved hostile witnesses.
+It composes T2 durable reservation/boot admission, GD110 authenticated EOF and
+SR110/T1 ordinary launch. Service restart preserves the surviving guest and peer;
+guest restart destroys volatile authority and requires fresh external boot evidence.
+Local realm IDs, durable boot incarnations and authenticated service/channel
+identities are distinct. Cleanup refunds only the retired realm's retained custody
+after revocation, drain and scrub. Ordinary launch preserves the durable boot
+record and selected bootstrap artifact.
+
+The [bounded runtime adapter](DESIGN_NOTES.md#stored-restart-runtime) and real
+CC2/socket/NIC/file restart witness passed on the developer Mac on 2026-11-19. `RestartGuest` owns a fresh accounted
+Kernel and a file-retrieved precompiled download pump. It uses actual T2
+reservation/BootLatch admission and an externally consumed fresh attempt, then
+runs the retained pump through GD110 without recreating compiler receipts. One
+shared authority mutex serializes current boot/service/read/dependency and T1
+execute evidence through ordinary launch commit. Durable boot identity remains
+separate from SR110's process-local realm label.
+
+The real witness destroys the original compiler/lineage, independently restarts
+service and guest, and checks target exit 42, stale-authority rejection, retained
+files/selection and peer quota across a service-only restart. Fourteen focused
+cases passed in 4.21s and the separately selected ignored witness passed in
+92.13s. The full release library suite subsequently passed 1,949 tests, with
+0 failures and 20 ignored, in 317.84s after the GD110 deadline-test correction.
+This supersedes the earlier pending RR110 validation label, not the stated
+scope limits. The supplied worktree is uncommitted on `main`. Run
+`bash scripts/check-anka110-stored-restart.sh --real` on the laptop. This bounded
+adapter is not a whole-machine reboot or concurrent peer scheduler. Current
+freshness/bootstrap/content verdicts remain trusted integration obligations;
+a process-local counter or rolled-back file does not supply external nonrollback
+freshness. Xcode profiling remains a separate follow-up.

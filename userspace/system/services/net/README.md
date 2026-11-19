@@ -281,8 +281,8 @@ subject to owner/global admission; the default is 1024 bytes. One guest typed
 copy remains bounded to 1024 bytes. These queue/copy policies are distinct from
 the legacy shared buffer and from the HTTP application's 1024-byte request bound.
 
-The fixed-route outbound adapter supports separate Select and artifact-exchange
-modes. `storage_select.c` has accepted guest/file evidence. `storage_upload.c`
+The fixed-route outbound adapter supports separate Select, artifact Upload and
+artifact Download modes. `storage_select.c` has accepted guest/file evidence. `storage_upload.c`
 now has accepted GA110 evidence for real compiler output, three bounded Append
 chunks, 64/1024-byte queues, and recovered publication after reply loss and file
 reopen. Artifact authority uses a separate default-deny verifier; a Select grant
@@ -294,5 +294,12 @@ Reproduce with `bash scripts/check-anka110-guest-artifact.sh --real` from the
 repository root. The host test peer bridges the virtual NIC to a real localhost
 TCP/file service using deterministic trusted evidence. This is not a general
 Internet-facing TCP stack, production credential provider or authenticated HTTP
-endpoint. Persistent retrieval and authorized live/reboot launch remain separate.
-See [DN-72](../../../../DESIGN_NOTES.md#guest-artifact-upload).
+endpoint. The distinct `storage_download.c` mode and GD110 adapter now have
+accepted charged retrieval, with separate SR110 execute admission for live launch.
+RR110 persists that pump and the target before destroying the original compiler,
+then reconstructs a fresh accounted guest under boot authority. Its real witness
+passed in 92.13s across service-only, guest-only and combined restarts, using the
+same typed-socket/NIC/file path and retaining the peer charge across service-only
+restart. Run `bash scripts/check-anka110-stored-restart.sh --real` from the
+repository root. This does not supply whole-machine reboot or general TCP.
+See [DN-72](../../../../DESIGN_NOTES.md#stored-restart-runtime).

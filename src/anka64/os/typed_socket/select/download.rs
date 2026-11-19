@@ -151,9 +151,25 @@ mod tests{
         let (mut d,_)=active(100);d.transport_lost().unwrap();let r=d.prepare(4096).unwrap();assert!(d.bind(r,binding(1)).is_err());
     }
     #[test] fn gd110_download_deadline_and_correlation_never_reset(){
-        let mut d=Download::new(manifest(),RetrievalLimits{timeout:Duration::from_nanos(1),..limits(100)}).unwrap();
-        assert!(d.prepare(4096).is_err());
-        let mut d=Download::new(manifest(),limits(100)).unwrap();d.correlation=u64::MAX;assert!(d.prepare(4096).is_err());
+        // Construct under a live budget, then expire it explicitly. A 1-ns
+        // timeout can expire inside new(), before this test reaches prepare().
+        let mut d=Download::new(manifest(),limits(100)).unwrap();
+        d.budget.expire_for_test();
+        assert_eq!(d.prepare(4096),Err(Error::ExpiredRequest));
+        assert_eq!((d.state,d.cursor,d.correlation),(State::Failed,0,0));
+        assert_eq!(d.prepare(4096),Err(Error::Authority));
+
+        // A lost transport does not acquire a fresh deadline on retry.
+        let (mut d,r)=active(100);d.transport_lost().unwrap();
+        d.budget.expire_for_test();
+        assert_eq!(d.prepare(4096),Err(Error::ExpiredRequest));
+        assert_eq!((d.state,d.cursor,d.correlation),(State::Failed,0,r.correlation));
+        assert_eq!(d.request,Some(r));
+        assert_eq!(d.transport_lost(),Err(Error::Authority));
+
+        let mut d=Download::new(manifest(),limits(100)).unwrap();d.correlation=u64::MAX;
+        assert_eq!(d.prepare(4096),Err(Error::Exhausted));
+        assert_eq!((d.state,d.cursor,d.correlation),(State::Failed,0,u64::MAX));
     }
     #[test] fn gd110_download_full_buffer_without_eof_cannot_commit(){
         let (mut d,_)=active(100);let mut out=vec![0;5000];

@@ -8,6 +8,7 @@ mod envelope;
 pub(crate) mod retrieval;
 pub(crate) mod download;
 pub(crate) mod launch;
+pub(crate) mod restart;
 use envelope::Envelope;
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]

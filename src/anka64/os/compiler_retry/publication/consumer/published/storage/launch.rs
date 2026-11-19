@@ -5,7 +5,7 @@ use super::retrieval::RetrievedCompilerImage;
 use crate::anka64::{dev_runner::{self,DevelopmentRunConfig,DevelopmentRunReport},
     dev_shell::DevelopmentArtifactRegistry,placement::PhysicalPlacementManager,
     authority_persistence::{artifact::{retrieval::StoredEnvelope,transfer::read::ReadRequest},protocol::client::Binding}};
-use std::sync::{Mutex,atomic::{AtomicU64,Ordering}};
+use std::sync::{Arc,Mutex,atomic::{AtomicU64,Ordering}};
 pub(crate) mod authority;
 use authority::ExecuteEvidence;
 const REPORT_CHARGE:u64=65536+4096;
@@ -82,12 +82,32 @@ impl Drop for Realm {
 }
 impl Kernel {
     pub(crate) fn stored_launch_revision(&self)->u64 {self.stored_launch.revision}
+    pub(crate) fn stored_launch_realm(&self)->u64 {self.stored_launch.boot}
 }
 impl<'k> RetrievedCompilerImage<'k> {
     /// Consumes private custody; even a rejected attempt cannot reuse this guard.
     /// This is synchronous, like the current linked-image runner. The enclosing
     /// Kernel, existing processes/publications and durable selection stay alive.
     pub(crate) fn launch(self,policy:&Mutex<impl LaunchPolicy>,expected_revision:u64,config:DevelopmentRunConfig)
+        ->Result<StoredLaunchReport<'k>,String>
+    {
+        self.launch_inner(policy,expected_revision,config,None)
+    }
+    /// RR110 owns a single mutex for current boot, read and execute evidence.
+    /// Require the EXACT retained read lane, then call its verifier directly
+    /// under that same lock. No recursive locking or detached read snapshot.
+    pub(crate) fn launch_shared<P:LaunchPolicy+crate::anka64::authority_persistence::protocol::client::ServerVerifier+'static>(
+        self,policy:&Arc<Mutex<P>>,expected_revision:u64,config:DevelopmentRunConfig)
+        ->Result<StoredLaunchReport<'k>,String>
+    {
+        let lane:crate::anka64::os::typed_socket::select::ServerLane=policy.clone();
+        if self.read_verifier.as_ref().is_none_or(|r|!Arc::ptr_eq(r,&lane))
+            || !matches!(self.origin,Some(ReadOrigin::Guest{..})) {return Err("foreign shared read/execute lane".into())}
+        self.launch_inner(policy.as_ref(),expected_revision,config,Some(|p,b,r,e|
+            p.verify_read(b,r)==Verdict::Valid && p.verify_download(e)==Verdict::Valid))
+    }
+    fn launch_inner<P:LaunchPolicy>(self,policy:&Mutex<P>,expected_revision:u64,config:DevelopmentRunConfig,
+        shared:Option<fn(&mut P,Binding,ReadRequest,StoredEnvelope<'_>)->bool>)
         ->Result<StoredLaunchReport<'k>,String>
     {
         self.recheck().map_err(err)?;
@@ -139,22 +159,24 @@ impl<'k> RetrievedCompilerImage<'k> {
                     // Keep the original read lane locked too: revocation cannot
                     // race the execute decision. There is no network wait here.
                     let read_lane=custody.image.read_verifier.clone();
-                    let mut reader=match read_lane.as_ref(){Some(v)=>Some(v.try_lock().map_err(err)?),None=>None};
+                    let mut reader=if shared.is_some(){None}else{match read_lane.as_ref(){Some(v)=>Some(v.try_lock().map_err(err)?),None=>None}};
                     if let ReadOrigin::Guest{binding,request}=scope.origin {
-                        let r=reader.as_mut().ok_or("missing original read verifier")?;
-                        if r.verify_read(binding,request)!=Verdict::Valid || r.verify_download(image)!=Verdict::Valid {
-                            return Err("current guest read evidence denied".into())
-                        }
+                        let valid=if let Some(check)=shared {check(&mut *p,binding,request,image)}else{
+                            let r=reader.as_mut().ok_or("missing original read verifier")?;
+                            r.verify_read(binding,request)==Verdict::Valid && r.verify_download(image)==Verdict::Valid
+                        };
+                        if !valid {return Err("current guest read evidence denied".into())}
                     }
                     if p.validate_image(scope,image)!=Verdict::Valid {return Err("current image/read/dependency evidence denied".into())}
                     let now=p.now().ok_or("authority clock unavailable")?;
                     let evidence=p.execute(scope,now).ok_or("current execute evidence denied")?;
                     if p.validate_image(scope,image)!=Verdict::Valid {return Err("image evidence revoked at commit".into())}
                     if let ReadOrigin::Guest{binding,request}=scope.origin {
-                        let r=reader.as_mut().unwrap();
-                        if r.verify_read(binding,request)!=Verdict::Valid || r.verify_download(image)!=Verdict::Valid {
-                            return Err("guest read evidence revoked at commit".into())
-                        }
+                        let valid=if let Some(check)=shared {check(&mut *p,binding,request,image)}else{
+                            let r=reader.as_mut().unwrap();
+                            r.verify_read(binding,request)==Verdict::Valid && r.verify_download(image)==Verdict::Valid
+                        };
+                        if !valid {return Err("guest read evidence revoked at commit".into())}
                     }
                     // No cached authority timestamp: compare to a fresh clock
                     // observation AFTER all provider work at the commit boundary.

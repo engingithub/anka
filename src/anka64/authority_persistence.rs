@@ -1,6 +1,7 @@
 //! Phase 10.10 reference transition core for the Phase 10.9 T2 model.
 //!
-//! Not wired into Kernel boot, sockets, or grant admission. Context/Access and
+//! RR110 uses this core for bounded restart admission; it does not replace
+//! general Kernel boot or production credential verification. Context/Access and
 //! BootEvidence must come from trusted validators; this module verifies their
 //! bindings, not cryptography. Value is an opaque persistent envelope identity,
 //! never a Fabric ObjectId or proof of artifact validity. One store instance is
@@ -62,7 +63,7 @@ pub(crate) trait DurableRecord {
     fn commit(&mut self, anchor:u64, installation:u64, before:&State, after:&State) -> Result<(),Error>;
 }
 
-fn authorized(c:Context,r:Request,a:Access) -> bool {
+pub(crate) fn authorized(c:Context,r:Request,a:Access) -> bool {
     c.selected && c.anchor!=0 && c.installation!=0
         && r.anchor==c.anchor && r.installation==c.installation && r.policy==c.policy
         && a.anchor==r.anchor && a.installation==r.installation && a.policy==r.policy
@@ -118,6 +119,18 @@ pub(crate) struct Enrollment {
 #[derive(Clone,Copy,Debug)]
 pub(crate) struct BootEvidence {
     pub head:u64,pub boot:u64,pub freshness:Verdict,pub artifact:Verdict,
+}
+/// RR110: a new sequence may not reuse the retained boot attempt. Exact lost
+/// reply recovery still uses transact's one-outcome replay window. This helper
+/// does not activate a Kernel; BootLatch and current external freshness follow.
+pub(crate) fn reserve_restart_boot<B:DurableRecord>(b:&mut B,c:Context,r:Request,a:Access)
+    ->Result<Outcome,Error>
+{
+    if !authorized(c,r,a) || r.operation!=Operation::ReserveBoot
+        || c.challenge==0 || r.attempt!=c.challenge {return Err(Error::BootDenied)}
+    let head=b.load(c.anchor,c.installation)?;
+    if head.last.is_some_and(|old|old!=r && old.attempt==r.attempt) {return Err(Error::BootDenied)}
+    transact(b,c,r,a,true)
 }
 /// Volatile execution latch. A crash drops it. A replacement latch alone cannot
 /// justify boot: the trusted challenge must change across restart/snapshot restore.

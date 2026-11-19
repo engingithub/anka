@@ -94,3 +94,5 @@ fn sr110_kernel_reopen_reads_same_bytes_without_recompiling() {
 }
 
 mod launch;
+
+mod restart;

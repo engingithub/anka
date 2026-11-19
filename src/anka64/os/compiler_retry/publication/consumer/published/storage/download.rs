@@ -18,6 +18,23 @@ pub(crate) struct DownloadConnection<'a>{pub capacity:SocketCapacity,pub peer:Bo
 pub(crate) trait DownloadTransport{
     fn connect(&mut self,request:ReadRequest)->Result<DownloadConnection<'_>,String>;
 }
+// Both pump sources use the same GD110 exchange/custody/budget implementation.
+// A restarted bootstrap is admitted separately; it never fabricates a compiler
+// receipt or bypasses the typed socket path.
+pub(super) trait GuestReadPump {
+    fn validation_work(&self)->u64{0}
+    fn validate(&mut self,kernel:&mut Kernel)->Result<(),String>;
+    fn run<'k>(&mut self,kernel:&'k mut Kernel,stream:SelectStream<'_>,config:DevelopmentRunConfig)
+        ->Result<super::super::execution::LinkedCompilerRunReport<'k>,String>;
+}
+struct CompiledPump<'a>{epoch:u64,exec:&'a DeveloperExecutionAuthority}
+impl GuestReadPump for CompiledPump<'_>{
+    fn validate(&mut self,k:&mut Kernel)->Result<(),String>{k.validate_linked_compiler_publication(self.epoch).map_err(err)}
+    fn run<'k>(&mut self,k:&'k mut Kernel,stream:SelectStream<'_>,config:DevelopmentRunConfig)
+        ->Result<super::super::execution::LinkedCompilerRunReport<'k>,String>{
+        k.run_linked_compiler_publication_with_select(self.epoch,self.exec,stream,config).map_err(err)
+    }
+}
 struct Guard<'k>{image:Option<RetrievedCompilerImage<'k>>,scratch:Option<HostStorageReservation>,state:Option<DownloadLane>}
 impl Guard<'_>{
     fn release_scratch(&mut self)->Result<(),String>{
@@ -39,11 +56,19 @@ impl Kernel{
         verifier:ServerLane,transport:&mut impl DownloadTransport,config:DownloadConfig)
         ->Result<RetrievedCompilerImage<'k>,String>
     {
+        self.download_with_pump(&mut CompiledPump{epoch:pump_epoch,exec},manifest,input,net,verifier,transport,config)
+    }
+    pub(super) fn download_with_pump<'k>(&'k mut self,pump:&mut impl GuestReadPump,manifest:Manifest,
+        input:&DeveloperInputAuthority,net:&DeveloperFrameAuthority,
+        verifier:ServerLane,transport:&mut impl DownloadTransport,config:DownloadConfig)
+        ->Result<RetrievedCompilerImage<'k>,String>
+    {
         if !(1..=4096).contains(&config.window) || config.retries>8 || config.limits.max_bytes>2*1024*1024
             || config.limits.work>100_000_000 || config.limits.timeout>std::time::Duration::from_secs(120)
             || std::mem::size_of::<Download>()as u64+4096>SCRATCH {return Err("invalid bounded download configuration".into())}
-        let budget=config.limits.start(manifest.size).map_err(err)?;
-        self.validate_linked_compiler_publication(pump_epoch).map_err(err)?;
+        let mut budget=config.limits.start(manifest.size).map_err(err)?;
+        budget.spend(pump.validation_work()).map_err(err)?;
+        pump.validate(self)?;
         let image=RetrievedCompilerImage::reserve(self,manifest).map_err(err)?;
         let mut guard=Guard{image:Some(image),scratch:None,state:None};
         let image=guard.image.as_mut().unwrap();
@@ -72,8 +97,9 @@ impl Kernel{
                 };
                 state.try_lock().map_err(err)?.check().map_err(err)?;
                 let failure={
+                state.try_lock().map_err(err)?.spend(pump.validation_work()).map_err(err)?;
                 let image=guard.image.as_mut().unwrap();
-                let result=image.kernel.run_linked_compiler_publication_with_select(pump_epoch,exec,
+                let result=pump.run(image.kernel,
                     SelectStream{capacity:connection.capacity,request:StorageRequest::Download(request,input,state.clone()),
                         verifier:verifier.clone(),authority:net,peer:&mut *connection.peer},config.run);
                 match result {
@@ -86,7 +112,7 @@ impl Kernel{
                         state.try_lock().map_err(err)?.commit(&run.byte_output,&mut image.bytes,&mut *policy).map_err(err)?;
                         drop(policy);drop(report);None
                     }
-                    Err(e)=>Some(err(e)),
+                    Err(e)=>Some(e),
                 }
                 };
                 // Realm/driver destruction precedes peer close, then retry. No

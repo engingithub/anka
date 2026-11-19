@@ -13,7 +13,10 @@ affected Kleis gates before implementation. Current evidence is centralized in
 [DN-71](../../../DESIGN_NOTES.md#dn71-status).
 
 Phase 10.10's file-backed persistence service and authority adapters currently run
-as Rust host reference components. The CC2 guest Select and artifact-upload probes
-in `userspace/bin/` use the bounded outbound virtual-NIC path; GA110 upload and
-lost-reply recovery are accepted. This does not install a general remote filesystem
+as Rust host reference components. The CC2 guest Select, Upload and distinct
+Download probes in `userspace/bin/` use the bounded outbound virtual-NIC path.
+Upload/recovery, charged retrieval, fresh live launch and RR110 independent
+bounded guest/service restart are accepted. RR110's real witness passed in 92.13s
+using retained precompiled pump/target images and current boot/read/execute evidence.
+This does not install a general remote filesystem, integrate whole-machine reboot
 or authenticate external HTTP requesters. See [DN-72](../../../DESIGN_NOTES.md#dn72-status).

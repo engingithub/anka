@@ -6,6 +6,8 @@ mod published;
 #[cfg(any(target_os="linux",target_os="macos"))]
 pub(crate) use published::storage::launch as stored_launch;
 #[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use published::storage::restart as stored_restart;
+#[cfg(any(target_os="linux",target_os="macos"))]
 pub(crate) use published::storage::download::{DownloadConfig,DownloadConnection,DownloadTransport};
 #[cfg(all(test,any(target_os="linux",target_os="macos")))]
 pub(crate) use published::{LinkedCompilerReceipt,storage::{CompilerStoragePolicy,PersistentLinkIdentity,PersistentDependency}};

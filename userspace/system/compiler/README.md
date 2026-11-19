@@ -103,7 +103,7 @@ separate execution authority and the charged isolated-run profile.
 
 Phase 10.8 C2–C5 and the protected network-service rebuild are closed within their
 stated profiles. The final evidence is in [DN-71](../../../DESIGN_NOTES.md#phase-108-final-evidence).
-Latest supplied CC2 lineage in the guest-upload witness: CC2_0 is 168840 bytes;
+CC2 lineage confirmed again in the RR110 restart witness: CC2_0 is 168840 bytes;
 CC2_1 and CC2_2 are byte-identical at 191576 bytes, entry 188888. These are lineage
 artifacts, not the separately compiled protected producer image.
 
@@ -120,7 +120,16 @@ bash scripts/check-anka110-guest-artifact.sh --real
 ```
 
 Use focused checks during development. Ignored real witnesses must be selected
-explicitly; do not count filtered or ignored tests as passes. Retrieval, validation
-and live launch from persistent storage are the next milestone under
-[DN-72](../../../DESIGN_NOTES.md#guest-artifact-upload), followed by independent reboot
-acceptance. Existing rebuild and HTTP scripts remain regression entry points.
+explicitly; do not count filtered or ignored tests as passes. Charged retrieval,
+fresh live launch and [RR110 bounded restart](../../../DESIGN_NOTES.md#stored-restart-runtime)
+are now accepted. The RR110 witness compiles and persists the pump and target once,
+then drops the original compiler/lineage before independently restarting guest and
+service. No compiler producer runs or publication receipt is recreated after that
+boundary. The retained target exits 42 through the real socket/NIC/file path.
+
+Run `bash scripts/check-anka110-stored-restart.sh --real` from the repository root.
+The 14 focused cases and real witness passed (92.13s for the real case); the latest
+full release suite passed 1,949 tests, with 0 failures and 20 ignored, in 317.84s.
+The supplied RR110 worktree is tested but uncommitted on `main`. Whole-machine
+reboot and production credential/freshness integration remain open. Existing
+rebuild and HTTP scripts remain regression entry points.

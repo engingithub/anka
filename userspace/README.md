@@ -44,10 +44,16 @@ evidence; placement in `/bin` conveys no storage grant. The guest Select and upl
 probes have separate acceptance scripts. Run the current upload witness with
 `bash scripts/check-anka110-guest-artifact.sh --real` from the repository root.
 
-Persistent artifact upload is accepted; retrieving a stored image and launching
-it under fresh authority, first live and then after reboot, remains next work.
-There is no general guest filesystem, S3/Ceph backend or production credential
-provider in this source tree. See [DN-72](../DESIGN_NOTES.md#dn72-status) for current
+Artifact upload, charged retrieval and fresh live launch are accepted. RR110 also
+passed independent bounded guest/service restart: the precompiled download pump
+and target are persisted before the compiler/lineage is destroyed. Fresh boot
+admission reconstructs the guest; the retained target runs through the real
+socket/NIC/file path without recompilation. Reproduce with
+`bash scripts/check-anka110-stored-restart.sh --real`. The real witness passed in
+92.13s; the subsequent full release suite passed 1,949 tests with 0 failures and
+20 ignored. RR110 is tested but still uncommitted on `main` in the supplied status.
+There is no general guest filesystem/CRUD, whole-machine reboot integration,
+S3/Ceph backend or production credential provider in this source tree. See [DN-72](../DESIGN_NOTES.md#dn72-status) for current
 evidence and [the root README](../README.md) for commands.
 
 ## Legacy development monitor

@@ -14,9 +14,9 @@ const REPORT_CHARGE:u64=OUTPUT_BYTES as u64+4096;
 pub(crate) struct LinkedCompilerRunReport<'k> {
     pub(crate) publication_epoch:u64,
     pub(crate) profile:ApplicationLinkProfile,
-    execution:DevelopmentRunReport,
-    kernel:&'k mut Kernel,
-    reservation:Option<HostStorageReservation>,
+    pub(super) execution:DevelopmentRunReport,
+    pub(super) kernel:&'k mut Kernel,
+    pub(super) reservation:Option<HostStorageReservation>,
 }
 impl LinkedCompilerRunReport<'_> {
     pub(crate) fn execution(&self)->&DevelopmentRunReport {&self.execution}

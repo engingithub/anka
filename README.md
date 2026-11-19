@@ -50,85 +50,85 @@ and forced the abstractions beneath it to become more precise.
 | Protected allocation | Shared allocation/free service, supported C `malloc/free`, initialized heap/local storage, cleanup and independent-client reuse with stale-alias rejection |
 | Compiler resources | Charged source/tool custody, protected ABI-2 producer, bounded output retry, retained artifacts and atomic publication; described workspace tables exercised by real guest CC2 |
 | Module composition | Separately compiled protected C modules, merged frame metadata, ordered dependency receipts, publication and ordinary process execution |
-| Durable compiler artifacts | Receipt-bound export and CC2 guest upload through the virtual NIC to a host-file store, including lost-reply recovery; retrieval/live launch pending |
+| Durable compiler artifacts | Receipt-bound export and CC2 guest upload through the virtual NIC to a host-file store, including lost-reply recovery, charged retrieval and fresh live/restart launch |
 | Formal development | Kleis/Z3 contracts, positive witnesses, and deliberately false claims that must be explicitly disproved |
 
 The original MC68000 implementation remains in the repository as the project's
 experimental foundation. Active architecture and toolchain development targets
 Anka64.
 
-## Current checkpoint — artifact read accepted
+## Current checkpoint — stored restart accepted
 
 **Phase 10.8 is closed and merged. Phases 10.9 and 10.10 remain open.**
-The protected service stack serves `/alive` through the virtual NIC. A CC2-compiled
-guest can now upload actual linked compiler output through typed sockets, NIC DMA,
-guarded localhost TCP and a durable host-file artifact store.
+The protected service stack serves `/alive` through the virtual NIC. CC2 guests
+upload and retrieve actual linked images through typed sockets, NIC DMA, guarded
+localhost TCP and a durable host-file store. Fresh execute admission runs the
+stored target both live and after independent bounded guest/service restarts.
 
 | Evidence | Accepted scope |
 |---|---|
-| Phase 10.8 closure | Protected allocation/free, post-malloc whole-stack review, concurrent compiler jobs, typed modules, charged linking/execution and rebuilt network services; historical final verification: 1,628 ordinary tests, 15 explicit guest witnesses and 48 Kleis pairs |
-| Authority and persistence | T1/T2 formal contracts, evidence admission/verifier adapters, durable records and bounded transport; production credentials and Kernel enrollment/reboot integration remain open |
-| Host artifact storage | Receipt-bound compiler export, bounded upload protocol and guarded TCP/file transport; last standalone persistence reference result: 206 passed, with 12 focused AG110 tests included |
-| Guest artifact upload (GA110) | Latest supplied log: 44 positive / 36 hostile explicitly disproved; 7 quick tests passed in 0.10s; real CC2 upload/recovery witness passed in 85.09s |
+| Phase 10.8 closure | Protected allocation/free, compiler jobs, typed modules, charged linking/execution and rebuilt network services; historical final evidence is retained in DN-71 |
+| Artifact upload (GA110) | 44 positive / 36 hostile Kleis witnesses; 7 quick tests and real CC2 upload/recovery witness (85.09s), including an 11,984-byte envelope in three chunks and exact lost-reply recovery |
+| Stored retrieval and read transport (SR110 R1 / AR110) | SR110 92 positive / 78 hostile, 20 focused Rust cases; AR110 117 positive / 98 hostile, 23 focused read cases plus 24 upload compatibility cases |
+| Guest download and live launch (GD110 / SR110 R2) | GD110 174 positive / 149 hostile; 11 focused live-admission cases and real download/live-launch witness (84.35s), target exit 42; merged to main on 2026-11-18 |
+| Independent restart (RR110) | 234 positive / 192 explicitly disproved hostile witnesses; 14 focused cases passed in 4.21s; separately selected real restart witness passed in 92.13s |
+| Latest full release library suite | **1,949 passed, 0 failed, 20 ignored, 0 measured, 0 filtered out in 317.84s**, reported by the developer on 2026-11-19 after the GD110 deadline-test correction |
 
-The real witness transfers an **11,984-byte canonical linked-image envelope** in
-three Append chunks (4,096 + 4,096 + 3,792 bytes), alternates 64/1,024-byte queues,
-and recovers publication revision 8 after deliberate reply loss and service/file
-reopen. The compiled guest performs the typed I/O; a trusted test coordinator
-supplies bounded requests and deterministic authority/dependency evidence.
-This does not yet provide a standalone external storage deployment or guest
-filesystem. Stored bytes do not grant execution authority.
+RR110 persists the download pump A and target B, destroys the original compiler
+and lineage, and reconstructs a fresh accounted guest under current boot
+authority. The real witness covers service-only, guest-only and combined restarts,
+then retrieves and runs B to exit 42 without recompilation. It checks stale
+channels, revocation at launch commit, unchanged retained bytes/boot selection
+and preservation of the same peer charge/state across a service-only restart.
+The ignored real witness has its own passing result; the ordinary full suite
+does not execute it or the other ignored tests. Overlapping groups are not added.
 
-The supporting `g110_` filter passed 21 tests with one ignored in 0.48s; it also
-matches AG110 tests, so overlapping groups must not be added. The latest supplied
-whole-suite result remains the earlier **1,795 passed, 16 ignored in 296.54s**.
-No complete regression for the current upload revision is claimed. The current
-focused build reports 20 nonfatal dead-code warnings.
+**Integration status:** the supplied `git status` shows RR110 and its formal
+files, script and deadline-test correction as uncommitted changes on `main`,
+whose committed tip matches `origin/main`. RR110 acceptance is complete within
+this bounded profile; it has not yet been committed, pushed or merged. The next
+action is to create a feature branch from this worktree and review/commit the
+intended changes before a PR. Exclude archive ZIPs from the commit and review
+the separately untracked runtime-image builder before deciding to include it.
 
-**Next milestone:** retrieve and validate a stored image and its dependencies,
-reconstruct fresh runtime objects, and launch under current execution authority
-without restarting Anka64. Separate guest/service reboot acceptance follows.
-The stored-launch Kleis gate (49 positive / 56 hostile) is a foundation; extend
-affected retrieval/transport/admission contracts before implementing new behavior.
-The [SR110 retrieval/admission refinement](DESIGN_NOTES.md#stored-retrieval-launch)
-now passes 92 positive witnesses and 78 explicit hostile disproofs. The first
-Rust slice implements charged private file retrieval and exact envelope decoding;
-its 20 focused tests passed on macOS in **7.20s**. Run
-`bash scripts/check-anka110-stored-retrieval.sh`. The next network read contract,
-[AR110](DESIGN_NOTES.md#artifact-read-protocol), passes **117 positive / 98 hostile**
-Kleis witnesses. Its Rust codec, bounded client exchange and guarded TCP read
-path now have local acceptance: **23 focused + 24 upload-compatibility tests
-passed** (`bash scripts/check-anka110-artifact-read.sh`, 2026-11-18). The next
-[GD110 guest-download contract](DESIGN_NOTES.md#guest-artifact-download) passes
-**174 positive / 149 explicitly disproved hostile witnesses** with Kleis/Z3.
-It specifies charged typed I/O, contiguous multi-range assembly, bounded retries,
-cleanup and private envelope validation. GD110 guest-runtime integration and
-SR110 R2 fresh live admission are implemented, with laptop validation pending.
-The repaired source includes the complete download prerequisites; see
-`GD110_SR110_REPAIR.md`. Run
-`bash scripts/check-anka110-stored-live-launch.sh --real` to validate the real
-CC2/typed-socket/NIC/file/live-launch path. Reboot execution remains pending.
-Select the gates with
-`--only-stored-retrieval`, `--only-artifact-read` or `--only-guest-download` in
-`scripts/check-anka109-gates.py`.
-Podman with persistent host files, S3/Ceph adapters and Metal execution are later
-work, not prerequisites for the accepted file-backed upload.
+The runtime consumes trusted evidence; test providers are deterministic fixtures.
+External nonrollback freshness, production credential verification, general
+installation/enrollment and whole-machine reboot integration remain open.
+This does not provide general guest file CRUD, arbitrary process migration,
+concurrent peer application progress or a standalone deployed storage server.
+[Xcode performance probing](DESIGN_NOTES.md#xcode-performance-probing) remains a
+recorded measurement follow-up; no profiling results or optimizations are claimed.
 
-Reproduce the upload acceptance from the repository root:
+Reproduce the restart acceptance from the repository root:
 
 ```bash
 python3 scripts/check-anka109-gates.py \
   --kleis "$HOME/.cargo/bin/kleis" \
-  --kleis-root "$HOME/git/cee/kleis" --only-guest-artifact &&
-bash scripts/check-anka110-guest-artifact.sh --real
+  --kleis-root "$HOME/git/cee/kleis" --only-stored-restart
+bash scripts/check-anka110-stored-restart.sh --real
+cargo test --release --lib -- --test-threads=1
 ```
 
-The script runs quick checks before one explicit CC2 witness. See
-[DN-72 current status](DESIGN_NOTES.md#dn72-status),
-[GA110 evidence](DESIGN_NOTES.md#guest-artifact-upload) and the
+The restart script checks test discovery, runs the focused RR110/T2 and existing
+live-launch/download/read/upload/retrieval regressions, then selects the real
+restart witness. Omitting `--real` skips that costly witness. The GD110 deadline
+test now constructs under a live budget and explicitly expires it using the
+existing test-only hook, avoiding a one-nanosecond constructor race. Production
+deadline checks and the number of tests are unchanged.
+
+Individual gates remain available as `check-anka110-guest-artifact.sh`,
+`check-anka110-artifact-read.sh`, `check-anka110-guest-download.sh`,
+`check-anka110-stored-retrieval.sh` and `check-anka110-stored-live-launch.sh` in
+`scripts/`. Use `--real` for the guest upload, download and live-launch witnesses.
+The formal runner also accepts `--only-guest-artifact`, `--only-stored-retrieval`,
+`--only-artifact-read` and `--only-guest-download`.
+
+See [DN-72 current status](DESIGN_NOTES.md#dn72-status),
+[RR110 acceptance](DESIGN_NOTES.md#stored-restart-runtime) and the
 [compiler compatibility backlog](DESIGN_NOTES.md#toolchain-compatibility-backlog).
 The legacy CC_B/shared-buffer network stack remains a protocol regression oracle;
-its retention does not reopen Phase 10.8.
+its retention does not reopen Phase 10.8. Podman deployment with persistent host
+files, S3/Ceph adapters and Metal execution remain later work.
 
 ## Build and explore
 
@@ -165,7 +165,8 @@ bash scripts/check-anka108-http-application.sh --real
 
 That script runs focused formal/runtime checks and the explicit real guest HTTP
 witness. Long real witnesses are deliberately ignored by the ordinary test
-runner and must be selected explicitly. At the final integration checkpoint:
+runner and must be selected explicitly. To reproduce the historical Phase 10.8
+closure gate (distinct from the RR110 commands above):
 
 ```sh
 bash scripts/check-anka108-closure.sh --final

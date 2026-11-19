@@ -9,7 +9,7 @@ the project's purpose and development entry points. Architectural decisions
 and future directions belong in these documents rather than separate root notes.
 
 For current work, start with [DN-72: authority and persistence status](#dn72-status)
-and the [guest artifact upload checkpoint](#guest-artifact-upload). For the closed rebuild, see the
+and the [RR110 restart acceptance record](#stored-restart-runtime). For the closed rebuild, see the
 [DN-71 status table](#dn71-status) and [final 10.8 evidence](#phase-108-final-evidence).
 DN-1 through DN-71 and the detailed DN-72 entries retain decisions and test results
 at the time they were made. Read a checkpoint’s “next” or “pending” in that context;
@@ -13794,7 +13794,7 @@ This documentation update did not rerun or extend the accepted gates.
 
 <a id="dn72-status"></a>
 
-### Current status — guest artifact upload accepted; stored retrieval and live launch next
+### Current status — bounded stored restart accepted; integration pending
 
 **Phase 10.8 is closed and merged. Phases 10.9 and 10.10 remain open.**
 The protected virtual-NIC service can answer `/alive`. The persistence binder
@@ -13803,7 +13803,7 @@ requesters or authorize boot.
 
 | Scope | Evidence and boundary |
 |---|---|
-| 10.9 recognition, enrollment and reboot | [T1](#dn72-t1) and the initial [T2 model](#dn72-t2) have passing formal gates. A durable reservation and an authorized boot are separate transitions. Kernel enrollment/reboot integration and the broader T3–T5 work remain open. |
+| 10.9 recognition, enrollment and reboot | [T1](#dn72-t1) and the initial [T2 model](#dn72-t2) have passing formal gates. A durable reservation and an authorized boot are separate transitions. RR110 now connects T2/BootLatch to a fresh accounted guest. General installation/enrollment, whole-machine reboot integration and broader T3–T5 work remain open. |
 | 10.10 persistence and bounded transport | The [local durable backend](#dn72-local-backend), [codec](#dn72-persistence-codec), loopback transport and [client](#dn72-persistence-client) have accepted Rust reference evidence, including exact retry after a lost reply. The client checkpoint reached 83 tests and the protocol pair 137 positive / 108 hostile. |
 | E1–E4: trusted evidence and serialized use | E1 admission: 119 positive / 99 hostile; E2 Rust checkpoint: 105 tests. E3 provider-use contract: 116 / 94; E4 registry and guarded dispatch: 130 tests. These checks consume trusted verifier outputs. |
 | E5–E6: guarded replies on a real stream | E5: 21 positive / 16 hostile. E6: 135 reference tests passed. Authority is checked before each reply fragment; revocation cannot recall a prefix already written or undo a durable commit. E6 is merged to main. |
@@ -13813,8 +13813,11 @@ requesters or authorize boot.
 | E11: client verifies the storage server | [Formal gate](#dn72-storage-verifier): 43 positive witnesses passed; all 36 hostile claims explicitly disproved. Confirmed on the developer Mac. |
 | E12: protected host storage I/O | Developer Mac: 154 persistence reference tests passed in 0.99s, including the six E12 cases. |
 | Compiler output and artifact transport | CS110 receipt-bound export and AT110 framing/dispatch are implemented. AG110 has developer acceptance: 12 focused TCP/file tests and 206 reference tests, including terminal socket ownership correction; gate 51 positive / 42 hostile explicitly disproved. |
-| GA110 guest artifact upload | [Accepted bounded integration](#guest-artifact-upload): 44 positive / 36 hostile explicitly disproved; 7 quick tests and the explicit real CC2 witness passed (85.09s). Three chunks retained an 11,984-byte envelope; exact Outcome recovered revision 8 after deliberate post-commit reply loss and service recreation. No current full regression is claimed. |
-| Stored retrieval / live launch | SL110 foundation: 49 positive / 56 hostile explicitly disproved. [SR110 refinement](#stored-retrieval-launch): 92 positive / 78 hostile explicitly disproved locally. SR110 R1 accepted: 20 focused Rust tests passed in 7.20s. [AR110 read protocol](#artifact-read-protocol) formal gate passed: 117 positive / 98 hostile. AR110 Rust read codec/client and host TCP path accepted: 23 focused + 24 compatibility tests passed. [GD110 guest download](#guest-artifact-download) formal gate: 174 positive / 149 hostile explicitly disproved. GD110 runtime now implements charged guest retrieval and private assembly; fresh loader admission and reboot execution remain pending. |
+| GA110 guest artifact upload | [Accepted bounded integration](#guest-artifact-upload): 44 positive / 36 hostile explicitly disproved; 7 quick tests and the explicit real CC2 witness passed (85.09s). Three chunks retained an 11,984-byte envelope; exact Outcome recovered revision 8 after deliberate post-commit reply loss and service recreation. This historical focused result is supplemented by the current full-suite result below. |
+| Stored retrieval / live launch | SL110 foundation: 49 positive / 56 hostile explicitly disproved. [SR110 refinement](#stored-retrieval-launch): 92 positive / 78 hostile explicitly disproved locally. SR110 R1 accepted: 20 focused Rust tests passed in 7.20s. [AR110 read protocol](#artifact-read-protocol) formal gate passed: 117 positive / 98 hostile. AR110 Rust read codec/client and host TCP path accepted: 23 focused + 24 compatibility tests passed. [GD110 guest download](#guest-artifact-download) formal gate: 174 positive / 149 hostile explicitly disproved. GD110 retrieval and SR110 R2 fresh live admission are accepted and merged to main (user confirmation, 2026-11-18): 11 focused live-admission tests and the real witness passed (84.35s); full library suite: 1,935 passed, 0 failed, 19 ignored (307.91s). The subsequent bounded restart acceptance is recorded below. |
+| RR110 independent restart | [Composition gate](#stored-restart-contract): 234 positive / 192 explicitly disproved hostile witnesses. [Runtime acceptance](#stored-restart-runtime): 14 focused tests passed in 4.21s; real CC2/socket/NIC/file restart witness passed in 92.13s. Service-only, guest-only and combined restart cases launch the retained target to exit 42 without recompilation. |
+| Latest full release library regression | Developer-reported on 2026-11-19: **1,949 passed, 0 failed, 20 ignored, 0 measured, 0 filtered out in 317.84s**, after the GD110 deterministic deadline-test correction. The ignored real RR110 witness has its separate passing result above. |
+| Integration status | RR110, its formal pair and script, and the GD110 test correction remain uncommitted on `main`; the committed tip matches `origin/main`. Branch/commit/PR integration is the next action. No RR110 push or merge is claimed. |
 
 E7/E8 are merged to main. The 148-test E10 run includes E8’s tests; it is a
 persistence reference result, not a whole-system regression.
@@ -13978,7 +13981,9 @@ by clearing one register pair while aliases remain in cells or saved contexts.
 
 T1 has the concrete theory pairs and local results recorded below. The initial
 T2 model is delivered in the [T2 evidence record](#dn72-t2); its durable backend
-has a host-local reference implementation; trusted reboot freshness and Kernel integration remain open. T3–T5 remain proposed gates. The I7/I8 scope review establishes which earlier lemmas
+has a host-local reference implementation. RR110 adds accepted bounded Kernel/BootLatch
+integration; external nonrollback freshness and general whole-machine boot remain
+trusted integration obligations. Broader T3–T5 remain proposed gates. The I7/I8 scope review establishes which earlier lemmas
 T1 actually uses: direct 64-bit range checks and nonwrapping admission revisions
 are explicit; the older reduced-width range-transitivity witness is not assumed.
 Later chained delegation still needs its own full-width obligation. Runtime
@@ -14131,7 +14136,7 @@ validation. Storage custody never grants enrollment, endorsement or execution.
 
 #### Launching a durable executable: live first, then after reboot
 
-**SL110 formal gate passed; runtime implementation follows the CC2 guest Select witness.** Select commits a selection
+**SL110 formal foundation passed; SR110 R2 live launch and RR110 bounded restart are accepted below.** Select commits a selection
 record; it does not upload a linked image or start a process. Store the exact
 linked image, protected metadata and bound provenance under a durable artifact
 identity. Ordinary launch takes that identity directly. Storage read access
@@ -14158,8 +14163,13 @@ of the actual bytes and durable provenance, not host object IDs or a chosen
 hash. The model assumes an admitted, fresh boot, serialized checks/commit, a
 nonreusing allocator and accurate charges. The prior boot does not provide
 live bindings. This gate does not write a blob, authenticate storage, execute
-instructions or prove scheduler progress. The two positive runtime witnesses
-and their denial checks remain to be implemented:
+instructions or prove scheduler progress. The following is the original acceptance
+sketch. SR110 R2 now covers bounded live launch with exit 42, preserved peer
+quota/state and unchanged selection; it does not establish concurrent progress
+of a separate peer application. RR110 now covers independent bounded guest/service
+restart with the retained target exiting 42, without rebuilding it or the pump.
+Whole-machine reboot and the broader peer-progress sketch below remain outside the accepted synchronous
+runner's scope:
 
 1. **Live launch.** Compile and link a C program that returns 70. Persist it,
    release the compiler job and its in-memory publication, and keep a separate
@@ -15603,7 +15613,7 @@ a guest reached the file backend. A committed TX is local network custody, not
 a remote ACK. The adapter must serialize authority checks with wire publication
 and keep queued bytes from a dead connection out of its replacement.
 
-**Runtime implementation (acceptance pending).** The fixed-route adapter
+**Initial runtime implementation (subsequent acceptance recorded below).** The fixed-route adapter
 uses the existing bounded NIC driver for both ingress and committed egress.
 The protected caller uses the existing send/receive ABI and syscall 25 for
 write shutdown. RX stays open. A verifier lock serializes each request
@@ -15690,12 +15700,13 @@ not implement an autonomous guest retry coordinator.
 
 <a id="durable-artifact-storage-plan"></a>
 
-**Durable artifact storage accepted through guest upload; retrieval/live launch next.**
+**Durable artifact storage, live launch and bounded independent restart accepted.**
 The earlier Select record holds an opaque envelope identity. AS110 now retains
 artifact payloads, CS110 binds compiler receipts, AT110/AG110 provide bounded
 framing and guarded TCP, and GA110 uploads through a CC2 guest and virtual NIC
-into actual durable host files. These accepted reference profiles do not yet
-establish a deployed production artifact server or stored-code execution.
+into actual durable host files. AR110/GD110/SR110 and RR110 add charged retrieval,
+fresh execute admission and bounded independent restart. These reference profiles
+do not establish a deployed production artifact server or whole-machine reboot.
 
 A network-accessible durable service is sufficient; Anka64 does not need a
 mounted remote filesystem or guest inode/disk-driver implementation. The first
@@ -15708,10 +15719,10 @@ storage product is required for the first acceptance demonstration.
 | Priority | Bounded deliverable | Current evidence / remaining acceptance |
 | --- | --- | --- |
 | 1 | Formal staging, transfer and durable publication contracts | AS110, CS110, AT110, AG110 and GA110 gates recorded below; preserve explicit authority, quota, crash and durability assumptions. |
-| 2 | File-backed immutable artifacts and compiler receipt binding | Implemented and focused tests accepted. Bounded backend reads exist; an integrated guest retrieval/launch path is not established. |
+| 2 | File-backed immutable artifacts and compiler receipt binding | Implemented and accepted, now including the bounded GD110/SR110 guest retrieval/live-launch path recorded below. |
 | 3 | Network service plus guest artifact upload | GA110 real CC2 witness accepted: three chunks, exact retained bytes, charged cleanup, lost-reply recovery. Host coordinates exchanges and supplies trusted fixture evidence. |
-| 4 | Retrieve, validate and launch a stored executable | Next: review/extend affected Kleis gates first; retrieve exact bytes/receipt/dependencies and admit fresh runtime objects and execution authority while Anka64 keeps running. |
-| 5 | Independent restart demonstration | Pending after live launch: restart guest/service independently, retain files, reacquire current authority and reject stale incarnations or revoked grants. GA110 service recreation establishes only publication-outcome recovery. |
+| 4 | Retrieve, validate and launch a stored executable | Accepted and merged to main: exact stored bytes run in a fresh, charged isolated realm while the service Kernel remains alive; real witness passed in 84.35s. General concurrent peer application progress remains outside this bounded runner. |
+| 5 | Independent restart demonstration | RR110 accepted: 234 positive / 192 hostile; 14 focused Rust cases and the real witness (92.13s), followed by the 1,949-pass full suite. Uses current boot/read/execute evidence after independent bounded service/guest restarts; retained files/selection and stale-incarnation rejection checked. Changes await commit/PR; production freshness and whole-machine reboot remain open. |
 
 Publication must never advertise an artifact until all required bytes and
 metadata are recoverably retained. Stage objects privately; finalize verified
@@ -15731,7 +15742,7 @@ The accepted stored-launch theory (49 positive / 56 hostile claims explicitly
 disproved) supplies launch-admission obligations. It does not by itself establish
 blob transfer, storage durability or atomic manifest publication. Review and
 extend the affected persistence, evidence, outbound transport, publication and
-stored-launch gates before implementing the remaining retrieval and execution
+stored-launch gates before extending the accepted bounded retrieval and execution
 transitions. AS110 and the later transfer sections below record the implemented
 canonical wire profile and file backend. No production credential provider or
 S3/Ceph backend is selected.
@@ -16961,17 +16972,29 @@ unfiltered full-suite pass. Logs for the prior run and final checks are included
 The transport and providers are deterministic trusted fixtures, not production
 cryptographic authentication. Deadlines remain cooperative at host callbacks.
 
-**Next implementation slice:** fresh live executable admission from this private
-validated stored image, without recompiling it, under current execution authority
-and fresh-object/tag/frame/context obligations. Guest/service reboot execution
-remains a separate acceptance boundary.
+**Follow-up completed:** SR110 R2 below now supplies fresh live executable
+admission from this private image without recompilation. Its acceptance and merge
+are recorded below. RR110 subsequently passed the bounded independent guest/service
+restart acceptance; general whole-machine reboot remains outside that scope.
 
 ### SR110 R2 — fresh live admission implementation (2026-11-18)
 
-**Delivered for laptop validation; not compiled or tested in this delivery.**
-This is the next slice after GD110's charged private download. The accepted
-SR110 92/78, SL110 49/56 and GD110 174/149 formal files are unchanged; their
-previous results do not constitute acceptance of this Rust implementation.
+**Accepted on the developer Mac and merged to main; status recorded 2026-11-19.**
+The supplied final log reports 11 focused live-admission tests passed in 3.18s,
+then the separately selected real CC2/typed-socket/NIC/file/live-launch witness
+passed in 84.35s. The stored image exited 42; replay and revoked read evidence
+were denied while peer quota and durable state were preserved. Adjacent execution,
+download, socket, artifact-transfer and retrieval groups also passed. The earlier
+timeout-fixture failure was corrected before this successful run.
+
+The user subsequently reported the unfiltered single-threaded release library
+suite: **1,935 passed, 0 failed, 19 ignored, 0 filtered out in 307.91s**, and confirmed
+merging `feat/anka110-stored-artifact-launch` to `main` on 2026-11-18. The 19 ignored
+cases are not counted as executed by that suite; the live-launch real witness has
+its separate result above. Historical overlapping test groups are not summed.
+The accepted SR110 92/78, SL110 49/56 and GD110 174/149 formal files are unchanged.
+These are bounded implementation results, not production credential or reboot
+acceptance. This documentation update runs no Rust or Kleis commands.
 
 `RetrievedCompilerImage::launch` consumes the private image and retains its
 original deadline and remaining work. Both host-file retrieval and guest
@@ -17034,5 +17057,324 @@ bash scripts/check-anka110-stored-live-launch.sh
 bash scripts/check-anka110-stored-live-launch.sh --real
 ```
 
-Until those runs pass, fresh live admission remains **implementation pending
-validation**, and reboot/restart acceptance remains a subsequent task.
+These live-admission gates have passed. The independent bounded restart acceptance
+described below has also passed. Branch/commit/PR integration is now next; Xcode
+profiling remains a separate recorded measurement follow-up.
+
+
+<a id="stored-restart-next"></a>
+
+### Independent restart and stored-image launch — accepted bounded task
+
+**RR110 accepted, 2026-11-19; commit/PR pending:** the earlier live-launch work
+remains accepted and merged. The new `anka110_stored_restart` pair composes the existing T2 reservation/
+boot admission, T1 execute admission, SR110 custody and GD110 authenticated EOF
+contracts. Local Kleis validation passed **234 positive witnesses and 192/192
+explicit hostile disproofs**. The affected existing pairs were rerun successfully;
+see the refinement record below. The bounded runtime adapter and real
+CC2/typed-socket/NIC/file restart witness are now implemented in the RR110 runtime
+slice below. The developer passed the 14 focused cases, real restart witness and
+full release library suite (1,949 passed, 0 failed, 20 ignored). These runtime
+results supplement the formal gate; RR110 itself remains uncommitted on `main`.
+
+The bounded acceptance target is to retain the published file and its bound
+metadata/dependencies, independently restart the storage service and Anka64,
+reacquire current read and execute authority, and launch the same stored image
+without recompiling it or retaining the original in-memory publication. Cover
+service-only, guest-only, and both-side restart cases. Specify the trusted boot
+and download infrastructure available after restart; an unnoticed CC2 rebuild
+inside the witness must not substitute for retrieval of the stored target.
+
+Connect boot admission to the T2 durable reservation and fresh current evidence.
+A storage-service reopen and a newly allocated Rust `Kernel` alone are not proof
+of authorized reboot. SR110 R2's process-local identity counter is not a durable
+freshness mechanism. State the external nonrollback freshness assumption; a
+counter restored with the same rolled-back store cannot defeat that rollback.
+
+Check stale channels, saved process/socket/heap/admission handles, old challenges,
+wrong boot or owner bindings, revoked/expired grants, corrupt image/dependencies,
+exact boot-request retries, counter exhaustion and failure cleanup. Reconstruct
+fresh objects, protected pointer/frame/context state and grants. Ordinary launch
+after an authorized boot must not change the selected boot artifact or reserve
+another boot incarnation. A service-only restart preserves the surviving guest
+and its peer's charge/state. Guest death invalidates that guest's volatile peers
+too; it does not prove their survival or automatically refund their storage.
+General concurrent peer scheduling is separate work.
+
+This task does not introduce general file CRUD, a distributed storage backend,
+Metal execution, or performance optimizations.
+
+<a id="stored-restart-contract"></a>
+
+### RR110 — independent restart composition gate (2026-11-19)
+
+Files: `theories/anka110_stored_restart.kleis` and its
+`_false_witnesses.kleis` pair. The gate runner adds `--only-stored-restart` and
+includes the pair in its default selection. Unknown solver results, parser/import
+errors, missing witnesses and incomplete hostile disproofs still fail closed.
+There are no new axioms and no changes to the accepted foundational theories.
+
+The model distinguishes a durable boot incarnation, its externally fresh attempt,
+a local guest realm, and an authenticated storage-service incarnation/channel.
+Those identities must not be collapsed into a Rust process counter, socket
+number, artifact identity, or saved publication receipt. A handle root check also
+requires current issuer-table evidence; matching serialized fields alone never
+creates a capability. Zero is permitted for an actual Kernel owner incarnation,
+while the existing T2 storage caller retains its own nonzero identity rules.
+
+| Boundary | Required behavior |
+| --- | --- |
+| New guest reservation | Use the actual T2 transition, retain selection A, increment the durable boot exactly once, reject exhausted counters and reused attempts under a new sequence. |
+| Lost reservation reply | Reload the committed head and recover the exact retained outcome under current authority; no second incarnation is reserved. |
+| Guest boot admission | Bind fresh evidence to anchor, installation, policy, exact durable head, selection, boot, attempt and new realm; use the actual `b109_admit` predicate and current enrollment/bootstrap evidence. |
+| Storage-service restart | Preserve the durable record, every retained manifest field, admitted guest root and unaffected peer; authenticate a new service incarnation and invalidate old channels. |
+| Guest crash | Destroy the active authority root while retaining durable records/files. Saved process, socket, heap, admission, pointer and frame identities cannot acquire authority in the next realm. |
+| Download completion | Compose the actual GD110 EOF gate with the captured boot/realm/service session. Require real EOF, exact request echo/content, current read/server authority and the existing accounting/work/deadline checks. |
+| Ordinary launch B | Compose actual SR110/T1 admission with the current boot and service session. Read permission and validated bytes do not supply execute authority. Preserve all durable fields, including selection A and boot counter. |
+| Retired cleanup | Retain the exact old realm's custody. Revocation, physical drain and scrub must complete before refund; a new realm or foreign ticket cannot release another charge. |
+
+Positive traces cover service-only, guest-only and both-side restart compositions.
+The launch trace begins with a validated private SR110 image; a separate composed
+GD110 witness checks authenticated download EOF. These are finite-state contract
+witnesses, not executed C programs, network traces, disk power-loss tests, or a
+proof of eventual progress. The observed current-service, freshness, bootstrap,
+content/dependency and execution-binding verdicts must be derived by trusted
+runtime validators and serialized with their use. They are not guest inputs.
+
+**External freshness assumption:** the boot-attempt and current service-identity
+validators must survive or detect rollback of the entire guest/storage snapshot.
+A counter recovered from that same snapshot cannot establish this. The model
+checks the scope of valid evidence and rejects unknown/invalid evidence; it does
+not implement an external monotonic authority, a credential protocol, or signing.
+The bounded model retains one reservation outcome. It does not promise recovery
+of an arbitrary old request after a subsequent durable operation supersedes it.
+
+Run on the laptop from the repository root:
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" \
+  --only-stored-restart
+```
+
+Local formal validation also reran the unchanged recognition (37/31), enrollment
+(29/24), grant-admission (66/59), persistence (59/50), reboot (28/22), stored-launch
+(49/56), stored-retrieval (92/78), and guest-download (174/149) pairs; each pair
+passed all positive witnesses and explicitly disproved all hostile assertions.
+These counts are per pair, not new Rust coverage. No Rust build or tests were run.
+
+**Runtime implementation target (implemented and accepted below):** connect the trusted boot admission boundary to a fresh
+Kernel and retained bootstrap/download infrastructure. Compile and persist the
+target and download infrastructure before the restart boundary. After restart,
+reconstruct fresh objects/frames/contexts and admit the precompiled infrastructure
+under current bootstrap authority; do not restore compiler publication receipts or
+silently run CC2 to recreate a pump. The target B must come from the retained file
+through the real typed-socket/NIC read path, with current read/dependency and
+execute authority. Preserve the existing in-process live-launch path and its
+separate admission ledger; the new adapter must not reinterpret its local identity
+counter as a durable boot credential.
+
+The runtime acceptance matrix must independently restart service, guest and both,
+run B without recompiling it, reject saved sessions/handles and revoked grants,
+and demonstrate unchanged selected A, exact retained bytes/metadata/dependencies,
+reservation retry behavior and owned cleanup. A service reopen alone or another
+`Kernel::new` alone is insufficient. The bounded adapter and real restart witness
+now have the developer acceptance recorded below. The prior 1,935-test result
+predates RR110; the current full-suite result is 1,949 passed with 20 ignored.
+
+<a id="stored-restart-runtime"></a>
+
+### RR110 — bounded restart adapter and real witness (2026-11-19)
+
+**Accepted on the developer Mac; uncommitted on `main` (2026-11-19).**
+The supplied Kleis results are 234 positive / 192 explicitly disproved hostile
+witnesses. The supplied `check-anka110-stored-restart.sh --real` log shows
+**14 focused RR110 cases passed in 4.21s**, all selected regression groups passed,
+and the separately selected **real restart witness passed in 92.13s**.
+The injected provider-unwind panics are intentional passing fault cases.
+
+The first full-suite run reported 1,948 passed, one failure and 20 ignored: the
+GD110 deadline test created a one-nanosecond budget and unwrapped construction,
+which could expire before the intended `prepare` assertion. The correction uses
+the existing test-only `expire_for_test` hook after successful construction and
+checks exact expiry, terminal retry rejection and nonwrapping correlation.
+Production timeout behavior and the test count are unchanged. The developer then
+reported **1,949 passed, 0 failed, 20 ignored, 0 measured, 0 filtered out in
+317.84s**. The earlier 1,935-pass result remains the historical SR110 checkpoint.
+Ignored tests are not counted as executed by the full suite; the RR110 real case
+has its separate result above. This documentation review ran no Rust or Kleis.
+
+The supplied git status has modified and untracked RR110 files on `main`, whose
+committed tip matches `origin/main`. Passing acceptance does not imply a commit,
+push or merge: the current slice still needs branch/commit/PR integration.
+
+`stored_restart::Authority<P>` and `RestartGuest<P>` connect the actual T2
+reservation and `BootLatch` predicates to a fresh, privately owned, accounted
+Kernel. A durable boot identity binds anchor, installation, policy, head,
+selection, boot incarnation and external attempt; a separate local realm label
+identifies its live custody. `reserve_restart_boot` preserves exact retained
+request recovery and rejects reuse of its attempt under a new sequence.
+Reservation does not activate the guest. Admission rechecks the durable head,
+current enrollment and selected-bootstrap evidence after reading the file, then
+atomically consumes the external attempt before activating the root. A failed or
+uncertain consume result cannot make an attempt reusable.
+
+The selected bootstrap A is a previously compiled, persisted `storage_download.c`
+image. It is read through the charged SR110 file adapter, validated, and retained
+under its original storage reservation. Each pump invocation reconstructs a
+protected executable realm, charges its entire machine/NIC/input/output allowance
+before allocation, and checks boot/bootstrap authority after ordinary child
+construction and before its first instruction. No compiler producer executes
+and no compiler publication receipt is recreated after this boundary.
+
+The pump uses the same GD110 implementation as the existing live-compiler path:
+C typed socket calls, virtual NIC frames, the transport adapter, AR110, and the
+actual retained file. Bootstrap validation work spends the same finite retrieval
+budget and deadline, including retry attempts. Target B remains private charged
+custody until ordinary SR110/T1 execute admission. A single `Arc<Mutex<Authority>>`
+provides read, dependency, current boot/service, clock and execute evidence.
+`launch_shared` requires that exact retained read lane and keeps it locked through
+commit, avoiding both detached authority snapshots and recursive locking.
+
+The provider must independently authenticate the actual service/channel and the
+complete boot binding. Its attempt-consumption record must survive or detect
+rollback of the guest and file-store snapshot. These are explicit trusted
+integration obligations, not implemented credentials or external monotonic
+hardware. The local connection watermark only rejects recycled handles within
+this authority lane; it is not durable freshness. Providers must be bounded and
+non-reentrant; mutable evidence updates take the same authority mutex.
+
+Dropping the guest invalidates its root and destroys its private backing; pump
+realms and output are scrubbed before their charges are released. Ordinary target
+launch advances only the existing volatile launch ledger, preserving the durable
+selection and boot record. The public adapter accepts no saved runtime objects.
+This is a bounded restartable guest adapter, not a whole-machine reboot,
+arbitrary process migration, or general concurrent peer scheduler.
+
+The 14 focused cases cover reservation replay, scope/default/expiry denial,
+counter exhaustion, stale service/boot/channel bindings, fresh accounted custody,
+rollback rejection, corrupt bootstrap, validator unwind, download cleanup and
+foreign read-lane substitution. The separately ignored real witness compiles and
+persists A and B once, then drops the compiler and lineage before admission. It
+covers initial launch, service-only, guest-only and both-side restarts; the exact
+peer charge/state survives the service-only restart. It checks exit 42,
+multi-range retrieval and lost-prefix retry, stale-channel rejection, read
+revocation at commit, unchanged retained bytes/records and selected A, fresh
+guest realm/boot identity, zero recreated compiler receipts and quota cleanup.
+Fixture authority records are deliberately deterministic; they are not a
+production authentication service or a power-loss durability test.
+
+Run from the repository root on the laptop:
+
+```bash
+bash scripts/check-anka110-stored-restart.sh --real
+```
+
+The script checks discovery of 14 focused tests plus one ignored real witness,
+runs the focused RR110 and T2 filters and existing stored-live-launch regression
+gates, then selects the real restart witness. Omitting `--real` skips that costly
+witness. The focused/real gates and the subsequent full release library suite
+have now passed as recorded above. Re-run affected checks if runtime code changes.
+The next action is branch/commit/PR integration of the tested slice. The Xcode
+measurement proposal below remains a separate follow-up; broader T3–T5,
+production authority/deployment, whole-machine reboot and the compiler
+compatibility backlog remain open work, not silently added to RR110 acceptance.
+
+<a id="rr110-documentation-review"></a>
+
+### Documentation consistency review — RR110 acceptance (2026-11-19)
+
+Reviewed all 12 Markdown files in the supplied repository archive against its
+source, the supplied focused/real test log, the final full-suite result and git
+status. Current summaries now agree on accepted bounded restart and the
+1,949-pass result, with commit/PR integration still pending. Dated earlier
+checkpoints remain history, including the SR110 merge and partial GD110 runs.
+
+| Files | Review outcome |
+| --- | --- |
+| `README.md`, `ARCHITECTURE.md`, `DESIGN_NOTES.md` | Updated current evidence, phase/roadmap summaries, accepted restart scope, deterministic deadline-test correction and uncommitted integration status. |
+| `userspace/README.md`, `userspace/bin/README.md` | Updated retrieval/live/restart acceptance and persisted download-pump role; preserved separate read and execute authority and the absence of general file CRUD. |
+| `userspace/system/README.md`, `userspace/system/compiler/README.md` | Updated host-service/guest roles, confirmed lineage sizes from the restart log and documented compilation only before restart. |
+| `userspace/system/services/README.md`, `userspace/system/services/net/README.md` | Added the distinct Download mode and accepted socket/NIC/file restart scope; retained networking and production-authentication limits. |
+| `userspace/etc/README.md`, `userspace/include/anka/README.md`, `userspace/lib/README.md` | Reviewed without changes: configuration remains reserved, includes remain explicit, and there is no installed complete libc or ambient filesystem authority. |
+
+The provided worktree is on `main`, up to date with `origin/main` only at its
+committed tip. Create a feature branch before committing the tested RR110 source,
+formal pair, gate script, GD110 test correction and these documentation updates.
+Do not stage `Archive.zip` or other delivery archives. The separately untracked
+`build-anka-dev-runtime-image-podman.sh` needs its own scope review; a runtime-image
+builder is not evidence of an accepted standalone persistent storage deployment.
+The Xcode note is retained unchanged. No source, formal contract, Cargo profile
+or acceptance script is modified by this documentation-only delivery.
+
+<a id="xcode-performance-probing"></a>
+
+### Follow-up note — Xcode Instruments performance probing
+
+**Discussion recorded 2026-11-19; proposed measurement work, not implemented.**
+Use Instruments on the developer's Apple Silicon Mac to measure host cost in the
+Rust Anka64 emulator. Start with sampling before adding instrumentation. The
+question is how much host work is spent per unit of guest work, and where it
+accumulates: instruction dispatch/decoding, Fabric authority and bounds checks,
+pointer metadata and collection lookups, allocation/copying/zeroing/scrubbing,
+cleanup, and host storage/network I/O. These are hypotheses to measure, not
+identified bottlenecks.
+
+Keep optimized code and useful debug information. A possible future Cargo profile
+is shown below; it has NOT been added to `Cargo.toml` by this note:
+
+```toml
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+```
+
+Cargo release defaults disable debug information; they do not enable symbol
+stripping. Retain matching executable/debug artifacts for symbolization. Select
+the actual workload executable: `anka rebuild ...` profiles the CLI rebuild path,
+whereas the accepted `sr110_live_real_cc2_download_and_launch` witness runs inside
+the library-test executable. Build it separately on the laptop, then launch that
+specific executable with the intended test filter and ignored-test selection;
+profiling Cargo or a gate script would mix in builds and other tests.
+
+Prefer CPU Profiler when supported by the installed Xcode/macOS combination;
+Time Profiler is a useful fallback. Inspect inclusive and self costs, using
+inverted stacks where helpful. Do not hide system-library costs when investigating
+allocation, copying or I/O. Follow expensive regions with CPU Counters to assess
+cache/branch/stall behavior. Tool availability, counter access and signing rules
+are version-dependent. Add `com.apple.security.get-task-allow` to a local profiling
+binary only if the chosen instrument's actual permissions require it; do not
+assume re-signing is a universal prerequisite.
+
+Separate coarse phases on the timeline: CC2 bootstrap/fixed point, target/pump
+compilation, download, envelope/dependency validation, fresh admission, guest
+execution, and cleanup. The 84.35s acceptance witness includes bootstrap and
+compilation as well as retrieval/launch; it is not an isolated download or launch
+latency measurement. If samples alone cannot separate phases, add opt-in
+`os_signpost` intervals at phase boundaries in a later change. Avoid a signpost
+on every guest instruction or memory access. Rust signpost bindings have not yet
+been selected or added as dependencies.
+
+Instruments observes host Rust/native stacks and the Mac's hardware counters.
+It does not automatically attribute execution to interpreted guest C functions,
+and host cache misses do not establish the behavior of a future Anka64 FPGA or
+Metal implementation. Guest-function attribution would require separate mapping
+from guest execution state to symbols. Keep CPU cost distinct from elapsed time
+spent waiting, and retain an unprofiled baseline to assess tracing overhead.
+
+Record the exact source revision, workload, Rust/profile settings, hardware,
+macOS/Xcode versions and profiler options. Repeat comparable runs and normalize
+by useful work where available, such as transferred bytes or guest instructions.
+No performance conclusion is supported until such traces exist. Pure observation
+requires no new architectural contract; any later optimization that changes
+representation, authority, lifecycle, ABI or observable behavior must first pass
+the applicable Kleis review/gates, then runtime regression checks. Authority
+checks remain part of the measured semantics.
+
+Reference material checked 2026-11-19:
+
+- [Cargo profile settings](https://doc.rust-lang.org/cargo/reference/profiles.html).
+- [Apple: Optimize CPU performance with Instruments](https://developer.apple.com/videos/play/wwdc2025/308/).
+- [Apple: Processor Trace with non-Xcode binaries and signing requirements](https://developer.apple.com/forums/thread/791270).

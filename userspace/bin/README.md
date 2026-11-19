@@ -23,15 +23,21 @@ capabilities and does not imply a Unix process or library ABI.
   guarded localhost TCP. Accepted: seven quick tests and the explicit real witness
   (85.09s), including three payload chunks and exact recovery after a lost Publish
   reply and file-service reopen. Run `bash scripts/check-anka110-guest-artifact.sh --real`;
-  the script checks the quick witnesses first. Stored-image retrieval/launch is
-  separate work; this probe does not confer execution authority.
+  the script checks the quick witnesses first. Retrieval and fresh launch have
+  their own accepted adapters; this upload probe does not confer execution authority.
 - `storage_download.c` is the distinct protected AR110 read pump. It sends one
   exact 168-byte command, receives `200 + count` response bytes and waits for real
   EOF before writing the payload into its charged private report. The trusted
   Kernel adapter compares those bytes with authenticated receive custody and
   assembles contiguous ranges under one budget/deadline. Run
   `bash scripts/check-anka110-guest-download.sh --real` for the real CC2/NIC/file
-  witness. Downloaded bytes remain non-executable private custody.
+  witness. Downloaded bytes remain non-executable private custody until separate
+  SR110 execute admission. RR110 persists this pump before destroying the original
+  compiler/lineage, then admits it under fresh boot authority after restart.
+  `bash scripts/check-anka110-stored-restart.sh --real` passed the service-only,
+  guest-only and combined restart witness in 92.13s, launching the retained target
+  to exit 42 without recompilation. This is a bounded adapter, not a guest
+  filesystem or a standalone authenticated storage client.
 - `local_initialization_probe.c` exercises initialized local bytes and pointer kinds.
 
 Some probes intentionally fault or reject malformed inputs; their Rust harnesses

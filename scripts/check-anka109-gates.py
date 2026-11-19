@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Phase 10.9/10.10 formal gates; unchanged 10.7/10.8 gates are not repeated.
+"""Run Phase 10.9 through 11.0 formal gates; unchanged 10.7/10.8 gates are not repeated.
 
 Positive assertions must pass and every hostile assertion must be explicitly
 DISPROVED. Unknown, missing witnesses, import errors and timeouts fail closed.
@@ -40,6 +40,7 @@ GUEST_ARTIFACT_PAIRS = ('anka110_guest_artifact',)
 STORED_RETRIEVAL_PAIRS = ('anka110_stored_retrieval',)
 ARTIFACT_READ_PAIRS = ('anka110_artifact_read',)
 GUEST_DOWNLOAD_PAIRS = ('anka110_guest_download',)
+STORED_RESTART_PAIRS = ('anka110_stored_restart',)
 
 
 def main():
@@ -69,6 +70,7 @@ def main():
     selection.add_argument('--only-stored-retrieval', action='store_true', help='bounded stored-envelope retrieval and fresh live-launch admission')
     selection.add_argument('--only-artifact-read', action='store_true', help='bounded artifact read wire framing and guarded disclosure')
     selection.add_argument('--only-guest-download', action='store_true', help='charged guest download, contiguous range assembly and private validation')
+    selection.add_argument('--only-stored-restart', action='store_true', help='independent service/guest restart, durable boot admission and fresh stored launch')
     parser.add_argument('--timeout', type=int, default=120, help='seconds per theory file')
     args = parser.parse_args()
     if args.timeout <= 0:
@@ -99,7 +101,8 @@ def main():
              STORED_RETRIEVAL_PAIRS if args.only_stored_retrieval else
              ARTIFACT_READ_PAIRS if args.only_artifact_read else
              GUEST_DOWNLOAD_PAIRS if args.only_guest_download else
-             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS + EVIDENCE_PAIRS + PROVIDER_PAIRS + GUARDED_PAIRS + BINDER_PAIRS + VERIFIER_PAIRS + STORAGE_VERIFIER_PAIRS + SOCKET_CAPACITY_PAIRS + OUTBOUND_SELECT_PAIRS + STORED_LAUNCH_PAIRS + ARTIFACT_STORAGE_PAIRS + COMPILER_STORAGE_BINDING_PAIRS + ARTIFACT_TRANSFER_PAIRS + ARTIFACT_TRANSPORT_PAIRS + GUEST_ARTIFACT_PAIRS + STORED_RETRIEVAL_PAIRS + ARTIFACT_READ_PAIRS + GUEST_DOWNLOAD_PAIRS)
+             STORED_RESTART_PAIRS if args.only_stored_restart else
+             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS + EVIDENCE_PAIRS + PROVIDER_PAIRS + GUARDED_PAIRS + BINDER_PAIRS + VERIFIER_PAIRS + STORAGE_VERIFIER_PAIRS + SOCKET_CAPACITY_PAIRS + OUTBOUND_SELECT_PAIRS + STORED_LAUNCH_PAIRS + ARTIFACT_STORAGE_PAIRS + COMPILER_STORAGE_BINDING_PAIRS + ARTIFACT_TRANSFER_PAIRS + ARTIFACT_TRANSPORT_PAIRS + GUEST_ARTIFACT_PAIRS + STORED_RETRIEVAL_PAIRS + ARTIFACT_READ_PAIRS + GUEST_DOWNLOAD_PAIRS + STORED_RESTART_PAIRS)
     for stem in pairs:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')
