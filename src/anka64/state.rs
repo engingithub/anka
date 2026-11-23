@@ -381,6 +381,9 @@ impl TxState {
     }
 }
 
+mod read_payload;
+pub use read_payload::ReadPayload;
+
 /// A fabric transaction with explicit lifecycle.
 ///
 /// The crucial invariant:
@@ -398,9 +401,16 @@ pub struct Transaction {
     /// authority, translation and physical-span revalidation all pass.
     /// Asynchronous bus masters (for example NIC TX) consume this exact
     /// committed observation instead of peeking at physical memory later.
-    pub read_data: Option<Vec<u8>>,
+    pub read_data: Option<ReadPayload>,
+    /// Trusted CPU call-site selection only; never an authority decision.
+    pub(crate) scalar_read: bool,
     pub fault: Option<FaultRecord>,
 }
+
+// SC110: bound retained record growth on every build target. The largest
+// application directory has 16384 entries; records plus up to 32 bytes of
+// per-entry CPU payload fit under 8 MiB of its 16 MiB nonheap allowance.
+const _: () = assert!(std::mem::size_of::<Transaction>() <= 384);
 
 // ───────────────────────────────────────────────────────────────────
 // Fault state

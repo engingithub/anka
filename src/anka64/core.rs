@@ -719,18 +719,23 @@ impl Anka64Core {
         self.install_pointer(dst, pointer)
     }
 
+    #[cfg(test)]
     pub(crate) fn pointer_read(&mut self, fabric: &mut Fabric, start: u8, width: Width) -> Result<Vec<u8>, PointerMachineError> {
+        self.pointer_read_payload(fabric, start, width).map(|bytes| bytes.to_vec())
+    }
+
+    fn pointer_read_payload(&mut self, fabric: &mut Fabric, start: u8, width: Width) -> Result<ReadPayload, PointerMachineError> {
         let pointer = self.authenticated_pointer(fabric, start)?.ok_or(PointerMachineError::MissingKind)?;
         if fabric.scoped_pointers.is_heap_pointer(pointer) {
             let mut bytes=vec![0; width.bytes() as usize];
             fabric.read_heap_bytes(self.heap_owner().map_err(PointerMachineError::Heap)?,self.agent,pointer,&mut bytes).map_err(PointerMachineError::Heap)?;
-            return Ok(bytes);
+            return Ok(ReadPayload::Heap(bytes));
         }
         let address = fabric.scoped_pointers.resolve(pointer, self.domain.0, width.bytes(), false).map_err(PointerMachineError::Pointer)?;
         let (object, offset) = self.checked_pointer_mapping(address, width.bytes())?;
         if fabric.scoped_pointer_backing(pointer, self.domain)? != (object, offset) { return Err(PointerMachineError::Unmapped); }
         let request = self.make_request(object, offset, width, AccessKind::Read);
-        fabric.execute_read(request).map_err(PointerMachineError::Fabric)
+        fabric.execute_cpu_read(request).map_err(PointerMachineError::Fabric)
     }
 
     pub(crate) fn pointer_write(&self, fabric: &mut Fabric, start: u8, width: Width, data: Vec<u8>) -> Result<(), PointerMachineError> {
@@ -969,7 +974,7 @@ impl Anka64Core {
                         Sem::PointerStore=>self.pointer_store_indirect(fabric,insn.rd,insn.rs1,insn.imm),
                         Sem::PointerRead=> {
                             let width=match insn.raw&3 {0=>Width::Byte,1=>Width::Half,2=>Width::Word,_=>Width::Double};
-                            let bytes=self.pointer_read(fabric,insn.rs1,width)?;
+                            let bytes=self.pointer_read_payload(fabric,insn.rs1,width)?;
                             let mut word=[0u8;8];word[..bytes.len()].copy_from_slice(&bytes);
                             self.write_register(insn.rd as usize,u64::from_le_bytes(word));Ok(())
                         },
@@ -1034,7 +1039,7 @@ impl Anka64Core {
                     Err(fault) => return StepResult::Fault(fault),
                 };
                 if kind == AccessKind::Read {
-                    match fabric.execute_read(request) {
+                    match fabric.execute_cpu_read(request) {
                         Ok(bytes) => self.write_register(insn.rd as usize, u64::from(bytes[0])),
                         Err(fault) => return StepResult::Fault(fault),
                     }
@@ -1322,7 +1327,7 @@ impl Anka64Core {
         addr: u64,
         width: Width,
         kind: AccessKind,
-    ) -> Result<Vec<u8>, FaultRecord> {
+    ) -> Result<ReadPayload, FaultRecord> {
         let (object, offset) = self.address_map.resolve(addr)
             .ok_or_else(|| FaultRecord {
                 agent: self.agent,
@@ -1339,7 +1344,7 @@ impl Anka64Core {
                 reason: FaultReason::TranslationFault,
             })?;
         let req = self.make_request(object, offset, width, kind);
-        fabric.execute_read(req)
+        fabric.execute_cpu_read(req)
     }
 
     fn fabric_write(
@@ -1957,6 +1962,49 @@ mod tests {
         core.r[R0 as usize] = 0x1ab;
         core.r[R1 as usize] = 0x8000 + offset;
         (fabric, data, dom, core)
+    }
+
+    #[test]
+    fn sc110_core_fetch_and_byte_load_use_inline_without_allocation() {
+        let (mut f, _, _, mut c) = byte_fixture(false, Permissions::READ, 0xfff, 1);
+        f.prepare_preprocessor_trace(16).unwrap();
+        crate::anka64::scoped_pointers::heap::no_alloc(|| {
+            assert!(matches!(c.step(&mut f), StepResult::Continue));
+        });
+        assert_eq!(c.r[R0 as usize], 255);
+        for i in 0..2 {
+            assert!(matches!(f.transaction(i).read_data, Some(ReadPayload::Inline { .. })));
+        }
+    }
+
+    #[test]
+    fn sc110_core_double_load_zero_allocation_and_exact_value() {
+        let (mut f, text, _, dom, mut c) = setup();
+        let mut asm = Asm64::new();
+        asm.ld(R2, R1, 0);
+        load_program(&mut f, &asm); seal_text(&mut f, text, dom);
+        f.write_physical(0x10000, &[1, 2, 3, 4, 5, 6, 7, 0x80]);
+        c.r[R1 as usize] = 0x8000;
+        f.prepare_preprocessor_trace(16).unwrap();
+        crate::anka64::scoped_pointers::heap::no_alloc(|| {
+            assert!(matches!(c.step(&mut f), StepResult::Continue));
+        });
+        assert_eq!(c.r[R2 as usize], 0x8007_0605_0403_0201);
+        assert!(matches!(f.transaction(1).read_data, Some(ReadPayload::Inline { .. })));
+    }
+
+    #[test]
+    fn sc110_core_protected_local_scalar_read_uses_inline() {
+        let (mut f, mut c, _) = protected_frame_fixture();
+        // pframe, plocal, movi, pwrite: initialize the four-byte local to 42.
+        for _ in 0..4 { assert!(matches!(c.step(&mut f), StepResult::Continue)); }
+        // Reserve enough space and drop only completed CPU-owned observations.
+        f.prepare_preprocessor_trace(64).unwrap();
+        crate::anka64::scoped_pointers::heap::no_alloc(|| {
+            let bytes = c.pointer_read_payload(&mut f, R4, Width::Word).unwrap();
+            assert_eq!(bytes.as_slice(), &[42, 0, 0, 0]);
+            assert!(matches!(bytes, ReadPayload::Inline { .. }));
+        });
     }
 
     #[test]

@@ -13796,7 +13796,7 @@ This documentation update did not rerun or extend the accepted gates.
 
 <a id="dn72-status"></a>
 
-### Current status — bounded stored restart merged; performance baseline next
+### Current status — stored restart merged; SC110 accepted, integration pending
 
 **Phase 10.8 is closed and merged. Phases 10.9 and 10.10 remain open.**
 The protected virtual-NIC service can answer `/alive`. The persistence binder
@@ -13818,8 +13818,8 @@ requesters or authorize boot.
 | GA110 guest artifact upload | [Accepted bounded integration](#guest-artifact-upload): 44 positive / 36 hostile explicitly disproved; 7 quick tests and the explicit real CC2 witness passed (85.09s). Three chunks retained an 11,984-byte envelope; exact Outcome recovered revision 8 after deliberate post-commit reply loss and service recreation. This historical focused result is supplemented by the current full-suite result below. |
 | Stored retrieval / live launch | SL110 foundation: 49 positive / 56 hostile explicitly disproved. [SR110 refinement](#stored-retrieval-launch): 92 positive / 78 hostile explicitly disproved locally. SR110 R1 accepted: 20 focused Rust tests passed in 7.20s. [AR110 read protocol](#artifact-read-protocol) formal gate passed: 117 positive / 98 hostile. AR110 Rust read codec/client and host TCP path accepted: 23 focused + 24 compatibility tests passed. [GD110 guest download](#guest-artifact-download) formal gate: 174 positive / 149 hostile explicitly disproved. GD110 retrieval and SR110 R2 fresh live admission are accepted and merged to main (user confirmation, 2026-11-18): 11 focused live-admission tests and the real witness passed (84.35s); full library suite: 1,935 passed, 0 failed, 19 ignored (307.91s). The subsequent bounded restart acceptance is recorded below. |
 | RR110 independent restart | [Composition gate](#stored-restart-contract): 234 positive / 192 explicitly disproved hostile witnesses. [Runtime acceptance](#stored-restart-runtime): 14 focused tests passed in 4.21s; real CC2/socket/NIC/file restart witness passed in 92.13s. Service-only, guest-only and combined restart cases launch the retained target to exit 42 without recompilation. |
-| Latest full release library regression | Developer-reported on 2026-11-19: **1,949 passed, 0 failed, 20 ignored, 0 measured, 0 filtered out in 317.84s**, after the GD110 deterministic deadline-test correction. The ignored real RR110 witness has its separate passing result above. |
-| Integration status | The user confirmed RR110 merged to `main` on 2026-11-19, after the passing focused/real gates and 1,949-test suite. The [agreed next task](#post-rr110-plan) is an Xcode performance baseline, followed by Keycloak, enrollment/boot authorization and the installation wizard. |
+| Latest full release library regression | SC110 laptop log reviewed 2026-11-22: **1,964 passed, 0 failed, 20 ignored, 0 measured, 0 filtered out in 267.06s**. All 15 focused cases and the separately selected real GD110/SR110/RR110 witnesses also passed (70.30s/69.50s/69.53s). Ignored tests are not all claimed as executed. |
+| Integration status | The user confirmed RR110 merged to `main` on 2026-11-19, after the passing focused/real gates and 1,949-test suite. The [SC110 checkpoint](#scalar-read-runtime) now has accepted formal, Rust and measured laptop evidence; profiling/SC110 changes are uncommitted on `main` in the supplied status. After commit/merge, the next planned task is the Keycloak adapter contract and Kleis gates, followed by CLI integration, enrollment/boot authorization and installation work. |
 
 E7/E8 are merged to main. The 148-test E10 run includes E8’s tests; it is a
 persistence reference result, not a whole-system regression.
@@ -17060,8 +17060,9 @@ bash scripts/check-anka110-stored-live-launch.sh --real
 ```
 
 These live-admission gates have passed. The independent bounded restart acceptance
-described below has also passed and was merged to main. Xcode profiling is now
-the next bounded task in the [agreed post-RR110 plan](#post-rr110-plan).
+described below has also passed and was merged to main. SC110 has since passed
+formal, Rust and laptop measurement acceptance; its commit/merge is pending.
+The [agreed post-RR110 plan](#post-rr110-plan) now proceeds toward identity integration.
 
 
 <a id="stored-restart-next"></a>
@@ -17183,7 +17184,8 @@ and demonstrate unchanged selected A, exact retained bytes/metadata/dependencies
 reservation retry behavior and owned cleanup. A service reopen alone or another
 `Kernel::new` alone is insufficient. The bounded adapter and real restart witness
 now have the developer acceptance recorded below. The prior 1,935-test result
-predates RR110; the current full-suite result is 1,949 passed with 20 ignored.
+predates RR110; its historical full-suite checkpoint was 1,949 passed with 20 ignored.
+The subsequent SC110 checkpoint is 1,964 passed with 20 ignored.
 
 <a id="stored-restart-runtime"></a>
 
@@ -17279,9 +17281,10 @@ runs the focused RR110 and T2 filters and existing stored-live-launch regression
 gates, then selects the real restart witness. Omitting `--real` skips that costly
 witness. The focused/real gates and the subsequent full release library suite
 have now passed as recorded above. Re-run affected checks if runtime code changes.
-RR110 integration is complete by the user's merge confirmation. The next bounded
-task is the Xcode baseline in the [agreed plan](#post-rr110-plan). Keycloak,
-enrollment and boot authorization follow; broader T3–T5, production deployment,
+RR110 integration is complete by the user's merge confirmation. SC110 is accepted
+and awaits commit/merge. The next planned task is the Keycloak adapter contract
+and Kleis gates in the [agreed plan](#post-rr110-plan); CLI integration, enrollment
+and boot authorization follow; broader T3–T5, production deployment,
 whole-machine reboot and the compiler backlog are not silently added to RR110
 acceptance.
 
@@ -17441,7 +17444,7 @@ and emulator overhead; architectural counts record switches, instructions, bytes
 copied, metadata checks, synchronization, queueing and retained memory. Hardware
 evaluation separately assigns latency/bandwidth, arbitration, cache coherence,
 area and power costs. More software threads do not establish hardware speedup.
-The Xcode baseline remains next. This threading milestone is recorded for future
+SC110 is accepted. This threading milestone remains recorded for future
 work; its priority relative to CRUD and identity integration remains undecided.
 
 #### Primary source register
@@ -17506,7 +17509,7 @@ restarts, denied operations, stale handles, conflicting updates, interrupted
 requests, exact retries and quota exhaustion. New protocol/ABI operations require
 their own formal contracts; reuse of existing transport is not proof of CRUD.
 
-The Xcode performance baseline remains the next bounded task. Record CRUD now as
+The first Xcode baseline and SC110 comparison are accepted. CRUD remains
 a separate future milestone; its exact ordering relative to Keycloak/enrollment
 implementation is not yet fixed, and it need not wait for native FPGA hardware.
 See the [architecture boundary](ARCHITECTURE.md#guest-file-crud-plan) and
@@ -17525,8 +17528,8 @@ is implemented by this documentation change.
 | Sequence | Task and evidence required |
 | --- | --- |
 | 1 — design now | Define the host-independent boot/enrollment responsibilities: installation credential, selected trust anchor, enrollment entitlement, machine boot versus personal login, selected workload admission, one-use freshness, recovery and online/offline policy. Settle precise contracts before coding them. |
-| 2 — next bounded task | Capture Xcode Instruments baselines for a representative rebuild and the accepted stored restart/launch workload. Record source revision, build/profile, hardware/tool versions, workload and profiler settings. Separate bootstrap/compilation, retrieval, validation, admission, execution and cleanup; distinguish CPU cost, allocations and elapsed waits. Retain unprofiled comparisons. |
-| 3 | Add a minimal command-line Keycloak integration. Start with a separate Podman Keycloak service and persistent database, independent of Anka and artifact-service restarts. Replace selected deterministic evidence fixtures with verified identity/permission evidence. Test allowed and denied operations, wrong issuer/audience, expiration, revocation and authority outage. |
+| 2 — accepted; integration pending | SC110 formal, focused/full/real Rust checks and fresh laptop measurements accepted. Median rebuild/restart workload times reduced 19.8%/17.6%. Preserve both sessions and recording caveats; commit and merge the profiling/SC110 checkpoint. |
+| 3 — next planned task | Define and verify the Keycloak trusted-adapter contract in Kleis, then add a minimal command-line integration. Start with a separate Podman Keycloak service and persistent database, independent of Anka and artifact-service restarts. Replace selected deterministic evidence fixtures with verified identity/permission evidence. Test allowed and denied operations, wrong issuer/audience, expiration, revocation and authority outage. |
 | 4 | Implement installation enrollment and boot authorization with explicit machine-credential provisioning, authenticated trust selection and externally retained attempt consumption. Specify rollback/crash/retry behavior and verify the platform-independent flow in the emulator. |
 | 5 | Build the installation wizard on the tested CLI enrollment/recovery operations. Implement the native/FPGA bootstrap adapter when a concrete hardware target determines firmware, key storage and communication facilities. |
 
@@ -17535,8 +17538,12 @@ do not turn it into an open-ended optimization prerequisite for authentication.
 The 92.13-second RR110 result includes the original compiler/bootstrap work and
 all restart scenarios; it is not a standalone restart-latency measurement. The
 existing Xcode note below supplies the measurement procedure. Optional phase
-instrumentation, Cargo profile changes and any optimizations need their own
-implementation and validation; none is introduced here.
+instrumentation and optimizations need their own implementation and validation.
+The profiling harness, both sets of six unprofiled runs and both pairs of Time
+Profiler exports have been reviewed. SC110 is accepted below; median workload
+reductions are 19.8%/17.6%. Detailed phase timers and whole-workload allocation
+counts remain unmeasured. No further optimization is required before the identity
+contract work; the present checkpoint still needs commit/merge.
 
 **Keycloak's role.** Keycloak is the intended first deployed identity and
 authorization provider. Its product/protocol choices belong in an adapter, not
@@ -17599,19 +17606,21 @@ accepted bounded trusted-provider assumptions.
 
 <a id="xcode-performance-probing"></a>
 
-### Next bounded task — Xcode Instruments performance probing
+### Xcode Instruments performance baseline — first evidence reviewed
 
-**Discussion recorded 2026-11-19; selected as the next bounded task after RR110 merge. Measurement work is not yet implemented.**
+**Discussion recorded 2026-11-19; harness prepared 2026-11-22 after the developer
+confirmed the roadmap merge. Six valid unprofiled runs and two Time Profiler
+exports were reviewed on 2026-11-22. The subsequent SC110 comparison and laptop
+correctness results are now accepted below; commit/merge is pending.**
 Use Instruments on the developer's Apple Silicon Mac to measure host cost in the
 Rust Anka64 emulator. Start with sampling before adding instrumentation. The
 question is how much host work is spent per unit of guest work, and where it
 accumulates: instruction dispatch/decoding, Fabric authority and bounds checks,
 pointer metadata and collection lookups, allocation/copying/zeroing/scrubbing,
-cleanup, and host storage/network I/O. These are hypotheses to measure, not
-identified bottlenecks.
+cleanup, and host storage/network I/O. The first review identifies scalar payload
+allocation/cleanup as a hotspot; other costs remain candidates for later analysis.
 
-Keep optimized code and useful debug information. A possible future Cargo profile
-is shown below; it has NOT been added to `Cargo.toml` by this note:
+Keep optimized code and useful debug information. `Cargo.toml` now includes:
 
 ```toml
 [profile.profiling]
@@ -17619,6 +17628,46 @@ inherits = "release"
 debug = true
 strip = false
 ```
+
+The [laptop guide](PERFORMANCE.md), `scripts/profile-anka110.py` and
+[results template](scripts/profiling/RESULTS_TEMPLATE.md) provide the first
+measurement slice. Explicit `build` prepares a native CLI and library-test binary
+without executing tests, then discovers the one ignored RR110 witness. A private
+per-session Cargo target directory retains matching executable/debug artifacts;
+macOS builds request packed debug information. Baseline and capture commands do
+not invoke Cargo builds or gate scripts. Input and binary hashes reject stale
+sessions, and runs retain commands, version/configuration metadata and logs.
+
+The fixed rebuild workload compiles two C modules with a shared header, links
+them and runs the result through the normal CLI. Its expected CLI exit is 42.
+The restart workload selects the exact ignored RR110 real witness; its expected
+test-binary exit is zero and exactly one passing test is required. Baselines
+record wall and child user/system CPU time. Allocation counts and target timeline
+durations must come from reviewed Instruments captures, not launcher timing.
+Partial traces, missing symbols, failures and profiler-induced deadline failures
+are not accepted performance baselines. Authority checks, budgets and deadlines
+remain unchanged; the harness never re-signs the binary or alters entitlements.
+
+Initial local validation passed 12 Python checks, but the developer Mac exposed
+two assertion failures and four errors caused by inconsistent canonicalization of
+temporary-path aliases in the test fixtures. The failed-child record assertion
+was downstream of the incorrect checkout comparison, not a workload failure.
+The repair canonicalizes the mock checkout and expected artifact path, adds two
+symlink regression cases, and leaves the runner and its input hashes unchanged.
+All 14 Python checks pass locally with ordinary and symlinked temporary paths;
+the developer has now also confirmed all 14 pass on macOS. Cargo/Xcode calls in
+those helper checks were mocked. No Rust compilation/tests were run here.
+
+The same supplied terminal log independently records successful native
+`aarch64-apple-darwin` profiling builds and three `valid` rebuild plus three `valid`
+RR110 baseline runs in `target/perf-baseline-01`. Keep that session and its samples;
+this repair requires neither recompilation nor baseline repetition. The attachment
+was followed by JSON/log, native trace and XML export attachments. Their review
+is recorded in [PERFORMANCE.md](PERFORMANCE.md#reviewed-first-baseline-and-selected-sc110-task).
+Those original samples selected scalar payload allocation as the first target.
+The subsequent [SC110 comparison](PERFORMANCE.md#sc110-accepted-results) establishes
+a measured laptop workload improvement. Whole-workload allocation counts, phase
+markers and guest work counters have not been added.
 
 Cargo release defaults disable debug information; they do not enable symbol
 stripping. Retain matching executable/debug artifacts for symbolization. Select
@@ -17657,7 +17706,7 @@ spent waiting, and retain an unprofiled baseline to assess tracing overhead.
 Record the exact source revision, workload, Rust/profile settings, hardware,
 macOS/Xcode versions and profiler options. Repeat comparable runs and normalize
 by useful work where available, such as transferred bytes or guest instructions.
-No performance conclusion is supported until such traces exist. Pure observation
+The first traces now support the bounded hotspot selection below. Pure observation
 requires no new architectural contract; any later optimization that changes
 representation, authority, lifecycle, ABI or observable behavior must first pass
 the applicable Kleis review/gates, then runtime regression checks. Authority
@@ -17668,3 +17717,183 @@ Reference material checked 2026-11-19:
 - [Cargo profile settings](https://doc.rust-lang.org/cargo/reference/profiles.html).
 - [Apple: Optimize CPU performance with Instruments](https://developer.apple.com/videos/play/wwdc2025/308/).
 - [Apple: Processor Trace with non-Xcode binaries and signing requirements](https://developer.apple.com/forums/thread/791270).
+
+
+<a id="scalar-read-contract"></a>
+
+### SC110 — scalar read payload equivalence before allocation optimization
+
+**2026-11-22: 146 positive witnesses and 146/146 hostile disproofs pass both
+locally and on the developer Mac. Laptop compilation, focused/full/real-path
+tests and measured performance acceptance are complete; commit/merge remains
+pending.** This is
+one measured follow-up to the first laptop baseline, not a new ISA, authorization
+policy or instruction cache. The measured reference source allocates `read_data` in
+`Fabric::phase_commit`, clones it in `execute_read`, and later frees the retained
+payload during compiler trace collection. Every four-byte instruction fetch uses
+this path. Reviewed allocation and cleanup stacks justify reducing that work.
+
+The pair `theories/anka110_scalar_read.kleis` and
+`theories/anka110_scalar_read_false_witnesses.kleis` is selected by
+`python3 scripts/check-anka109-gates.py --only-scalar-read` and included in the
+full 10.9/11.0 gate. A successful hostile run means every assertion is explicitly
+DISPROVED; unknown, parse/import failures, missing examples and timeouts fail.
+
+| Contract boundary | Required behavior |
+| --- | --- |
+| Scalar selection | Only CPU scalar Read/Fetch, with width and length equal to 1, 2, 4 or 8. Zero, unsupported widths, mismatches, Write/Atomic and bulk/asynchronous traffic never select the scalar optimization. Invalid spans still fault; representation eligibility alone is not admission. |
+| Request/lifecycle | Preserve actor, domain, privilege, object, offset, width, length, kind and transaction identity. Requested → Authorized → Prepared → Committed still crosses the existing gates. Terminal transactions cannot be recommitted. |
+| Commit authority | The same fresh serialized `authorize`/`validate_precommit` outcome governs both representations; early authorization is not a substitute. Revocation, wrong permission, translation failure and whole-span failure retain their original fault precedence and identity. |
+| Bytes and extent | Same little-endian scalar value and each in-range byte. No physical widening/alignment-down to fill inline capacity, no access to trailing storage, no index wrap. Unused inline bytes are canonicalized. |
+| Snapshot ownership | Capture only at commit; later writes do not alter retained bytes. Returning the CPU result does not consume the transaction observation. Existing asynchronous consumers retain their general committed-snapshot contract. |
+| Failure | No payload, zero retained length/data, no scalar result; preserve fault identity. Read/Fetch must preserve every memory cell. |
+| Cleanup/accounting | Only terminal CPU-only history without external retained indices may be discarded. Keep the next transaction ID and fault history. Preserve all existing accounting limits and ownership rules. |
+
+The model compares a reference heap observation with a normalized inline
+observation. It proves conditional observational equivalence for all modeled
+terminal outcomes and per-stage transitions, plus pointwise scalar byte equality.
+Concrete witnesses establish nonvacuous successful paths for every width and
+exercise denied transitions and malformed candidate outputs. The hostile file
+negates those obligations, including deliberate snapshot/identity substitution,
+commit-after-denial, early disclosure and illegal collection.
+
+**Scope:** trusted stage-result codes abstract existing Fabric authority,
+translation and precommit checks; they are not guest-supplied authorization.
+The same immutable request is supplied across a modeled transition, with a
+separate exact-request bridge obligation. The compact state models transaction
+ID, phase, fault and payload; Rust must additionally preserve the full retained
+request/provenance fields, including authorized generation and prepared address.
+A scalar word represents only the exact committed bytes; the bulk word is an
+opaque snapshot token, so fallback identity/delegation is proved, not arbitrary
+DMA content. Cleanup uses a two-entry abstraction, requiring a Rust check over
+all actual entries. ID arithmetic is restricted to nonexhausted admitted IDs;
+this change does not redesign counter exhaustion. Memory preservation is an
+explicit frame obligation, not a model of physical memory. No Rust equivalence,
+allocator behavior, constant-time execution or hardware performance proof follows.
+
+Run the formal gate on the developer machine:
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" --only-scalar-read
+```
+
+The supplied Rust change implements bounded inline committed scalar payload
+storage plus a scalar CPU return path through the existing pipeline.
+Do not introduce direct physical reads, authorization caching, trace elision or
+consuming `read_data` to avoid a clone. Keep the general path for bulk and
+asynchronous consumers and review every reader of the retained payload.
+
+The following acceptance obligations were exercised on the laptop; results are
+recorded in the runtime section below:
+
+1. Differential reference/candidate tests for every width, byte order and boundary;
+   compare values, exact faults, requests, IDs, generations and prepared addresses.
+2. Stage interleavings for revoke, permission changes and failed translation/span
+   validation; committed observations must survive subsequent memory changes and
+   repeated inspection without granting a new operation authority.
+3. A zero **scalar payload** allocation check with ledger capacity reserved.
+   Do not claim the complete Kernel operation is allocation-free. Account for any
+   larger transaction-record footprint and verify bounded resource charges.
+4. Bulk/asynchronous fallback, nonterminal/externally owned ledger retention,
+   fault history and monotonic ID regressions, plus existing Fabric/pointer gates.
+5. Full Rust regression and the real CC2/typed-socket/NIC/file stored-launch and
+   RR110 restart paths, run separately because ordinary suites ignore real gates.
+6. Fresh comparable unprofiled runs and profiles in `target/perf-scalar-read-01`.
+   Preserve `target/perf-baseline-01`; claim a speedup only after measured comparison.
+
+Scoped-pointer free-slot search is a later candidate (2.84% inclusive in the
+restart trace). It is outside this payload change, as are Keycloak, guest CRUD,
+threads/SMP and hardware/FPGA cost estimation. The identity/enrollment roadmap
+remains planned; performance work is bounded rather than an open-ended prerequisite.
+
+
+<a id="scalar-read-runtime"></a>
+
+### SC110 Rust and laptop performance — accepted, integration pending
+
+The accepted theories remain unchanged. `state/read_payload.rs` defines an owned
+`ReadPayload`: an eight-byte inline array plus logical length for CPU scalars,
+or the existing heap Vec for general reads. `Transaction::read_data` remains
+absent until commit and exposes the same exact slice through `as_deref()`.
+Unused inline bytes are zeroed. The transaction also retains a private selection
+bit set only by the trusted synchronous CPU entry point; ordinary `submit` leaves
+it false. It does not change permissions or identify a principal.
+
+`Fabric::execute_cpu_read` submits and advances the existing three phases.
+`phase_commit` constructs either representation only after the original
+`validate_precommit` succeeds, from the exact `[base..end]` slice. The result is
+cloned by value for inline storage, leaving the ledger observation intact.
+Mismatched-width and bulk read spans fall back to heap snapshots. Internal
+Write/Atomic misuse is asserted before any effect; those operations continue
+through their existing APIs. General `execute_read` still returns a Vec, and
+NIC TX copies the committed slice into its existing Vec sink.
+
+Core fetch, ordinary double/byte loads, and protected-local pointer reads use
+the CPU entry point. Private heap-pointer reads keep their existing API and Vec;
+16-byte protected pointer cells and all bulk/device paths remain general. The
+old pointer-read test helper materializes a Vec for existing assertions; actual
+instruction execution uses the inline-return helper. This is not a claim that
+all guest reads or the complete Kernel step are allocation-free.
+
+The retained record can grow. A compile-time bound of 384 bytes per Transaction
+limits its directory cost: 16384 records plus a conservative 32 bytes of scalar
+payload per entry remain below 8 MiB of the existing 16 MiB nonheap application
+allowance. The footprint test prints the actual target layout. No admission quota,
+trace capacity, work/deadline rule or cleanup policy was increased. The laptop
+footprint check reports **240 bytes per Transaction**, or **3,932,160 bytes
+(3.75 MiB)** for 16,384 records. The resource and reserved-capacity scalar-payload
+allocation checks passed.
+
+Fifteen new tests cover reference/candidate bytes and full diagnostic provenance,
+all widths and Read/Fetch, exact last-byte access, failure precedence, revocation
+at each stage, current commit permission/span checks, commit-time sampling,
+retained snapshots after later writes, bulk/small-async fallback, nonterminal
+collection refusal, fault history and ID preservation, target record footprint,
+and no scalar payload allocation with reserved directory capacity. Three core
+cases verify fetch+byte load, double load and protected-local read integration.
+The existing thread-local allocation counter is reused; no second global
+allocator or new production profiling instrumentation is introduced.
+
+Run on the laptop:
+
+```bash
+bash scripts/check-anka110-scalar-read.sh --real
+```
+
+The script checks discovery of exactly 15 focused cases, runs them and the full
+release library suite, then individually selects three ignored real witnesses by
+exact full name: GD110 guest download, SR110 stored live launch, RR110 independent
+restart. Missing/ambiguous discovery and any failed command stop acceptance.
+Without `--real`, the focused and full suites still run but real paths are skipped.
+
+Delivery checks performed here: source review, unchanged authority/precommit/
+cleanup bodies, shell syntax and mock-Cargo checks of discovery/failure handling.
+**No Rust compiler or Rust tests were run in the delivery environment.** The
+developer subsequently ran the acceptance script on the Mac. The supplied
+`test-output-performance-2.txt.zip` verifies:
+
+| Check | Accepted result |
+| --- | --- |
+| Focused SC110 cases | 15 passed, 0 failed |
+| Full release library suite | 1,964 passed, 0 failed, 20 ignored, 0 measured, 0 filtered out; 267.06s |
+| Real GD110 guest download | 1 passed; 70.30s |
+| Real SR110 stored live launch | 1 passed; 69.50s |
+| Real RR110 independent restart | 1 passed; 69.53s |
+
+The focused cases overlap the full suite; do not add these counts. Only the three
+explicitly selected ignored witnesses are claimed as run in this acceptance.
+
+The separate fresh-session comparison in `target/perf-scalar-read-01` validates
+three unprofiled runs per workload. Rebuild median fell **72.9326 → 58.4865 s
+(19.8%)**, and the whole restart workload fell **85.0476 → 70.1119 s (17.6%)**.
+Allocator self sample weight fell about 91% in each profile. Both profiled targets
+completed with expected exit status (42/0); rebuild retains recorder status
+`capture_issue` because xctrace returned 54. This is separate from target completion.
+See [full evidence, manifests and limitations](PERFORMANCE.md#sc110-accepted-results).
+
+The supplied git status still shows profiling/SC110 changes uncommitted on `main`.
+Acceptance does not imply a commit, PR or merge. After checkpoint integration,
+proceed to the Keycloak adapter contract and Kleis gates; remaining instruction
+execution/cleanup costs are observations, not authorization for another optimization.

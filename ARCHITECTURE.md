@@ -1703,9 +1703,15 @@ After correcting the GD110 test's one-nanosecond constructor race with the
 existing test-only expiry hook, the full release library suite passed
 **1,949 tests, 0 failed, 20 ignored, 0 measured, 0 filtered out in 317.84s**.
 The 20 ignored tests are not claimed as run by that suite. The user subsequently
-confirmed that RR110 was merged to `main` on 2026-11-19. The next bounded task is
-an Xcode Instruments performance baseline, followed by the agreed
-[identity, enrollment and bootstrap plan](#post-rr110-plan).
+confirmed that RR110 was merged to `main` on 2026-11-19. The subsequent SC110
+checkpoint is accepted on the laptop: 146 positive / 146 hostile formal witnesses,
+15 focused tests, **1,964 passed / 0 failed / 20 ignored in 267.06s**, and separately
+passing real guest-download, stored-launch and restart witnesses. Original and
+comparison profiles are reviewed: median rebuild and whole restart workload times
+fell 19.8% and 17.6%. See [evidence and limitations](PERFORMANCE.md#sc110-accepted-results).
+Profiling/SC110 changes remain uncommitted in the supplied `main` worktree. After
+integration, the next planned task is the Keycloak adapter contract and Kleis gates
+in the [identity, enrollment and bootstrap plan](#post-rr110-plan).
 
 The accepted persistence chain covers AS110/CS110 file custody and receipt
 binding, AT110/AG110 guarded transfer, GA110 guest upload, AR110 bounded reads,
@@ -1734,7 +1740,7 @@ acceptance. Older dated counts below are historical, not additional current pass
 | CC_A (bootstrap seed) | 45 functions, frozen at Phase 7.3 semantics |
 | Current CC2 witness | Accepted lineage witness: CC2_0 = 168840 bytes; exact CC2_1 = CC2_2 = 191576 bytes; entry 188888 (confirmed again by the RR110 witness). Protected producer images are separate artifacts. |
 | CC2 source | `userspace/system/compiler/ankacc2_stage3.c` and protected producer `ankacc2_abi2.c` |
-| Regression evidence | Current: 1,949 passed, 0 failed, 20 ignored in 317.84s; RR110 real witness separately passed in 92.13s. Historical final 10.8 acceptance: 1628 ordinary library tests passed, 15 ignored guest witnesses explicitly passed, complete Cargo suite passed; formal sweep: 48 pairs, 4467 positive witnesses and 3664 explicit hostile disproofs. See DN-71 for scope and input digest. |
+| Regression evidence | Current SC110: 1,964 passed, 0 failed, 20 ignored in 267.06s; 15 focused cases and separately selected real GD110/SR110/RR110 witnesses passed (70.30s/69.50s/69.53s). Historical RR110 real witness: 92.13s. Historical final 10.8 acceptance: 1628 ordinary library tests passed, 15 ignored guest witnesses explicitly passed, complete Cargo suite passed; formal sweep: 48 pairs, 4467 positive witnesses and 3664 explicit hostile disproofs. See DN-71 for scope and input digest. |
 | Protected modules | Typed separate compilation, exact interface evidence, guest linking, ordered dependency receipts and separately authorized protected execution accepted, including heap-list and stale/bounds denial witnesses. |
 | Module formal gate | Included in the final 48-pair sweep; per-theory counts and development history are retained in DN-65 through DN-71. |
 | Shared allocation and compiler resources | Shared protected allocation/free, C malloc/free, post-malloc review and R1 local initialization accepted. C1–C5 resource growth, charged preprocessing/link/run storage, retained publication and concurrent compiler/rebuild jobs accepted within configured profiles. |
@@ -3618,7 +3624,7 @@ toolchains.
 | 10.7 | Protected local pointer ABI and application rebuild | Closed; DN-59 fixes its scope |
 | 10.8 | Shared allocation, compiler resource growth, typed modules and protected network-service rebuild | Closed; final evidence in DN-71 |
 | 10.9 | Identity/authority model, supply-chain closure and hostile CPU-to-HTTP audit | T1 and initial T2 model delivered; persistence/evidence refinements implemented in 10.10; bounded RR110 boot admission accepted; general enrollment/whole-machine reboot, broader T3–T5 and production integration open; DN-72 |
-| 10.10 | Durable network persistence using the artifact/publication foundation | File backend, guarded transfer, guest upload/download, fresh live launch and bounded RR110 restart accepted; RR110 merged to main (user confirmation, 2026-11-19). Performance baseline next; production credentials, broader deployment and whole-machine reboot remain open; DN-72 |
+| 10.10 | Durable network persistence using the artifact/publication foundation | File backend, guarded transfer, guest upload/download, fresh live launch and bounded RR110 restart accepted; RR110 merged to main (user confirmation, 2026-11-19). SC110 formal, Rust and laptop performance acceptance complete; profiling/SC110 commit and merge pending; production credentials, broader deployment and whole-machine reboot remain open; DN-72 |
 
 Phase 10.8's implementation chronology and test commands live in
 [DN-71](DESIGN_NOTES.md#dn-71). The repeated allocation/worker/compiler progress
@@ -5446,9 +5452,10 @@ admission or general concurrent peer execution.
 
 The subsequent [RR110 restart task](DESIGN_NOTES.md#stored-restart-next) is now
 accepted and merged below. [Xcode performance probing](DESIGN_NOTES.md#xcode-performance-probing)
-is the next bounded task; the subsequent Keycloak/enrollment/bootstrap work is
-recorded in the [agreed plan](#post-rr110-plan). No profiling results or
-optimizations are claimed.
+has identified scalar payload allocation as the first bounded optimization.
+SC110 formal, Rust and laptop performance evidence is accepted below; profiling/SC110
+integration remains pending. Subsequent identity/bootstrap work remains in the
+[agreed plan](#post-rr110-plan).
 
 
 #### RR110 independent restart — accepted on the developer Mac
@@ -5484,8 +5491,47 @@ scope limits. The user subsequently confirmed merge to `main` on 2026-11-19. Run
 adapter is not a whole-machine reboot or concurrent peer scheduler. Current
 freshness/bootstrap/content verdicts remain trusted integration obligations;
 a process-local counter or rolled-back file does not supply external nonrollback
-freshness. Xcode profiling is the next bounded task in the plan below.
+freshness. The subsequent accepted SC110 comparison is recorded below.
 
+
+<a id="scalar-read-refinement"></a>
+
+#### SC110 — scalar Read/Fetch payload representation
+
+**2026-11-22: formal, Rust and laptop performance acceptance complete; commit/merge
+pending.** The developer Mac passed 146 positive witnesses, 146/146 explicit hostile
+disproofs, 15 focused cases, the 1,964-pass full suite and three separately selected
+real CC2/socket/NIC/file witnesses. Median unprofiled rebuild fell 72.9326 → 58.4865 s
+(19.8%); the whole restart workload fell 85.0476 → 70.1119 s (17.6%).
+Allocator self sample weight fell 20.043 → 1.769 s / 20.828 → 1.849 s for
+rebuild/restart; cleanup inclusive weight fell 16.159 → 6.352 s / 16.685 → 6.468 s.
+Categories overlap and are not exact function durations. Preserve recording caveats
+and the three-run, single-laptop scope in [PERFORMANCE.md](PERFORMANCE.md#sc110-accepted-results).
+
+The accepted CPU path for Read/Fetch of exactly 1, 2, 4 or 8 bytes retains an inline
+committed snapshot and returns scalar bytes without per-read payload allocation.
+Representation eligibility is not authority. Keep the same request and the full
+submit/authorize/translate/commit lifecycle, including fresh commit revalidation,
+exact physical span, fault behavior and transaction identity. Retain the committed
+observation for inspection; never replace it with a later physical-memory peek
+or remove it when returning the scalar result. General/bulk and asynchronous
+reads retain their existing contract and path.
+
+`anka110_scalar_read.kleis` and its hostile counterpart model stage transitions,
+little-endian byte observations, fallback, fault precedence, immutable delivery
+and bounded cleanup. The model abstracts existing trusted check outcomes; it
+does not prove capability lookup, the Rust implementation, host allocation counts,
+FPGA timing or arbitrary-length DMA contents. The original authority and resource
+contracts still apply.
+The implementation uses `ReadPayload` (heap or inline) and an internal per-transaction
+CPU selector. That selector changes representation only; it is not inferred from
+AgentId and supplies no authority. `submit` defaults to the general path, including
+NIC and small asynchronous reads. Private heap-pointer reads retain their existing
+heap API. A compile-time record-size bound and a laptop footprint test constrain
+the ledger representation; logical quotas are unchanged. The measured Transaction
+size is 240 bytes (3.75 MiB for 16,384 records); reserved-capacity scalar-payload
+allocation and differential checks passed. This does not claim an allocation-free
+Kernel step. See [SC110 acceptance](DESIGN_NOTES.md#scalar-read-runtime).
 
 <a id="post-rr110-plan"></a>
 
@@ -5499,8 +5545,8 @@ all optimization before progressing with identity integration.
 | Order | Work | Completion boundary |
 | --- | --- | --- |
 | 1 | Host-independent boot and enrollment design | Separate installation identity, personal login, workload execution admission and one-use boot freshness; specify initial trust provisioning, recovery and online/offline policy. This note records the direction; detailed contracts and gates precede implementation. |
-| 2 — next implementation task | Xcode Instruments baseline | Reproducible representative rebuild and stored restart/launch workloads; CPU/elapsed time and allocation observations, phase attribution and retained unprofiled baselines. Fix only clear consequential bottlenecks within separately validated changes. |
-| 3 | Keycloak integration through a minimal CLI | First real identity/authorization provider in a separate Podman container, with persistent database state; verify credentials and exact Anka bindings, including wrong issuer/audience, expiry, revocation and unavailable-authority denial. |
+| 2 — accepted; integration pending | SC110 scalar Read/Fetch payload refinement | Formal, focused/full/real Rust tests and fresh laptop comparisons accepted. Median workload times reduced 19.8%/17.6%; original checks, retained snapshots and accounting preserved. Commit and merge the profiling/SC110 checkpoint. |
+| 3 — next planned task | Keycloak adapter contract and minimal CLI | Define and verify the trusted-adapter contract in Kleis before implementation. First real identity/authorization provider in a separate Podman container, with persistent database state; verify credentials and exact Anka bindings, including wrong issuer/audience, expiry, revocation and unavailable-authority denial. |
 | 4 | Installation enrollment and boot authorization | Provision machine identity and implement externally recorded boot-attempt consumption under an explicit rollback threat model; exercise the platform-independent flow in the emulator. |
 | 5 | Installation wizard and later native adapter | Expose tested enrollment/recovery operations through the wizard. Implement the hardware-specific bootstrap adapter when the native/FPGA target is concrete. |
 
@@ -5556,8 +5602,7 @@ is a real CC2-compiled C program performing create/write/close/reopen/read,
 update and delete through the accounted service path, with restart persistence
 and hostile authority/resource cases checked separately.
 
-This is a separate planned milestone, not added to RR110 acceptance. The Xcode
-baseline remains next; exact CRUD implementation sequencing with the identity
+This is a separate planned milestone, not added to RR110 acceptance. SC110 is accepted; exact CRUD implementation sequencing with the identity
 and enrollment work remains to be decided. See the
 [detailed CRUD plan](DESIGN_NOTES.md#guest-file-crud-plan).
 
@@ -5622,5 +5667,5 @@ explicit sharing, join, denial, revoke/free races and exact resource accounting.
 Later SMP acceptance must cover weak-memory behavior, cache/metadata visibility
 and DMA; emulator interleavings alone do not prove it. Profile context-switch,
 contention, copying and reclamation costs separately from architectural operation
-counts and target-specific hardware costs. The Xcode baseline remains next;
-thread implementation priority relative to CRUD and identity work is not yet set.
+counts and target-specific hardware costs. SC110 is accepted; thread implementation
+priority relative to CRUD and identity work is not yet set.

@@ -57,7 +57,7 @@ The original MC68000 implementation remains in the repository as the project's
 experimental foundation. Active architecture and toolchain development targets
 Anka64.
 
-## Current checkpoint — stored restart accepted
+## Current checkpoint — stored restart and SC110 accepted
 
 **Phase 10.8 is closed and merged. Phases 10.9 and 10.10 remain open.**
 The protected service stack serves `/alive` through the virtual NIC. CC2 guests
@@ -72,7 +72,7 @@ stored target both live and after independent bounded guest/service restarts.
 | Stored retrieval and read transport (SR110 R1 / AR110) | SR110 92 positive / 78 hostile, 20 focused Rust cases; AR110 117 positive / 98 hostile, 23 focused read cases plus 24 upload compatibility cases |
 | Guest download and live launch (GD110 / SR110 R2) | GD110 174 positive / 149 hostile; 11 focused live-admission cases and real download/live-launch witness (84.35s), target exit 42; merged to main on 2026-11-18 |
 | Independent restart (RR110) | 234 positive / 192 explicitly disproved hostile witnesses; 14 focused cases passed in 4.21s; separately selected real restart witness passed in 92.13s |
-| Latest full release library suite | **1,949 passed, 0 failed, 20 ignored, 0 measured, 0 filtered out in 317.84s**, reported by the developer on 2026-11-19 after the GD110 deadline-test correction |
+| Latest full release library suite | **1,964 passed, 0 failed, 20 ignored, 0 measured, 0 filtered out in 267.06s**, verified in the developer Mac SC110 acceptance log on 2026-11-22 |
 
 RR110 persists the download pump A and target B, destroys the original compiler
 and lineage, and reconstructs a fresh accounted guest under current boot
@@ -83,21 +83,42 @@ and preservation of the same peer charge/state across a service-only restart.
 The ignored real witness has its own passing result; the ordinary full suite
 does not execute it or the other ignored tests. Overlapping groups are not added.
 
-**Integration status:** the supplied `git status` shows RR110 and its formal
-files, script and deadline-test correction as uncommitted changes on `main`,
-whose committed tip matches `origin/main`. RR110 acceptance is complete within
-this bounded profile; it has not yet been committed, pushed or merged. The next
-action is to create a feature branch from this worktree and review/commit the
-intended changes before a PR. Exclude archive ZIPs from the commit and review
-the separately untracked runtime-image builder before deciding to include it.
+**Integration status:** the developer confirmed RR110 merged to `main`, followed
+by the roadmap documentation merge. Profiling and SC110 are validated on the laptop,
+but remain local, uncommitted changes on `main` in the supplied git status.
+The original and SC110 comparison sessions have been reviewed; see
+[accepted measurements and limitations](PERFORMANCE.md#sc110-accepted-results).
 
 The runtime consumes trusted evidence; test providers are deterministic fixtures.
 External nonrollback freshness, production credential verification, general
 installation/enrollment and whole-machine reboot integration remain open.
 This does not provide general guest file CRUD, arbitrary process migration,
 concurrent peer application progress or a standalone deployed storage server.
-[Xcode performance probing](DESIGN_NOTES.md#xcode-performance-probing) remains a
-recorded measurement follow-up; no profiling results or optimizations are claimed.
+The [SC110 scalar payload contract](DESIGN_NOTES.md#scalar-read-contract) passes
+on the developer Mac: 146 positive witnesses and 146/146 hostile assertions
+explicitly disproved. **Rust correctness and the measured laptop improvement are
+accepted.** CPU fetches, ordinary scalar loads and protected-local
+scalar reads keep inline committed snapshots through the existing Fabric checks.
+Bulk/asynchronous reads and private heap-pointer access keep their general paths.
+All 15 focused tests passed. Reproduce the full/real acceptance on the laptop:
+
+```bash
+bash scripts/check-anka110-scalar-read.sh --real
+```
+
+The script runs focused tests, the full release library suite, and separately
+selects the ignored real CC2 guest-download, stored-launch and RR110 restart
+witnesses; all three passed separately (70.30 s, 69.50 s and 69.53 s). The 20 ignored
+tests in the ordinary suite are not all claimed as executed. Median unprofiled
+rebuild time fell **72.93 → 58.49 s (19.8%)**, and the complete restart workload
+fell **85.05 → 70.11 s (17.6%)**, over three runs per workload and build. These
+are emulator measurements on one laptop, not isolated restart latency or FPGA
+speedup. Preserve both [profiling sessions](PERFORMANCE.md#sc110-accepted-results).
+
+After this checkpoint is committed and merged, the next planned task is the
+Keycloak trusted-adapter contract and Kleis gates, followed by minimal CLI
+integration. Enrollment and external boot-attempt consumption remain separate
+planned work; further optimization is not a prerequisite.
 
 Reproduce the restart acceptance from the repository root:
 

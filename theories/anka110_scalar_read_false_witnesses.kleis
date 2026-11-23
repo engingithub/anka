@@ -1,0 +1,586 @@
+// Deliberately false counterparts. Each must be explicitly DISPROVED by Z3.
+import "anka110_scalar_read.kleis"
+
+example "FALSE SC110 001 all terminal outcomes preserve observations" {
+    assert(¬(∀ r_agent : BitVec64 . ∀ r_domain : BitVec64 . ∀ r_privilege : BitVec8 . ∀ r_object : BitVec64 . ∀ r_offset : BitVec64 . ∀ r_width : BitVec64 . ∀ r_length : BitVec64 . ∀ r_kind : BitVec8 . ∀ id : BitVec64 . ∀ old_id : BitVec64 . ∀ old_phase : BitVec8 . ∀ old_fault : BitVec8 . ∀ old_storage : BitVec8 . ∀ old_length : BitVec64 . ∀ old_word : BitVec64 . ∀ new_id : BitVec64 . ∀ new_phase : BitVec8 . ∀ new_fault : BitVec8 . ∀ new_storage : BitVec8 . ∀ new_length : BitVec64 . ∀ new_word : BitVec64 . ∀ a : BitVec8 . ∀ x : BitVec8 . ∀ c : BitVec8 . ∀ w : BitVec64 . ∀ cpu : Bool . (sc110_finish(SC110Request(r_agent,r_domain,r_privilege,r_object,r_offset,r_width,r_length,r_kind),id,SC110State(old_id,old_phase,old_fault,old_storage,old_length,old_word),a,x,c,w,sc110_false(),cpu) ∧ sc110_finish(SC110Request(r_agent,r_domain,r_privilege,r_object,r_offset,r_width,r_length,r_kind),id,SC110State(new_id,new_phase,new_fault,new_storage,new_length,new_word),a,x,c,w,sc110_true(),cpu)) ⇒ sc110_equivalent(SC110State(old_id,old_phase,old_fault,old_storage,old_length,old_word),SC110State(new_id,new_phase,new_fault,new_storage,new_length,new_word))))
+}
+
+example "FALSE SC110 002 every scalar byte agrees with reference" {
+    assert(¬(∀ n : BitVec64 . ∀ w : BitVec64 . ∀ i : BitVec64 . sc110_width(n) ⇒ (sc110_reference_byte(n,sc110_pack(n,w),i)=sc110_reference_byte(n,w,i))))
+}
+
+example "FALSE SC110 003 normalization is idempotent" {
+    assert(¬(∀ n : BitVec64 . ∀ w : BitVec64 . sc110_width(n) ⇒ (sc110_pack(n,sc110_pack(n,w))=sc110_pack(n,w))))
+}
+
+example "FALSE SC110 004 fallback snapshot relation is identical" {
+    assert(¬(∀ r_agent : BitVec64 . ∀ r_domain : BitVec64 . ∀ r_privilege : BitVec8 . ∀ r_object : BitVec64 . ∀ r_offset : BitVec64 . ∀ r_width : BitVec64 . ∀ r_length : BitVec64 . ∀ r_kind : BitVec8 . ∀ s_id : BitVec64 . ∀ s_phase : BitVec8 . ∀ s_fault : BitVec8 . ∀ s_storage : BitVec8 . ∀ s_length : BitVec64 . ∀ s_word : BitVec64 . ∀ w : BitVec64 . ∀ cpu : Bool . ¬sc110_inline_eligible(cpu,SC110Request(r_agent,r_domain,r_privilege,r_object,r_offset,r_width,r_length,r_kind)) ⇒ (sc110_snapshot(SC110Request(r_agent,r_domain,r_privilege,r_object,r_offset,r_width,r_length,r_kind),SC110State(s_id,s_phase,s_fault,s_storage,s_length,s_word),w,sc110_true(),cpu) ⟺ sc110_snapshot(SC110Request(r_agent,r_domain,r_privilege,r_object,r_offset,r_width,r_length,r_kind),SC110State(s_id,s_phase,s_fault,s_storage,s_length,s_word),w,sc110_false(),cpu))))
+}
+
+example "FALSE SC110 005 later memory cannot change retained observation" {
+    assert(¬(∀ s_id : BitVec64 . ∀ s_phase : BitVec8 . ∀ s_fault : BitVec8 . ∀ s_storage : BitVec8 . ∀ s_length : BitVec64 . ∀ s_word : BitVec64 . ∀ i : BitVec64 . ∀ now : BitVec64 . sc110_observe_after_write(SC110State(s_id,s_phase,s_fault,s_storage,s_length,s_word),i,now)=sc110_observe(SC110State(s_id,s_phase,s_fault,s_storage,s_length,s_word),i)))
+}
+
+example "FALSE SC110 006 terminal transition preserves full record" {
+    assert(¬(∀ r_agent : BitVec64 . ∀ r_domain : BitVec64 . ∀ r_privilege : BitVec8 . ∀ r_object : BitVec64 . ∀ r_offset : BitVec64 . ∀ r_width : BitVec64 . ∀ r_length : BitVec64 . ∀ r_kind : BitVec8 . ∀ b_id : BitVec64 . ∀ b_phase : BitVec8 . ∀ b_fault : BitVec8 . ∀ b_storage : BitVec8 . ∀ b_length : BitVec64 . ∀ b_word : BitVec64 . ∀ s_id : BitVec64 . ∀ s_phase : BitVec8 . ∀ s_fault : BitVec8 . ∀ s_storage : BitVec8 . ∀ s_length : BitVec64 . ∀ s_word : BitVec64 . ∀ a : BitVec8 . ∀ x : BitVec8 . ∀ c : BitVec8 . ∀ w : BitVec64 . (sc110_terminal(SC110State(b_id,b_phase,b_fault,b_storage,b_length,b_word)) ∧ sc110_step(SC110Request(r_agent,r_domain,r_privilege,r_object,r_offset,r_width,r_length,r_kind),SC110State(b_id,b_phase,b_fault,b_storage,b_length,b_word),SC110State(s_id,s_phase,s_fault,s_storage,s_length,s_word),a,x,c,w,sc110_true(),sc110_true())) ⇒ sc110_same_state(SC110State(s_id,s_phase,s_fault,s_storage,s_length,s_word),SC110State(b_id,b_phase,b_fault,b_storage,b_length,b_word))))
+}
+
+example "FALSE SC110 007 per step representations refine one another" {
+    assert(¬(∀ r_agent : BitVec64 . ∀ r_domain : BitVec64 . ∀ r_privilege : BitVec8 . ∀ r_object : BitVec64 . ∀ r_offset : BitVec64 . ∀ r_width : BitVec64 . ∀ r_length : BitVec64 . ∀ r_kind : BitVec8 . ∀ b_id : BitVec64 . ∀ b_phase : BitVec8 . ∀ b_fault : BitVec8 . ∀ b_storage : BitVec8 . ∀ b_length : BitVec64 . ∀ b_word : BitVec64 . ∀ old_id : BitVec64 . ∀ old_phase : BitVec8 . ∀ old_fault : BitVec8 . ∀ old_storage : BitVec8 . ∀ old_length : BitVec64 . ∀ old_word : BitVec64 . ∀ new_id : BitVec64 . ∀ new_phase : BitVec8 . ∀ new_fault : BitVec8 . ∀ new_storage : BitVec8 . ∀ new_length : BitVec64 . ∀ new_word : BitVec64 . ∀ a : BitVec8 . ∀ x : BitVec8 . ∀ c : BitVec8 . ∀ w : BitVec64 . (sc110_step(SC110Request(r_agent,r_domain,r_privilege,r_object,r_offset,r_width,r_length,r_kind),SC110State(b_id,b_phase,b_fault,b_storage,b_length,b_word),SC110State(old_id,old_phase,old_fault,old_storage,old_length,old_word),a,x,c,w,sc110_false(),sc110_true()) ∧ sc110_step(SC110Request(r_agent,r_domain,r_privilege,r_object,r_offset,r_width,r_length,r_kind),SC110State(b_id,b_phase,b_fault,b_storage,b_length,b_word),SC110State(new_id,new_phase,new_fault,new_storage,new_length,new_word),a,x,c,w,sc110_true(),sc110_true())) ⇒ sc110_equivalent(SC110State(old_id,old_phase,old_fault,old_storage,old_length,old_word),SC110State(new_id,new_phase,new_fault,new_storage,new_length,new_word))))
+}
+
+example "FALSE SC110 008 1 byte scalar eligible" {
+    assert(¬(sc110_inline_eligible(sc110_true(),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(1,64),bvconst(1,64),bvconst(0,8)))))
+}
+
+example "FALSE SC110 009 1 byte reference accepted" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(1,64),bvconst(1,64),bvconst(0,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(1,8),bvconst(1,64),bvconst(578437695752307201,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_false(),sc110_true())))
+}
+
+example "FALSE SC110 010 1 byte inline accepted" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(1,64),bvconst(1,64),bvconst(0,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(1,64),bvconst(1,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 011 1 byte full lifecycle" {
+    assert(¬(sc110_submit(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(1,64),bvconst(1,64),bvconst(0,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64))) ∧ sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(1,64),bvconst(1,64),bvconst(0,8)),SC110State(bvconst(31,64),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()) ∧ sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(1,64),bvconst(1,64),bvconst(0,8)),SC110State(bvconst(31,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()) ∧ sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(1,64),bvconst(1,64),bvconst(0,8)),SC110State(bvconst(31,64),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(1,64),bvconst(1,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 012 1 byte canonical scalar result" {
+    assert(¬(sc110_scalar_present(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(1,64),bvconst(1,64))) ∧ (sc110_scalar_value(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(1,64),bvconst(1,64)))=bvconst(1,64))))
+}
+
+example "FALSE SC110 013 1 byte little endian lane 0" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(1,64),bvconst(1,64)),bvconst(0,64))=bvconst(1,64)))
+}
+
+example "FALSE SC110 014 1 byte trailing storage hidden" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(1,64),bvconst(1,64)),bvconst(1,64))=bvconst(256,64)))
+}
+
+example "FALSE SC110 015 1 byte exact physical capture span" {
+    assert(¬(sc110_capture_span(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(1,64),bvconst(1,64),bvconst(0,8)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(1,64),bvconst(1,64)),bvconst(12,64),bvconst(1,64))))
+}
+
+example "FALSE SC110 016 1 byte high bit unsigned" {
+    assert(¬(sc110_scalar_value(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(1,64),bvconst(128,64)))=bvconst(128,64)))
+}
+
+example "FALSE SC110 017 2 byte scalar eligible" {
+    assert(¬(sc110_inline_eligible(sc110_true(),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(2,64),bvconst(2,64),bvconst(0,8)))))
+}
+
+example "FALSE SC110 018 2 byte reference accepted" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(2,64),bvconst(2,64),bvconst(0,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(1,8),bvconst(2,64),bvconst(578437695752307201,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_false(),sc110_true())))
+}
+
+example "FALSE SC110 019 2 byte inline accepted" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(2,64),bvconst(2,64),bvconst(0,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(2,64),bvconst(513,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 020 2 byte full lifecycle" {
+    assert(¬(sc110_submit(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(2,64),bvconst(2,64),bvconst(0,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64))) ∧ sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(2,64),bvconst(2,64),bvconst(0,8)),SC110State(bvconst(31,64),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()) ∧ sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(2,64),bvconst(2,64),bvconst(0,8)),SC110State(bvconst(31,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()) ∧ sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(2,64),bvconst(2,64),bvconst(0,8)),SC110State(bvconst(31,64),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(2,64),bvconst(513,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 021 2 byte canonical scalar result" {
+    assert(¬(sc110_scalar_present(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(2,64),bvconst(513,64))) ∧ (sc110_scalar_value(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(2,64),bvconst(513,64)))=bvconst(513,64))))
+}
+
+example "FALSE SC110 022 2 byte little endian lane 0" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(2,64),bvconst(513,64)),bvconst(0,64))=bvconst(1,64)))
+}
+
+example "FALSE SC110 023 2 byte little endian lane 1" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(2,64),bvconst(513,64)),bvconst(1,64))=bvconst(2,64)))
+}
+
+example "FALSE SC110 024 2 byte trailing storage hidden" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(2,64),bvconst(513,64)),bvconst(2,64))=bvconst(256,64)))
+}
+
+example "FALSE SC110 025 2 byte exact physical capture span" {
+    assert(¬(sc110_capture_span(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(2,64),bvconst(2,64),bvconst(0,8)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(2,64),bvconst(513,64)),bvconst(12,64),bvconst(2,64))))
+}
+
+example "FALSE SC110 026 2 byte high bit unsigned" {
+    assert(¬(sc110_scalar_value(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(2,64),bvconst(32768,64)))=bvconst(32768,64)))
+}
+
+example "FALSE SC110 027 4 byte scalar eligible" {
+    assert(¬(sc110_inline_eligible(sc110_true(),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)))))
+}
+
+example "FALSE SC110 028 4 byte reference accepted" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(1,8),bvconst(4,64),bvconst(578437695752307201,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_false(),sc110_true())))
+}
+
+example "FALSE SC110 029 4 byte inline accepted" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 030 4 byte full lifecycle" {
+    assert(¬(sc110_submit(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64))) ∧ sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110State(bvconst(31,64),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()) ∧ sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110State(bvconst(31,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()) ∧ sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110State(bvconst(31,64),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 031 4 byte canonical scalar result" {
+    assert(¬(sc110_scalar_present(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64))) ∧ (sc110_scalar_value(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)))=bvconst(67305985,64))))
+}
+
+example "FALSE SC110 032 4 byte little endian lane 0" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(0,64))=bvconst(1,64)))
+}
+
+example "FALSE SC110 033 4 byte little endian lane 1" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(1,64))=bvconst(2,64)))
+}
+
+example "FALSE SC110 034 4 byte little endian lane 2" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(2,64))=bvconst(3,64)))
+}
+
+example "FALSE SC110 035 4 byte little endian lane 3" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(3,64))=bvconst(4,64)))
+}
+
+example "FALSE SC110 036 4 byte trailing storage hidden" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(4,64))=bvconst(256,64)))
+}
+
+example "FALSE SC110 037 4 byte exact physical capture span" {
+    assert(¬(sc110_capture_span(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(12,64),bvconst(4,64))))
+}
+
+example "FALSE SC110 038 4 byte high bit unsigned" {
+    assert(¬(sc110_scalar_value(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(2147483648,64)))=bvconst(2147483648,64)))
+}
+
+example "FALSE SC110 039 8 byte scalar eligible" {
+    assert(¬(sc110_inline_eligible(sc110_true(),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(8,64),bvconst(8,64),bvconst(0,8)))))
+}
+
+example "FALSE SC110 040 8 byte reference accepted" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(8,64),bvconst(8,64),bvconst(0,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(1,8),bvconst(8,64),bvconst(578437695752307201,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_false(),sc110_true())))
+}
+
+example "FALSE SC110 041 8 byte inline accepted" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(8,64),bvconst(8,64),bvconst(0,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(8,64),bvconst(578437695752307201,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 042 8 byte full lifecycle" {
+    assert(¬(sc110_submit(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(8,64),bvconst(8,64),bvconst(0,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64))) ∧ sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(8,64),bvconst(8,64),bvconst(0,8)),SC110State(bvconst(31,64),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()) ∧ sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(8,64),bvconst(8,64),bvconst(0,8)),SC110State(bvconst(31,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()) ∧ sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(8,64),bvconst(8,64),bvconst(0,8)),SC110State(bvconst(31,64),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(8,64),bvconst(578437695752307201,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 043 8 byte canonical scalar result" {
+    assert(¬(sc110_scalar_present(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(8,64),bvconst(578437695752307201,64))) ∧ (sc110_scalar_value(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(8,64),bvconst(578437695752307201,64)))=bvconst(578437695752307201,64))))
+}
+
+example "FALSE SC110 044 8 byte little endian lane 0" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(8,64),bvconst(578437695752307201,64)),bvconst(0,64))=bvconst(1,64)))
+}
+
+example "FALSE SC110 045 8 byte little endian lane 1" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(8,64),bvconst(578437695752307201,64)),bvconst(1,64))=bvconst(2,64)))
+}
+
+example "FALSE SC110 046 8 byte little endian lane 2" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(8,64),bvconst(578437695752307201,64)),bvconst(2,64))=bvconst(3,64)))
+}
+
+example "FALSE SC110 047 8 byte little endian lane 3" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(8,64),bvconst(578437695752307201,64)),bvconst(3,64))=bvconst(4,64)))
+}
+
+example "FALSE SC110 048 8 byte little endian lane 4" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(8,64),bvconst(578437695752307201,64)),bvconst(4,64))=bvconst(5,64)))
+}
+
+example "FALSE SC110 049 8 byte little endian lane 5" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(8,64),bvconst(578437695752307201,64)),bvconst(5,64))=bvconst(6,64)))
+}
+
+example "FALSE SC110 050 8 byte little endian lane 6" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(8,64),bvconst(578437695752307201,64)),bvconst(6,64))=bvconst(7,64)))
+}
+
+example "FALSE SC110 051 8 byte little endian lane 7" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(8,64),bvconst(578437695752307201,64)),bvconst(7,64))=bvconst(8,64)))
+}
+
+example "FALSE SC110 052 8 byte trailing storage hidden" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(8,64),bvconst(578437695752307201,64)),bvconst(8,64))=bvconst(256,64)))
+}
+
+example "FALSE SC110 053 8 byte exact physical capture span" {
+    assert(¬(sc110_capture_span(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(8,64),bvconst(8,64),bvconst(0,8)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(8,64),bvconst(578437695752307201,64)),bvconst(12,64),bvconst(8,64))))
+}
+
+example "FALSE SC110 054 8 byte high bit unsigned" {
+    assert(¬(sc110_scalar_value(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(8,64),bvsub(bvconst(0,64),bvshl(bvconst(1,64),bvconst(63,64)))))=bvsub(bvconst(0,64),bvshl(bvconst(1,64),bvconst(63,64)))))
+}
+
+example "FALSE SC110 055 zero length not inline" {
+    assert(¬(¬sc110_inline_eligible(sc110_true(),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(0,64),bvconst(0,64),bvconst(1,8)))))
+}
+
+example "FALSE SC110 056 width length mismatch not inline" {
+    assert(¬(¬sc110_inline_eligible(sc110_true(),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(8,64),bvconst(1,8)))))
+}
+
+example "FALSE SC110 057 unsupported width not inline" {
+    assert(¬(¬sc110_inline_eligible(sc110_true(),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(3,64),bvconst(3,64),bvconst(1,8)))))
+}
+
+example "FALSE SC110 058 nine byte bulk not inline" {
+    assert(¬(¬sc110_inline_eligible(sc110_true(),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(1,64),bvconst(9,64),bvconst(1,8)))))
+}
+
+example "FALSE SC110 059 512 byte DMA not inline" {
+    assert(¬(¬sc110_inline_eligible(sc110_false(),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(1,64),bvconst(512,64),bvconst(1,8)))))
+}
+
+example "FALSE SC110 060 small asynchronous read not inline" {
+    assert(¬(¬sc110_inline_eligible(sc110_false(),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)))))
+}
+
+example "FALSE SC110 061 write not inline" {
+    assert(¬(¬sc110_inline_eligible(sc110_true(),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(2,8)))))
+}
+
+example "FALSE SC110 062 atomic not inline" {
+    assert(¬(¬sc110_inline_eligible(sc110_true(),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(8,64),bvconst(8,64),bvconst(3,8)))))
+}
+
+example "FALSE SC110 063 nine byte bulk keeps general path" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(1,64),bvconst(9,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(1,8),bvconst(9,64),bvconst(578437695752307201,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 064 nine byte bulk cannot use inline" {
+    assert(¬(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(1,64),bvconst(9,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(9,64),bvconst(578437695752307201,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 065 512 byte DMA keeps general path" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(1,64),bvconst(512,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(1,8),bvconst(512,64),bvconst(578437695752307201,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_false())))
+}
+
+example "FALSE SC110 066 512 byte DMA cannot use inline" {
+    assert(¬(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(1,64),bvconst(512,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(512,64),bvconst(578437695752307201,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_false()))))
+}
+
+example "FALSE SC110 067 small asynchronous read keeps general path" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(1,8),bvconst(4,64),bvconst(578437695752307201,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_false())))
+}
+
+example "FALSE SC110 068 small asynchronous read cannot use inline" {
+    assert(¬(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(578437695752307201,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_false()))))
+}
+
+example "FALSE SC110 069 zero faults without disclosure" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(0,64),bvconst(0,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(4,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 070 offset length wrap faults without disclosure" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvsub(bvconst(0,64),bvconst(2,64)),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(4,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 071 maximum offset faults without disclosure" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvsub(bvconst(0,64),bvconst(1,64)),bvconst(1,64),bvconst(1,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(4,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 072 last representable span accepted" {
+    assert(¬(sc110_span(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvsub(bvconst(0,64),bvconst(2,64)),bvconst(1,64),bvconst(1,64),bvconst(1,8)))))
+}
+
+example "FALSE SC110 073 no capability" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(4,8),bvconst(2,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 074 no capability cannot commit" {
+    assert(¬(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 075 wrong permission" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(3,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 076 wrong permission cannot commit" {
+    assert(¬(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(3,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 077 stale authorize" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(4,8),bvconst(4,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(4,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 078 stale authorize cannot commit" {
+    assert(¬(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(4,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 079 missing translation" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(4,8),bvconst(5,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(5,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 080 missing translation cannot commit" {
+    assert(¬(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(0,8),bvconst(5,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 081 revoked before commit" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(4,8),bvconst(4,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),bvconst(4,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 082 revoked before commit cannot commit" {
+    assert(¬(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(0,8),bvconst(0,8),bvconst(4,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 083 permission removed before commit" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),bvconst(3,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 084 permission removed before commit cannot commit" {
+    assert(¬(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(0,8),bvconst(0,8),bvconst(3,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 085 physical bounds fail" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(4,8),bvconst(1,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),bvconst(1,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 086 physical bounds fail cannot commit" {
+    assert(¬(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(0,8),bvconst(0,8),bvconst(1,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 087 heap exclusion at commit" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(4,8),bvconst(5,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),bvconst(5,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 088 heap exclusion at commit cannot commit" {
+    assert(¬(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(0,8),bvconst(0,8),bvconst(5,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 089 authorize fault precedence" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(3,8),bvconst(5,8),bvconst(4,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 090 authorize fault precedence cannot commit" {
+    assert(¬(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(3,8),bvconst(5,8),bvconst(4,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 091 translation fault precedence" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(4,8),bvconst(5,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(5,8),bvconst(4,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 092 translation fault precedence cannot commit" {
+    assert(¬(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(0,8),bvconst(5,8),bvconst(4,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 093 opaque fault preserved" {
+    assert(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(4,8),bvconst(211,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),bvconst(211,8),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 094 opaque fault preserved cannot commit" {
+    assert(¬(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(0,8),bvconst(0,8),bvconst(211,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 095 phase 0 reveals no byte" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,64))=bvconst(256,64)))
+}
+
+example "FALSE SC110 096 phase 0 cannot skip to commit" {
+    assert(¬(¬(sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110State(bvconst(31,64),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 097 phase 1 reveals no byte" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,64))=bvconst(256,64)))
+}
+
+example "FALSE SC110 098 phase 1 cannot skip to commit" {
+    assert(¬(¬(sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110State(bvconst(31,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 099 phase 2 reveals no byte" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,64))=bvconst(256,64)))
+}
+
+example "FALSE SC110 100 commit samples current bytes" {
+    assert(¬(sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110State(bvconst(31,64),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(99,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(99,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 101 commit cannot retain older memory contents" {
+    assert(¬(¬(sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110State(bvconst(31,64),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(99,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 102 revocation generation faults" {
+    assert(¬(sc110_generation_check(bvconst(3,64),bvconst(4,64),bvconst(0,8))=bvconst(4,8)))
+}
+
+example "FALSE SC110 103 same generation still rechecks permission" {
+    assert(¬(sc110_generation_check(bvconst(3,64),bvconst(3,64),bvconst(3,8))=bvconst(3,8)))
+}
+
+example "FALSE SC110 104 fresh recheck determines commit" {
+    assert(¬(sc110_step(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110State(bvconst(31,64),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),SC110State(bvconst(31,64),bvconst(4,8),bvconst(4,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,8),bvconst(0,8),sc110_generation_check(bvconst(3,64),bvconst(4,64),bvconst(0,8)),bvconst(578437695752307201,64),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 105 agent request substitution rejected" {
+    assert(¬(¬sc110_exact_request(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110Request(bvconst(2,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)))))
+}
+
+example "FALSE SC110 106 domain request substitution rejected" {
+    assert(¬(¬sc110_exact_request(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110Request(bvconst(1,64),bvconst(8,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)))))
+}
+
+example "FALSE SC110 107 object request substitution rejected" {
+    assert(¬(¬sc110_exact_request(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(10,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)))))
+}
+
+example "FALSE SC110 108 offset request substitution rejected" {
+    assert(¬(¬sc110_exact_request(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(13,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)))))
+}
+
+example "FALSE SC110 109 kind request substitution rejected" {
+    assert(¬(¬sc110_exact_request(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(0,8)))))
+}
+
+example "FALSE SC110 110 length request substitution rejected" {
+    assert(¬(¬sc110_exact_request(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(2,64),bvconst(2,64),bvconst(1,8)))))
+}
+
+example "FALSE SC110 111 width request substitution rejected" {
+    assert(¬(¬sc110_exact_request(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(8,64),bvconst(4,64),bvconst(1,8)))))
+}
+
+example "FALSE SC110 112 exact bridge request retained" {
+    assert(¬(sc110_exact_request(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)))))
+}
+
+example "FALSE SC110 113 ID observation substitution rejected" {
+    assert(¬(¬sc110_equivalent(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(32,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)))))
+}
+
+example "FALSE SC110 114 byte observation substitution rejected" {
+    assert(¬(¬sc110_equivalent(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305986,64)))))
+}
+
+example "FALSE SC110 115 length observation substitution rejected" {
+    assert(¬(¬sc110_equivalent(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(8,64),bvconst(67305985,64)))))
+}
+
+example "FALSE SC110 116 fault observation substitution rejected" {
+    assert(¬(¬sc110_equivalent(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(31,64),bvconst(4,8),bvconst(3,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)))))
+}
+
+example "FALSE SC110 117 missing retained payload observation substitution rejected" {
+    assert(¬(¬sc110_equivalent(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)))))
+}
+
+example "FALSE SC110 118 noncanonical candidate tail rejected" {
+    assert(¬(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(578437695752307201,64)),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 119 maximum index cannot wrap" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvsub(bvconst(0,64),bvconst(1,64)))=bvconst(256,64)))
+}
+
+example "FALSE SC110 120 delivery retains snapshot" {
+    assert(¬(sc110_delivery(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(0,64),bvconst(1,64))))
+}
+
+example "FALSE SC110 121 delivery cannot consume ledger payload" {
+    assert(¬(¬sc110_delivery(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,64),bvconst(1,64))))
+}
+
+example "FALSE SC110 122 later memory cannot substitute byte" {
+    assert(¬(¬sc110_delivery(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(0,64),bvconst(99,64))))
+}
+
+example "FALSE SC110 123 repeat delivery unchanged" {
+    assert(¬(sc110_delivery(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(2,64),bvconst(3,64))))
+}
+
+example "FALSE SC110 124 fault has no scalar result" {
+    assert(¬(¬sc110_scalar_present(SC110State(bvconst(31,64),bvconst(4,8),bvconst(4,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)))))
+}
+
+example "FALSE SC110 125 faulted transaction reveals no byte" {
+    assert(¬(sc110_observe(SC110State(bvconst(31,64),bvconst(4,8),bvconst(4,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),bvconst(0,64))=bvconst(256,64)))
+}
+
+example "FALSE SC110 126 fault payload injection rejected" {
+    assert(¬(¬(sc110_finish(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(4,64),bvconst(4,64),bvconst(1,8)),bvconst(31,64),SC110State(bvconst(31,64),bvconst(4,8),bvconst(4,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),bvconst(0,8),bvconst(0,8),bvconst(4,8),bvconst(578437695752307201,64),sc110_true(),sc110_true()))))
+}
+
+example "FALSE SC110 127 read preserves memory cell" {
+    assert(¬(sc110_memory_frame(bvconst(123,8),bvconst(123,8))))
+}
+
+example "FALSE SC110 128 read cannot mutate memory cell" {
+    assert(¬(¬sc110_memory_frame(bvconst(123,8),bvconst(124,8))))
+}
+
+example "FALSE SC110 129 capture cannot widen to inline capacity" {
+    assert(¬(¬sc110_capture_span(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(12,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(1,64),bvconst(1,64)),bvconst(12,64),bvconst(8,64))))
+}
+
+example "FALSE SC110 130 capture cannot align down" {
+    assert(¬(¬sc110_capture_span(SC110Request(bvconst(1,64),bvconst(7,64),bvconst(0,8),bvconst(9,64),bvconst(13,64),bvconst(1,64),bvconst(1,64),bvconst(1,8)),SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(1,64),bvconst(1,64)),bvconst(8,64),bvconst(1,64))))
+}
+
+example "FALSE SC110 131 terminal traces collect preserving fault history" {
+    assert(¬(sc110_collect(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(32,64),bvconst(4,8),bvconst(4,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),sc110_true(),sc110_false(),bvconst(33,64),bvconst(33,64),bvconst(91,64),bvconst(91,64),bvconst(0,64))))
+}
+
+example "FALSE SC110 132 requested prevents collection" {
+    assert(¬(¬sc110_can_collect(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(31,64),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),sc110_true(),sc110_false())))
+}
+
+example "FALSE SC110 133 requested retains ledger length" {
+    assert(¬(sc110_collect(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(31,64),bvconst(0,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),sc110_true(),sc110_false(),bvconst(33,64),bvconst(33,64),bvconst(91,64),bvconst(91,64),bvconst(2,64))))
+}
+
+example "FALSE SC110 134 authorized prevents collection" {
+    assert(¬(¬sc110_can_collect(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(31,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),sc110_true(),sc110_false())))
+}
+
+example "FALSE SC110 135 authorized retains ledger length" {
+    assert(¬(sc110_collect(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(31,64),bvconst(1,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),sc110_true(),sc110_false(),bvconst(33,64),bvconst(33,64),bvconst(91,64),bvconst(91,64),bvconst(2,64))))
+}
+
+example "FALSE SC110 136 prepared prevents collection" {
+    assert(¬(¬sc110_can_collect(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(31,64),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),sc110_true(),sc110_false())))
+}
+
+example "FALSE SC110 137 prepared retains ledger length" {
+    assert(¬(sc110_collect(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(31,64),bvconst(2,8),bvconst(0,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),sc110_true(),sc110_false(),bvconst(33,64),bvconst(33,64),bvconst(91,64),bvconst(91,64),bvconst(2,64))))
+}
+
+example "FALSE SC110 138 non CPU ledger prevents collection" {
+    assert(¬(¬sc110_can_collect(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(32,64),bvconst(4,8),bvconst(4,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),sc110_false(),sc110_false())))
+}
+
+example "FALSE SC110 139 non CPU ledger retains ledger length" {
+    assert(¬(sc110_collect(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(32,64),bvconst(4,8),bvconst(4,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),sc110_false(),sc110_false(),bvconst(33,64),bvconst(33,64),bvconst(91,64),bvconst(91,64),bvconst(2,64))))
+}
+
+example "FALSE SC110 140 external index prevents collection" {
+    assert(¬(¬sc110_can_collect(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(32,64),bvconst(4,8),bvconst(4,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),sc110_true(),sc110_true())))
+}
+
+example "FALSE SC110 141 external index retains ledger length" {
+    assert(¬(sc110_collect(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(32,64),bvconst(4,8),bvconst(4,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),sc110_true(),sc110_true(),bvconst(33,64),bvconst(33,64),bvconst(91,64),bvconst(91,64),bvconst(2,64))))
+}
+
+example "FALSE SC110 142 collection cannot reset next ID" {
+    assert(¬(¬sc110_collect(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(32,64),bvconst(4,8),bvconst(4,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),sc110_true(),sc110_false(),bvconst(33,64),bvconst(0,64),bvconst(91,64),bvconst(91,64),bvconst(0,64))))
+}
+
+example "FALSE SC110 143 collection cannot clear fault history" {
+    assert(¬(¬sc110_collect(SC110State(bvconst(31,64),bvconst(3,8),bvconst(0,8),bvconst(2,8),bvconst(4,64),bvconst(67305985,64)),SC110State(bvconst(32,64),bvconst(4,8),bvconst(4,8),bvconst(0,8),bvconst(0,64),bvconst(0,64)),sc110_true(),sc110_false(),bvconst(33,64),bvconst(33,64),bvconst(91,64),bvconst(0,64),bvconst(0,64))))
+}
+
+example "FALSE SC110 144 submission consumes exactly one ID" {
+    assert(¬(sc110_id_step(bvconst(31,64),bvconst(31,64),bvconst(32,64))))
+}
+
+example "FALSE SC110 145 submission cannot reuse ID" {
+    assert(¬(¬sc110_id_step(bvconst(31,64),bvconst(30,64),bvconst(32,64))))
+}
+
+example "FALSE SC110 146 ID exhaustion outside admitted scope" {
+    assert(¬(¬sc110_id_step(sc110_max(),sc110_max(),bvconst(0,64))))
+}

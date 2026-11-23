@@ -400,8 +400,8 @@ impl NicController {
                     let (status, transferred_len) = match fabric.transaction(tx_idx).state {
                         TxState::Committed => {
                             if operation == NicOperation::Tx {
-                                let bytes = fabric.transaction(tx_idx).read_data.clone()
-                                    .expect("committed NIC TX READ must retain read_data");
+                                let bytes = fabric.transaction(tx_idx).read_data.as_ref()
+                                    .expect("committed NIC TX READ must retain read_data").to_vec();
                                 debug_assert_eq!(bytes.len() as u64, frame_len);
                                 self.tx_sink.push_back(bytes);
                             }

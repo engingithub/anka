@@ -1127,6 +1127,7 @@ impl Fabric {
             physical_address: None,
             write_data,
             read_data: None,
+            scalar_read: false,
             fault: None,
         };
         self.transactions.push(tx);
@@ -1273,7 +1274,13 @@ impl Fabric {
                 // Capture the authorized committed observation.  This must
                 // happen inside the commit phase so an asynchronous bus master
                 // never has to bypass Fabric and peek at physical memory later.
-                self.transactions[idx].read_data = Some(self.memory[base..end].to_vec());
+                let bytes = &self.memory[base..end];
+                let payload = if self.transactions[idx].scalar_read {
+                    ReadPayload::scalar(bytes)
+                } else {
+                    ReadPayload::Heap(bytes.to_vec())
+                };
+                self.transactions[idx].read_data = Some(payload);
             }
         }
 
@@ -1331,14 +1338,42 @@ impl Fabric {
         self.advance(idx); // commit
         match self.transactions[idx].state {
             TxState::Committed => {
-                let data = self.transactions[idx].read_data.clone()
-                    .expect("committed read transaction must retain read_data");
+                let data = self.transactions[idx].read_data.as_ref()
+                    .expect("committed read transaction must retain read_data").to_vec();
                 debug_assert_eq!(data.len(), length);
                 Ok(data)
             }
             TxState::Faulted => {
                 Err(self.transactions[idx].fault.clone().unwrap())
             }
+            _ => unreachable!("transaction not terminal after 3 advances"),
+        }
+    }
+
+    /// SC110: explicit trusted CPU call site, not inferred from guest AgentId.
+    /// Every request still crosses the ordinary submit/authorize/translate/commit
+    /// stages. Non-scalar spans keep the general owned snapshot representation.
+    fn submit_cpu_read(&mut self, request: MemoryRequest) -> usize {
+        let scalar = matches!(request.kind, AccessKind::Read | AccessKind::Fetch)
+            && request.length == request.width.bytes();
+        let idx = self.submit(request, None);
+        self.transactions[idx].scalar_read = scalar;
+        idx
+    }
+
+    pub(crate) fn execute_cpu_read(&mut self, request: MemoryRequest)
+        -> Result<ReadPayload, FaultRecord>
+    {
+        // All callers construct Read/Fetch. Misuse must not perform a write.
+        assert!(matches!(request.kind, AccessKind::Read | AccessKind::Fetch));
+        let idx = self.submit_cpu_read(request);
+        self.advance(idx);
+        self.advance(idx);
+        self.advance(idx);
+        match self.transactions[idx].state {
+            TxState::Committed => Ok(self.transactions[idx].read_data.as_ref()
+                .expect("committed CPU read must retain its observation").clone()),
+            TxState::Faulted => Err(self.transactions[idx].fault.clone().unwrap()),
             _ => unreachable!("transaction not terminal after 3 advances"),
         }
     }
@@ -2932,3 +2967,6 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+mod scalar_read_tests;

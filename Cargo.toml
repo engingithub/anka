@@ -13,3 +13,9 @@ libc = "0.2"
 [[bin]]
 name = "anka"
 path = "src/main.rs"
+
+# Optimized host sampling; runtime semantics remain those of release.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
