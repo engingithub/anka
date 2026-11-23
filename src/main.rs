@@ -14,12 +14,18 @@ use anka::bus::{Bus, FlatBus, MappedBus};
 use anka::cpu::Cpu;
 use anka::monitor;
 
+mod keycloak_preflight;
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const CONSOLE_BASE: u32 = 0x00F0_0000;
 const TIMER_BASE: u32 = 0x00F0_0010;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+
+    if args.get(1).is_some_and(|s| s == "keycloak-preflight") {
+        process::exit(keycloak_preflight::command(&args[2..]));
+    }
 
     if args.get(1).is_some_and(|s| s == "rebuild") {
         process::exit(anka::anka64::rebuild::command(&args[2..]));
@@ -920,6 +926,7 @@ EXAMPLES:
     anka --hello --emit-srec h.srec Write hello demo as S-record file
     anka asm hello.s                Assemble source → hello.srec
     anka asm hello.s -o out.srec    Assemble with explicit output path
+    anka keycloak-preflight --help   Check external identity (no live admission)
     anka dev                         Start the Anka64 Development Shell
     anka dev --userspace userspace  Use an explicit host userspace mirror
     anka cc hello.c --run           Compile and run C program

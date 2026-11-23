@@ -6,7 +6,7 @@ and reviewed Time Profiler exports. SC110 scalar CPU Read/Fetch payload storage
 passed formal and laptop Rust acceptance. Median rebuild time fell **19.8%** and
 the complete restart workload fell **17.6%**. See the
 [accepted results](#sc110-accepted-results) for evidence and limits. Profiling/SC110
-changes still await commit and merge in the supplied git status.
+changes are now merged to `main`, as confirmed by the developer.
 
 The developer also confirmed all 14 Python orchestration checks pass on macOS
 after the temporary-path alias repair. Keep `target/perf-baseline-01`, its matching
@@ -379,16 +379,20 @@ not a basis to remove authority checks or immediately launch another optimizatio
 
 ### Integration and next task
 
-The supplied worktree is on `main`, tracking `origin/main`, with profiling/SC110
-changes still uncommitted. Runtime acceptance and measurement do not establish
-PR or merge status. Commit and merge this bounded checkpoint, preserving the raw
-evidence outside source control. Do not stage `Archive.zip` or `target/` captures.
-The separate untracked Podman runtime-image script is not required by this
-documentation update and needs its own inclusion decision.
+The user has confirmed the profiling/SC110 checkpoint merged to `main`. Preserve
+the raw evidence and matching binaries outside source control. Do not stage
+`Archive.zip` or `target/` captures. The later KC110 CLI adds a binary entry point
+in `src/main.rs` and a host helper. Preserve the historical SC110 measurements as
+accepted; any new comparison must build a fresh profiling session for the new
+checkout. Do not reuse a session whose source-input hashes have changed.
 
-Next planned work: define the trusted Keycloak adapter's evidence/binding and
-denial contract, verify its Kleis gates, then implement the minimal CLI integration
-in the agreed roadmap. Machine enrollment and external nonrollback boot-attempt
+The [KC110 Keycloak adapter contract](DESIGN_NOTES.md#keycloak-adapter-contract)
+is now developer-confirmed (201 positive / 201 hostile disproofs). Bounded CLI
+preflight has passed all 26 fixture checks and the binary build on the laptop.
+The Keycloak import filename mismatch is now corrected in generation and resume;
+40 local Python checks pass and real-server acceptance remains pending. Complete the [lab recovery and acceptance](scripts/keycloak/README.md)
+next. This script-only fix changes no measured Rust inputs. Strict live authority integration requires additional serialized-use
+evidence as specified there. Machine enrollment and external nonrollback boot-attempt
 consumption remain separate obligations. Further performance optimization is not
 a prerequisite for that work; guest CRUD, threads/SMP and native/FPGA bootstrap
 remain planned milestones.

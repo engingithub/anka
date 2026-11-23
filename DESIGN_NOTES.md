@@ -9,7 +9,8 @@ the project's purpose and development entry points. Architectural decisions
 and future directions belong in these documents rather than separate root notes.
 
 For current work, start with [DN-72: authority and persistence status](#dn72-status)
-and the [RR110 restart acceptance record](#stored-restart-runtime). For the closed rebuild, see the
+and the [KC110 Keycloak adapter contract](#keycloak-adapter-contract). Accepted
+restart evidence remains in [RR110](#stored-restart-runtime). For the closed rebuild, see the
 [DN-71 status table](#dn71-status) and [final 10.8 evidence](#phase-108-final-evidence).
 DN-1 through DN-71 and the detailed DN-72 entries retain decisions and test results
 at the time they were made. Read a checkpoint’s “next” or “pending” in that context;
@@ -13796,9 +13797,12 @@ This documentation update did not rerun or extend the accepted gates.
 
 <a id="dn72-status"></a>
 
-### Current status — stored restart merged; SC110 accepted, integration pending
+### Current status — SC110 merged; KC110 preflight implemented, acceptance pending
 
-**Phase 10.8 is closed and merged. Phases 10.9 and 10.10 remain open.**
+**Phase 10.8 is closed and merged. Within Phases 10.9–10.10, bounded artifact
+persistence, guest download, stored launch, independent restart and the SC110
+performance checkpoint are accepted and merged. The broader phases remain open
+pending production identity, enrollment, boot and deployment integration.**
 The protected virtual-NIC service can answer `/alive`. The persistence binder
 below governs a different service: accepting E8 does not authenticate HTTP
 requesters or authorize boot.
@@ -13819,7 +13823,7 @@ requesters or authorize boot.
 | Stored retrieval / live launch | SL110 foundation: 49 positive / 56 hostile explicitly disproved. [SR110 refinement](#stored-retrieval-launch): 92 positive / 78 hostile explicitly disproved locally. SR110 R1 accepted: 20 focused Rust tests passed in 7.20s. [AR110 read protocol](#artifact-read-protocol) formal gate passed: 117 positive / 98 hostile. AR110 Rust read codec/client and host TCP path accepted: 23 focused + 24 compatibility tests passed. [GD110 guest download](#guest-artifact-download) formal gate: 174 positive / 149 hostile explicitly disproved. GD110 retrieval and SR110 R2 fresh live admission are accepted and merged to main (user confirmation, 2026-11-18): 11 focused live-admission tests and the real witness passed (84.35s); full library suite: 1,935 passed, 0 failed, 19 ignored (307.91s). The subsequent bounded restart acceptance is recorded below. |
 | RR110 independent restart | [Composition gate](#stored-restart-contract): 234 positive / 192 explicitly disproved hostile witnesses. [Runtime acceptance](#stored-restart-runtime): 14 focused tests passed in 4.21s; real CC2/socket/NIC/file restart witness passed in 92.13s. Service-only, guest-only and combined restart cases launch the retained target to exit 42 without recompilation. |
 | Latest full release library regression | SC110 laptop log reviewed 2026-11-22: **1,964 passed, 0 failed, 20 ignored, 0 measured, 0 filtered out in 267.06s**. All 15 focused cases and the separately selected real GD110/SR110/RR110 witnesses also passed (70.30s/69.50s/69.53s). Ignored tests are not all claimed as executed. |
-| Integration status | The user confirmed RR110 merged to `main` on 2026-11-19, after the passing focused/real gates and 1,949-test suite. The [SC110 checkpoint](#scalar-read-runtime) now has accepted formal, Rust and measured laptop evidence; profiling/SC110 changes are uncommitted on `main` in the supplied status. After commit/merge, the next planned task is the Keycloak adapter contract and Kleis gates, followed by CLI integration, enrollment/boot authorization and installation work. |
+| Integration status | The user confirmed RR110 merged to `main` on 2026-11-19, after the passing focused/real gates and 1,949-test suite. The [SC110 checkpoint](#scalar-read-runtime) now has accepted formal, Rust and measured laptop evidence; the user confirmed profiling/SC110 merged to `main`. The [KC110 adapter contract](#keycloak-adapter-contract) is developer-confirmed (201 positive / 201 hostile disproofs). Bounded CLI preflight is implemented with 26 passing local Python checks; The laptop passed those checks and the Rust binary build. The startup log identified an import filename/realm mismatch; generator and resume repair are corrected, with 40 local Python checks passing and real-server acceptance pending. Strict live use, enrollment/boot authorization and installation remain open. |
 
 E7/E8 are merged to main. The 148-test E10 run includes E8’s tests; it is a
 persistence reference result, not a whole-system regression.
@@ -17061,7 +17065,7 @@ bash scripts/check-anka110-stored-live-launch.sh --real
 
 These live-admission gates have passed. The independent bounded restart acceptance
 described below has also passed and was merged to main. SC110 has since passed
-formal, Rust and laptop measurement acceptance; its commit/merge is pending.
+formal, Rust and laptop measurement acceptance and was merged by user confirmation.
 The [agreed post-RR110 plan](#post-rr110-plan) now proceeds toward identity integration.
 
 
@@ -17281,10 +17285,11 @@ runs the focused RR110 and T2 filters and existing stored-live-launch regression
 gates, then selects the real restart witness. Omitting `--real` skips that costly
 witness. The focused/real gates and the subsequent full release library suite
 have now passed as recorded above. Re-run affected checks if runtime code changes.
-RR110 integration is complete by the user's merge confirmation. SC110 is accepted
-and awaits commit/merge. The next planned task is the Keycloak adapter contract
-and Kleis gates in the [agreed plan](#post-rr110-plan); CLI integration, enrollment
-and boot authorization follow; broader T3–T5, production deployment,
+RR110 and SC110 integration are complete by the user's merge confirmations.
+The KC110 adapter contract is developer-confirmed in the [agreed plan](#post-rr110-plan).
+Bounded CLI preflight is implemented; Rust/real Keycloak acceptance, separate
+strict live-use integration, enrollment and boot authorization follow.
+Broader T3–T5, production deployment,
 whole-machine reboot and the compiler backlog are not silently added to RR110
 acceptance.
 
@@ -17528,8 +17533,8 @@ is implemented by this documentation change.
 | Sequence | Task and evidence required |
 | --- | --- |
 | 1 — design now | Define the host-independent boot/enrollment responsibilities: installation credential, selected trust anchor, enrollment entitlement, machine boot versus personal login, selected workload admission, one-use freshness, recovery and online/offline policy. Settle precise contracts before coding them. |
-| 2 — accepted; integration pending | SC110 formal, focused/full/real Rust checks and fresh laptop measurements accepted. Median rebuild/restart workload times reduced 19.8%/17.6%. Preserve both sessions and recording caveats; commit and merge the profiling/SC110 checkpoint. |
-| 3 — next planned task | Define and verify the Keycloak trusted-adapter contract in Kleis, then add a minimal command-line integration. Start with a separate Podman Keycloak service and persistent database, independent of Anka and artifact-service restarts. Replace selected deterministic evidence fixtures with verified identity/permission evidence. Test allowed and denied operations, wrong issuer/audience, expiration, revocation and authority outage. |
+| 2 — accepted and merged | SC110 formal, focused/full/real Rust checks and fresh laptop measurements accepted. Median rebuild/restart workload times reduced 19.8%/17.6%. Preserve both sessions and recording caveats; user confirmed profiling/SC110 merged to `main`. |
+| 3 — KC110 preflight implemented, acceptance pending | Formal 201/201 developer-confirmed. CLI preflight and separate pinned Podman Keycloak/persistent PostgreSQL lab implemented; 26 local Python checks pass. The laptop passed the original 26 checks and Rust binary build. The import filename mismatch is fixed in generation and resume; 40 local Python checks pass. Real-server acceptance remains pending. Preflight stays outside effecting provider callbacks. Replacing deterministic current-authority fixtures requires the separate serialized-use mechanism and real denial/revocation/outage acceptance in KC110. |
 | 4 | Implement installation enrollment and boot authorization with explicit machine-credential provisioning, authenticated trust selection and externally retained attempt consumption. Specify rollback/crash/retry behavior and verify the platform-independent flow in the emulator. |
 | 5 | Build the installation wizard on the tested CLI enrollment/recovery operations. Implement the native/FPGA bootstrap adapter when a concrete hardware target determines firmware, key storage and communication facilities. |
 
@@ -17543,7 +17548,7 @@ The profiling harness, both sets of six unprofiled runs and both pairs of Time
 Profiler exports have been reviewed. SC110 is accepted below; median workload
 reductions are 19.8%/17.6%. Detailed phase timers and whole-workload allocation
 counts remain unmeasured. No further optimization is required before the identity
-contract work; the present checkpoint still needs commit/merge.
+contract work; the user has confirmed the profiling/SC110 merge.
 
 **Keycloak's role.** Keycloak is the intended first deployed identity and
 authorization provider. Its product/protocol choices belong in an adapter, not
@@ -17562,8 +17567,9 @@ Keycloak and its persistent database remain separate from the artifact service
 and guest lifecycle. Container persistence alone does not provide rollback
 protection. A first local experiment may use development startup; the later
 acceptance configuration must state its transport trust, stable issuer, database,
-credential storage and recovery assumptions. No Keycloak extension or particular
-credential encoding has been implemented or mandated by this note.
+credential storage and recovery assumptions. The original roadmap did not select a credential encoding. KC110 below now
+selects a certificate-bound access-token profile; its wire encoding and runtime
+configuration still require implementation acceptance.
 
 **Host-independent boot.** The initial installation credential and configured
 trust belong to the installation's trusted boot environment. The emulator may
@@ -17611,7 +17617,7 @@ accepted bounded trusted-provider assumptions.
 **Discussion recorded 2026-11-19; harness prepared 2026-11-22 after the developer
 confirmed the roadmap merge. Six valid unprofiled runs and two Time Profiler
 exports were reviewed on 2026-11-22. The subsequent SC110 comparison and laptop
-correctness results are now accepted below; commit/merge is pending.**
+correctness results are accepted below; the user subsequently confirmed merge.**
 Use Instruments on the developer's Apple Silicon Mac to measure host cost in the
 Rust Anka64 emulator. Start with sampling before adding instrumentation. The
 question is how much host work is spent per unit of guest work, and where it
@@ -17725,8 +17731,8 @@ Reference material checked 2026-11-19:
 
 **2026-11-22: 146 positive witnesses and 146/146 hostile disproofs pass both
 locally and on the developer Mac. Laptop compilation, focused/full/real-path
-tests and measured performance acceptance are complete; commit/merge remains
-pending.** This is
+tests and measured performance acceptance are complete; the user subsequently
+confirmed merge to `main`.** This is
 one measured follow-up to the first laptop baseline, not a new ISA, authorization
 policy or instruction cache. The measured reference source allocates `read_data` in
 `Fabric::phase_commit`, clones it in `execute_read`, and later frees the retained
@@ -17811,7 +17817,7 @@ remains planned; performance work is bounded rather than an open-ended prerequis
 
 <a id="scalar-read-runtime"></a>
 
-### SC110 Rust and laptop performance — accepted, integration pending
+### SC110 Rust and laptop performance — accepted and merged
 
 The accepted theories remain unchanged. `state/read_payload.rs` defines an owned
 `ReadPayload`: an eight-byte inline array plus logical length for CPU scalars,
@@ -17893,7 +17899,293 @@ completed with expected exit status (42/0); rebuild retains recorder status
 `capture_issue` because xctrace returned 54. This is separate from target completion.
 See [full evidence, manifests and limitations](PERFORMANCE.md#sc110-accepted-results).
 
-The supplied git status still shows profiling/SC110 changes uncommitted on `main`.
-Acceptance does not imply a commit, PR or merge. After checkpoint integration,
-proceed to the Keycloak adapter contract and Kleis gates; remaining instruction
-execution/cleanup costs are observations, not authorization for another optimization.
+The user subsequently confirmed profiling/SC110 merged to `main`. The KC110
+adapter contract below is now developer-confirmed and bounded CLI preflight is
+implemented, with laptop runtime acceptance pending. Remaining instruction
+execution/cleanup costs are observations, not a prerequisite for identity work.
+
+
+<a id="keycloak-adapter-contract"></a>
+
+### KC110 — Keycloak trusted-adapter contract (2026-11-23)
+
+**Delivery:** `anka110_keycloak_adapter.kleis` and its false-witness counterpart,
+selected by `--only-keycloak-adapter` and included in the default gate sweep.
+**Local result: 201 positive witnesses; 201/201 hostile assertions explicitly
+disproved.** Existing caller-verifier (45/39), storage-verifier (43/36), evidence-provider
+(116/94), persistence (59/50) and reboot (28/22) pairs also passed locally; each
+pair is positive witnesses / explicit hostile disproofs. The full formal sweep
+was not repeated. The developer subsequently confirmed the KC110 201/201 pair.
+The original formal delivery changed no Rust code. The follow-up implementation
+below adds the bounded CLI entry point; no Rust build or real Keycloak deployment
+was performed here. SC110 and the profiling harness were merged to `main` by user
+confirmation before this work.
+
+#### Boundary and first implementation scope
+
+The existing E9/E10 caller verifier and E11 storage verifier already require
+verified credential/holder statements and current authority under serialized use.
+Their Rust provider traits are bounded, nonblocking callbacks under a registry
+guard. Do not perform HTTP, discovery, key refresh, credential acquisition or
+interactive login inside those callbacks. KC110 models the external adapter
+boundary and projections into the existing predicates; it does not replace them.
+
+| Stage | Evidence | Permitted outcome |
+| --- | --- | --- |
+| `kc110_preflight` | Configured token verification and correlated, bounded-age active introspection observation | Diagnostic identity observation only; no reusable capability or backend effect |
+| `kc110_candidate` | Preflight plus trusted subject mapping, exact local grant, holder proof and live channel | Candidate for a specific request; still not current authority |
+| `kc110_ready` | Candidate plus a separate serialized current-authority receipt and usable budget | May proceed to the existing operation/Fabric gate for this use only |
+| `kc110_attempt` / `kc110_effect` | Recomputed ready, existing operation gate, owned budget and fresh use sequence | Spend work, retain deadline and advance the sequence; only an admitted use adds an effect. Denial preserves history and emits nothing new |
+
+The Rust/CLI delivery implements **bounded preflight first**, with a separate
+Podman Keycloak lab and persistent database state for laptop acceptance. Its output
+is explicitly diagnostic; it does not install `Verdict::Valid` current authority
+in any live provider. This supplies a concrete credential integration step without
+weakening the accepted contracts. A subsequent live adapter requires the
+current-authority mechanism below and its own real-path acceptance.
+
+#### Selected credential and binding profile
+
+KC110 selects signed **access tokens with certificate holder binding** for the
+first profile. Ordinary bearer, ID, refresh and offline tokens cannot substitute.
+Use a configured signature-algorithm allowlist and trusted issuer key set; reject
+`none`, wrong algorithm/key use, unknown or ambiguous keys, malformed/duplicate
+security claims and missing required fields. Unverified `iss`, `jku`, `x5u`, `kid`
+or discovery redirects must not choose network destinations or trust anchors.
+Key IDs select only within the configured issuer's trusted key set.
+
+Exact access-token typing is pinned to the chosen Keycloak version and realm
+configuration during implementation. Do not assume that Keycloak's default token
+header implements the RFC 9068 `at+jwt` profile. Required mutually exclusive
+validation rules must be demonstrated with actual access, ID and refresh tokens.
+The model's `profile=1` denotes that verified profile, not a self-asserted JWT field.
+
+The selected OAuth resource audience identifies the adapter/resource server.
+Audience-array membership is exact, never substring matching. The issuing client
+is independently checked (`azp`/`client_id` according to the pinned profile).
+The Anka installation is a separate configured value, obtained through an enabled
+mapping keyed by verified issuer, immutable subject and client. Never treat a
+display name, email address or matching role string as an Anka principal. Mapping
+changes advance the Anka policy epoch and invalidate earlier candidates.
+
+For holder binding, verify the token's `cnf.x5t#S256` against the certificate
+actually observed by the trusted TLS stack, and verify possession of its private
+key. A caller-supplied certificate header or socket address is insufficient.
+KC110 additionally requires a domain-separated Anka proof over the full scope
+below, including token identity. Caller and storage-server proof domains are
+distinct. The concrete signed encoding must be specified before implementation;
+canonical field equality in Kleis is not a proof of that encoding. Direct TLS
+termination in the trusted adapter is the first target; proxy-forwarded identity
+and TLS termination elsewhere need separate authenticated-binding contracts.
+
+| Model input | Runtime refinement obligation |
+| --- | --- |
+| `KC110Config` | Trusted issuer/endpoints/TLS roots, resource audience, issuing client, installation, policy and key-set revisions, selected profile and finite limits |
+| `KC110Token` | Verified canonical token identity, issuer-scoped subject, audience membership, client, holder certificate/key identity, signature/profile and validity |
+| `KC110Mapping` | Enabled trusted mapping to Anka principal kind, installation and current policy; not fields freely supplied by the guest |
+| `KC110Scope` | Installation, policy, peer/kind, complete artifact identity/generation, exact request identity, operation/direction, runtime, connection, binding, local endpoint, incarnation, serial and challenge |
+| `KC110Status` | Authenticated introspection result for the exact token and locally owned query; query-start and response-observation monotonic times |
+| `KC110Proof` / `KC110Grant` | Checked full-scope holder statement and explicit Anka permission, both tied to the same token; grant validity is independently checked |
+| `KC110Fence` | Independent serialized current-authority receipt for token, full scope, key-set revision and one local use sequence at the current tick |
+| `KC110Budget` | Trusted owned remaining work, original deadline and monotonic high-water mark, preserved across retries and reconnects |
+
+All 64-bit IDs denote opaque, collision-free equality references within this model.
+The implementation must retain full strings/bytes or collision-resistant verified
+identities with appropriate collision handling; it must not truncate UUIDs,
+certificate thumbprints, tokens or artifact digests to 64 bits. The request identity
+freezes all operation fields, including byte range, attempt/sequence and payload
+identity where applicable. References and query/use counters must not be recycled
+within their authority lifetime and must fail closed before wrap.
+
+#### Time, introspection and revocation semantics
+
+Token and grant validity use trusted wall time with an inclusive start and exclusive
+expiry. No positive expiry grace is modeled. The adapter must deny on unavailable
+or untrustworthy time and detect wall-clock rollback; that trusted-clock mechanism
+is an implementation obligation. `iat` cannot be in the future. For a profile where
+`nbf` is absent, derive the effective start from a checked `iat`; malformed or
+missing required time claims deny. No unsigned timestamp arithmetic may wrap.
+
+Introspection uses authenticated HTTPS to the configured endpoint with a confidential
+client and a bounded POST/JSON exchange. Missing, inactive, malformed, mismatched,
+timed-out and unavailable responses deny preflight. Verified JWT claims and any
+duplicated introspection claims must agree; the checked-response verdict covers
+this correlation. A response is bound to the locally owned request and full token
+identity, not only to a `jti` string or an attacker-echoed nonce.
+
+Observation age begins **before** the request, so a slow response cannot reset its
+lifetime. Require start ≤ observation ≤ current tick and age strictly below the
+configured limit. Monotonic time is independent of JWT wall time. The witness
+configuration uses five monotonic units; this is not a universal deployment value
+or a promise of five-second revocation. The first CLI should make a fresh query
+per preflight and never fall back to cached success on timeout/outage.
+
+**An active response is not current authority at a later effect.** RFC 7662
+describes observation and caching; it provides no transaction shared with Anka.
+Even a fresh request leaves a response-to-use race. A local mutex cannot serialize
+a remote Keycloak administrator's changes. Keycloak logout, disabling a client,
+role changes and token revocation also need separate pinned-version tests; do not
+assume they invalidate every outstanding token in the same way.
+
+For strict live use, the trusted integration must supply an independent mechanism
+that orders relevant credential/permission revocation and policy/key changes with
+the effect and accounts for disconnection. Options such as an authority coordinator,
+fencing protocol or explicitly enforced lease semantics need a further contract
+and implementation; a locally incremented serial alone is insufficient. KC110
+requires this receipt but implements none of those producers. An introspection-only
+adapter therefore leaves `KC110Fence.current` Unknown and **cannot pass ready**.
+This preserves E9/E11 current-use semantics rather than silently redefining them
+as bounded-stale permission. Offline/cached admission needs its own explicit policy.
+
+At each effect, reply fragment and final EOF/result delivery, recheck the exact
+scope, current evidence and deadline under the existing local authority guard.
+Every attempt spends one remaining work unit, including malformed/denied attempts;
+zero remains zero. Retrying cannot extend the deadline or mint a fresh budget.
+A nonzero nonwrapping use sequence advances on every attempt; the previous
+receipt cannot authorize the next attempt even within the same clock tick.
+Denied suffixes do not erase already disclosed prefixes or undo earlier commits.
+
+#### Composition, formal scope and acceptance
+
+The theories import the existing E11/E9 chain. The caller projection exercises
+`v110_verified`; the storage-server projection exercises the E11 statement
+checks, and cross-direction substitution is rejected. Exact artifact/request
+scope remains in the enclosing KC110 check because the older credential records
+do not carry those fields. Publication into E9/E11 is permitted only after ready;
+pure projection helpers are not evidence-producing APIs. Existing permits,
+resource charges, content/dependency checks and execute/boot admission still apply.
+
+The model covers E9/E11 operation tags 1/2, not a new CRUD or execute protocol.
+Boot additionally requires a distinct boot grant, external one-use consumption
+and the existing boot gate. Ordinary adapter use preserves boot state. `exp`,
+`jti`, a query ID or a persistent Keycloak database is not rollback protection.
+
+The 201 positive cases include complete success witnesses, individually changed
+credential/mapping/status/proof/grant/fence fields, every exact scope field,
+time/size/work boundaries, retries, role separation, E9/E11 projection and boot
+separation. Quantified primitive-field obligations cover expiry/deadline
+exclusion, monotonic work and sequence, denied-effect preservation, deadline
+retention and caller projection across admissible times. The 201 negative
+counterparts must each be explicitly disproved; unknown/error/timeout is failure.
+This is a bounded semantic contract with trusted primitive inputs, not a proof of
+JWT parsing, cryptography, TLS, Keycloak internals, Rust refinement or distributed
+revocation atomicity. No new axioms are introduced.
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" --only-keycloak-adapter
+```
+
+The bounded CLI acceptance obligations are to pin Keycloak image/version,
+realm/client settings, database persistence, TLS trust and access-token profile;
+use protected credential inputs and redact tokens/secrets from diagnostics. It must
+exercise real certificate-bound access tokens, wrong issuer/audience/client/type,
+wrong holder, expiry, unknown keys, rotation, inactive status, malformed/oversized
+responses, timeout and unavailable authority. Record each revocation operation's
+actual behavior. The token/JSON input cap is at most 16 KiB in this model; all
+network/key-set buffers and retries must also receive explicit finite limits.
+The preflight CLI's diagnostic success must still fail an attempted live effect
+without a current-authority producer. No identity tokens or credentials should
+be placed in the untrusted guest or raw artifacts.
+
+Later live acceptance must test revocation between observation and effect, changed
+configuration during verification, stale receipt replay, suffix suppression and
+current EOF delivery through the actual CC2/socket/NIC/file path. Retain current
+Kernel accounting and the independent boot-attempt consumption mechanism. The
+installer, personal login, general CRUD, threads/SMP and native bootstrap remain
+separate milestones.
+
+#### Bounded CLI implementation delivered (2026-11-23)
+
+`src/keycloak_preflight.rs` adds `anka keycloak-preflight --config FILE`; it invokes
+`scripts/keycloak/preflight.py` from the build checkout, using isolated Python and
+OpenSSL without adding Cargo dependencies. It never enters provider callbacks,
+opens the artifact store or publishes a credential. Success always leaves
+`current_authority` unknown, `live_admission` false and `boot_authorized` false.
+
+The initial wire profile is `keycloak-26.8.1-rs256-mtls-v1`: exact RS256/JWT header,
+signed Bearer access-token type, trusted issuer/resource audience/issuing client,
+integer validity, one certificate thumbprint, explicit CA roots, matching local
+holder key/certificate, fresh JWKS and confidential authenticated introspection.
+All shared claims are correlated without type coercion. Input files are protected,
+bounded and rechecked before success. The deadline never restarts; two network
+requests have no retries/cache/redirect/discovery. Token/config/JSON caps are
+16 KiB, other files 64 KiB, JWKS at most 16 keys, and the full HTTP stream including
+framing/trailers is capped at 128 KiB. A process supervisor terminates the worker
+and OpenSSL group after 30 seconds, including a stalled DNS call. The configured
+operation deadline is at most 20 seconds; observation age starts before the query.
+These are diagnostic bounds, not a new live retry or authority receipt mechanism.
+
+`scripts/keycloak/lab.py` generates private local credentials and a pinned
+Keycloak 26.8.1/PostgreSQL lab, persists its database, and exercises real bound
+tokens, wrong issuer/audience/client/holder, realm-not-before inactivity, RSA key
+rotation/withdrawal, exclusive expiry, outage and server restart. It records exact
+observed denial reasons and immutable image IDs. It modifies only its disposable
+lab; no claim is made about logout/client-disable semantics. The complete
+[setup, input/output contract and acceptance commands](scripts/keycloak/README.md)
+include container-removal/database-persistence verification.
+
+**Validation:** 26 local Python checks pass using actual RSA/OpenSSL and mutual
+TLS fixtures, plus strict parser/correlation, key rotation, response framing,
+input replacement, clock/deadline, child termination and redaction tests. No Rust
+compilation/tests or real Podman/Keycloak run were performed here. Laptop acceptance
+is the immediate next step. The next implementation milestone is the independent
+serialized current-authority mechanism and its formal contract, followed by trusted
+mapping/full-scope proofs/grants and the live adapter. Diagnostic success alone
+cannot satisfy `kc110_ready` or E9 current validity. This delivery does not implement
+boot authorization, enrollment or a guest credential API.
+
+#### First laptop run and lab recovery (2026-11-23)
+
+The uploaded `test-output-keycloak-1.txt.zip` records **26/26 Python fixture checks
+passing in 4.410s** and a successful `cargo build --bin anka --locked` in **4.64s**.
+The 353 compiler warnings did not fail the build; no full Rust suite result was
+supplied. Both lab `start` and subsequent `check` emitted only the old generic
+failure. No container status or server logs were supplied, so the startup root
+cause was unknown at that point; the subsequent server log is recorded below.
+
+The follow-up leaves Rust and preflight verification unchanged. It adds a
+read-only `doctor` report with allowlisted diagnostics, phase-specific failure
+JSON, and recovery that reuses running or restarts stopped pinned containers
+instead of trying to create duplicates. Podman lookup errors are no longer
+treated as absent resources. No database volume, credentials or containers are
+automatically deleted during recovery. Nine new mocked lifecycle/diagnostic tests
+pass with the existing 26 fixtures (35 total locally). No Rust or real Podman
+execution was performed here. The immediate next step is the documented
+[doctor/resume procedure](scripts/keycloak/README.md#recovery-for-the-first-laptop-run),
+then real-server acceptance. These corrections do not establish a live authority
+producer or weaken any preflight denial gate.
+
+#### Confirmed import-filename failure and repair (2026-11-23)
+
+The developer subsequently confirmed all 35 previous Python checks. The Keycloak
+server log then identified the startup failure: `anka-realm.json` contained realm
+`anka-kc110`, requiring filename `anka-kc110-realm.json`. This was a lab generator
+bug, not a Rust compilation failure or evidence of a failed identity check.
+
+The generator now derives the filename from `REALM`. Before starting or resuming,
+the lab validates the import and migrates the legacy filename without changing
+its contents, permissions, credentials or database. Conflicting filenames,
+wrong realm content, symlinks and unsafe permissions fail explicitly. The doctor
+recognizes the exact filename-mismatch diagnostic. Five additional regressions
+pass with the existing 35 checks (40 locally). Rust, the preflight verifier and
+formal gates are unchanged; no Rust compilation/tests or real Podman execution
+were performed here. Resume the retained lab, then rerun real-server acceptance.
+
+#### Primary sources reviewed 2026-11-23
+
+- [KC1: Keycloak OIDC endpoints](https://www.keycloak.org/securing-apps/oidc-layers):
+  authenticated token introspection and distinct access/refresh-token endpoints.
+- [KC2: Keycloak Server Administration](https://www.keycloak.org/docs/latest/server_admin/index.html):
+  audience configuration, certificate-bound tokens and session/revocation behavior.
+  This is a rolling guide; the runtime task must pin a concrete release and test it.
+- [KC3: RFC 7662](https://www.rfc-editor.org/rfc/rfc7662.html), sections 2 and 4:
+  authenticated active-state observation, response correlation and caching limits.
+- [KC4: RFC 8725](https://www.rfc-editor.org/rfc/rfc8725.html), section 3:
+  algorithm/key/issuer/audience validation and mutually exclusive JWT profiles.
+- [KC5: RFC 8705](https://www.rfc-editor.org/rfc/rfc8705.html), section 3:
+  certificate-bound access tokens and TLS certificate confirmation.
+
+The exact Anka mapping, scope proof, effect fence, budget and boot separation are
+KC110 design decisions, not features claimed to be supplied by those standards.

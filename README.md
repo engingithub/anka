@@ -59,7 +59,10 @@ Anka64.
 
 ## Current checkpoint — stored restart and SC110 accepted
 
-**Phase 10.8 is closed and merged. Phases 10.9 and 10.10 remain open.**
+**Phase 10.8 is closed and merged. Within Phases 10.9–10.10, bounded artifact
+persistence, guest download, stored launch, independent restart and the SC110
+performance checkpoint are accepted and merged. The broader phases remain open
+pending production identity, enrollment, boot and deployment integration.**
 The protected service stack serves `/alive` through the virtual NIC. CC2 guests
 upload and retrieve actual linked images through typed sockets, NIC DMA, guarded
 localhost TCP and a durable host-file store. Fresh execute admission runs the
@@ -84,8 +87,8 @@ The ignored real witness has its own passing result; the ordinary full suite
 does not execute it or the other ignored tests. Overlapping groups are not added.
 
 **Integration status:** the developer confirmed RR110 merged to `main`, followed
-by the roadmap documentation merge. Profiling and SC110 are validated on the laptop,
-but remain local, uncommitted changes on `main` in the supplied git status.
+by the roadmap documentation merge. The developer has also confirmed the
+profiling harness and SC110 checkpoint merged to `main`.
 The original and SC110 comparison sessions have been reviewed; see
 [accepted measurements and limitations](PERFORMANCE.md#sc110-accepted-results).
 
@@ -115,10 +118,29 @@ fell **85.05 → 70.11 s (17.6%)**, over three runs per workload and build. Thes
 are emulator measurements on one laptop, not isolated restart latency or FPGA
 speedup. Preserve both [profiling sessions](PERFORMANCE.md#sc110-accepted-results).
 
-After this checkpoint is committed and merged, the next planned task is the
-Keycloak trusted-adapter contract and Kleis gates, followed by minimal CLI
-integration. Enrollment and external boot-attempt consumption remain separate
-planned work; further optimization is not a prerequisite.
+The [KC110 Keycloak adapter contract](DESIGN_NOTES.md#keycloak-adapter-contract)
+is developer-confirmed: **201 positive witnesses and 201/201 hostile disproofs**.
+The bounded `anka keycloak-preflight` command is now implemented, with a protected
+host helper, real RSA/mTLS fixture checks, and a separate persistent Podman lab.
+**The developer Mac passed all 26 fixture checks and built the Rust binary.**
+Keycloak startup failed because the import filename did not match the realm.
+The generator and existing-lab recovery now use `anka-kc110-realm.json`.
+All 40 Python checks pass locally; real Keycloak acceptance must be rerun. See [setup and acceptance](scripts/keycloak/README.md).
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" --only-keycloak-adapter
+```
+
+Run the host fixtures with `bash scripts/check-anka110-keycloak-preflight.sh`.
+Use the existing binary and follow the documented `doctor` / `resume` procedure
+for the pinned Keycloak 26.8.1 lab. Diagnostic success reports `current_authority: unknown`,
+`live_admission: false` and `boot_authorized: false`; it publishes no capabilities.
+Next live-provider work requires the separate serialized-authority mechanism,
+full-scope holder proof, trusted mapping and grants. Ordinary introspection cannot
+supply current operation authority. Enrollment and external boot-attempt
+consumption remain separate planned work.
 
 Reproduce the restart acceptance from the repository root:
 
