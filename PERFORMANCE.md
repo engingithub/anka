@@ -390,17 +390,22 @@ KC110 preflight is now accepted and merged by developer confirmation: 201/201
 formal witnesses, 40 Python checks, the Rust binary build and all 14 real Keycloak
 acceptance cases passed. No new full Rust suite is claimed for this milestone.
 The [SA110 coordinator contract](DESIGN_NOTES.md#serialized-current-authority)
-is accepted on the laptop: 185 positive / 185 hostile disproofs, 33/33 focused Rust,
-and a full library suite of 1997 passed / 0 failed / 20 ignored. AC110 now adds a
-closed coordinator-to-Keycloak administration probe; its Rust/real Podman acceptance
-is pending. No new live authority or performance acceptance is inferred.
-This changes Rust source inputs; create a fresh profiling session for any new
-comparison. No SA110 timing or speedup is claimed. Keep the historical SC110 evidence.
+and AC110 administrative lab harness are accepted and merged. SA110 passed 185/185
+formal and 33/33 focused Rust; AC110 passed 56/56 formal, 21 new Python checks plus
+40 regressions, 15/15 focused Rust and the real Podman probe. The latest full suite
+passed 2012 tests, with 0 failures and 20 ignored (272.04s). No new live authority
+or performance acceptance is inferred. These runtime changes require a fresh
+profiling session for new comparisons. No SA110/AC110 speedup is claimed; preserve
+the historical SC110 evidence. This documentation update adds no measurements.
 
-Strict live authority requires exclusive mediation of relevant authority changes
-and guarded local use; introspection alone remains insufficient. Machine enrollment,
-external boot-attempt consumption, guest CRUD, threads/SMP and native/FPGA bootstrap
-remain planned work. Further optimization is not a prerequisite for this contract.
+The [LG110 formal contract](DESIGN_NOTES.md#local-grant-contract) separates
+bounded external identity evidence from locally serialized grants and revocation.
+Anka64 cannot control Keycloak and requires no runtime administrator credentials
+or internal policy inspection. Future runtime measurements should separate token
+verification, remote observation and local grant checks. AC110's administrative
+mutations are test-fixture work, not ordinary runtime cost. Enrollment, external
+boot-attempt consumption, guest CRUD, threads/SMP and native/FPGA bootstrap remain
+planned work. Further optimization is not a prerequisite for the next contract.
 
 ## References
 
@@ -411,3 +416,13 @@ remain planned work. Further optimization is not a prerequisite for this contrac
   use the installed `man xctrace` for version-specific syntax.
 - [Apple developer discussion of non-Xcode Processor Trace permissions](https://developer.apple.com/forums/thread/791270).
 - [Design plan](DESIGN_NOTES.md#xcode-performance-probing).
+
+
+## LG110 formal follow-up
+
+The [LG110 contract](DESIGN_NOTES.md#local-grant-contract) now specifies bounded
+external identity observations and locally controlled grants. This delivery changes
+only theories, gate selection and documentation; no new runtime measurement or
+speedup is claimed. The next implementation should measure remote verification
+separately from local grant checks and Kernel/file work. AC110 administrative
+mutations remain lab setup work. Historical SC110 results remain unchanged.

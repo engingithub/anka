@@ -27,9 +27,10 @@ Keep it and all private state outside Git. A new full Rust suite was not reporte
 for KC110. No Rust or real Podman run was performed in the delivery environment.
 The following commands reproduce acceptance; they are not outstanding blockers.
 The CLI remains diagnostic and publishes no live/boot authority. SA110 formal
-and Rust gates are accepted (185/185 formal, 33/33 focused Rust; full suite
-1997 passed, 0 failed, 20 ignored). AC110 below connects the closed coordinator
-to lab administration, without enabling production current authority.
+and Rust gates are accepted (185/185 formal, 33/33 focused Rust). SA110 and AC110
+are merged by user confirmation. AC110 passed 15/15 focused Rust and the real Podman
+probe; the latest full suite passed 2012 tests, with 0 failures and 20 ignored.
+AC110 is an administrative test harness and supplies no runtime authority.
 
 ## Run on the laptop
 
@@ -254,10 +255,13 @@ They do not prove Keycloak internals, distributed revocation atomicity or
 Rust refinement. The laptop binary build has passed; run the real acceptance above and your
 normal Rust suite on the laptop; retain the results when reproducing this accepted milestone.
 
-Next: run the AC110 control-path acceptance below. After that, enforce exclusive
-administration and implement the trusted Keycloak source, principal mapping,
-full-scope holder proof and explicit grants. HTTP stays outside guarded callbacks.
-The real CC2/typed-socket/NIC/file admission path, external boot-attempt consumption,
+The [LG110 formal contract](../../DESIGN_NOTES.md#local-grant-contract) is delivered below.
+Next implement the ordinary-client identity adapter, principal mapping,
+full-scope holder proof and explicit local grants. Anka64 cannot control Keycloak;
+no runtime admin credential, internal policy inspection or exclusive-writer
+attestation is required. Remote freshness and local revocation need separate
+semantics. HTTP stays outside guarded effect callbacks. The real
+CC2/typed-socket/NIC/file admission path, external boot-attempt consumption,
 enrollment, installation, guest CRUD and threads/SMP remain separate work.
 
 Sources for this pinned setup: [Keycloak 26.8.1 release](https://www.keycloak.org/2026/10/keycloak-2681-released),
@@ -279,12 +283,13 @@ This new command uses the actual Rust SA110 coordinator to close a barrier befor
 remote administration. It temporarily raises realm `notBefore`, verifies old-token
 inactivity, restores the saved value, and verifies fresh-token activity. It leaves
 the coordinator **closed**, with current authority **Unknown** and live/boot
-admission **false**. It exercises the administration path; it does not establish
-exclusive writer control or connect live file operations yet.
+admission **false**. It exercises a privileged disposable-lab administration path.
+It is not an ordinary runtime adapter and never supplies live file grants.
 
-Local acceptance is 56/56 formal and 21 new Python tests, plus 40 existing Python
-regressions. Fifteen new Rust tests and this real Podman probe have not been run in
-delivery. Use the already prepared private lab, not production credentials:
+Acceptance is 56/56 formal and 21 new Python tests, plus 40 existing Python
+regressions. The developer confirmed 15/15 AC110 and 33/33 SA110 Rust tests, this
+real Podman probe, and a full suite of 2012 passed / 0 failed / 20 ignored (272.04s).
+Both slices are merged. To reproduce, use the prepared private disposable lab:
 
 ```bash
 python3 scripts/keycloak/lab.py resume --state target/keycloak-preflight-01
@@ -300,7 +305,8 @@ The directory, credentials and recovery files must remain private. Do not run
 other lab administration (including `lab.py check`) concurrently. The advisory
 lock protects AC110 workers only; it does not fence direct administrators, database
 writers or automatic server changes. Setting `hostname-admin` is not sufficient
-to restrict Admin REST access; deployment enforcement remains future work.
+to restrict Admin REST access. These are harness isolation limits; they do not
+create a requirement for Anka64 to administer or fence Keycloak.
 
 If the worker fails, inspect private `control-failure-*.json` for the fixed reason.
 If `control-recovery.json` exists, a new probe refuses to start. Recover using:
@@ -323,3 +329,40 @@ by the probe stay in worker memory; the fixed binary pipe contains only correlat
 and bounded result fields. The worker uses TLS endpoint observations for this
 control probe; KC110's separate signature/preflight checks remain unchanged.
 See [the full AC110 contract and limitations](../../DESIGN_NOTES.md#keycloak-control-probe).
+
+
+## Runtime and test credential separation
+
+Keycloak is externally administered. The ordinary Anka64 adapter must validate
+configured token/signature/holder evidence and, when required, authenticate to
+introspection using ordinary client credentials. It must not use Admin REST,
+inspect internal policies or depend on this lab's privileged credentials.
+Anka64 controls local grant issuance, scope, revocation and effect ordering.
+
+AC110's separate administrator credential is only for provoking remote changes in
+the disposable lab. Passing that probe does not turn remote observations into
+current local permission. The [next Kleis contract](../../DESIGN_NOTES.md#external-identity-local-authority)
+will explicitly define freshness, expiry, outage and local grant semantics, and
+refine KC110/SA110 before any live admission. The existing default-denying source
+and flags remain unchanged in this documentation update.
+
+
+## LG110 formal gate and next runtime slice
+
+The [local grant contract](../../DESIGN_NOTES.md#local-grant-contract) is now delivered
+as `anka110_local_grants.kleis` plus hostile witnesses. Run the selector from the
+repository root:
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" \
+  --only-local-grants --timeout 1800
+```
+
+Next is the bounded local grant owner and trusted ordinary-client evidence interface.
+The existing AC110 privileged helper remains a disposable-lab fixture for provoking
+remote changes; it supplies no local grant or runtime admin credential. Remote
+outage retains only an already issued grant's bounded validity. Local revocation is
+terminal for that grant, including when a positive refresh reply arrives later.
+The Rust/live file path has not been changed or tested by this formal delivery.

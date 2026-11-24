@@ -13797,7 +13797,7 @@ This documentation update did not rerun or extend the accepted gates.
 
 <a id="dn72-status"></a>
 
-### Current status — KC110 merged; SA110 accepted; AC110 control probe delivered
+### Current status — KC110, SA110 and AC110 merged; LG110 formal slice delivered
 
 **Phase 10.8 is closed and merged. Within Phases 10.9–10.10, bounded artifact
 persistence, guest download, stored launch, independent restart and the SC110
@@ -13823,7 +13823,7 @@ requesters or authorize boot.
 | Stored retrieval / live launch | SL110 foundation: 49 positive / 56 hostile explicitly disproved. [SR110 refinement](#stored-retrieval-launch): 92 positive / 78 hostile explicitly disproved locally. SR110 R1 accepted: 20 focused Rust tests passed in 7.20s. [AR110 read protocol](#artifact-read-protocol) formal gate passed: 117 positive / 98 hostile. AR110 Rust read codec/client and host TCP path accepted: 23 focused + 24 compatibility tests passed. [GD110 guest download](#guest-artifact-download) formal gate: 174 positive / 149 hostile explicitly disproved. GD110 retrieval and SR110 R2 fresh live admission are accepted and merged to main (user confirmation, 2026-11-18): 11 focused live-admission tests and the real witness passed (84.35s); full library suite: 1,935 passed, 0 failed, 19 ignored (307.91s). The subsequent bounded restart acceptance is recorded below. |
 | RR110 independent restart | [Composition gate](#stored-restart-contract): 234 positive / 192 explicitly disproved hostile witnesses. [Runtime acceptance](#stored-restart-runtime): 14 focused tests passed in 4.21s; real CC2/socket/NIC/file restart witness passed in 92.13s. Service-only, guest-only and combined restart cases launch the retained target to exit 42 without recompilation. |
 | Latest full release library regression | SC110 laptop log reviewed 2026-11-22: **1,964 passed, 0 failed, 20 ignored, 0 measured, 0 filtered out in 267.06s**. All 15 focused cases and the separately selected real GD110/SR110/RR110 witnesses also passed (70.30s/69.50s/69.53s). Ignored tests are not all claimed as executed. |
-| Integration status | RR110 and profiling/SC110 are accepted and merged. The user also confirmed KC110 preflight merged after 201/201 formal witnesses, 40 Python checks, the Rust binary build and all 14 real Keycloak lab cases. No new full Rust suite is claimed for KC110. SA110 formal gates are developer-confirmed (185 positive / 185 hostile disproofs). The bounded Rust coordinator passed 33/33 focused tests and the full suite (1997 passed, 0 failed, 20 ignored). AC110 closed control-path integration is delivered with Rust/real Podman acceptance pending; live use, enrollment, boot authorization and installation remain open. |
+| Integration status | RR110 and profiling/SC110 are accepted and merged. The user also confirmed KC110 preflight merged after 201/201 formal witnesses, 40 Python checks, the Rust binary build and all 14 real Keycloak lab cases. No new full Rust suite is claimed for KC110. SA110 formal gates are developer-confirmed (185 positive / 185 hostile disproofs). SA110 passed 33/33 focused Rust tests; AC110 passed 15/15 focused Rust tests, 56/56 formal witnesses, 21 new Python checks plus 40 regressions, and the real Podman probe. Both are merged by user confirmation. The latest full suite passed 2012 tests, with 0 failures and 20 ignored. LG110 now supplies the external-identity/local-grant formal contract with 264/264 locally verified witnesses. Developer formal acceptance, its bounded runtime, live use, enrollment, boot authorization and installation remain open. |
 
 E7/E8 are merged to main. The 148-test E10 run includes E8’s tests; it is a
 persistence reference result, not a whole-system regression.
@@ -17289,9 +17289,10 @@ RR110 and SC110 integration are complete by the user's merge confirmations.
 The KC110 adapter contract is developer-confirmed in the [agreed plan](#post-rr110-plan).
 Bounded CLI preflight, its binary build and all real Keycloak acceptance cases
 have passed and merged. SA110 formal gates also passed on the laptop. Its bounded
-Rust coordinator passed 33/33 focused tests and the full suite (1997/0/20). AC110
-closed administration probing is delivered; strict live-use integration,
-enrollment and boot authorization follow.
+Rust coordinator passed 33/33 focused tests. AC110 passed 15/15 focused Rust and
+the real Podman probe; the latest full suite passed 2012/0/20, and both slices are
+merged. The [LG110 formal contract](#local-grant-contract) is delivered; its bounded runtime follows;
+live-use integration, enrollment and boot authorization follow.
 Broader T3–T5, production deployment,
 whole-machine reboot and the compiler backlog are not silently added to RR110
 acceptance.
@@ -17538,9 +17539,9 @@ is implemented by this documentation change.
 | 1 — design now | Define the host-independent boot/enrollment responsibilities: installation credential, selected trust anchor, enrollment entitlement, machine boot versus personal login, selected workload admission, one-use freshness, recovery and online/offline policy. Settle precise contracts before coding them. |
 | 2 — accepted and merged | SC110 formal, focused/full/real Rust checks and fresh laptop measurements accepted. Median rebuild/restart workload times reduced 19.8%/17.6%. Preserve both sessions and recording caveats; user confirmed profiling/SC110 merged to `main`. |
 | 3a — KC110 accepted and merged | 201 positive / 201 hostile disproofs, 40 Python checks, Rust binary build and all 14 real Keycloak cases passed on the laptop; user confirmed merge. Diagnostic success supplies no live operation or boot authority. |
-| 3b — SA110 accepted on laptop | 185 positive / 185 hostile disproofs; 33/33 focused Rust; full library suite 1997 passed, 0 failed, 20 ignored. No merge confirmation yet. |
-| 3c — AC110 delivered | Real SA110 close/change/verify path to the existing Keycloak lab, exact private worker protocol and explicit journal recovery. Local 56/56 formal and 21 Python checks passed; Rust/real Podman acceptance pending. No live authority. |
-| 3d — planned | Exclusive mediation of relevant issuer/admin/grant/key changes, trusted principal mapping, full-scope holder proof and explicit grants; then real CC2/socket/NIC/file revocation-at-use acceptance. |
+| 3b — SA110 accepted and merged | 185 positive / 185 hostile disproofs and 33/33 focused Rust. Preserve local ordering; explicitly refine the original external-control assumption before live use. |
+| 3c — AC110 accepted and merged | Administrative test harness only. 56/56 formal, 21 new Python checks plus 40 regressions, 15/15 focused Rust and real Podman probe passed. Latest full suite 2012/0/20. No live authority. |
+| 3d — LG110 formal slice delivered | [Local grant contract](#local-grant-contract): 264 positive / 264 hostile witnesses for external freshness and local grant state. Next implement the bounded LG110 owner and trusted ordinary-client evidence interface. Real CC2/socket/NIC/file acceptance precedes live admission. No Keycloak administration prerequisite. |
 | 4 | Implement installation enrollment and boot authorization with explicit machine-credential provisioning, authenticated trust selection and externally retained attempt consumption. Specify rollback/crash/retry behavior and verify the platform-independent flow in the emulator. |
 | 5 | Build the installation wizard on the tested CLI enrollment/recovery operations. Implement the native/FPGA bootstrap adapter when a concrete hardware target determines firmware, key storage and communication facilities. |
 
@@ -17908,8 +17909,9 @@ See [full evidence, manifests and limitations](PERFORMANCE.md#sc110-accepted-res
 The user subsequently confirmed profiling/SC110 merged to `main`. The KC110
 adapter contract and bounded CLI preflight below are now accepted on the laptop
 and merged. SA110 formal gates are developer-confirmed, and its bounded Rust
-coordinator passed 33/33 focused Rust and a 1997/0/20 full suite. AC110 control-path
-probing is delivered, with real acceptance pending. Remaining instruction
+coordinator passed 33/33 focused Rust. AC110 passed 15/15 focused Rust and the real
+Podman probe, followed by a 2012/0/20 full suite; both slices are merged. The next
+identity task follows the [revised trust boundary](#external-identity-local-authority). Remaining instruction
 execution/cleanup costs are observations, not a prerequisite for identity work.
 
 
@@ -17930,6 +17932,12 @@ was performed here. SC110 and the profiling harness were merged to `main` by use
 confirmation before this work.
 
 #### Boundary and first implementation scope
+
+**Historical contract scope:** the predicates below describe the accepted KC110
+model. The [revised external identity plan](#external-identity-local-authority)
+supersedes any requirement to control Keycloak writers. It requires explicit
+refinement of these predicates before live use; delivery-time next steps below
+are historical and are superseded by the later acceptance and revised roadmap.
 
 The existing E9/E10 caller verifier and E11 storage verifier already require
 verified credential/holder statements and current authority under serialized use.
@@ -18035,15 +18043,15 @@ a remote Keycloak administrator's changes. Keycloak logout, disabling a client,
 role changes and token revocation also need separate pinned-version tests; do not
 assume they invalidate every outstanding token in the same way.
 
-For strict live use, the trusted integration must supply an independent mechanism
-that orders relevant credential/permission revocation and policy/key changes with
-the effect and accounts for disconnection. Options such as an authority coordinator,
-fencing protocol or explicitly enforced lease semantics need a further contract
-and implementation; a locally incremented serial alone is insufficient. KC110
-requires this receipt but implements none of those producers. An introspection-only
-adapter therefore leaves `KC110Fence.current` Unknown and **cannot pass ready**.
-This preserves E9/E11 current-use semantics rather than silently redefining them
-as bounded-stale permission. Offline/cached admission needs its own explicit policy.
+**Historical model requirement, superseded as a deployment plan:** the original
+KC110 ready predicate requires independently serialized current-authority evidence;
+introspection alone cannot supply it, so `KC110Fence.current` stays Unknown.
+The revised plan does not require Anka64 to order external Keycloak policy/key
+changes with its effects. Instead it will define bounded identity observations
+supporting local grants, with local revocation serialized at use. This requires an
+explicit refinement of the KC110/SA110 contracts and implementation, including
+composition with E9/E11; changing documentation does not make the existing ready
+predicate pass. See [the current decision and next task](#external-identity-local-authority).
 
 At each effect, reply fragment and final EOF/result delivery, recheck the exact
 scope, current evidence and deadline under the existing local authority guard.
@@ -18197,7 +18205,8 @@ a new full Rust test-suite result was not supplied for this change.
 The user subsequently confirmed merge to `main`. This supersedes the pending and
 blocked statuses in the historical delivery/recovery notes above. KC110 is accepted
 as **diagnostic preflight only**. The CLI still leaves current authority unknown;
-it establishes neither exclusive administrative mediation nor live Anka permission.
+it supplies no live Anka permission. Keycloak administrative mediation is not
+a requirement of the revised plan.
 
 #### Primary sources reviewed 2026-11-23
 
@@ -18227,30 +18236,33 @@ KC110 design decisions, not features claimed to be supplied by those standards.
 slice introduced no axioms or Rust changes. The bounded Rust follow-up is recorded
 below. The accepted Keycloak CLI remains unchanged and does not produce current authority.
 
-#### Chosen ordering mechanism and trust boundary
+#### Original ordering mechanism and revised trust boundary
 
-The first profile has one uniquely owned coordinator and one bounded operation
-stream. Its transitions are atomic local critical sections. All relevant changes
-and effect submissions must pass through this owner. A replicated coordinator,
-multiple independent owners, new-stream budget allocation, and crash-consistent
-external effects are not silently inferred from this bounded model.
+The accepted SA110 model has one uniquely owned coordinator and one bounded
+operation stream, with atomic local transitions. Its original contract assumes
+that all relevant authority changes and effect submissions pass through this
+owner. The state/transition table below records that contract as implemented;
+it is not a claim that Anka64 can control Keycloak.
 
-The administration protocol is **close locally, perform external change, verify
-completion, then optionally reopen**. An exclusive mediation attestation covers
-this exact authority domain, installation, issuer, selected configuration and
-coordinator incarnation, including reconciliation of uncertain prior actions.
-It is trusted control-plane evidence, not an OAuth role, an `active=true` result,
-a successful HTTP response, a local mutex, or a caller-selected flag.
+The original administration protocol is **close locally, perform external change,
+verify completion, then optionally reopen**. Its control attestation covers the
+exact authority domain, installation, issuer, selected configuration and owner
+incarnation, including reconciliation. AC110 exercises the close/change/verify
+portion in a disposable lab and never establishes that attestation or reopens.
 
-All relevant Keycloak administration, automatic signing-key changes and Anka
-grant/policy mutations must be mediated. Either deployment controls establish that
-property, or the profile stays uncontrolled and cannot admit strict live use.
-Direct master/realm administration, an alternate writer or an independent database
-mutation invalidates the assumption. Detected loss poisons the operation, but no
-claim is made that an unobserved bypass can be detected by polling. A future
-integration must specify administration credentials, writer restrictions, routing,
-acknowledgement semantics and failover fencing; the present Podman lab does not
-establish those controls.
+**Plan correction:** Anka64 cannot mediate all Keycloak administration, automatic
+key changes or database mutations. It must not obtain administrator privileges to
+inspect or manage Keycloak policy. The all-writers assumption is therefore
+superseded as a deployment requirement, including as an optional Anka64 profile.
+Existing model tests remain valid under their stated assumptions; they do not
+prove the revised external-identity integration.
+
+The next Kleis contract must separate remote evidence freshness from locally
+current grants and revocation. SA110's bounded local serialization remains useful,
+but its evidence interfaces and the KC110/E9/E11 composition need explicit
+refinement before any live admission. A replicated owner, cross-restart uniqueness
+and crash-consistent effects still need their own evidence. See the
+[detailed external identity plan](#external-identity-local-authority).
 
 #### State and transition contract
 
@@ -18324,7 +18336,8 @@ KC110 201 positive / 201 hostile disproofs, caller verifier 45 / 39, and storage
 verifier 43 / 36. The gate harness passed Python syntax validation. The full formal
 sweep and Rust compilation/tests were not run for that formal delivery. The user
 has now confirmed the same 185 positive / 185 explicit hostile disproofs on the
-laptop; the formal gate is accepted, with no SA110 merge claimed yet.
+laptop; the formal gate is accepted. The user subsequently confirmed SA110 and
+AC110 merged to main; the developer acceptance records below supersede delivery status.
 
 ```bash
 python3 scripts/check-anka109-gates.py \
@@ -18334,9 +18347,10 @@ python3 scripts/check-anka109-gates.py \
 
 The private bounded Rust coordinator and its guarded submission interface are
 now delivered below, with deterministic ordering and failure tests. Keep real CLI authority
-Unknown until exclusive mediation and full-record control evidence have a concrete
-implementation and deployment acceptance. Subsequent real CC2/typed-socket/NIC/file
-acceptance must cover revocation between observation and effect, changed caller
+Unknown until the revised external-identity/local-grant contract and its
+implementation pass acceptance. Subsequent real CC2/typed-socket/NIC/file
+acceptance must distinguish local revocation at use from bounded remote observation
+freshness, and cover changed caller
 and scope, suffix/final-delivery suppression and retained Kernel accounting.
 Enrollment, external boot-attempt consumption, installation, guest CRUD, threads/SMP
 and native bootstrap remain separate milestones.
@@ -18419,15 +18433,14 @@ propagating failure. These checks do not establish Rust type correctness or test
 success. No Rust compilation or Rust tests were run, as requested. The Kleis pair
 is unchanged from the user's accepted 185/185 result.
 
-**Follow-up:** AC110 below supplies the first real control-path integration with
-the existing Podman lab. Exclusive administration and a live evidence source remain
-separate deployment/implementation gates. Keep current
-authority Unknown until the deployment restricts all relevant writers and verifies
-complete control/completion records. Then connect the guarded submission boundary
-to real CC2/typed-socket/NIC/file operations and test revocation between observation
-and use, suffix/final-delivery suppression, changed callers/scopes and retained
-Kernel accounting. Enrollment, external boot-attempt consumption, installation,
-guest CRUD and threads/SMP remain separate work.
+**Follow-up:** AC110 below is the accepted administrative test harness. The next
+runtime task is the [external-identity/local-grant contract](#external-identity-local-authority),
+starting with Kleis. Keep current authority Unknown until that contract and its
+implementation pass. Then test the guarded submission boundary with the real
+CC2/typed-socket/NIC/file path: local revocation ordering, bounded remote evidence,
+suffix/final-delivery suppression, changed caller/scope and retained Kernel
+accounting. Enrollment, external boot-attempt consumption, installation, guest
+CRUD and threads/SMP remain separate work.
 
 
 #### SA110 developer acceptance (2026-11-23)
@@ -18436,18 +18449,19 @@ The supplied `test-output-serialized-authority-1.txt.zip` confirms 185 positive 
 185/185 hostile Kleis disproofs, 33/33 focused Rust tests (0.00s), and the full
 library suite: **1997 passed, 0 failed, 20 ignored**, 268.41s. Injected unwind tests
 passed; compiler warnings were not failures. This supersedes the delivery-time
-untested status above. No SA110 merge confirmation has been supplied yet.
+untested status above. The user subsequently confirmed SA110 and AC110 merged
+to main; AC110 acceptance below records the later full suite.
 
 <a id="keycloak-control-probe"></a>
 
 ### AC110 — Keycloak control-path probe and explicit recovery (2026-11-23)
 
-**Delivered:** a bounded host command connects an actual SA110 coordinator to the
-existing Podman Keycloak lab. This is the first administration integration slice.
-It deliberately does not claim exclusive mediation: the lab retains direct master
-administration, database/Podman access, and other writers. An admin hostname alone
-is not endpoint isolation. Enforced writer restriction and a complete control
-attestation remain prerequisites to strict live authority.
+**Accepted and merged:** a bounded host command connects an actual SA110
+coordinator to the disposable Podman Keycloak lab. This is an administrative test
+harness. It uses separate privileged lab credentials to provoke revocation and
+test recovery; ordinary Anka64 runtime must not depend on those credentials or
+on Admin REST access. Keycloak remains externally administered. The harness does
+not fence other writers, establish exclusive control or grant live authority.
 
 | Boundary | Implementation |
 | --- | --- |
@@ -18534,16 +18548,258 @@ worker protocol, plus all 40 existing KC110 Python regressions. Rust files passe
 syntax-only parsing; shell syntax/discovery checks passed with stub commands.
 No Rust compilation/tests or real Podman control probe were run in delivery.
 The local HTTP fixture is not Keycloak and does not establish real realm behavior.
-Developer Rust and real Podman output are the next acceptance evidence.
+**Subsequent developer acceptance:** 15/15 AC110 Rust tests, 33/33 SA110 Rust
+tests and the real Podman probe passed. The probe reported `control_probe_valid`,
+`coordinator: closed`, `current_authority: unknown`, and live/boot admission false.
+The full library suite passed **2012 tests, 0 failed, 20 ignored** (272.04s).
+The user confirmed both slices merged to main. These results supersede the
+untested delivery status; no Rust or Podman execution was performed for this
+documentation-only revision.
 
-**Next after acceptance:** specify enforced administration ingress and writer
-ownership (including master realm, DB/Podman/operator and automatic key/policy
-changes), then implement the trusted source and full-scope proof/grant mapping.
-Only after that gate may the coordinator admit real CC2/typed-socket/NIC/file
-operations. Revocation-between-observation-and-effect, suffix/final-delivery
-suppression and preserved Kernel accounting remain mandatory real-path acceptance.
+**Next after acceptance:** define [external identity evidence and local grants](#external-identity-local-authority)
+in Kleis. Explicitly refine the original exclusive-control assumption and specify
+remote observation freshness separately from local revocation. Then implement the
+ordinary-client adapter, trusted principal mapping and full-scope holder proof.
+Real CC2/typed-socket/NIC/file acceptance must precede live admission, covering
+local revocation ordering, remote evidence expiry/outage, changed caller/scope,
+suffix/final-delivery suppression and retained Kernel accounting.
 
 Primary references: [pinned Keycloak Admin REST API](https://www.keycloak.org/docs-api/26.8.1/rest-api/index.html#_put_adminrealmsrealm)
 for realm GET/PUT, and [hostname configuration](https://www.keycloak.org/server/hostname#_exposing_the_administration_console_on_a_separate_hostname)
 for the explicit limitation that an admin hostname does not block frontend Admin
 REST access. Those API facts do not establish deployment writer exclusion.
+
+
+<a id="external-identity-local-authority"></a>
+
+### Decision — external Keycloak identity, local Anka64 authority (2026-11-23)
+
+**Anka64 cannot control Keycloak.** Keycloak administrators own its policy, clients,
+users, grants and signing keys. Anka64 consumes evidence through the configured
+identity protocol. It neither inspects internal Keycloak policies nor enforces
+who can change them. Exclusive Keycloak administration is removed from the runtime
+plan, including as an optional deployment prerequisite.
+
+This decision supersedes the earlier roadmap's external-writer restriction and
+control-attestation prerequisite. Historical KC110/SA110 model descriptions above
+remain records of their actual assumptions and tests. They require explicit
+formal refinement; their existing passing witnesses do not prove this new profile.
+No source code, theory, ready predicate or default-denying authority flag changes
+in this documentation revision.
+
+#### Responsibility and credential boundary
+
+| Owner | Responsibility |
+| --- | --- |
+| Keycloak operators | Remote identity policy, administration, issuance and signing-key lifecycle |
+| Anka64 installation administrator | Configure trusted issuer/profile, allowed audience/client/holder bindings, principal mapping and local grant policy through Anka64's own authorized configuration path |
+| Trusted identity adapter | Verify token signatures and scope, fetch configured public signing keys, and perform authenticated introspection when required using ordinary client credentials; return bounded identity evidence |
+| Anka64 local authority owner | Issue explicit scoped local grants, serialize local revocation and local effects, and retain work/deadline/incarnation accounting |
+| AC110 test operator | Supply isolated privileged credentials in a disposable lab to provoke remote changes; keep those credentials out of the normal runtime adapter |
+
+Authenticated introspection access is not administrative policy-inspection access.
+External operators provision the client and protocol configuration; Anka64 validates
+the evidence it receives against its own configured trust policy. A trusted issuer
+remains a trust dependency: local scope checks do not independently prove an identity
+that the issuer falsely asserts. Token roles and successful introspection do not
+by themselves mint an Anka64 capability.
+
+#### Agreed formal requirements — delivered by LG110 below
+
+Define a bounded external-identity-to-local-grant profile and its composition with
+KC110, SA110 and E9/E11. Keep the following meanings explicit:
+
+1. **Evidence and mapping.** Bind issuer-scoped subject, installation, token/profile,
+   client/audience, holder and exact local principal mapping. Separate identity
+   verification from the decision to issue an explicit local grant. Bind the grant
+   and holder proof to the permitted operation, artifact/generation and actual
+   caller/channel/incarnation/challenge; preserve existing Fabric and storage gates.
+2. **Freshness and validity.** Record observation timing before the remote request;
+   a late response cannot reset age. Define trusted wall/monotonic clock conversion,
+   skew, rollback handling, token validity and a finite observation window. Use may
+   not outlive the earliest applicable evidence validity, token expiry or grant
+   expiry. Specify exact boundary comparisons and overflow denial in Kleis.
+3. **Two revocation scopes.** Local grant revocation shares the serialization boundary
+   with each local effect, fragment and final delivery. A completed prefix remains;
+   subsequent effects deny. A remote change may be unobserved until a new observation
+   or the evidence window expires. The model must permit that bounded interval and
+   must not claim instantaneous remote revocation or global serialization. Observed
+   invalidity closes the dependent local grant at the local decision boundary.
+4. **Outage and refresh.** Failed/late/unavailable verification cannot issue or refresh
+   a grant or extend existing validity. The proposed first profile permits an
+   existing grant only within its already established finite evidence/token/grant
+   bounds, unless locally revoked. Its exact bound is a policy parameter to settle
+   in the contract; it is not a promise of a particular number of seconds. Fresh
+   evidence requires a new local decision and cannot resurrect a locally revoked
+   grant implicitly. Notification may accelerate observation but is not proof that
+   no unseen remote change occurred.
+5. **Ordering and accounting.** Fetch remote evidence outside the local effect guard;
+   revalidate its binding and age, current local grant state and operation scope
+   inside the guard. Preserve nonwrapping revisions/sequences, original budgets and
+   deadlines, owner/incarnation checks, prefix retention and default denial. Retry,
+   reconnect, delayed replies and restart cannot replay authority or refill work.
+6. **Refinement obligation.** State which original current-authority/attestation
+   predicates change, which E9/E11 obligations remain local, and which remote facts
+   are only observations. Do not repurpose `sa110_establish` or assert its original
+   all-writers attestation on the strength of an introspection response. Keep the
+   existing live source Unknown until the new formal and implementation gates pass.
+
+Positive and hostile witnesses must distinguish immediate local revocation from
+unobserved remote changes within the permitted window. Cover expiry equality,
+late responses, outage during refresh, observed invalidity, key withdrawal,
+changed issuer/subject/holder/scope, local revocation racing evidence refresh,
+stale incarnation, replay, budget exhaustion and denied suffix/final delivery.
+Use SA110's local ordering machinery where its contract remains applicable.
+
+After the formal gate passes, implement the ordinary-client adapter and local-grant
+integration. The developer will compile and test Rust on the laptop. Use AC110's
+privileged lab fixture only to generate remote changes for acceptance, and test
+the real CC2/typed-socket/NIC/file path before enabling fresh live admission.
+No production admin credential or Keycloak policy-inspection step belongs in that
+runtime path. Enrollment, external one-use boot-attempt consumption, installation,
+guest file CRUD, threads/SMP and native bootstrap remain separate planned work.
+
+
+<a id="local-grant-contract"></a>
+
+### LG110 — bounded external evidence and local grant contract (2026-11-23)
+
+**Delivered:** `anka110_local_grants.kleis` and its hostile pair, selected with
+`--only-local-grants` and included in the default 10.9/10.10 sweep. No new axioms,
+Rust changes, Keycloak administration or production credentials are introduced.
+This supplies the formal slice requested by the preceding decision; the next task
+is its bounded Rust owner and evidence interface, not another remote-control gate.
+
+#### Explicit refinement boundary
+
+| Existing contract | LG110 treatment |
+| --- | --- |
+| KC110 token/preflight/candidate checks | Reuse configured issuer/audience/client/profile, signature/holder, mapping, exact scope and local grant checks. Freshness still starts before the remote query. |
+| KC110 current fence / `kc110_ready` | Remain unchanged for the old strict profile. LG110 does not manufacture that remote-current receipt or assert that an active token proves current remote policy. |
+| SA110 control establishment | No `sa110_establish` or all-writers attestation. Retain the local design principles of one owner, atomic use/revocation, nonwrapping counters and retained accounting in a dedicated LG110 contract. |
+| E9 caller / E11 server statements | The guarded projection names the local authority domain and local grant ID, with the mapped subject/holder and exact live channel. Current means current **local grant**. Remote token identity and bounded observation remain separate prerequisites. |
+| Existing Kernel/Fabric/storage gates | Still mandatory at each operation/fragment/EOF. E11 statement composition is not the whole permit, content, accounting or execute-admission chain. |
+| Boot and recovery | All normal transitions preserve boot state. No boot grant or external one-use consumption is inferred. Restart never reopens or refunds this bounded operation. |
+
+The local authority domain must be provisioned through Anka64's trusted local
+configuration path. It is not copied from a token issuer or automatically recognized
+by the existing registries. A locally issued credential/status assertion and a
+holder proof must be validated and published through the appropriate trusted
+provider; the projection helpers are semantic records, not signing APIs. Their
+validity cannot escape the local guard or the monotonic evidence window. No guest
+or peer may manufacture any of the model's `A109Valid` inputs.
+
+#### Owned state and transitions
+
+The product records are flattened into scalar fields for the available Kleis/Z3
+boundary. Config/token/mapping/scope/grant field names retain their full bindings;
+this is a semantic model, not a wire layout. Opaque identifiers mean collision-free
+equality handles, never truncated strings, certificate hashes or network nonces.
+
+| Record or operation | Contract |
+| --- | --- |
+| `LG110State` | Unique local owner/domain/incarnation/grant reference, revision, next sequence, remaining work, original deadline, wall/tick high-water marks, submitted-effect count and boot frame; complete immutable local configuration/scope/grant and stored evidence |
+| `LG110Use` | Exact domain/incarnation/grant/revision/sequence/tick and scope, with the holder proof and a trusted verdict over the entire LOCAL-GRANT-USE record |
+| `LG110Reply` | Exact pending domain/incarnation/grant/revision/query/start/token/issuer plus evidence and full-record verification/outcome verdicts |
+| `lg110_begin` | Spend work and sequence, then record the query start and local revision before remote IO. Only one pending query. An existing issued grant retains its old bounded evidence while refresh is pending. |
+| `lg110_complete` | Spend work/sequence. A fresh, correlated positive can issue/refresh only an unissued or issued grant. A correlated Unknown/outage clears pending but retains old evidence and validity. A verified negative revokes even at exhausted work/deadline. Foreign or stale replies cannot replace evidence or clear a different pending query. |
+| `lg110_allow` / `lg110_attempt` | Recompute current local readiness, identity validity, holder/channel/scope, sequence, clock and existing-operation checks. Submission and accounting are one local critical section. Every denied attempt also spends work; counters never wrap. |
+| `lg110_revoke` | Authorized local revocation or local policy invalidation is terminal for this grant, independent of network availability or remaining work. Advance revision or poison at saturation; cancel pending refresh; preserve prior effects. |
+| `lg110_restart` | Independently verified incarnation non-reuse is required even to record a new owner incarnation. Authority stays closed, the original budget/deadline/history remains, and no grant is restored from a diagnostic snapshot. |
+
+The first profile binds **one token and one explicit grant per bounded operation**.
+The token reference identifies the complete immutable token bytes through trusted
+local interning or a fully checked content identity; it is never an incoming JWT
+`jti` alone. Reusing a reference for different signed claims would violate the
+model's identity assumption and must be rejected by the adapter.
+Token replacement, regrant after revocation, multiple concurrent grants/owners,
+durable grant persistence and cross-process ownership are not silently inferred.
+They need their own admission/accounting contracts. Local policy, principal mapping,
+trust-anchor or selected-keyset changes revoke this owner; refresh cannot replace
+those immutable fields. Pure remote signing-key changes are external events;
+verified withdrawal is a negative observation, and unobserved withdrawal is subject
+to the existing evidence window.
+
+#### Time, outage and revocation semantics
+
+Token and grant windows are half-open in trusted wall time. Query age and the
+original operation deadline are half-open in trusted monotonic ticks. Both clocks
+are sampled together at the guarded effect; no units are added across clock domains,
+no wall/monotonic conversion is assumed, and the model permits no clock skew.
+Backward samples poison the operation, while equal samples are valid. The embedding
+must supply advancing trustworthy clocks, including defined suspend/restart
+behavior; high-water checks do not detect an adversary freezing both clocks.
+
+Evidence age is `tick - query_started`, guarded against backwards time, and must
+be strictly less than configured `max_age`. Response arrival never starts a new
+window. Token expiry, grant expiry, evidence age and the original operation deadline
+all independently constrain use. The fixture uses a five-tick observation bound;
+this is not a five-second production revocation promise. The actual bound and tick
+units must be explicitly selected by trusted deployment policy.
+
+Unknown, timeout and outage cannot issue or refresh permission. The first profile
+permits an existing grant only until its **already established** bounds expire.
+A verified negative observation closes the dependent grant immediately at the
+local decision boundary. An unobserved Keycloak change does not update local state;
+LG110 deliberately permits use inside the remaining observation window and proves
+expiry denial. It makes no instantaneous remote revocation claim. Local revocation
+shares the effect guard, so a completed prefix remains and no later suffix/final
+result is admitted. A late positive response cannot resurrect a revoked grant.
+
+Every transition spends one work unit when nonzero and advances the owned sequence
+without wrap. The same sequence space supplies query correlation. Retry, repeated
+begin, failed refresh and restart never refill work or move the operation deadline.
+An authorized closing action can still close after exhaustion. The effect counter
+counts guarded synchronous submissions, not bytes or durable commits; callback
+uncertainty must close the implementation and retain accounted submissions.
+
+#### Validation and next implementation
+
+The pair contains **264 positive witnesses and 264 hostile assertions**. Coverage
+includes full identity/proof/scope substitution, default denial, explicit issuance,
+positive/negative/Unknown refresh, exact correlation, expiry equality, clock rollback,
+remote-change observation limits, local revocation versus late refresh, replay,
+nonwrapping counters, prefix retention, restart, E9/E11 direction separation,
+universal state/accounting properties, and concrete realizable before/after steps.
+Hostile witnesses must be explicitly disproved; Unknown is a gate failure.
+
+**Local validation, 2026-11-23:** all **264 positive witnesses passed** and all
+**264 hostile assertions were explicitly disproved** by the supplied Kleis/Z3
+binary. Complete coverage was verified in name-filtered batches, with targeted
+reruns after correcting indirect E9/E11 record construction and the spelling of
+maximum-width witness constants. Unknown was never counted as a pass. The laptop
+command below runs each complete file through the standard gate.
+
+Regression gates passed unchanged: KC110 201 positive / 201 hostile disproofs,
+SA110 185 / 185, E9 caller verifier 45 / 39, and E11 storage verifier 43 / 36.
+Python syntax and stubbed harness checks verified selector/default-sweep inclusion,
+legacy versus LG110 timeout defaults, explicit override and nonpositive-timeout
+rejection. Those routing checks are separate from the actual Kleis results.
+The complete default formal sweep was not run. No Rust compilation/tests or live
+Keycloak/file execution was performed; developer laptop acceptance is still due.
+
+Run on the laptop:
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" \
+  --only-local-grants --timeout 1800
+```
+
+The LG110 default is 1800 seconds per file because this pair checks complete
+snapshots and transition traces; older pairs retain their 120-second default.
+An explicit `--timeout` overrides either default. It changes no semantic deadline or runtime work budget.
+The gate still fails on missing/duplicate witnesses, timeout, import/parse error,
+Unknown or an unexpected solver result.
+
+After the developer confirms the formal gate, implement a dedicated bounded LG110
+local owner with a private grant/evidence store, exact query tickets, clock samples,
+terminal revocation and guarded submission. Keep network verification outside the
+owner guard; recheck all bindings, age and local state inside it. Reuse ordinary
+KC110 verification where applicable, with no Admin REST or AC110 credentials.
+Retain the current CLI's Unknown/live-false/boot-false defaults until implementation
+and real CC2/typed-socket/NIC/file acceptance pass. Rust compilation and tests remain
+for the developer laptop. Full holder-proof encoding, provisioning of the local
+authority, production deployment, enrollment and boot-attempt consumption are
+separate uncompleted obligations.

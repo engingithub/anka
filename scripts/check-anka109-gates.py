@@ -45,6 +45,7 @@ SCALAR_READ_PAIRS = ('anka110_scalar_read',)
 KEYCLOAK_ADAPTER_PAIRS = ('anka110_keycloak_adapter',)
 SERIALIZED_AUTHORITY_PAIRS = ('anka110_serialized_authority',)
 KEYCLOAK_CONTROL_PAIRS = ('anka110_keycloak_control',)
+LOCAL_GRANTS_PAIRS = ('anka110_local_grants',)
 
 
 def main():
@@ -79,9 +80,11 @@ def main():
     selection.add_argument('--only-keycloak-adapter', action='store_true', help='Keycloak observation, exact holder/scope binding and strict current-use boundary')
     selection.add_argument('--only-serialized-authority', action='store_true', help='single-owner authority barriers, exact-use ordering, replay and recovery')
     selection.add_argument('--only-keycloak-control', action='store_true', help='closed Keycloak control probe, exact completion and recovery boundaries')
-    parser.add_argument('--timeout', type=int, default=120, help='seconds per theory file')
+    selection.add_argument('--only-local-grants', action='store_true', help='external identity freshness and locally serialized grant admission/revocation')
+    parser.add_argument('--timeout', type=int, default=None,
+                        help='seconds per theory file (default: 120; LG110 complete snapshots: 1800)')
     args = parser.parse_args()
-    if args.timeout <= 0:
+    if args.timeout is not None and args.timeout <= 0:
         parser.error('--timeout must be positive')
     root = Path(__file__).resolve().parents[1]
     executable = str(Path(args.kleis).expanduser().resolve()) if '/' in args.kleis else args.kleis
@@ -114,7 +117,8 @@ def main():
              KEYCLOAK_ADAPTER_PAIRS if args.only_keycloak_adapter else
              SERIALIZED_AUTHORITY_PAIRS if args.only_serialized_authority else
              KEYCLOAK_CONTROL_PAIRS if args.only_keycloak_control else
-             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS + EVIDENCE_PAIRS + PROVIDER_PAIRS + GUARDED_PAIRS + BINDER_PAIRS + VERIFIER_PAIRS + STORAGE_VERIFIER_PAIRS + SOCKET_CAPACITY_PAIRS + OUTBOUND_SELECT_PAIRS + STORED_LAUNCH_PAIRS + ARTIFACT_STORAGE_PAIRS + COMPILER_STORAGE_BINDING_PAIRS + ARTIFACT_TRANSFER_PAIRS + ARTIFACT_TRANSPORT_PAIRS + GUEST_ARTIFACT_PAIRS + STORED_RETRIEVAL_PAIRS + ARTIFACT_READ_PAIRS + GUEST_DOWNLOAD_PAIRS + STORED_RESTART_PAIRS + SCALAR_READ_PAIRS + KEYCLOAK_ADAPTER_PAIRS + SERIALIZED_AUTHORITY_PAIRS + KEYCLOAK_CONTROL_PAIRS)
+             LOCAL_GRANTS_PAIRS if args.only_local_grants else
+             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS + EVIDENCE_PAIRS + PROVIDER_PAIRS + GUARDED_PAIRS + BINDER_PAIRS + VERIFIER_PAIRS + STORAGE_VERIFIER_PAIRS + SOCKET_CAPACITY_PAIRS + OUTBOUND_SELECT_PAIRS + STORED_LAUNCH_PAIRS + ARTIFACT_STORAGE_PAIRS + COMPILER_STORAGE_BINDING_PAIRS + ARTIFACT_TRANSFER_PAIRS + ARTIFACT_TRANSPORT_PAIRS + GUEST_ARTIFACT_PAIRS + STORED_RETRIEVAL_PAIRS + ARTIFACT_READ_PAIRS + GUEST_DOWNLOAD_PAIRS + STORED_RESTART_PAIRS + SCALAR_READ_PAIRS + KEYCLOAK_ADAPTER_PAIRS + SERIALIZED_AUTHORITY_PAIRS + KEYCLOAK_CONTROL_PAIRS + LOCAL_GRANTS_PAIRS)
     for stem in pairs:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')
@@ -124,7 +128,9 @@ def main():
                 if not names or len(names) != len(set(names)):
                     raise ValueError('missing or duplicate witness names')
                 result = subprocess.run([executable, 'test', str(path)], cwd=cwd, env=env,
-                                        capture_output=True, text=True, timeout=args.timeout)
+                                        capture_output=True, text=True,
+                                        timeout=args.timeout if args.timeout is not None else
+                                        (1800 if stem in LOCAL_GRANTS_PAIRS else 120))
             except (OSError, ValueError, subprocess.TimeoutExpired) as error:
                 print(f'FAIL: {path.name}: {error}', file=sys.stderr)
                 all_ok = False

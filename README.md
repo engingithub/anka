@@ -127,23 +127,42 @@ across server restart. The import filename repair preserved credentials and the
 database. A new full Rust suite was not reported for KC110.
 See [lab setup and acceptance](scripts/keycloak/README.md).
 
-The **SA110 bounded coordinator is accepted on the developer laptop**:
-185 positive / 185 hostile Kleis disproofs, **33/33 focused Rust tests**, and the
-full library suite **1997 passed, 0 failed, 20 ignored** (268.41s). No SA110 merge
-is claimed yet. This acceptance covers the local coordinator and candidate checks.
+**SA110 and AC110 are accepted and merged to main.** SA110 passed 185 positive /
+185 hostile Kleis disproofs and 33/33 focused Rust tests. The
+[AC110 administrative test harness](DESIGN_NOTES.md#keycloak-control-probe) passed
+56/56 formal witnesses, 21 new Python checks plus 40 regressions, 15/15 focused Rust
+tests and the real Podman probe. The latest full library suite passed
+**2012 tests, 0 failed, 20 ignored** (272.04s), as reported by the developer.
+The probe stays closed with `current_authority: unknown`, `live_admission: false`
+and `boot_authorized: false`; it does not supply runtime grants.
 
-The next integration slice, **[AC110 Keycloak control probe](DESIGN_NOTES.md#keycloak-control-probe)**,
-is delivered. A real SA110 barrier closes before the host worker contacts the
-existing Podman lab. The worker checks realm-not-before revocation, restores the
-prior value, and returns an exact correlated completion. Failures after mutation
-may have begun leave a private recovery journal. Successful completion leaves the
-coordinator closed: this lab does not establish exclusive authority-change mediation.
+**Anka64 cannot control Keycloak.** The [revised plan](DESIGN_NOTES.md#external-identity-local-authority)
+treats Keycloak as externally administered. Ordinary runtime uses identity evidence
+and ordinary client access, with no administrator credentials or internal policy
+inspection. Anka64 controls its own grants and local revocation. AC110's privileged
+credentials belong only to the disposable lab test harness.
 
-Local delivery checks passed **56 positive / 56 hostile formal disproofs**,
-**21 Python checks** (including local mTLS), and the existing **40 KC110 checks**.
-There are **15 new Rust tests**, not run in delivery. Real Podman acceptance and
-Rust compilation/tests remain for the laptop. The CLI continues to report
-`current_authority: unknown`, `live_admission: false`, `boot_authorized: false`.
+**LG110 formal slice delivered:** [external identity evidence and local grants](DESIGN_NOTES.md#local-grant-contract).
+Local verification passed all 264 positive witnesses and explicitly disproved all
+264 hostile assertions; laptop acceptance is pending. The pair
+reuses KC110 identity/scope checks, keeps local authority distinct from remote
+observations, and adds bounded issuance/refresh/revocation transitions. The gate is
+included in the default formal sweep and can be selected independently:
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" \
+  --only-local-grants --timeout 1800
+```
+
+**Next after the formal gate:** implement the bounded LG110 local grant owner and
+its trusted evidence interface. Ordinary client verification stays outside the
+local effect guard; no Keycloak administrator credential is involved. Rust and
+real CC2/typed-socket/NIC/file acceptance remain required before live admission.
+The existing diagnostic CLI and default-denying live source are unchanged.
+
+To reproduce the accepted administrative lab probe:
 
 ```bash
 python3 scripts/check-anka109-gates.py \
@@ -158,8 +177,9 @@ The `--real` gate compiles/tests Rust on the laptop and temporarily changes the
 disposable lab realm's `notBefore`; it restores and verifies the original value
 on success. Do not run other lab administration concurrently. See
 [recovery and trust boundaries](scripts/keycloak/README.md#ac110-control-probe)
-before retrying an interrupted probe. Exclusive administration, live artifact-path
-admission, enrollment and external boot-attempt consumption remain separate gates.
+before retrying an interrupted probe. This administrative harness is not a runtime
+dependency. Live artifact-path admission under the revised contract, enrollment
+and external boot-attempt consumption remain separate gates.
 
 Reproduce the restart acceptance from the repository root:
 
