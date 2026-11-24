@@ -1,0 +1,278 @@
+// AC110: bounded administration probe, not exclusive mediation or live authority.
+// Fixed private worker replies are trusted observations only after exact framing,
+// process success, full correlation and an owned pending SA110 barrier.
+// No new axioms. Journal read-before-write is NOT atomic compare-and-swap.
+import "anka110_serialized_authority.kleis"
+
+data AC110Request = AC110Request(action : BitVec64, domain : BitVec64, incarnation : BitVec64, revision : BitVec64, command : BitVec64, nonce0 : BitVec64, nonce1 : BitVec64, nonce2 : BitVec64, nonce3 : BitVec64)
+define acq_action(v : AC110Request) = match v { AC110Request(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3) => action }
+define acq_domain(v : AC110Request) = match v { AC110Request(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3) => domain }
+define acq_incarnation(v : AC110Request) = match v { AC110Request(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3) => incarnation }
+define acq_revision(v : AC110Request) = match v { AC110Request(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3) => revision }
+define acq_command(v : AC110Request) = match v { AC110Request(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3) => command }
+define acq_nonce0(v : AC110Request) = match v { AC110Request(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3) => nonce0 }
+define acq_nonce1(v : AC110Request) = match v { AC110Request(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3) => nonce1 }
+define acq_nonce2(v : AC110Request) = match v { AC110Request(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3) => nonce2 }
+define acq_nonce3(v : AC110Request) = match v { AC110Request(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3) => nonce3 }
+
+data AC110Reply = AC110Reply(action : BitVec64, domain : BitVec64, incarnation : BitVec64, revision : BitVec64, command : BitVec64, nonce0 : BitVec64, nonce1 : BitVec64, nonce2 : BitVec64, nonce3 : BitVec64, status : BitVec64, original : BitVec64, target : BitVec64, restored : BitVec64, flags : BitVec64)
+define acr_action(v : AC110Reply) = match v { AC110Reply(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3,status,original,target,restored,flags) => action }
+define acr_domain(v : AC110Reply) = match v { AC110Reply(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3,status,original,target,restored,flags) => domain }
+define acr_incarnation(v : AC110Reply) = match v { AC110Reply(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3,status,original,target,restored,flags) => incarnation }
+define acr_revision(v : AC110Reply) = match v { AC110Reply(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3,status,original,target,restored,flags) => revision }
+define acr_command(v : AC110Reply) = match v { AC110Reply(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3,status,original,target,restored,flags) => command }
+define acr_nonce0(v : AC110Reply) = match v { AC110Reply(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3,status,original,target,restored,flags) => nonce0 }
+define acr_nonce1(v : AC110Reply) = match v { AC110Reply(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3,status,original,target,restored,flags) => nonce1 }
+define acr_nonce2(v : AC110Reply) = match v { AC110Reply(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3,status,original,target,restored,flags) => nonce2 }
+define acr_nonce3(v : AC110Reply) = match v { AC110Reply(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3,status,original,target,restored,flags) => nonce3 }
+define acr_status(v : AC110Reply) = match v { AC110Reply(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3,status,original,target,restored,flags) => status }
+define acr_original(v : AC110Reply) = match v { AC110Reply(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3,status,original,target,restored,flags) => original }
+define acr_target(v : AC110Reply) = match v { AC110Reply(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3,status,original,target,restored,flags) => target }
+define acr_restored(v : AC110Reply) = match v { AC110Reply(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3,status,original,target,restored,flags) => restored }
+define acr_flags(v : AC110Reply) = match v { AC110Reply(action,domain,incarnation,revision,command,nonce0,nonce1,nonce2,nonce3,status,original,target,restored,flags) => flags }
+
+define ac110_request(q : AC110Request) =
+    ((acq_action(q)=bvconst(1,64)) ∨ (acq_action(q)=bvconst(2,64))) ∧
+    kc110_nz(acq_domain(q)) ∧ kc110_nz(acq_incarnation(q)) ∧ kc110_nz(acq_revision(q)) ∧ kc110_nz(acq_command(q)) ∧
+    (kc110_nz(acq_nonce0(q)) ∨ kc110_nz(acq_nonce1(q)) ∨ kc110_nz(acq_nonce2(q)) ∨ kc110_nz(acq_nonce3(q)))
+define ac110_echo(q : AC110Request,r : AC110Reply) =
+    acq_action(q)=acr_action(r) ∧ acq_domain(q)=acr_domain(r) ∧ acq_incarnation(q)=acr_incarnation(r) ∧ acq_revision(q)=acr_revision(r) ∧ acq_command(q)=acr_command(r) ∧ acq_nonce0(q)=acr_nonce0(r) ∧ acq_nonce1(q)=acr_nonce1(r) ∧ acq_nonce2(q)=acr_nonce2(r) ∧ acq_nonce3(q)=acr_nonce3(r)
+define ac110_reply(q : AC110Request,r : AC110Reply,size : BitVec64,eof : Bool,exit : BitVec64) =
+    ac110_request(q) ∧ ac110_echo(q,r) ∧ (size=bvconst(120,64)) ∧ eof ∧ (exit=bvconst(0,64)) ∧
+    (acr_status(r)=acq_action(q)) ∧ bvult(acr_original(r),acr_target(r)) ∧
+    bvule(acr_target(r),bvconst(2147483647,64)) ∧ (acr_restored(r)=acr_original(r)) ∧
+    (acr_flags(r)=(if acq_action(q)=bvconst(1,64) then bvconst(31,64) else bvconst(8,64)))
+define ac110_consume(q : AC110Request,r : AC110Reply,size : BitVec64,eof : Bool,exit : BitVec64,
+    mode : BitVec64,controlled : A109Verdict,pending : BitVec64,work : BitVec64,tick : BitVec64,deadline : BitVec64) =
+    ac110_reply(q,r,size,eof,exit) ∧ (mode=bvconst(0,64)) ∧ (controlled=A109Unknown) ∧
+    (pending=acq_command(q)) ∧ kc110_nz(work) ∧ bvule(work,bvconst(512,64)) ∧ bvult(tick,deadline)
+define ac110_live(mode : BitVec64,controlled : A109Verdict) = (mode=bvconst(1,64)) ∧ (controlled=A109Valid)
+// Necessary recovery checks only. Concurrent bypass writers remain outside the
+// laboratory contract, so this observation NEVER attests exclusive control.
+define ac110_restore(original : BitVec64,target : BitVec64,current : BitVec64,same_realm : Bool,private_record : Bool,bound_inputs : Bool) =
+    bvult(original,target) ∧ bvule(target,bvconst(2147483647,64)) ∧ same_realm ∧ private_record ∧ bound_inputs ∧
+    ((current=original) ∨ (current=target))
+
+example "AC110 001 exact probe reply" {
+    assert(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64)))
+}
+
+example "AC110 002 exact recovery reply" {
+    assert(ac110_reply(AC110Request(bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(8,64)),bvconst(120,64),kc110_true(),bvconst(0,64)))
+}
+
+example "AC110 003 foreign action echo" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(2,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 004 foreign domain echo" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(3,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 005 foreign incarnation echo" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(4,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 006 foreign revision echo" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(5,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 007 foreign command echo" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(6,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 008 foreign nonce0 echo" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(7,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 009 foreign nonce1 echo" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(8,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 010 foreign nonce2 echo" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(9,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 011 foreign nonce3 echo" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(10,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 012 zero request action" {
+    assert(¬(ac110_reply(AC110Request(bvconst(0,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 013 zero request domain" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(0,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 014 zero request incarnation" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(0,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 015 zero request revision" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(0,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 016 zero request command" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(0,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 017 unknown action" {
+    assert(¬(ac110_reply(AC110Request(bvconst(3,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 018 empty nonce" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(0,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 019 invalid status 2" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(2,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 020 invalid original 101" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(101,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 021 invalid target 2147483648" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(2147483648,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 022 invalid target 0" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(0,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 023 invalid restored 1" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(1,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 024 invalid flags 0" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(0,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 025 invalid flags 8" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(8,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 026 invalid flags 63" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(63,64)),bvconst(120,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 027 reply size 0" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(0,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 028 reply size 1" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(1,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 029 reply size 79" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(79,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 030 reply size 80" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(80,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 031 reply size 119" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(119,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 032 reply size 121" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(121,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 033 reply size 128" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(128,64),kc110_true(),bvconst(0,64))))
+}
+
+example "AC110 034 real EOF required" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_false(),bvconst(0,64))))
+}
+
+example "AC110 035 process failure" {
+    assert(¬(ac110_reply(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(1,64))))
+}
+
+example "AC110 036 pending completion consumed closed" {
+    assert(ac110_consume(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64),bvconst(0,64),A109Unknown,bvconst(5,64),bvconst(7,64),bvconst(100,64),bvconst(200,64)))
+}
+
+example "AC110 037 consume rejects mode bvconst(1,64)" {
+    assert(¬(ac110_consume(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64),bvconst(1,64),A109Unknown,bvconst(5,64),bvconst(7,64),bvconst(100,64),bvconst(200,64))))
+}
+
+example "AC110 038 consume rejects mode bvconst(2,64)" {
+    assert(¬(ac110_consume(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64),bvconst(2,64),A109Unknown,bvconst(5,64),bvconst(7,64),bvconst(100,64),bvconst(200,64))))
+}
+
+example "AC110 039 consume rejects controlled A109Valid" {
+    assert(¬(ac110_consume(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64),bvconst(0,64),A109Valid,bvconst(5,64),bvconst(7,64),bvconst(100,64),bvconst(200,64))))
+}
+
+example "AC110 040 consume rejects controlled A109Invalid" {
+    assert(¬(ac110_consume(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64),bvconst(0,64),A109Invalid,bvconst(5,64),bvconst(7,64),bvconst(100,64),bvconst(200,64))))
+}
+
+example "AC110 041 consume rejects pending bvconst(0,64)" {
+    assert(¬(ac110_consume(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64),bvconst(0,64),A109Unknown,bvconst(0,64),bvconst(7,64),bvconst(100,64),bvconst(200,64))))
+}
+
+example "AC110 042 consume rejects pending bvconst(6,64)" {
+    assert(¬(ac110_consume(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64),bvconst(0,64),A109Unknown,bvconst(6,64),bvconst(7,64),bvconst(100,64),bvconst(200,64))))
+}
+
+example "AC110 043 consume rejects work bvconst(0,64)" {
+    assert(¬(ac110_consume(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64),bvconst(0,64),A109Unknown,bvconst(5,64),bvconst(0,64),bvconst(100,64),bvconst(200,64))))
+}
+
+example "AC110 044 consume rejects work bvconst(513,64)" {
+    assert(¬(ac110_consume(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64),bvconst(0,64),A109Unknown,bvconst(5,64),bvconst(513,64),bvconst(100,64),bvconst(200,64))))
+}
+
+example "AC110 045 consume rejects tick bvconst(200,64)" {
+    assert(¬(ac110_consume(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64),bvconst(0,64),A109Unknown,bvconst(5,64),bvconst(7,64),bvconst(200,64),bvconst(200,64))))
+}
+
+example "AC110 046 consume rejects tick bvconst(201,64)" {
+    assert(¬(ac110_consume(AC110Request(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64)),AC110Reply(bvconst(1,64),bvconst(2,64),bvconst(3,64),bvconst(4,64),bvconst(5,64),bvconst(6,64),bvconst(7,64),bvconst(8,64),bvconst(9,64),bvconst(1,64),bvconst(0,64),bvconst(101,64),bvconst(0,64),bvconst(31,64)),bvconst(120,64),kc110_true(),bvconst(0,64),bvconst(0,64),A109Unknown,bvconst(5,64),bvconst(7,64),bvconst(201,64),bvconst(200,64))))
+}
+
+example "AC110 047 diagnostic closed unknown is not live" {
+    assert(¬(ac110_live(bvconst(0,64),A109Unknown)))
+}
+
+example "AC110 048 partial authority never live 0A109Valid" {
+    assert(¬(ac110_live(bvconst(0,64),A109Valid)))
+}
+
+example "AC110 049 partial authority never live 1A109Unknown" {
+    assert(¬(ac110_live(bvconst(1,64),A109Unknown)))
+}
+
+example "AC110 050 partial authority never live 2A109Valid" {
+    assert(¬(ac110_live(bvconst(2,64),A109Valid)))
+}
+
+example "AC110 051 restore 0TrueTrue" {
+    assert(ac110_restore(bvconst(0,64),bvconst(101,64),bvconst(0,64),kc110_true(),kc110_true(),kc110_true()))
+}
+
+example "AC110 052 restore 101TrueTrue" {
+    assert(ac110_restore(bvconst(0,64),bvconst(101,64),bvconst(101,64),kc110_true(),kc110_true(),kc110_true()))
+}
+
+example "AC110 053 restore 555TrueTrue" {
+    assert(¬(ac110_restore(bvconst(0,64),bvconst(101,64),bvconst(555,64),kc110_true(),kc110_true(),kc110_true())))
+}
+
+example "AC110 054 restore 101FalseTrue" {
+    assert(¬(ac110_restore(bvconst(0,64),bvconst(101,64),bvconst(101,64),kc110_false(),kc110_true(),kc110_true())))
+}
+
+example "AC110 055 restore 101TrueFalse" {
+    assert(¬(ac110_restore(bvconst(0,64),bvconst(101,64),bvconst(101,64),kc110_true(),kc110_false(),kc110_true())))
+}
+
+example "AC110 056 changed configuration binding denies recovery" {
+    assert(¬(ac110_restore(bvconst(0,64),bvconst(101,64),bvconst(101,64),kc110_true(),kc110_true(),kc110_false())))
+}

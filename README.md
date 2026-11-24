@@ -118,29 +118,48 @@ fell **85.05 → 70.11 s (17.6%)**, over three runs per workload and build. Thes
 are emulator measurements on one laptop, not isolated restart latency or FPGA
 speedup. Preserve both [profiling sessions](PERFORMANCE.md#sc110-accepted-results).
 
-The [KC110 Keycloak adapter contract](DESIGN_NOTES.md#keycloak-adapter-contract)
-is developer-confirmed: **201 positive witnesses and 201/201 hostile disproofs**.
-The bounded `anka keycloak-preflight` command is now implemented, with a protected
-host helper, real RSA/mTLS fixture checks, and a separate persistent Podman lab.
-**The developer Mac passed all 26 fixture checks and built the Rust binary.**
-Keycloak startup failed because the import filename did not match the realm.
-The generator and existing-lab recovery now use `anka-kc110-realm.json`.
-All 40 Python checks pass locally; real Keycloak acceptance must be rerun. See [setup and acceptance](scripts/keycloak/README.md).
+The **KC110 Keycloak preflight milestone is accepted and merged to `main`**
+(user confirmation, 2026-11-23): **201 positive / 201 hostile Kleis witnesses,
+40 Python checks, a successful Rust binary build, and all 14 real Keycloak lab
+acceptance cases**. This includes certificate-bound tokens, realm-not-before
+inactivity, key rotation/withdrawal, exclusive expiry, outage and persistence
+across server restart. The import filename repair preserved credentials and the
+database. A new full Rust suite was not reported for KC110.
+See [lab setup and acceptance](scripts/keycloak/README.md).
+
+The **SA110 bounded coordinator is accepted on the developer laptop**:
+185 positive / 185 hostile Kleis disproofs, **33/33 focused Rust tests**, and the
+full library suite **1997 passed, 0 failed, 20 ignored** (268.41s). No SA110 merge
+is claimed yet. This acceptance covers the local coordinator and candidate checks.
+
+The next integration slice, **[AC110 Keycloak control probe](DESIGN_NOTES.md#keycloak-control-probe)**,
+is delivered. A real SA110 barrier closes before the host worker contacts the
+existing Podman lab. The worker checks realm-not-before revocation, restores the
+prior value, and returns an exact correlated completion. Failures after mutation
+may have begun leave a private recovery journal. Successful completion leaves the
+coordinator closed: this lab does not establish exclusive authority-change mediation.
+
+Local delivery checks passed **56 positive / 56 hostile formal disproofs**,
+**21 Python checks** (including local mTLS), and the existing **40 KC110 checks**.
+There are **15 new Rust tests**, not run in delivery. Real Podman acceptance and
+Rust compilation/tests remain for the laptop. The CLI continues to report
+`current_authority: unknown`, `live_admission: false`, `boot_authorized: false`.
 
 ```bash
 python3 scripts/check-anka109-gates.py \
   --kleis "$HOME/.cargo/bin/kleis" \
-  --kleis-root "$HOME/git/cee/kleis" --only-keycloak-adapter
+  --kleis-root "$HOME/git/cee/kleis" --only-keycloak-control
+
+python3 scripts/keycloak/lab.py resume --state target/keycloak-preflight-01
+bash scripts/check-anka110-keycloak-control.sh --real target/keycloak-preflight-01
 ```
 
-Run the host fixtures with `bash scripts/check-anka110-keycloak-preflight.sh`.
-Use the existing binary and follow the documented `doctor` / `resume` procedure
-for the pinned Keycloak 26.8.1 lab. Diagnostic success reports `current_authority: unknown`,
-`live_admission: false` and `boot_authorized: false`; it publishes no capabilities.
-Next live-provider work requires the separate serialized-authority mechanism,
-full-scope holder proof, trusted mapping and grants. Ordinary introspection cannot
-supply current operation authority. Enrollment and external boot-attempt
-consumption remain separate planned work.
+The `--real` gate compiles/tests Rust on the laptop and temporarily changes the
+disposable lab realm's `notBefore`; it restores and verifies the original value
+on success. Do not run other lab administration concurrently. See
+[recovery and trust boundaries](scripts/keycloak/README.md#ac110-control-probe)
+before retrying an interrupted probe. Exclusive administration, live artifact-path
+admission, enrollment and external boot-attempt consumption remain separate gates.
 
 Reproduce the restart acceptance from the repository root:
 

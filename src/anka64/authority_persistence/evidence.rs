@@ -175,3 +175,7 @@ pub(crate) mod caller_verifier;
 
 #[path="evidence/storage_verifier.rs"]
 pub(crate) mod storage_verifier;
+
+// SA110: bounded coordinator; no production Keycloak authority producer yet.
+#[path="evidence/serialized_authority.rs"]
+pub(crate) mod serialized_authority;

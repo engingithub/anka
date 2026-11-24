@@ -14,16 +14,22 @@ There are no new Cargo dependencies. Credentials never enter guest memory.
 
 ## Acceptance status
 
-On 2026-11-23 the developer confirmed the unchanged KC110 formal gate:
-201 positive witnesses and 201/201 explicit hostile disproofs. The implementation
-has 26 passing RSA/mTLS fixture checks, confirmed on the developer Mac in
-4.410 seconds, and 14 passing local lab recovery/diagnostic regressions (40 checks total). The
-new lifecycle tests mock Podman; these fixtures are not Keycloak itself. The
-developer also completed `cargo build --bin anka --locked` successfully in 4.64s
-(with warnings). **Real Podman/Keycloak acceptance is pending after the import-filename fix.
-The server log identified a realm/file name mismatch in the original generator. No Rust was run here.**
-The commands below are the developer-laptop acceptance procedure. Do not mark
-live integration or production credentials accepted on the basis of this delivery.
+**Accepted and merged to main, developer confirmation on 2026-11-23.** KC110 has
+201 positive / 201 hostile formal witnesses, all 40 Python checks, a successful
+Rust binary build and all 14 real Keycloak acceptance cases passing on the laptop.
+The final fixture/helper timings were 4.476s and 0.007s. Resume repaired the import
+filename while preserving credentials and database, then the real lab accepted
+certificate-bound tokens and exercised all rejection, revocation, rotation,
+expiry, outage and server-restart cases listed below.
+
+Evidence: `target/keycloak-preflight-01/acceptance-1795466633415870000.json`.
+Keep it and all private state outside Git. A new full Rust suite was not reported
+for KC110. No Rust or real Podman run was performed in the delivery environment.
+The following commands reproduce acceptance; they are not outstanding blockers.
+The CLI remains diagnostic and publishes no live/boot authority. SA110 formal
+and Rust gates are accepted (185/185 formal, 33/33 focused Rust; full suite
+1997 passed, 0 failed, 20 ignored). AC110 below connects the closed coordinator
+to lab administration, without enabling production current authority.
 
 ## Run on the laptop
 
@@ -133,7 +139,8 @@ wrote `anka-realm.json` for realm `anka-kc110`, but Keycloak requires
 renames the legacy file, preserving its bytes and permissions, before restarting
 the existing container. It refuses conflicting files, invalid realm content or
 unsafe file permissions. No credentials or database contents are regenerated.
-Real Keycloak acceptance must still be rerun; it is not claimed as passed.
+The subsequent developer run repaired this filename and passed all 14 real
+acceptance cases; these recovery instructions remain for reproducing old labs.
 
 Apply the patch in the same build checkout. No Rust source changed, so keep the
 already-built `target/debug/anka`. From the repository root:
@@ -245,13 +252,12 @@ partial-start recovery, image/state mismatch refusal, private failure reports,
 the legacy filename repair and conflict/invalid-input rejection.
 They do not prove Keycloak internals, distributed revocation atomicity or
 Rust refinement. The laptop binary build has passed; run the real acceptance above and your
-normal Rust suite on the laptop; report the results before marking this milestone accepted.
+normal Rust suite on the laptop; retain the results when reproducing this accepted milestone.
 
-Next: design and prove the separate serialized current-authority producer, then
-implement the live adapter, trusted principal mapping, full-scope holder proof
-and explicit grants. HTTP stays outside registry-guarded provider callbacks.
-Only after that work can revocation-between-observation-and-effect be accepted
-through the real CC2/typed-socket/NIC/file path. External boot-attempt consumption,
+Next: run the AC110 control-path acceptance below. After that, enforce exclusive
+administration and implement the trusted Keycloak source, principal mapping,
+full-scope holder proof and explicit grants. HTTP stays outside guarded callbacks.
+The real CC2/typed-socket/NIC/file admission path, external boot-attempt consumption,
 enrollment, installation, guest CRUD and threads/SMP remain separate work.
 
 Sources for this pinned setup: [Keycloak 26.8.1 release](https://www.keycloak.org/2026/10/keycloak-2681-released),
@@ -263,3 +269,57 @@ Sources for this pinned setup: [Keycloak 26.8.1 release](https://www.keycloak.or
 and [OpenSSL signature verification](https://docs.openssl.org/1.1.1/man1/dgst/).
 The Keycloak guides are rolling references; the pinned release must pass the lab
 acceptance rather than inheriting assumptions from a newer guide.
+
+
+<a id="ac110-control-probe"></a>
+
+## AC110: coordinator-to-Podman control probe
+
+This new command uses the actual Rust SA110 coordinator to close a barrier before
+remote administration. It temporarily raises realm `notBefore`, verifies old-token
+inactivity, restores the saved value, and verifies fresh-token activity. It leaves
+the coordinator **closed**, with current authority **Unknown** and live/boot
+admission **false**. It exercises the administration path; it does not establish
+exclusive writer control or connect live file operations yet.
+
+Local acceptance is 56/56 formal and 21 new Python tests, plus 40 existing Python
+regressions. Fifteen new Rust tests and this real Podman probe have not been run in
+delivery. Use the already prepared private lab, not production credentials:
+
+```bash
+python3 scripts/keycloak/lab.py resume --state target/keycloak-preflight-01
+bash scripts/check-anka110-keycloak-control.sh --real target/keycloak-preflight-01
+```
+
+The gate builds/tests Rust on your laptop. Omitting `--real STATE` runs the fixture
+and Rust gates without contacting the real lab. A successful real run emits
+`status: control_probe_valid`, `action: probe`, `coordinator: closed` and the three
+denying authority fields. Preserve that output with the Rust test results.
+
+The directory, credentials and recovery files must remain private. Do not run
+other lab administration (including `lab.py check`) concurrently. The advisory
+lock protects AC110 workers only; it does not fence direct administrators, database
+writers or automatic server changes. Setting `hostname-admin` is not sufficient
+to restrict Admin REST access; deployment enforcement remains future work.
+
+If the worker fails, inspect private `control-failure-*.json` for the fixed reason.
+If `control-recovery.json` exists, a new probe refuses to start. Recover using:
+
+```bash
+target/debug/anka keycloak-control-lab \
+  --state target/keycloak-preflight-01 --recover
+```
+
+Recovery verifies the input fingerprint, realm ID and observed value before
+restoring, and verifies readback before removing the journal. On a conflict,
+retain the record and inspect the lab rather than deleting it and rerunning.
+The check-before-write is not atomic CAS, and the journal is not boot authority
+or rollback-resistant storage. A timeout may leave no failure report but still
+leave a journal. Successful recovery reports `action: recover` and still grants
+no authority. Run a new probe afterwards for the complete revocation sequence.
+
+No existing `access.token`, keys, credentials or database is replaced. Tokens used
+by the probe stay in worker memory; the fixed binary pipe contains only correlation
+and bounded result fields. The worker uses TLS endpoint observations for this
+control probe; KC110's separate signature/preflight checks remain unchanged.
+See [the full AC110 contract and limitations](../../DESIGN_NOTES.md#keycloak-control-probe).

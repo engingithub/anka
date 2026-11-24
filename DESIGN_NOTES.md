@@ -13797,7 +13797,7 @@ This documentation update did not rerun or extend the accepted gates.
 
 <a id="dn72-status"></a>
 
-### Current status — SC110 merged; KC110 preflight implemented, acceptance pending
+### Current status — KC110 merged; SA110 accepted; AC110 control probe delivered
 
 **Phase 10.8 is closed and merged. Within Phases 10.9–10.10, bounded artifact
 persistence, guest download, stored launch, independent restart and the SC110
@@ -13823,7 +13823,7 @@ requesters or authorize boot.
 | Stored retrieval / live launch | SL110 foundation: 49 positive / 56 hostile explicitly disproved. [SR110 refinement](#stored-retrieval-launch): 92 positive / 78 hostile explicitly disproved locally. SR110 R1 accepted: 20 focused Rust tests passed in 7.20s. [AR110 read protocol](#artifact-read-protocol) formal gate passed: 117 positive / 98 hostile. AR110 Rust read codec/client and host TCP path accepted: 23 focused + 24 compatibility tests passed. [GD110 guest download](#guest-artifact-download) formal gate: 174 positive / 149 hostile explicitly disproved. GD110 retrieval and SR110 R2 fresh live admission are accepted and merged to main (user confirmation, 2026-11-18): 11 focused live-admission tests and the real witness passed (84.35s); full library suite: 1,935 passed, 0 failed, 19 ignored (307.91s). The subsequent bounded restart acceptance is recorded below. |
 | RR110 independent restart | [Composition gate](#stored-restart-contract): 234 positive / 192 explicitly disproved hostile witnesses. [Runtime acceptance](#stored-restart-runtime): 14 focused tests passed in 4.21s; real CC2/socket/NIC/file restart witness passed in 92.13s. Service-only, guest-only and combined restart cases launch the retained target to exit 42 without recompilation. |
 | Latest full release library regression | SC110 laptop log reviewed 2026-11-22: **1,964 passed, 0 failed, 20 ignored, 0 measured, 0 filtered out in 267.06s**. All 15 focused cases and the separately selected real GD110/SR110/RR110 witnesses also passed (70.30s/69.50s/69.53s). Ignored tests are not all claimed as executed. |
-| Integration status | The user confirmed RR110 merged to `main` on 2026-11-19, after the passing focused/real gates and 1,949-test suite. The [SC110 checkpoint](#scalar-read-runtime) now has accepted formal, Rust and measured laptop evidence; the user confirmed profiling/SC110 merged to `main`. The [KC110 adapter contract](#keycloak-adapter-contract) is developer-confirmed (201 positive / 201 hostile disproofs). Bounded CLI preflight is implemented with 26 passing local Python checks; The laptop passed those checks and the Rust binary build. The startup log identified an import filename/realm mismatch; generator and resume repair are corrected, with 40 local Python checks passing and real-server acceptance pending. Strict live use, enrollment/boot authorization and installation remain open. |
+| Integration status | RR110 and profiling/SC110 are accepted and merged. The user also confirmed KC110 preflight merged after 201/201 formal witnesses, 40 Python checks, the Rust binary build and all 14 real Keycloak lab cases. No new full Rust suite is claimed for KC110. SA110 formal gates are developer-confirmed (185 positive / 185 hostile disproofs). The bounded Rust coordinator passed 33/33 focused tests and the full suite (1997 passed, 0 failed, 20 ignored). AC110 closed control-path integration is delivered with Rust/real Podman acceptance pending; live use, enrollment, boot authorization and installation remain open. |
 
 E7/E8 are merged to main. The 148-test E10 run includes E8’s tests; it is a
 persistence reference result, not a whole-system regression.
@@ -17287,8 +17287,11 @@ witness. The focused/real gates and the subsequent full release library suite
 have now passed as recorded above. Re-run affected checks if runtime code changes.
 RR110 and SC110 integration are complete by the user's merge confirmations.
 The KC110 adapter contract is developer-confirmed in the [agreed plan](#post-rr110-plan).
-Bounded CLI preflight is implemented; Rust/real Keycloak acceptance, separate
-strict live-use integration, enrollment and boot authorization follow.
+Bounded CLI preflight, its binary build and all real Keycloak acceptance cases
+have passed and merged. SA110 formal gates also passed on the laptop. Its bounded
+Rust coordinator passed 33/33 focused tests and the full suite (1997/0/20). AC110
+closed administration probing is delivered; strict live-use integration,
+enrollment and boot authorization follow.
 Broader T3–T5, production deployment,
 whole-machine reboot and the compiler backlog are not silently added to RR110
 acceptance.
@@ -17534,7 +17537,10 @@ is implemented by this documentation change.
 | --- | --- |
 | 1 — design now | Define the host-independent boot/enrollment responsibilities: installation credential, selected trust anchor, enrollment entitlement, machine boot versus personal login, selected workload admission, one-use freshness, recovery and online/offline policy. Settle precise contracts before coding them. |
 | 2 — accepted and merged | SC110 formal, focused/full/real Rust checks and fresh laptop measurements accepted. Median rebuild/restart workload times reduced 19.8%/17.6%. Preserve both sessions and recording caveats; user confirmed profiling/SC110 merged to `main`. |
-| 3 — KC110 preflight implemented, acceptance pending | Formal 201/201 developer-confirmed. CLI preflight and separate pinned Podman Keycloak/persistent PostgreSQL lab implemented; 26 local Python checks pass. The laptop passed the original 26 checks and Rust binary build. The import filename mismatch is fixed in generation and resume; 40 local Python checks pass. Real-server acceptance remains pending. Preflight stays outside effecting provider callbacks. Replacing deterministic current-authority fixtures requires the separate serialized-use mechanism and real denial/revocation/outage acceptance in KC110. |
+| 3a — KC110 accepted and merged | 201 positive / 201 hostile disproofs, 40 Python checks, Rust binary build and all 14 real Keycloak cases passed on the laptop; user confirmed merge. Diagnostic success supplies no live operation or boot authority. |
+| 3b — SA110 accepted on laptop | 185 positive / 185 hostile disproofs; 33/33 focused Rust; full library suite 1997 passed, 0 failed, 20 ignored. No merge confirmation yet. |
+| 3c — AC110 delivered | Real SA110 close/change/verify path to the existing Keycloak lab, exact private worker protocol and explicit journal recovery. Local 56/56 formal and 21 Python checks passed; Rust/real Podman acceptance pending. No live authority. |
+| 3d — planned | Exclusive mediation of relevant issuer/admin/grant/key changes, trusted principal mapping, full-scope holder proof and explicit grants; then real CC2/socket/NIC/file revocation-at-use acceptance. |
 | 4 | Implement installation enrollment and boot authorization with explicit machine-credential provisioning, authenticated trust selection and externally retained attempt consumption. Specify rollback/crash/retry behavior and verify the platform-independent flow in the emulator. |
 | 5 | Build the installation wizard on the tested CLI enrollment/recovery operations. Implement the native/FPGA bootstrap adapter when a concrete hardware target determines firmware, key storage and communication facilities. |
 
@@ -17900,8 +17906,10 @@ completed with expected exit status (42/0); rebuild retains recorder status
 See [full evidence, manifests and limitations](PERFORMANCE.md#sc110-accepted-results).
 
 The user subsequently confirmed profiling/SC110 merged to `main`. The KC110
-adapter contract below is now developer-confirmed and bounded CLI preflight is
-implemented, with laptop runtime acceptance pending. Remaining instruction
+adapter contract and bounded CLI preflight below are now accepted on the laptop
+and merged. SA110 formal gates are developer-confirmed, and its bounded Rust
+coordinator passed 33/33 focused Rust and a 1997/0/20 full suite. AC110 control-path
+probing is delivered, with real acceptance pending. Remaining instruction
 execution/cleanup costs are observations, not a prerequisite for identity work.
 
 
@@ -18173,6 +18181,24 @@ pass with the existing 35 checks (40 locally). Rust, the preflight verifier and
 formal gates are unchanged; no Rust compilation/tests or real Podman execution
 were performed here. Resume the retained lab, then rerun real-server acceptance.
 
+#### Final KC110 acceptance and merge (2026-11-23)
+
+The developer's rerun passed **26 fixture checks in 4.476s** and **14 lab-helper
+checks in 0.007s**. Resume repaired the import filename while preserving credentials
+and database, and Keycloak became ready. All **14 real acceptance cases passed**:
+valid certificate-bound token; wrong issuer, audience, client and holder; realm
+not-before inactivity; fresh observation after policy restore; new signing key;
+withdrawn old key; fresh token after rotation; short-lived token before expiry;
+exclusive expiry; unavailable Keycloak; and persistent realm after server restart.
+The evidence file is `target/keycloak-preflight-01/acceptance-1795466633415870000.json`.
+Keep it and all private state outside Git. The Rust binary build had already passed;
+a new full Rust test-suite result was not supplied for this change.
+
+The user subsequently confirmed merge to `main`. This supersedes the pending and
+blocked statuses in the historical delivery/recovery notes above. KC110 is accepted
+as **diagnostic preflight only**. The CLI still leaves current authority unknown;
+it establishes neither exclusive administrative mediation nor live Anka permission.
+
 #### Primary sources reviewed 2026-11-23
 
 - [KC1: Keycloak OIDC endpoints](https://www.keycloak.org/securing-apps/oidc-layers):
@@ -18189,3 +18215,335 @@ were performed here. Resume the retained lab, then rerun real-server acceptance.
 
 The exact Anka mapping, scope proof, effect fence, budget and boot separation are
 KC110 design decisions, not features claimed to be supplied by those standards.
+
+<a id="serialized-current-authority"></a>
+
+### SA110 — serialized current-authority coordinator (2026-11-23)
+
+**Formal slice:** the next contract after accepted/merged KC110. Files:
+`anka110_serialized_authority.kleis` and
+`anka110_serialized_authority_false_witnesses.kleis`. The new selector is
+`--only-serialized-authority`, included in the default formal sweep. The formal
+slice introduced no axioms or Rust changes. The bounded Rust follow-up is recorded
+below. The accepted Keycloak CLI remains unchanged and does not produce current authority.
+
+#### Chosen ordering mechanism and trust boundary
+
+The first profile has one uniquely owned coordinator and one bounded operation
+stream. Its transitions are atomic local critical sections. All relevant changes
+and effect submissions must pass through this owner. A replicated coordinator,
+multiple independent owners, new-stream budget allocation, and crash-consistent
+external effects are not silently inferred from this bounded model.
+
+The administration protocol is **close locally, perform external change, verify
+completion, then optionally reopen**. An exclusive mediation attestation covers
+this exact authority domain, installation, issuer, selected configuration and
+coordinator incarnation, including reconciliation of uncertain prior actions.
+It is trusted control-plane evidence, not an OAuth role, an `active=true` result,
+a successful HTTP response, a local mutex, or a caller-selected flag.
+
+All relevant Keycloak administration, automatic signing-key changes and Anka
+grant/policy mutations must be mediated. Either deployment controls establish that
+property, or the profile stays uncontrolled and cannot admit strict live use.
+Direct master/realm administration, an alternate writer or an independent database
+mutation invalidates the assumption. Detected loss poisons the operation, but no
+claim is made that an unobserved bypass can be detected by polling. A future
+integration must specify administration credentials, writer restrictions, routing,
+acknowledgement semantics and failover fencing; the present Podman lab does not
+establish those controls.
+
+#### State and transition contract
+
+| Record | Owned meaning |
+| --- | --- |
+| `SA110State` | Domain/installation/issuer/configuration, coordinator incarnation/revision, next use sequence, original work/deadline, wall and monotonic high-water marks, completed effect count, unchanged boot state, mode and pending command |
+| `SA110Proposal` | Copiable, untrusted proposal for one token, key set, complete KC110 scope, coordinator incarnation/revision, exact sequence and tick; contains no validity bit |
+| `SA110Ack` | Verified result of the exact pending administrative command, correlated by domain/incarnation/revision/command and carrying the resulting policy/key set and enabled verdict |
+
+Mode `0` is closed, `1` open and `2` poisoned. Administrative command identities
+are complete opaque handles, not truncated strings. Revision and incarnation
+prevent reuse of a command name from accepting an old completion. All token,
+artifact and request handles inherit KC110's collision-free identity abstraction;
+wire encoding and cryptographic binding remain implementation obligations.
+
+| Transition | Required behavior |
+| --- | --- |
+| `sa110_establish` | Establish verified exclusive mediation only from a closed, idle lane; it stays closed and spends work. Unknown/invalid attestation cannot establish control. |
+| `sa110_barrier` | Close admission, advance revision without wrap and retain a pending command before external mutation. It can still close when work is exhausted or the deadline has elapsed. A second command cannot overwrite an outstanding command. |
+| `sa110_complete` | Only exact verified completion installs its policy/key-set result and clears pending state. Reopen also requires enabled status, established control, no poison and usable original budget. Unknown/mismatched completion stays closed; it cannot reset budget or undo effects. |
+| `sa110_attempt` | Recompute owned state and complete KC110 candidate plus existing operation gate in the same critical section as consumption/effect submission. Spend one work unit if any remains and advance the nonwrapping sequence even on denial. Emit at most one effect; otherwise preserve the completed prefix. |
+| `sa110_invalidate` | Detected loss of control or owner integrity poisons the bounded operation even while administration is pending. Delayed success cannot reopen it. |
+| `sa110_recover` | Independently verified newer incarnation closes admission and resets established control to Unknown. Uncertain/reused incarnation or prior poison stays poisoned. Preserve original work/deadline, completed effects and boot state. Re-establishment must reconcile outstanding external uncertainty. |
+
+Every transition preserves the boot frame. Recovery's incarnation evidence is
+independent of machine boot permission and external one-use boot-attempt consumption.
+Nothing in SA110 grants file CRUD, execute or boot authority outside existing gates.
+
+#### Exact use and linearization point
+
+The local guard spans reading current coordinator state, rechecking the complete
+KC110 candidate, applying the existing operation/Fabric gate, consuming accounting,
+and the selected local effect submission. A boolean computed before acquiring the
+guard is insufficient. `sa110_kc_ready` explicitly composes the existing KC110
+predicate with the owned budget and sequence. No public receipt bypasses the
+current state check; `sa110_fence` is a projection inside that critical section.
+
+A barrier ordered before a use denies it. A use ordered before the barrier retains
+its completed effect; the barrier cannot retract bytes already delivered. Every
+later fragment and final delivery repeats the checks and consumes a fresh sequence.
+Same-tick replay fails because the sequence advances. Policy/key changes invalidate
+old proposals by revision and require coherent new candidate evidence. Expiry is
+checked again at use; wall or monotonic rollback poisons rather than extending time.
+Work, deadline, sequence and completed effects are never replenished by reconnect,
+completion or recovery; saturated counters cannot wrap into admissible values.
+
+Remote HTTP/crypto/discovery runs outside registry-guarded callbacks. The closed
+barrier must precede external administration; in the interval, no local effect is
+admitted. If backend submission can block, escape the critical section, remain
+queued or complete later, the Rust integration must retain a valid fence through
+its actual effect boundary, or poison/reconcile uncertainty. An atomic predicate
+alone does not prove distributed atomic commit, durable exactly-once behavior,
+network delivery timing or backend rollback protection.
+
+#### Evidence and next implementation gate
+
+The pair exercises valid admission, every proposal scope field, coordinator
+identity/revision changes, missing control, stale/unknown KC110 evidence, existing
+gates, denied-use accounting, replay, both revoke/use orderings, unknown/delayed
+completion, policy/key replacement, expiry, clock rollback, counter exhaustion,
+loss of control while pending, and restart recovery. Positive universal properties
+also check nonwrapping counters, high-water marks and transition invariants.
+Universal state properties quantify every primitive constructor field; this avoids
+the translator's symbolic-record limitation without narrowing the state domain.
+Hostile counterparts must each be
+explicitly disproved; unknown, parse errors and timeouts are failures.
+
+**Local validation, 2026-11-23:** 185 positive witnesses passed and 185/185 hostile
+witnesses were explicitly disproved. Related regression gates also passed:
+KC110 201 positive / 201 hostile disproofs, caller verifier 45 / 39, and storage
+verifier 43 / 36. The gate harness passed Python syntax validation. The full formal
+sweep and Rust compilation/tests were not run for that formal delivery. The user
+has now confirmed the same 185 positive / 185 explicit hostile disproofs on the
+laptop; the formal gate is accepted, with no SA110 merge claimed yet.
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" --only-serialized-authority
+```
+
+The private bounded Rust coordinator and its guarded submission interface are
+now delivered below, with deterministic ordering and failure tests. Keep real CLI authority
+Unknown until exclusive mediation and full-record control evidence have a concrete
+implementation and deployment acceptance. Subsequent real CC2/typed-socket/NIC/file
+acceptance must cover revocation between observation and effect, changed caller
+and scope, suffix/final-delivery suppression and retained Kernel accounting.
+Enrollment, external boot-attempt consumption, installation, guest CRUD, threads/SMP
+and native bootstrap remain separate milestones.
+
+
+#### SA110 bounded Rust delivery (2026-11-23)
+
+**Accepted on the laptop after delivery:** `evidence/serialized_authority.rs`, its
+`candidate.rs`, and 33 focused tests. Module wiring is through `evidence.rs`.
+No Cargo dependencies, guest ABI, Keycloak CLI behavior, existing registry/provider
+behavior or boot path change. The implementation is an additional internal owner
+and guarded submission interface; it is not connected to the live artifact path yet.
+
+`Coordinator` owns a private mutex containing state, a trusted `Evidence` source
+and a trusted `Clock`. It starts closed and uncontrolled, with one allocated work
+budget and deadline. A read-only `View` cannot restore state; proposals and change
+handles carry correlation only. Process-local domain allocation is nonwrapping
+and separates owners. The embedding must still establish cross-restart incarnation
+non-reuse and prevent multiple owners from independently attesting the same real
+authority domain. Constructing another coordinator is a new trusted admission,
+not a reconnect/retry mechanism.
+
+The source's default methods deny. There is no JSON-to-Valid conversion and no
+production implementation of `attest`, `completion`, `fresh_incarnation` or
+`candidate`. Each callback must be bounded, nonblocking and independently bind
+its entire input context; a candidate must be derived from an authenticated peer
+and actual channel rather than echoing the requested proposal. The Rust predicate
+checks every KC110 configuration/token/status/mapping/scope/proof/grant field and
+all time windows. No cached `ready` input is accepted.
+
+Each entered transition debits remaining work without underflow and advances the
+sequence without wrap before any evidence/gate/effect callback. The guard remains
+held while the existing operation gate runs and through synchronous effect
+submission. Trusted clocks are sampled after callbacks as well as on entry:
+expiry or rollback during validation cannot inherit an earlier valid timestamp.
+The gate receives the verified complete scope; the effect closure receives no
+capability or authorization receipt. Neither closure may enqueue an unfenced later
+effect, wait for network I/O, or acquire another authority lane.
+
+`effects` counts authorized submissions, not bytes, successful syscalls or durable
+commits. One submission may return a short write count to the embedding. Any
+returned error is treated conservatively as uncertain, retains the debit and
+submission count, and applies a separately accounted loss-invalidation transition
+under the same guard. A provider/gate/effect unwind poisons
+the mutex, which is never recovered into an authorizing path. Known transient
+no-effect errors and backend-specific atomicity require a later explicit adapter;
+this slice does not retry uncertain effects or claim crash-safe exactly-once use.
+
+`Busy` is a failed try-lock, before a serialized transition: no provider/effect is
+called and protected state is untouched. The caller must not treat it as a completed
+barrier or permission for external administration. Future transport integration
+must charge outer ingress/poll work for contention, just as other bounded lanes do.
+Malformed serialized attempts still spend work. At zero work or an elapsed deadline,
+no evidence callback is invoked; barriers can still close. Recovery then has Unknown
+freshness and poisons rather than replenishing work. Missing/disabled completions
+stay closed; exact verified results can update policy/key set only for the pending
+command, and reopening requires usable original budget and established control.
+
+**Acceptance to run on the laptop:**
+
+```bash
+bash scripts/check-anka110-serialized-authority.sh
+# Before merge, also run the normal full library regression suite:
+cargo test --release --locked --lib -- --test-threads=1
+```
+
+The gate first lists and verifies exactly 33 SA110 tests, then runs that filter
+single-threaded (two tests explicitly create threads for deterministic ordering).
+Expected injected provider/gate/effect panic messages are caught by those tests;
+the test outcome still needs to be `ok`. No tests are ignored. Cases cover all
+proposal/proof/grant scope fields, candidate verdicts and scalar constraints,
+unknown default authority, cross-owner proposals, same-tick replay, both barrier/use
+orders, overlapping commands, every completion binding, rotation, deadline/work
+exhaustion, both clock rollbacks, delayed callbacks, saturating counters, loss of
+control while pending, recovery, retained prefixes and uncertainty.
+
+**Delivery validation:** Rust files passed a syntax-only parser; the shell gate
+passed syntax and stub-command checks, including rejecting missing tests and
+propagating failure. These checks do not establish Rust type correctness or test
+success. No Rust compilation or Rust tests were run, as requested. The Kleis pair
+is unchanged from the user's accepted 185/185 result.
+
+**Follow-up:** AC110 below supplies the first real control-path integration with
+the existing Podman lab. Exclusive administration and a live evidence source remain
+separate deployment/implementation gates. Keep current
+authority Unknown until the deployment restricts all relevant writers and verifies
+complete control/completion records. Then connect the guarded submission boundary
+to real CC2/typed-socket/NIC/file operations and test revocation between observation
+and use, suffix/final-delivery suppression, changed callers/scopes and retained
+Kernel accounting. Enrollment, external boot-attempt consumption, installation,
+guest CRUD and threads/SMP remain separate work.
+
+
+#### SA110 developer acceptance (2026-11-23)
+
+The supplied `test-output-serialized-authority-1.txt.zip` confirms 185 positive and
+185/185 hostile Kleis disproofs, 33/33 focused Rust tests (0.00s), and the full
+library suite: **1997 passed, 0 failed, 20 ignored**, 268.41s. Injected unwind tests
+passed; compiler warnings were not failures. This supersedes the delivery-time
+untested status above. No SA110 merge confirmation has been supplied yet.
+
+<a id="keycloak-control-probe"></a>
+
+### AC110 — Keycloak control-path probe and explicit recovery (2026-11-23)
+
+**Delivered:** a bounded host command connects an actual SA110 coordinator to the
+existing Podman Keycloak lab. This is the first administration integration slice.
+It deliberately does not claim exclusive mediation: the lab retains direct master
+administration, database/Podman access, and other writers. An admin hostname alone
+is not endpoint isolation. Enforced writer restriction and a complete control
+attestation remain prerequisites to strict live authority.
+
+| Boundary | Implementation |
+| --- | --- |
+| Formal contract | `anka110_keycloak_control.kleis` plus hostile pair; `--only-keycloak-control`, also in the default sweep; no new axioms |
+| Host entry | `anka keycloak-control-lab --state PRIVATE_LAB_DIRECTORY [--recover]` |
+| Local ordering | New private SA110 owner starts closed/Unknown; barrier completes before worker spawn; the mutex is not held across remote work |
+| Trusted worker | Fixed checkout helper `scripts/keycloak/control.py`, Python isolated mode, private pipes, no caller-selected URL/helper or credential arguments |
+| Correlation | Exact 80-byte little-endian request and 120-byte reply; action, domain, incarnation, revision, command and four nonce words echoed exactly |
+| Acceptance | Complete frame, real EOF, successful child exit, result/status invariants, original deadline and exact pending completion; no cached permission |
+| Resource bounds | Eight coordinator units, original 45-second supervisor deadline, worker 40-second/16-request budget, 64-KiB JSON and 128-KiB wire cap per response, bounded headers and no redirects/compression/retry |
+| Result | Pending completion consumed while closed/Unknown; no candidate, grant, holder proof, boot permission or new live effect |
+
+The probe uses authenticated TLS/mTLS to the fixed local realm. It obtains a token
+in memory, verifies its expected claims/holder and correlated introspection, reads
+the original realm ID and `notBefore`, then creates and fsyncs a private recovery
+journal before issuing PUT. It raises `notBefore` to the token's `iat + 1`, checks
+readback and inactive introspection, restores the original value after a conflict
+check, verifies readback, and checks fresh-token activity. These are control-path
+observations from authenticated endpoints, not a new token signature verifier or
+local full-scope possession proof. KC110 preflight remains the separate signature
+and identity diagnostic. No token or credential is written to the worker pipe or
+printed, and the existing `access.token` is not replaced by this probe.
+
+The private completion mailbox can clear only the exact pending SA110 command.
+`checked=Valid` means the worker's bounded probe result was verified; `enabled`
+remains Unknown and no exclusive-control attestation is supplied. The expected
+SA110 completion result is therefore Denied for live admission, with pending zero
+and mode still closed. The host reports `control_probe_valid` only after checking
+that accounting, deadline, effects and boot frame are preserved as required.
+A remote error, wrong reply or deadline failure invalidates the local operation;
+there is no automatic remote retry. A worker unwind before completion leaves the
+already-closed barrier pending. Process-group cleanup also bounds descendants
+holding stdout open after the child exits.
+
+#### Recovery and operational limits
+
+`control-recovery.json` is mode 0600 in the existing private lab directory.
+Its exact schema binds the original request, realm ID, original/target values and
+a SHA-256 fingerprint of the selected configuration, manifest, credentials and
+TLS input contents. A new probe refuses any outstanding journal. `--recover`
+requires the same binding and realm ID, and accepts only an observed original or
+target value. If the target remains, recovery restores the original; if already
+restored, it verifies without a write. It removes the journal only after successful
+readback and input rechecks. Credential/configuration changes, foreign realm IDs,
+conflicting values, malformed records, symlinks and public files fail closed.
+
+A read-before-write check is **not atomic compare-and-swap**. The advisory lock
+excludes concurrent AC110 workers, not direct administration, existing `lab.py
+check`, DB writes or automatic issuer changes. Do not run those concurrently with
+a probe/recovery. The host/operator and private lab credentials remain trusted.
+This journal is laboratory recovery evidence, not rollback-resistant authority
+storage, a reusable capability, or machine boot-attempt consumption. No deletion
+of existing databases, realm configuration, keys or credentials is performed.
+
+On worker failure, an allowlisted private `control-failure-*.json` report records
+a safe reason and whether recovery is needed. Raw exceptions, credentials,
+responses and command arguments are excluded. A supervisor timeout/kill may leave
+only the recovery journal; absence of a failure report is not evidence of success.
+If recovery reports a binding or state conflict, retain the journal and inspect
+the lab state; do not delete it and rerun blindly.
+
+```bash
+python3 scripts/check-anka109-gates.py \
+  --kleis "$HOME/.cargo/bin/kleis" \
+  --kleis-root "$HOME/git/cee/kleis" --only-keycloak-control
+python3 scripts/keycloak/lab.py resume --state target/keycloak-preflight-01
+bash scripts/check-anka110-keycloak-control.sh --real target/keycloak-preflight-01
+# Only after an interrupted probe left control-recovery.json:
+target/debug/anka keycloak-control-lab --state target/keycloak-preflight-01 --recover
+# Full library regression before merge:
+cargo test --release --locked --lib -- --test-threads=1
+```
+
+The shell gate runs Python fixtures, verifies discovery of exactly 15 AC110 Rust
+tests, runs them and the accepted SA110 gate; `--real` additionally builds the
+binary and runs the real lab probe. Without `--real` it does not contact Podman.
+The Rust tests cover exact framing/correlation, truncation/tail, foreign commands,
+closed/unlocked remote ordering, default denial, failed/late completion, retained
+accounting, worker unwind, child exit/EOF, excess output and descendant deadlines.
+
+**Delivery validation:** 56 positive / 56 hostile explicit Kleis disproofs and
+21 Python tests passed locally, including real local mTLS fixtures and supervised
+worker protocol, plus all 40 existing KC110 Python regressions. Rust files passed
+syntax-only parsing; shell syntax/discovery checks passed with stub commands.
+No Rust compilation/tests or real Podman control probe were run in delivery.
+The local HTTP fixture is not Keycloak and does not establish real realm behavior.
+Developer Rust and real Podman output are the next acceptance evidence.
+
+**Next after acceptance:** specify enforced administration ingress and writer
+ownership (including master realm, DB/Podman/operator and automatic key/policy
+changes), then implement the trusted source and full-scope proof/grant mapping.
+Only after that gate may the coordinator admit real CC2/typed-socket/NIC/file
+operations. Revocation-between-observation-and-effect, suffix/final-delivery
+suppression and preserved Kernel accounting remain mandatory real-path acceptance.
+
+Primary references: [pinned Keycloak Admin REST API](https://www.keycloak.org/docs-api/26.8.1/rest-api/index.html#_put_adminrealmsrealm)
+for realm GET/PUT, and [hostname configuration](https://www.keycloak.org/server/hostname#_exposing_the_administration_console_on_a_separate_hostname)
+for the explicit limitation that an admin hostname does not block frontend Admin
+REST access. Those API facts do not establish deployment writer exclusion.

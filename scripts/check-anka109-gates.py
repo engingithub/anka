@@ -43,6 +43,8 @@ GUEST_DOWNLOAD_PAIRS = ('anka110_guest_download',)
 STORED_RESTART_PAIRS = ('anka110_stored_restart',)
 SCALAR_READ_PAIRS = ('anka110_scalar_read',)
 KEYCLOAK_ADAPTER_PAIRS = ('anka110_keycloak_adapter',)
+SERIALIZED_AUTHORITY_PAIRS = ('anka110_serialized_authority',)
+KEYCLOAK_CONTROL_PAIRS = ('anka110_keycloak_control',)
 
 
 def main():
@@ -75,6 +77,8 @@ def main():
     selection.add_argument('--only-stored-restart', action='store_true', help='independent service/guest restart, durable boot admission and fresh stored launch')
     selection.add_argument('--only-scalar-read', action='store_true', help='scalar Read/Fetch payload equivalence, exact snapshots and guarded cleanup')
     selection.add_argument('--only-keycloak-adapter', action='store_true', help='Keycloak observation, exact holder/scope binding and strict current-use boundary')
+    selection.add_argument('--only-serialized-authority', action='store_true', help='single-owner authority barriers, exact-use ordering, replay and recovery')
+    selection.add_argument('--only-keycloak-control', action='store_true', help='closed Keycloak control probe, exact completion and recovery boundaries')
     parser.add_argument('--timeout', type=int, default=120, help='seconds per theory file')
     args = parser.parse_args()
     if args.timeout <= 0:
@@ -108,7 +112,9 @@ def main():
              STORED_RESTART_PAIRS if args.only_stored_restart else
              SCALAR_READ_PAIRS if args.only_scalar_read else
              KEYCLOAK_ADAPTER_PAIRS if args.only_keycloak_adapter else
-             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS + EVIDENCE_PAIRS + PROVIDER_PAIRS + GUARDED_PAIRS + BINDER_PAIRS + VERIFIER_PAIRS + STORAGE_VERIFIER_PAIRS + SOCKET_CAPACITY_PAIRS + OUTBOUND_SELECT_PAIRS + STORED_LAUNCH_PAIRS + ARTIFACT_STORAGE_PAIRS + COMPILER_STORAGE_BINDING_PAIRS + ARTIFACT_TRANSFER_PAIRS + ARTIFACT_TRANSPORT_PAIRS + GUEST_ARTIFACT_PAIRS + STORED_RETRIEVAL_PAIRS + ARTIFACT_READ_PAIRS + GUEST_DOWNLOAD_PAIRS + STORED_RESTART_PAIRS + SCALAR_READ_PAIRS + KEYCLOAK_ADAPTER_PAIRS)
+             SERIALIZED_AUTHORITY_PAIRS if args.only_serialized_authority else
+             KEYCLOAK_CONTROL_PAIRS if args.only_keycloak_control else
+             T1_PAIRS + T2_PAIRS + BACKEND_PAIRS + PROTOCOL_PAIRS + EVIDENCE_PAIRS + PROVIDER_PAIRS + GUARDED_PAIRS + BINDER_PAIRS + VERIFIER_PAIRS + STORAGE_VERIFIER_PAIRS + SOCKET_CAPACITY_PAIRS + OUTBOUND_SELECT_PAIRS + STORED_LAUNCH_PAIRS + ARTIFACT_STORAGE_PAIRS + COMPILER_STORAGE_BINDING_PAIRS + ARTIFACT_TRANSFER_PAIRS + ARTIFACT_TRANSPORT_PAIRS + GUEST_ARTIFACT_PAIRS + STORED_RETRIEVAL_PAIRS + ARTIFACT_READ_PAIRS + GUEST_DOWNLOAD_PAIRS + STORED_RESTART_PAIRS + SCALAR_READ_PAIRS + KEYCLOAK_ADAPTER_PAIRS + SERIALIZED_AUTHORITY_PAIRS + KEYCLOAK_CONTROL_PAIRS)
     for stem in pairs:
         for hostile in (False, True):
             path = root / 'theories' / (stem + ('_false_witnesses' if hostile else '') + '.kleis')

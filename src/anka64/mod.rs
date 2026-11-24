@@ -75,5 +75,8 @@ pub mod compiler_adapter;
 
 pub mod rebuild;
 
+// Host laboratory control-path probe; never a production authority provider.
+pub mod keycloak_control;
+
 // Phase 10.10 reference core; not yet wired into Kernel admission or boot.
 pub(crate) mod authority_persistence;

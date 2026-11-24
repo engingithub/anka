@@ -386,16 +386,21 @@ in `src/main.rs` and a host helper. Preserve the historical SC110 measurements a
 accepted; any new comparison must build a fresh profiling session for the new
 checkout. Do not reuse a session whose source-input hashes have changed.
 
-The [KC110 Keycloak adapter contract](DESIGN_NOTES.md#keycloak-adapter-contract)
-is now developer-confirmed (201 positive / 201 hostile disproofs). Bounded CLI
-preflight has passed all 26 fixture checks and the binary build on the laptop.
-The Keycloak import filename mismatch is now corrected in generation and resume;
-40 local Python checks pass and real-server acceptance remains pending. Complete the [lab recovery and acceptance](scripts/keycloak/README.md)
-next. This script-only fix changes no measured Rust inputs. Strict live authority integration requires additional serialized-use
-evidence as specified there. Machine enrollment and external nonrollback boot-attempt
-consumption remain separate obligations. Further performance optimization is not
-a prerequisite for that work; guest CRUD, threads/SMP and native/FPGA bootstrap
-remain planned milestones.
+KC110 preflight is now accepted and merged by developer confirmation: 201/201
+formal witnesses, 40 Python checks, the Rust binary build and all 14 real Keycloak
+acceptance cases passed. No new full Rust suite is claimed for this milestone.
+The [SA110 coordinator contract](DESIGN_NOTES.md#serialized-current-authority)
+is accepted on the laptop: 185 positive / 185 hostile disproofs, 33/33 focused Rust,
+and a full library suite of 1997 passed / 0 failed / 20 ignored. AC110 now adds a
+closed coordinator-to-Keycloak administration probe; its Rust/real Podman acceptance
+is pending. No new live authority or performance acceptance is inferred.
+This changes Rust source inputs; create a fresh profiling session for any new
+comparison. No SA110 timing or speedup is claimed. Keep the historical SC110 evidence.
+
+Strict live authority requires exclusive mediation of relevant authority changes
+and guarded local use; introspection alone remains insufficient. Machine enrollment,
+external boot-attempt consumption, guest CRUD, threads/SMP and native/FPGA bootstrap
+remain planned work. Further optimization is not a prerequisite for this contract.
 
 ## References
 
