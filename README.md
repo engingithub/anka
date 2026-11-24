@@ -75,7 +75,8 @@ stored target both live and after independent bounded guest/service restarts.
 | Stored retrieval and read transport (SR110 R1 / AR110) | SR110 92 positive / 78 hostile, 20 focused Rust cases; AR110 117 positive / 98 hostile, 23 focused read cases plus 24 upload compatibility cases |
 | Guest download and live launch (GD110 / SR110 R2) | GD110 174 positive / 149 hostile; 11 focused live-admission cases and real download/live-launch witness (84.35s), target exit 42; merged to main on 2026-11-18 |
 | Independent restart (RR110) | 234 positive / 192 explicitly disproved hostile witnesses; 14 focused cases passed in 4.21s; separately selected real restart witness passed in 92.13s |
-| Latest full release library suite | **1,964 passed, 0 failed, 20 ignored, 0 measured, 0 filtered out in 267.06s**, verified in the developer Mac SC110 acceptance log on 2026-11-22 |
+| SC110 full release library suite (historical) | **1,964 passed, 0 failed, 20 ignored** in 267.06s, verified in the developer Mac SC110 acceptance log on 2026-11-22 |
+| Latest full release library suite (LG110 checkpoint) | **2,050 passed, 0 failed, 20 ignored** in 267.41s, verified in the developer laptop log on 2026-11-24; runtime merge pending |
 
 RR110 persists the download pump A and target B, destroys the original compiler
 and lineage, and reconstructs a fresh accounted guest under current boot
@@ -131,7 +132,7 @@ See [lab setup and acceptance](scripts/keycloak/README.md).
 185 hostile Kleis disproofs and 33/33 focused Rust tests. The
 [AC110 administrative test harness](DESIGN_NOTES.md#keycloak-control-probe) passed
 56/56 formal witnesses, 21 new Python checks plus 40 regressions, 15/15 focused Rust
-tests and the real Podman probe. The latest full library suite passed
+tests and the real Podman probe. That checkpoint’s full library suite passed
 **2012 tests, 0 failed, 20 ignored** (272.04s), as reported by the developer.
 The probe stays closed with `current_authority: unknown`, `live_admission: false`
 and `boot_authorized: false`; it does not supply runtime grants.
@@ -142,9 +143,9 @@ and ordinary client access, with no administrator credentials or internal policy
 inspection. Anka64 controls its own grants and local revocation. AC110's privileged
 credentials belong only to the disposable lab test harness.
 
-**LG110 formal slice delivered:** [external identity evidence and local grants](DESIGN_NOTES.md#local-grant-contract).
-Local verification passed all 264 positive witnesses and explicitly disproved all
-264 hostile assertions; laptop acceptance is pending. The pair
+**LG110 formal gate accepted and merged:** [external identity evidence and local grants](DESIGN_NOTES.md#local-grant-contract).
+The developer confirmed 264 positive witnesses and 264/264 explicit hostile
+disproofs on the laptop, followed by merge to main. The pair
 reuses KC110 identity/scope checks, keeps local authority distinct from remote
 observations, and adds bounded issuance/refresh/revocation transitions. The gate is
 included in the default formal sweep and can be selected independently:
@@ -156,10 +157,22 @@ python3 scripts/check-anka109-gates.py \
   --only-local-grants --timeout 1800
 ```
 
-**Next after the formal gate:** implement the bounded LG110 local grant owner and
-its trusted evidence interface. Ordinary client verification stays outside the
-local effect guard; no Keycloak administrator credential is involved. Rust and
-real CC2/typed-socket/NIC/file acceptance remain required before live admission.
+**LG110 runtime accepted; merge pending:** the bounded local grant owner and
+default-denying trusted evidence interface passed **38/38 focused Rust tests** and
+**33/33 SA110 regressions** on the developer laptop. The full release library suite
+passed **2050 tests, 0 failed, 20 ignored in 267.41s**. Reproduce the focused gate:
+
+```bash
+bash scripts/check-anka110-local-grants.sh
+```
+
+Ordinary client verification stays outside the local effect guard; no Keycloak
+administrator credential is involved. Next, after merging this accepted checkpoint, implement the
+concrete ordinary-client evidence adapter and complete holder-proof encoding,
+then test the real CC2/typed-socket/NIC/file path before live admission. The current
+CLI still publishes no live or boot authority. See the
+[runtime boundary](DESIGN_NOTES.md#local-grant-runtime) and
+[boot dependency plan](DESIGN_NOTES.md#boot-dependency-readiness).
 The existing diagnostic CLI and default-denying live source are unchanged.
 
 To reproduce the accepted administrative lab probe:

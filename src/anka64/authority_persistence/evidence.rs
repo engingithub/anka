@@ -179,3 +179,7 @@ pub(crate) mod storage_verifier;
 // SA110: bounded coordinator; no production Keycloak authority producer yet.
 #[path="evidence/serialized_authority.rs"]
 pub(crate) mod serialized_authority;
+
+// LG110: external identity observations and locally controlled grants. No admin API.
+#[path="evidence/local_grants.rs"]
+pub(crate) mod local_grants;

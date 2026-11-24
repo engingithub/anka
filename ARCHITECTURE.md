@@ -3632,7 +3632,7 @@ toolchains.
 | 10.7 | Protected local pointer ABI and application rebuild | Closed; DN-59 fixes its scope |
 | 10.8 | Shared allocation, compiler resource growth, typed modules and protected network-service rebuild | Closed; final evidence in DN-71 |
 | 10.9 | Identity/authority model, supply-chain closure and hostile CPU-to-HTTP audit | T1 and initial T2 model delivered; persistence/evidence refinements implemented in 10.10; bounded RR110 boot admission accepted; general enrollment/whole-machine reboot, broader T3–T5 and production integration open; DN-72 |
-| 10.10 | Durable network persistence using the artifact/publication foundation | File backend, guarded transfer, guest upload/download, fresh live launch and bounded RR110 restart accepted; RR110 merged to main (user confirmation, 2026-11-19). SC110 formal, Rust and laptop performance acceptance complete; profiling/SC110 merged by user confirmation; KC110 preflight formal/Python/binary-build/14 real Keycloak cases accepted and merged; SA110 and AC110 accepted and merged; 185/185 and 56/56 formal, 33/33 and 15/15 focused Rust, real Podman probe passed; latest full suite 2012/0/20; LG110 formal contract verified locally (264/264); developer formal acceptance, bounded runtime and live admission remain pending; production credentials, broader deployment and whole-machine reboot remain open; DN-72 |
+| 10.10 | Durable network persistence using the artifact/publication foundation | File backend, guarded transfer, guest upload/download, fresh live launch and bounded RR110 restart accepted; RR110 merged to main (user confirmation, 2026-11-19). SC110 formal, Rust and laptop performance acceptance complete; profiling/SC110 merged by user confirmation; KC110 preflight formal/Python/binary-build/14 real Keycloak cases accepted and merged; SA110 and AC110 accepted and merged; 185/185 and 56/56 formal, 33/33 and 15/15 focused Rust, real Podman probe passed; latest full suite 2012/0/20; LG110 formal gate developer-accepted and merged (264/264); bounded local owner/evidence interface accepted with 38/38 focused Rust and 33/33 SA110 regressions; LG110 full suite 2050/0/20; runtime merge pending; concrete adapter and live admission remain pending; production credentials, broader deployment and whole-machine reboot remain open; DN-72 |
 
 Phase 10.8's implementation chronology and test commands live in
 [DN-71](DESIGN_NOTES.md#dn-71). The repeated allocation/worker/compiler progress
@@ -5557,8 +5557,8 @@ all optimization before progressing with identity integration.
 | 3a — accepted and merged | Keycloak contract and bounded preflight | KC110 201/201 formal, 40 Python checks, Rust binary build and 14 real Keycloak cases passed on the laptop. Preflight grants no live/boot authority. |
 | 3b — accepted and merged | Bounded serialized authority coordinator | SA110 185/185 formal and 33/33 focused Rust. Its original external-control assumption needs the refinement below before live integration. |
 | 3c — accepted and merged | Administrative test harness | AC110 56/56 formal, 21 new Python checks plus 40 regressions, 15/15 focused Rust and real Podman probe passed; latest full suite 2012/0/20. The coordinator stays closed/Unknown. |
-| 3d — LG110 formal slice delivered | External identity evidence and local grants | 264 positive / 264 hostile witnesses passed locally, specifying local grant state and bounded remote evidence. Next: implement the LG110 local owner and trusted ordinary-client evidence interface, then test the real CC2/socket/NIC/file path before live admission. No Keycloak administration. |
-| 4 | Installation enrollment and boot authorization | Provision machine identity and implement externally recorded boot-attempt consumption under an explicit rollback threat model; exercise the platform-independent flow in the emulator. |
+| 3d — formal merged; runtime accepted, merge pending | External identity evidence and local grants | Developer confirmed 264 positive / 264 hostile disproofs and merge. The bounded LG110 owner/evidence interface passed 38/38 focused Rust and 33/33 SA110 regressions; the full suite passed 2050/0/20; runtime merge pending. Concrete ordinary-client adapter and real CC2/socket/NIC/file acceptance precede live admission. No Keycloak administration. |
+| 4 | Installation enrollment and boot authorization | Specify and test the trusted boot dependency/readiness plan; provision machine identity and implement externally recorded boot-attempt consumption under an explicit rollback threat model; exercise the platform-independent flow in the emulator. |
 | 5 | Installation wizard and later native adapter | Expose tested enrollment/recovery operations through the wizard. Implement the hardware-specific bootstrap adapter when the native/FPGA target is concrete. |
 
 A host OS is not an architectural requirement. The installation's trusted boot
@@ -5878,12 +5878,13 @@ past its own validity or the token/grant expiry. Outage cannot create or refresh
 permission. LG110 permits an existing grant only within its already bounded
 validity, unless locally revoked. Retry never resets work, deadline or freshness.
 
-**Formal slice delivered:** LG110 below specifies external identity evidence and
+**Formal gate accepted and merged:** LG110 below specifies external identity evidence and
 local grant admission, including freshness, outages, observed invalidity and local revocation.
 It explicitly separates local authority from the original KC110/SA110 external-
 control assumption. No existing attestation or Unknown verdict becomes Valid.
-Next implement the bounded local owner, ordinary-client evidence interface and
-guarded grant mapping, and test the real CC2/typed-socket/NIC/file
+The bounded local owner and default-denying evidence interface are now delivered,
+with Rust acceptance complete and runtime merge pending. Next implement concrete ordinary-client evidence
+and guarded grant mapping, and test the real CC2/typed-socket/NIC/file
 path before enabling live admission. The accepted SA110 coordinator supplies useful
 local ordering machinery; AC110 supplies an administrative test fixture only.
 Enrollment, one-use boot-attempt consumption, installation, guest CRUD and
@@ -5921,8 +5922,51 @@ covers one token/grant per bounded operation and synchronous submissions; it doe
 not establish durable exactly-once execution, boot authority or token replacement.
 
 Validation and commands are recorded in the [detailed LG110 contract](DESIGN_NOTES.md#local-grant-contract).
-The next implementation is a dedicated bounded LG110 owner/evidence interface,
-reusing SA110's local accounting/guard patterns without its remote-control
-attestation. Existing SA110/KC110 contracts and runtime defaults remain unchanged.
+The developer confirmed all 264 positive / 264 hostile formal checks on the laptop
+and merged them to main. The dedicated Rust owner/evidence interface is now
+delivered, reusing SA110's local accounting patterns and KC110 field checks without
+its remote-control attestation. **38 new focused Rust tests and 33 shared-validator
+SA110 regressions passed on the laptop**. The full release suite passed **2050 tests,
+0 failed, 20 ignored in 267.41s**; runtime merge remains pending.
+Existing SA110/KC110 formal contracts and live/boot defaults remain unchanged.
 Actual holder-proof encoding, local trust provisioning and the real file path
 still require implementation and acceptance on the developer laptop.
+
+#### LG110 runtime ownership boundary (2026-11-24)
+
+`authority_persistence/evidence/local_grants.rs` owns one immutable configured
+scope/grant, one token identity, one pending query and bounded retained accounting.
+It exposes correlation/diagnostic copies but no provider escape, restore or regrant
+API. Query start is recorded before remote IO. A trusted `Evidence` implementation
+supplies privately staged, fully verified results; its defaults deny. Network and
+cryptographic verification stay outside the owner guard. Source verdicts are
+trusted integration inputs, never peer-supplied booleans.
+
+Submission and local revocation share one guard. Each use checks the exact owner,
+local domain/grant, incarnation/revision/sequence/tick and full scope, independent
+holder/channel proof, both clocks, stored evidence and the existing operation gate.
+An outage retains only the old bounded window; verified negative evidence closes
+even after exhaustion. Callback uncertainty or unwind closes the owner and retains
+submitted-effect accounting. Busy operations make no transition: the embedding must
+charge outer ingress/polling and must not spin. No live E9/E11 provider is published
+by this slice. Details and laptop commands: [LG110 runtime](DESIGN_NOTES.md#local-grant-runtime).
+
+#### Boot dependency readiness (planned, 2026-11-24)
+
+Boot's trusted implementation has dependencies even though it runs before guest C
+programs. Today, Rust adapters and Python/OpenSSL helpers rely on a host for clocks,
+network/TLS, entropy, credentials, files and process supervision. These functions
+must have explicit suppliers in a native/FPGA installation; Rust and Python are
+current implementation choices, not mandatory native execution environments.
+
+Before workload admission, a trusted bootstrap must establish its own code/trust
+basis, required platform services, installation credentials, identity verification
+and separately retained boot-attempt consumption. It must not need an admitted
+guest compiler or the very workload being authorized to obtain those prerequisites.
+Keycloak may run in Podman on a separate service machine; it does not have to run
+on the Anka64 machine, and its administration remains external.
+
+The [dependency inventory and readiness gate](DESIGN_NOTES.md#boot-dependency-readiness)
+are planned acceptance obligations, not a new executable boot path. Missing
+prerequisites must prevent fresh admission. Neither a healthy Keycloak container,
+a successful preflight nor an LG110 local grant supplies rollback protection.

@@ -418,11 +418,23 @@ planned work. Further optimization is not a prerequisite for the next contract.
 - [Design plan](DESIGN_NOTES.md#xcode-performance-probing).
 
 
-## LG110 formal follow-up
+## LG110 runtime follow-up
 
-The [LG110 contract](DESIGN_NOTES.md#local-grant-contract) now specifies bounded
-external identity observations and locally controlled grants. This delivery changes
-only theories, gate selection and documentation; no new runtime measurement or
-speedup is claimed. The next implementation should measure remote verification
-separately from local grant checks and Kernel/file work. AC110 administrative
-mutations remain lab setup work. Historical SC110 results remain unchanged.
+The [LG110 formal contract](DESIGN_NOTES.md#local-grant-contract) is accepted and
+merged: developer-confirmed 264 positive / 264 hostile disproofs. The bounded Rust
+owner and trusted evidence interface passed 38/38 focused tests and 33/33 SA110
+regressions on the developer laptop, followed by the full suite: 2050 passed,
+0 failed, 20 ignored in 267.41s. Runtime merge remains pending. This is correctness
+evidence, not a new performance comparison; no speedup is claimed. Historical
+SC110 results remain unchanged.
+
+After correctness acceptance, use a fresh profiling build/session for changed
+inputs. Measure remote IO and token/signature verification separately from staged
+completion, holder verification, local grant locking/checks, contention, and actual
+Kernel/file work. The owner guard contains bounded local lookups and synchronous
+submissions, not remote HTTP. AC110 administrative mutations remain lab setup work.
+Future boot measurements should separately account for the
+[trusted boot dependencies](DESIGN_NOTES.md#boot-dependency-readiness), including
+platform startup, network/TLS, credential access, identity verification and the
+separate boot-attempt service. Native/FPGA cost must be measured for its actual
+providers; hosted Rust/Python timings do not establish hardware cost.

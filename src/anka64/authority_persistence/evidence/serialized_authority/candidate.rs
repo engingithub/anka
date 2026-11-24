@@ -55,7 +55,7 @@ pub(crate) struct Candidate {
 fn window(now: u64, first: u64, until: u64) -> bool { first <= now && now < until }
 
 impl Scope {
-    fn valid(self) -> bool {
+    pub(crate) fn valid(self) -> bool {
         self.installation != 0 && self.policy != 0 && self.peer != 0 &&
         matches!(self.kind, 1..=3) && self.artifact != 0 && self.generation != 0 &&
         self.request != 0 && matches!(self.operation, 1 | 2) && matches!(self.role, 1 | 2) &&
@@ -63,16 +63,27 @@ impl Scope {
         self.local != 0 && self.incarnation != 0 && self.serial != 0 && self.challenge != 0
     }
 }
-impl Candidate {
-    /// kc110_candidate, recomputed inside the coordinator at the final clock
-    /// sample. Observation age begins BEFORE the outbound query, not at arrival.
-    pub(super) fn valid(self, now: Now) -> bool {
+/// Identity/scope/grant layer shared by KC110 candidates and LG110 issuance.
+/// It deliberately carries no holder-possession or current-authority verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IdentityEvidence {
+    pub config: Configuration, pub token: Token, pub status: Status,
+    pub mapping: Mapping, pub scope: Scope, pub grant: Grant,
+    pub query: u64, pub bytes: u64,
+}
+impl Configuration {
+    pub(crate) fn valid(self) -> bool {
+        self.selected == Verdict::Valid && self.issuer != 0 && self.audience != 0 &&
+        self.client != 0 && self.installation != 0 && self.policy != 0 && self.keyset != 0 &&
+        self.profile == 1 && self.max_age != 0 && (1..=16384).contains(&self.max_bytes)
+    }
+}
+impl IdentityEvidence {
+    /// kc110_preflight + mapping + scope + explicit local grant. No effect grant.
+    pub(crate) fn valid(self, now: Now) -> bool {
         let c = self.config; let t = self.token; let i = self.status;
-        let m = self.mapping; let s = self.scope; let p = self.proof; let g = self.grant;
-        c.selected == Verdict::Valid && c.issuer != 0 && c.audience != 0 &&
-        c.client != 0 && c.installation != 0 && c.policy != 0 && c.keyset != 0 &&
-        c.profile == 1 && c.max_age != 0 && (1..=16384).contains(&c.max_bytes) &&
-        self.bytes != 0 && self.bytes <= c.max_bytes &&
+        let m = self.mapping; let s = self.scope; let g = self.grant;
+        c.valid() && self.bytes != 0 && self.bytes <= c.max_bytes &&
         t.syntax == Verdict::Valid && t.signature == Verdict::Valid &&
         t.reference != 0 && t.subject != 0 && t.holder != 0 &&
         t.issuer == c.issuer && t.audience == c.audience && t.client == c.client &&
@@ -85,9 +96,18 @@ impl Candidate {
         m.enabled == Verdict::Valid && m.issuer == c.issuer && m.subject == t.subject &&
         m.client == t.client && m.installation == c.installation && m.installation == s.installation &&
         m.policy == c.policy && m.policy == s.policy && m.peer == s.peer && m.kind == s.kind &&
-        s.valid() && self.channel == Verdict::Valid && p.signature == Verdict::Valid &&
-        p.token == t.reference && p.issuer == c.issuer && p.signer == t.holder && p.scope == s &&
-        g.permission == Verdict::Valid && g.token == t.reference && g.scope == s &&
+        s.valid() && g.permission == Verdict::Valid && g.token == t.reference && g.scope == s &&
         window(now.wall, g.first, g.until)
+    }
+}
+impl Candidate {
+    /// Complete kc110_candidate. Existing SA110 semantics are unchanged.
+    pub(crate) fn valid(self, now: Now) -> bool {
+        IdentityEvidence { config: self.config, token: self.token, status: self.status,
+            mapping: self.mapping, scope: self.scope, grant: self.grant,
+            query: self.query, bytes: self.bytes }.valid(now) &&
+        self.channel == Verdict::Valid && self.proof.signature == Verdict::Valid &&
+        self.proof.token == self.token.reference && self.proof.issuer == self.config.issuer &&
+        self.proof.signer == self.token.holder && self.proof.scope == self.scope
     }
 }

@@ -255,9 +255,10 @@ They do not prove Keycloak internals, distributed revocation atomicity or
 Rust refinement. The laptop binary build has passed; run the real acceptance above and your
 normal Rust suite on the laptop; retain the results when reproducing this accepted milestone.
 
-The [LG110 formal contract](../../DESIGN_NOTES.md#local-grant-contract) is delivered below.
-Next implement the ordinary-client identity adapter, principal mapping,
-full-scope holder proof and explicit local grants. Anka64 cannot control Keycloak;
+The [LG110 formal contract](../../DESIGN_NOTES.md#local-grant-contract) is accepted and merged.
+The bounded local grant owner/evidence interface is laptop-accepted (38/38 LG110,
+33/33 SA110, full suite 2050/0/20); runtime merge remains pending. Concrete ordinary-client identity verification, principal mapping
+integration and full-scope holder-proof encoding follow. Anka64 cannot control Keycloak;
 no runtime admin credential, internal policy inspection or exclusive-writer
 attestation is required. Remote freshness and local revocation need separate
 semantics. HTTP stays outside guarded effect callbacks. The real
@@ -341,17 +342,17 @@ Anka64 controls local grant issuance, scope, revocation and effect ordering.
 
 AC110's separate administrator credential is only for provoking remote changes in
 the disposable lab. Passing that probe does not turn remote observations into
-current local permission. The [next Kleis contract](../../DESIGN_NOTES.md#external-identity-local-authority)
-will explicitly define freshness, expiry, outage and local grant semantics, and
-refine KC110/SA110 before any live admission. The existing default-denying source
-and flags remain unchanged in this documentation update.
+current local permission. The accepted [LG110 contract](../../DESIGN_NOTES.md#local-grant-contract)
+defines freshness, expiry, outage and local grant semantics, refining the original
+KC110/SA110 assumption. The new owner/interface still needs concrete evidence and
+real-path acceptance; existing live-source defaults and CLI flags stay unchanged.
 
 
-## LG110 formal gate and next runtime slice
+## LG110 formal acceptance and bounded runtime delivery
 
-The [local grant contract](../../DESIGN_NOTES.md#local-grant-contract) is now delivered
-as `anka110_local_grants.kleis` plus hostile witnesses. Run the selector from the
-repository root:
+The [local grant contract](../../DESIGN_NOTES.md#local-grant-contract) passed on the
+developer laptop: 264 positive witnesses and 264/264 explicit hostile disproofs,
+then merged to main. To reproduce the formal gate from the repository root:
 
 ```bash
 python3 scripts/check-anka109-gates.py \
@@ -360,9 +361,29 @@ python3 scripts/check-anka109-gates.py \
   --only-local-grants --timeout 1800
 ```
 
-Next is the bounded local grant owner and trusted ordinary-client evidence interface.
+The bounded local grant owner and default-denying trusted evidence interface are
+laptop-accepted: 38/38 LG110 tests, 33/33 SA110 regressions and full suite
+2050 passed / 0 failed / 20 ignored in 267.41s. Runtime merge remains pending.
 The existing AC110 privileged helper remains a disposable-lab fixture for provoking
 remote changes; it supplies no local grant or runtime admin credential. Remote
 outage retains only an already issued grant's bounded validity. Local revocation is
 terminal for that grant, including when a positive refresh reply arrives later.
-The Rust/live file path has not been changed or tested by this formal delivery.
+Run the new owner tests and 33 shared-validator SA110 regressions on the laptop:
+
+```bash
+bash scripts/check-anka110-local-grants.sh
+```
+
+The developer ran Rust compilation and tests successfully. This acceptance did
+not execute the 20 ignored real witnesses or add a live identity-backed file run.
+The trusted source is an interface, not a complete ordinary-client adapter or a
+new permission-producing CLI. See the [runtime boundary](../../DESIGN_NOTES.md#local-grant-runtime).
+Concrete evidence staging, full holder-proof encoding and real CC2/socket/NIC/file
+acceptance remain next; the existing live/boot defaults stay false/Unknown.
+
+Boot also depends on trusted tooling. The hosted Rust/Python/OpenSSL functions,
+platform clocks, entropy, TLS/network and credential storage must have explicit
+native suppliers before guest workload admission. This is now recorded in the
+[boot dependency plan](../../DESIGN_NOTES.md#boot-dependency-readiness).
+Keycloak administration remains external, and neither Podman nor successful token
+validation consumes the independent one-use boot attempt.
