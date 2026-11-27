@@ -257,8 +257,8 @@ normal Rust suite on the laptop; retain the results when reproducing this accept
 
 The [LG110 formal contract](../../DESIGN_NOTES.md#local-grant-contract) is accepted and merged.
 The bounded local grant owner/evidence interface is laptop-accepted (38/38 LG110,
-33/33 SA110, full suite 2050/0/20); runtime merge remains pending. Concrete ordinary-client identity verification, principal mapping
-integration and full-scope holder-proof encoding follow. Anka64 cannot control Keycloak;
+33/33 SA110, full suite 2050/0/20); runtime is merged to main (user confirmation, 2026-11-27). LA110 below delivers hosted identity verification and holder-proof encoding.
+Trusted transport/provider integration follows laptop acceptance. Anka64 cannot control Keycloak;
 no runtime admin credential, internal policy inspection or exclusive-writer
 attestation is required. Remote freshness and local revocation need separate
 semantics. HTTP stays outside guarded effect callbacks. The real
@@ -344,8 +344,8 @@ AC110's separate administrator credential is only for provoking remote changes i
 the disposable lab. Passing that probe does not turn remote observations into
 current local permission. The accepted [LG110 contract](../../DESIGN_NOTES.md#local-grant-contract)
 defines freshness, expiry, outage and local grant semantics, refining the original
-KC110/SA110 assumption. The new owner/interface still needs concrete evidence and
-real-path acceptance; existing live-source defaults and CLI flags stay unchanged.
+KC110/SA110 assumption. LA110 supplies the concrete hosted verifier; Rust and
+real-path acceptance remain pending; existing live-source defaults and CLI flags stay unchanged.
 
 
 ## LG110 formal acceptance and bounded runtime delivery
@@ -387,3 +387,30 @@ native suppliers before guest workload admission. This is now recorded in the
 [boot dependency plan](../../DESIGN_NOTES.md#boot-dependency-readiness).
 Keycloak administration remains external, and neither Podman nor successful token
 validation consumes the independent one-use boot attempt.
+
+## LA110 ordinary-client verifier bridge
+
+LG110 is now accepted and merged to main (user confirmation, 2026-11-27). LA110 adds
+`scripts/keycloak/adapter.py` and the Rust hosted adapter. The worker uses ordinary
+JWKS/introspection access and verifies holder signatures; it has no Admin REST
+access and never signs holder requests. Its binary stdout is private to a trusted
+parent, not a public permission API. Continue using the existing preflight CLI for
+diagnostics; do not launch the private worker as a replacement CLI.
+
+```bash
+bash scripts/check-anka110-local-adapter.sh --python-only
+# On the laptop, including Rust:
+bash scripts/check-anka110-local-adapter.sh
+```
+
+15 new Python fixtures passed, along with the 26 preflight, 14 lab and 21 control
+regressions. The 19 new Rust tests remain unexecuted here. The default gate runs
+those Rust tests and then the accepted LG110/SA110 gates. No real Podman or guest
+file acceptance is claimed for this new adapter.
+
+The trusted caller must provide an immutable profile, a separately provisioned
+local grant and a channel observation from the actual authenticated transport.
+The signature covers the complete canonical proposal/token/channel record, while
+the owner rechecks its current bounds before use. See [LA110 design and wire
+layout](../../DESIGN_NOTES.md#local-adapter-runtime) for limits, clocks and remaining
+provider integration. Live/boot defaults remain disabled.

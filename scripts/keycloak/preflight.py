@@ -400,7 +400,23 @@ def correlate(info, claims, config, holder):
     require("token_type" not in info or info["token_type"] == "Bearer", "token_type")
 
 
-def perform(config_path):
+def input_binding(inputs):
+    """Full SHA-256 commitment to selected paths and exact immutable file bytes."""
+    digest = hashlib.sha256(b"ANKA-LG110-INPUTS-v1\0")
+    for path, (_, value, private, limit) in sorted(inputs.saved.items(), key=lambda kv: str(kv[0])):
+        name = os.fsencode(path)
+        digest.update(len(name).to_bytes(8, "little") + name + value)
+        digest.update(bytes([private]) + limit.to_bytes(8, "little"))
+    return digest.digest()
+
+
+def verify_identity(config_path, expected=None, allow_inactive=False):
+    """Private verifier entry; callers must retain their original query deadline.
+
+    expected binds full immutable bytes and deployment-selected identity strings.
+    This function never issues local grants or verifies a workload channel.
+    """
+    require(not allow_inactive or expected is not None, "identity_binding")
     inputs = Inputs()
     config = load_config(config_path, inputs)
     budget = Budget(config["timeout_seconds"])
@@ -420,6 +436,13 @@ def perform(config_path):
     except (ValueError, UnicodeError):
         raise Denied("credential_encoding") from None
     validate_claims(claims, config, wall, holder)
+    if expected is not None:
+        require(token_bytes == expected["token"]
+                and config["issuer"] == expected["issuer"]
+                and config["audience"] == expected["audience"]
+                and config["issuing_client"] == expected["client"]
+                and claims["sub"] == expected["subject"]
+                and unb64(holder) == expected["holder"], "identity_binding")
     with tempfile.TemporaryDirectory(prefix="anka-kc110-") as directory_name:
         directory = Path(directory_name)
         for name, data in (("holder.pem", certificate), ("holder.key", private_key), ("ca.pem", ca)):
@@ -445,7 +468,11 @@ def perform(config_path):
                           {"Authorization": "Basic " + auth, "Content-Type": "application/x-www-form-urlencoded"})
         wall, observed = budget.check()
         require(observed - started < config["max_observation_age_seconds"], "observation_expired")
-        correlate(info, claims, config, holder)
+        # A bare inactive response is meaningful only on this authenticated,
+        # direct, single-token request after signature and expected-byte checks.
+        inactive = allow_inactive and info == {"active": False} and type(info.get("active")) is bool
+        if not inactive:
+            correlate(info, claims, config, holder)
         budget.spend()
         inputs.recheck()
         wall, now = budget.check()
@@ -455,10 +482,20 @@ def perform(config_path):
     wall, now = budget.check()
     validate_claims(claims, config, wall, holder)
     require(now - started < config["max_observation_age_seconds"], "observation_expired")
+    return {"config": config, "claims": claims, "token": token_bytes,
+            "holder": holder, "certificate": certificate, "active": not inactive,
+            "input_binding": input_binding(inputs),
+            "observation_age_ms": int((now-started)*1000)}
+
+
+def perform(config_path):
+    verified = verify_identity(config_path)
+    config, claims = verified["config"], verified["claims"]
+    token_bytes, holder = verified["token"], verified["holder"]
     return {"schema": 1, "status": "preflight_valid", "profile": PROFILE,
             "issuer": config["issuer"], "subject": claims["sub"],
             "token_sha256": hashlib.sha256(token_bytes).hexdigest(), "holder_thumbprint": holder,
-            "expires_at": claims["exp"], "observation_age_ms": int((now-started)*1000),
+            "expires_at": claims["exp"], "observation_age_ms": verified["observation_age_ms"],
             "current_authority": "unknown", "live_admission": False, "boot_authorized": False}
 
 

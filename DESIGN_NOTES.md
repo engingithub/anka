@@ -13797,7 +13797,7 @@ This documentation update did not rerun or extend the accepted gates.
 
 <a id="dn72-status"></a>
 
-### Current status — KC110/SA110/AC110 and LG110 formal merged; LG110 runtime accepted; merge pending
+### Current status — KC110/SA110/AC110 and LG110 formal merged; LG110 runtime accepted and merged
 
 **Phase 10.8 is closed and merged. Within Phases 10.9–10.10, bounded artifact
 persistence, guest download, stored launch, independent restart and the SC110
@@ -13823,7 +13823,7 @@ requesters or authorize boot.
 | Stored retrieval / live launch | SL110 foundation: 49 positive / 56 hostile explicitly disproved. [SR110 refinement](#stored-retrieval-launch): 92 positive / 78 hostile explicitly disproved locally. SR110 R1 accepted: 20 focused Rust tests passed in 7.20s. [AR110 read protocol](#artifact-read-protocol) formal gate passed: 117 positive / 98 hostile. AR110 Rust read codec/client and host TCP path accepted: 23 focused + 24 compatibility tests passed. [GD110 guest download](#guest-artifact-download) formal gate: 174 positive / 149 hostile explicitly disproved. GD110 retrieval and SR110 R2 fresh live admission are accepted and merged to main (user confirmation, 2026-11-18): 11 focused live-admission tests and the real witness passed (84.35s); full library suite: 1,935 passed, 0 failed, 19 ignored (307.91s). The subsequent bounded restart acceptance is recorded below. |
 | RR110 independent restart | [Composition gate](#stored-restart-contract): 234 positive / 192 explicitly disproved hostile witnesses. [Runtime acceptance](#stored-restart-runtime): 14 focused tests passed in 4.21s; real CC2/socket/NIC/file restart witness passed in 92.13s. Service-only, guest-only and combined restart cases launch the retained target to exit 42 without recompilation. |
 | SC110 full release library regression (historical) | SC110 laptop log reviewed 2026-11-22: **1,964 passed, 0 failed, 20 ignored, 0 measured, 0 filtered out in 267.06s**. All 15 focused cases and the separately selected real GD110/SR110/RR110 witnesses also passed (70.30s/69.50s/69.53s). Ignored tests are not all claimed as executed. |
-| Integration status | RR110 and profiling/SC110 are accepted and merged. The user also confirmed KC110 preflight merged after 201/201 formal witnesses, 40 Python checks, the Rust binary build and all 14 real Keycloak lab cases. No new full Rust suite is claimed for KC110. SA110 formal gates are developer-confirmed (185 positive / 185 hostile disproofs). SA110 passed 33/33 focused Rust tests; AC110 passed 15/15 focused Rust tests, 56/56 formal witnesses, 21 new Python checks plus 40 regressions, and the real Podman probe. Both are merged by user confirmation. The latest full suite passed 2012 tests, with 0 failures and 20 ignored. LG110 formal checks passed on the developer laptop (264 positive / 264 hostile disproofs) and were merged by user confirmation. Its bounded Rust owner/evidence interface passed 38/38 focused tests and 33/33 SA110 regressions; the latest full suite passed 2050/0/20 in 267.41s; runtime merge remains pending. The concrete adapter, live use, enrollment, boot authorization and installation remain open. |
+| Integration status | RR110 and profiling/SC110 are accepted and merged. The user also confirmed KC110 preflight merged after 201/201 formal witnesses, 40 Python checks, the Rust binary build and all 14 real Keycloak lab cases. No new full Rust suite is claimed for KC110. SA110 formal gates are developer-confirmed (185 positive / 185 hostile disproofs). SA110 passed 33/33 focused Rust tests; AC110 passed 15/15 focused Rust tests, 56/56 formal witnesses, 21 new Python checks plus 40 regressions, and the real Podman probe. Both are merged by user confirmation. That checkpoint’s full suite passed 2012 tests, with 0 failures and 20 ignored. LG110 formal checks passed on the developer laptop (264 positive / 264 hostile disproofs) and were merged by user confirmation. Its bounded Rust owner/evidence interface passed 38/38 focused tests and 33/33 SA110 regressions; the latest full suite passed 2050/0/20 in 267.41s; runtime is merged to main (user confirmation, 2026-11-27). LA110 hosted adapter code is delivered with Rust acceptance pending; real-path integration, live use, enrollment, boot authorization and installation remain open. |
 
 E7/E8 are merged to main. The 148-test E10 run includes E8’s tests; it is a
 persistence reference result, not a whole-system regression.
@@ -17292,7 +17292,7 @@ have passed and merged. SA110 formal gates also passed on the laptop. Its bounde
 Rust coordinator passed 33/33 focused tests. AC110 passed 15/15 focused Rust and
 the real Podman probe; the latest full suite passed 2012/0/20, and both slices are
 merged. The [LG110 formal contract](#local-grant-contract) is accepted and merged;
-its [bounded runtime](#local-grant-runtime) is accepted on the laptop with runtime merge pending;
+its [bounded runtime](#local-grant-runtime) is accepted on the laptop with runtime merged to main (user confirmation, 2026-11-27);
 live-use integration, enrollment and boot authorization follow.
 Broader T3–T5, production deployment,
 whole-machine reboot and the compiler backlog are not silently added to RR110
@@ -17542,7 +17542,7 @@ is implemented by this documentation change.
 | 3a — KC110 accepted and merged | 201 positive / 201 hostile disproofs, 40 Python checks, Rust binary build and all 14 real Keycloak cases passed on the laptop; user confirmed merge. Diagnostic success supplies no live operation or boot authority. |
 | 3b — SA110 accepted and merged | 185 positive / 185 hostile disproofs and 33/33 focused Rust. Preserve local ordering; explicitly refine the original external-control assumption before live use. |
 | 3c — AC110 accepted and merged | Administrative test harness only. 56/56 formal, 21 new Python checks plus 40 regressions, 15/15 focused Rust and real Podman probe passed. Latest full suite 2012/0/20. No live authority. |
-| 3d — LG110 formal merged; runtime accepted, merge pending | [Local grant contract](#local-grant-contract): developer-confirmed 264 positive / 264 hostile disproofs. Bounded owner/evidence interface accepted: 38/38 focused Rust, 33/33 SA110 regressions and full suite 2050/0/20; runtime merge pending. Next implement the concrete ordinary-client adapter and full holder proof. Real CC2/socket/NIC/file acceptance precedes live admission. No Keycloak administration prerequisite. |
+| 3d — LG110 formal merged; runtime accepted and merged | [Local grant contract](#local-grant-contract): developer-confirmed 264 positive / 264 hostile disproofs. Bounded owner/evidence interface accepted: 38/38 focused Rust, 33/33 SA110 regressions and full suite 2050/0/20; runtime merged to main (user confirmation, 2026-11-27). LA110 below delivers the hosted adapter and holder-proof codec; Rust acceptance remains pending. Real CC2/socket/NIC/file acceptance precedes live admission. No Keycloak administration prerequisite. |
 | 4 | Specify and validate the [boot dependency inventory/readiness gate](#boot-dependency-readiness), then implement installation enrollment and boot authorization with explicit machine-credential provisioning, authenticated trust selection and externally retained attempt consumption. Specify rollback/crash/retry behavior and verify the platform-independent flow in the emulator. |
 | 5 | Build the installation wizard on the tested CLI enrollment/recovery operations. Implement the native/FPGA bootstrap adapter when a concrete hardware target determines firmware, key storage and communication facilities. |
 
@@ -18672,8 +18672,8 @@ pair, selected with `--only-local-grants` and included in the default 10.9/10.10
 sweep. The developer confirmed 264 positive witnesses and 264/264 explicit hostile
 disproofs on the laptop, then merge to main. No new axioms or Keycloak
 administration prerequisite were introduced. The subsequent bounded Rust owner
-and evidence interface are [accepted below](#local-grant-runtime), with runtime
-merge pending.
+and evidence interface are [accepted below](#local-grant-runtime) and merged
+to main by user confirmation on 2026-11-27.
 
 #### Explicit refinement boundary
 
@@ -18816,7 +18816,7 @@ separate uncompleted obligations.
 
 ### LG110 — bounded Rust owner and evidence interface (2026-11-24)
 
-**Laptop accepted, runtime merge pending (2026-11-24):** `evidence/local_grants.rs`
+**Laptop accepted 2026-11-24; merged to main by user confirmation 2026-11-27:** `evidence/local_grants.rs`
 passed 38/38 focused `lg110_` tests and 33/33 SA110 regressions. The developer also
 ran the full release library suite: **2050 passed, 0 failed, 20 ignored in 267.41s**.
 The accepted Kleis theories and their gate runner are unchanged. This slice adds
@@ -18895,13 +18895,14 @@ syntax and mock-Cargo discovery/routing checks passed. These are static/tooling
 checks, **not Rust compilation or test execution**. Subsequent developer laptop execution passed all 38 LG110 and 33 SA110 tests,
 then the full suite (2050/0/20, 267.41s). Intentional unwind diagnostics are expected
 and their tests passed. The 20 ignored witnesses were not run by that full-suite
-command. Runtime acceptance is complete; merge and real adapter integration remain open.
+command. Runtime acceptance and merge are complete by user confirmation (2026-11-27).
+Real adapter integration remains open.
 
-**Next after this accepted checkpoint is merged:** build the bounded ordinary-client adapter that
-verifies and stages complete token/query evidence, implements full holder-proof
-encoding and authenticated channel binding, and registers the selected local
-trust domain. Connect the owner to existing Kernel/Fabric/storage checks and
-prove the real CC2/typed-socket/NIC/file path under positive, outage, expiry,
+**Follow-up:** LA110 below delivers hosted token/query verification, staging and
+full holder-proof encoding, binding proofs to a trusted transport-supplied channel.
+Its Rust acceptance remains pending. Next acquire the actual authenticated channel
+binding, register the selected local trust domain and connect the owner to existing
+Kernel/Fabric/storage checks. Prove the real CC2/typed-socket/NIC/file path under positive, outage, expiry,
 observed negative and local-revocation cases before enabling fresh live admission.
 Use privileged AC110 credentials only in the disposable test fixture to provoke
 remote changes. Do not broaden runtime access to Keycloak Admin REST.
@@ -18955,3 +18956,125 @@ platform-independent boot contract, and (3) a concrete native target's providers
 The installation wizard should use tested enrollment/recovery operations after
 those contracts exist. Keycloak administration stays external; its availability,
 container health and active token responses cannot supply boot rollback protection.
+
+<a id="local-adapter-runtime"></a>
+
+### LA110 — hosted ordinary-client verifier and holder-proof encoding (2026-11-27)
+
+**Delivery status:** LG110 formal and Rust checkpoints are accepted and merged by
+user confirmation. This new slice implements the hosted verifier bridge and full
+holder-proof record. **15 new Python tests and 61 Python regressions passed**
+(26 KC110 preflight, 14 lab, 21 AC110). Its **19 new Rust tests await developer
+laptop execution**. No Rust compilation/tests were run here. The previous accepted
+full suite remains 2050 passed / 0 failed / 20 ignored in 267.41s.
+
+This implements the trusted-evidence premise of the already accepted LG110
+contract. KC110/LG110/SA110 theories are unchanged; no new formal proof result or
+live admission is claimed. The binary golden fixture checks identical Rust/Python
+encoding on laptop execution; Python has already checked its side. The following
+concrete trust and integration obligations remain explicit.
+
+| Boundary | Implementation |
+| --- | --- |
+| Provisioning | Trusted code supplies `Config` and `Profile`: exact bounded token bytes, configured issuer/audience/client/subject, complete holder certificate SHA-256 fingerprint, collision-free subject/holder handles and local domain/grant/scope. IDs are not JWT `jti` or truncated hashes. Token identity stays fixed for this owner. |
+| Query | `refresh` samples the trusted clock, charges LG110 begin and creates a correlation record before spawning the verifier. Process lifetime and stdout/stdin are independently bounded. No owner guard is held during network or cryptographic work. |
+| Verifier | `preflight.verify_identity` shares the existing token, JWKS, RS256, mTLS and introspection checks. `perform` still produces the original diagnostic-only JSON; that JSON is never accepted by the adapter. No discovery, redirect, positive cache, retry or Admin REST path is added. |
+| Positive result | Exact private response echo, valid fixed outcome, full input commitment and validated token times precede construction of `Observation`. Numeric identity handles are mapped only from the trusted profile whose full strings/certificate/token were checked. LG110 validates scope, grant, freshness and time again at completion and use. |
+| Inactive result | Only exact boolean `{"active": false}` on the authenticated, direct, single-token introspection exchange after expected-token and signature validation yields the negative outcome. Malformed responses, HTTP failure, unknown key or failed verification yield unavailable evidence, never renewed permission. Key withdrawal that cannot be conclusively correlated is conservatively unavailable until existing bounds expire. |
+| Local configuration change | A full SHA-256 commitment binds the selected configuration, paths and exact credential/CA/token/certificate file bytes. In-flight changes are rechecked. Changed input binding or expected local identity binding closes the owner; refresh cannot install a new trust selection. This is a configuration commitment, not a rollback-protected registry. |
+| Holder proof | External holder signs the canonical record with RSA 2048–4096, SHA-256 and PKCS#1 v1.5. Worker verifies against the pinned certificate; it never signs. Checking file commitments may read the configured key/secret, but neither becomes a workload possession proof. No network query is required during holder verification. |
+| Channel | The transport must create `Channel` from its authenticated peer/certificate and actual nonzero channel binding, with the exact scope. Signature verification covers that binding but does not obtain or authenticate it. The factory is trusted crate-internal integration, not a parser for peer assertions. Existing Kernel/Fabric liveness checks remain mandatory. |
+| Local use | Private possession slot binds the exact channel/proposal and is consumed once. LG110 checks current evidence, owner revision/sequence/tick, scope, clocks and the existing gate, then submits synchronously under its guard. No reusable Valid receipt is exposed. |
+| Cancellation and restart | Independent `Revoker` can close during remote work; a late response cannot reopen. New adapter construction requires new authorized work and outer accounting. No snapshot restore, reconnect refill, regrant, boot consumption or native-provider implementation is added. |
+
+This initial hosted profile reuses KC110's machine-holder mTLS credential layout.
+It does not yet separate a resource-server TLS identity from arbitrary end-user
+holder key custody; that deployment profile needs its own explicit mapping.
+
+#### Canonical record and private worker protocol
+
+All integers are unsigned little-endian, with no implicit padding or native
+struct serialization. The signed record is:
+
+| Order | Exact encoding |
+| --- | --- |
+| Domain/version and action | Eight bytes `LG110A1\0`, then u64 action: 1 observation or 2 holder proof |
+| Adapter session | 32 cryptographically random bytes, nonzero; retained for the bounded adapter lifetime |
+| Correlation | Nine u64s: owner, local domain, incarnation, grant ID, revision, sequence, query-start/proposal-tick, token reference, issuer reference |
+| Scope | Sixteen u64s in KC110 order: installation, policy, peer, kind, artifact, generation, request, operation, role, runtime, connection, binding, local, incarnation, serial, challenge |
+| Cryptographic bindings | Three 32-byte fields: holder certificate SHA-256, actual channel binding (zero only for observation), private input commitment (zero only before initial issuance) |
+| Observation bound | One u64 in seconds, 1–5 and no greater than the selected verifier policy |
+| Identity bytes | Five u32-length-prefixed fields: entire token, issuer, audience, issuing client, subject; bounded to 16384/2048/256/256/256 bytes, respectively |
+
+Transport appends a u32 signature length and signature bytes; observation requires
+zero signature length, holder proof requires 256–512 bytes matching the actual RSA
+key size. The signature covers the complete preceding canonical record, not its
+own framing. Request cap is 24576 bytes. Every truncation, tail or malformed shape
+is rejected before credentials/network work. The golden binary contains only
+synthetic token/identity data, no credentials.
+
+Response is eight-byte `LG110R1\0`, u64 outcome (0 unavailable, 1 verified,
+2 verified inactive, 3 local input invalidation), three u64 token times, a 32-byte
+input commitment, then the exact original signed record. Unknown/local-invalidation
+responses require zero times and zero commitment. Holder positives require zero
+times. Positive/negative observations carry checked token times. All accepted
+responses require full byte-for-byte echo, bounded output, true EOF and successful
+child exit over private pipes. The local authenticated worker is in the TCB; this
+format is not a remote bearer authorization protocol.
+
+#### Bounds and clock behavior
+
+`HostClock` supplies UNIX wall seconds and monotonic elapsed seconds. Identity age
+remains strictly less than the configured 1–5 tick bound from LG110 begin. Arrival
+cannot restart it. Token/grant/operation windows and exact proposal tick equality
+remain enforced by LG110. A signing/verification round crossing a tick can fail;
+caller retries spend retained budgets and must obtain a fresh challenge. There is
+no automatic retry. This first hosted profile does not promise high throughput or
+future native timing behavior.
+
+The adapter also tracks samples made outside the owner guard. A rollback seen
+between preparations closes it permanently even if a later sample recovers. The
+independent `Instant` deadline is fixed at construction to at most 30 seconds and
+never reset by refresh or retry. Worker and preparation budgets start from the
+original finite operation allowance (maximum 512), reserve before work and never
+refund. Existing owner transitions continue their own accounting. The embedding
+must still account ingress and allocate new owners only through trusted new-work
+admission.
+
+Both subprocess pipes are nonblocking: oversized requests cannot block forever on
+a nonreading child. Output cannot exceed the exact expected response size. The
+child has its own process group; timeout/error/drop kills descendants and reaps the
+child. Python uses the existing bounded HTTP/parser/crypto checks. Fixed helper
+selection, installed Python/OpenSSL, trusted executable lookup, credential access,
+CA material and host services belong in the boot dependency inventory. Production
+hardening of executable provenance and native replacements remains planned.
+
+#### Acceptance and next integration
+
+```bash
+# Python, local real RSA/mTLS, 19 LA110 Rust tests, then 38 LG110 + 33 SA110:
+bash scripts/check-anka110-local-adapter.sh
+
+# Full ordinary Rust regression on the laptop:
+cargo test --release --locked --lib -- --test-threads=1
+```
+
+`--python-only` runs the 15 new Python checks and 40 preflight/lab regressions
+without Cargo. The separate `python3 scripts/keycloak/test_control.py` regression
+also passed (21 tests). New tests cover exact records, every truncation, full
+correlation/scope signature substitution, actual cryptographic key mismatch,
+configuration changes during introspection, inactive versus outage, age-policy
+mismatch, retained accounting, replay, local revocation, preparation clock rollback,
+nonreading subprocesses and descendants holding stdout. Rust syntax parsing and
+mock gate-routing checks are static tooling checks, not Rust acceptance.
+
+No real Podman or CC2/typed-socket/NIC/file execution was run for LA110. Existing
+standalone preflight/control CLI behavior stays diagnostic and live/boot false.
+This slice does not register a new authority domain in E9/E11 or expose an
+installation CLI; the trusted mapping/profile constructor supplies the internal
+bindings only. The next task, after laptop acceptance, is the actual trusted
+transport/provider connection and real guest/file witness with explicit local
+trust registration, holder signing/channel acquisition, positive use, outage,
+expiry, observed inactive and local revocation before live admission. Preserve all
+Kernel/Fabric/permit/content checks at each fragment and final delivery. AC110's
+privileged credentials remain disposable test-fixture inputs only.

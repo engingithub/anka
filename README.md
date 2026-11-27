@@ -76,7 +76,7 @@ stored target both live and after independent bounded guest/service restarts.
 | Guest download and live launch (GD110 / SR110 R2) | GD110 174 positive / 149 hostile; 11 focused live-admission cases and real download/live-launch witness (84.35s), target exit 42; merged to main on 2026-11-18 |
 | Independent restart (RR110) | 234 positive / 192 explicitly disproved hostile witnesses; 14 focused cases passed in 4.21s; separately selected real restart witness passed in 92.13s |
 | SC110 full release library suite (historical) | **1,964 passed, 0 failed, 20 ignored** in 267.06s, verified in the developer Mac SC110 acceptance log on 2026-11-22 |
-| Latest full release library suite (LG110 checkpoint) | **2,050 passed, 0 failed, 20 ignored** in 267.41s, verified in the developer laptop log on 2026-11-24; runtime merge pending |
+| Latest full release library suite (LG110 checkpoint) | **2,050 passed, 0 failed, 20 ignored** in 267.41s, verified in the developer laptop log on 2026-11-24; runtime merged to main (user confirmation, 2026-11-27) |
 
 RR110 persists the download pump A and target B, destroys the original compiler
 and lineage, and reconstructs a fresh accounted guest under current boot
@@ -157,7 +157,7 @@ python3 scripts/check-anka109-gates.py \
   --only-local-grants --timeout 1800
 ```
 
-**LG110 runtime accepted; merge pending:** the bounded local grant owner and
+**LG110 runtime accepted and merged:** the bounded local grant owner and
 default-denying trusted evidence interface passed **38/38 focused Rust tests** and
 **33/33 SA110 regressions** on the developer laptop. The full release library suite
 passed **2050 tests, 0 failed, 20 ignored in 267.41s**. Reproduce the focused gate:
@@ -167,9 +167,9 @@ bash scripts/check-anka110-local-grants.sh
 ```
 
 Ordinary client verification stays outside the local effect guard; no Keycloak
-administrator credential is involved. Next, after merging this accepted checkpoint, implement the
-concrete ordinary-client evidence adapter and complete holder-proof encoding,
-then test the real CC2/typed-socket/NIC/file path before live admission. The current
+administrator credential is involved. The hosted ordinary-client evidence adapter and holder-proof encoding are now
+delivered as LA110 below. Its Rust acceptance and the real CC2/typed-socket/NIC/file
+integration remain required before live admission. The current
 CLI still publishes no live or boot authority. See the
 [runtime boundary](DESIGN_NOTES.md#local-grant-runtime) and
 [boot dependency plan](DESIGN_NOTES.md#boot-dependency-readiness).
@@ -314,3 +314,24 @@ Non-commercial use, modification and redistribution are permitted subject to
 its terms. Commercial use requires prior written permission from Engin Atik;
 contact **atik@kleis.io**. Third-party components retain their own licenses.
 
+## LA110 hosted identity adapter — delivered, Rust acceptance pending
+
+The ordinary-client adapter now feeds verified identity evidence into LG110 through
+private bounded worker pipes. It verifies detached holder signatures over the full
+local proposal, exact token and trusted channel binding. It requires no Keycloak
+administrator access and does not consume diagnostic JSON as authority.
+
+Delivery checks passed: **15 new Python tests**, **26 preflight**, **14 lab** and
+**21 administrative-harness regressions**. Real local RSA/mTLS fixtures are included.
+No Rust compilation or tests were run for this delivery. On the laptop:
+
+```bash
+bash scripts/check-anka110-local-adapter.sh
+cargo test --release --locked --lib -- --test-threads=1
+```
+
+The new gate runs Python checks, **19 LA110 Rust tests**, then the accepted
+**38 LG110 and 33 SA110** regressions. `--python-only` skips all Rust commands.
+This does not run ignored guest witnesses. The next task is trusted transport and
+provider integration followed by the real CC2/typed-socket/NIC/file witness;
+live/boot admission defaults stay disabled. See [LA110 details](DESIGN_NOTES.md#local-adapter-runtime).

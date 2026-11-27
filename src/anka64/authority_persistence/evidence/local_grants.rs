@@ -302,3 +302,8 @@ impl<P: Evidence, C: Clock> Owner<P, C> {
 #[cfg(test)]
 #[path="local_grants/tests.rs"]
 mod tests;
+
+// Hosted ordinary-client verification. Native transport/crypto suppliers remain separate.
+#[cfg(unix)]
+#[path="local_grants/adapter.rs"]
+pub(crate) mod adapter;

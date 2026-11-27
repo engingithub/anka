@@ -438,3 +438,18 @@ Future boot measurements should separately account for the
 platform startup, network/TLS, credential access, identity verification and the
 separate boot-attempt service. Native/FPGA cost must be measured for its actual
 providers; hosted Rust/Python timings do not establish hardware cost.
+
+## LA110 measurement boundary
+
+LG110 is accepted and merged; its last full suite remains 2050/0/20 (267.41s).
+LA110's hosted verifier/holder codec has passing Python RSA/mTLS fixtures, with
+Rust acceptance pending. No new speedup or workload timing is claimed. After
+correctness and real-path acceptance, build a fresh profiling session.
+
+Separate process startup, JWKS/TLS/introspection, token signature verification,
+holder signature verification, staging and local guarded submission. The first
+profile deliberately uses a fixed maximum 30-second adapter worker lifetime,
+1–5 second evidence age and exact proposal tick equality. Tick-crossing denials
+and explicit retries must be counted rather than hidden in successful-run timing.
+No remote HTTP or expensive crypto runs inside the local grant guard. The trusted
+transport/provider integration and native suppliers remain separate obligations.
