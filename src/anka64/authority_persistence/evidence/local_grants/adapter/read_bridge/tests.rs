@@ -73,7 +73,7 @@ fn file()->(Temp,store::ArtifactStore,Content,transfer::Budget){
 // Readiness is a test-driver obligation, not an authority grant or EOF.
 // A nonblocking intake may legally make zero progress. Wait outside the owner
 // guard, then prepare a fresh proof for the actual read. Never refill work.
-fn readable(stream:&TcpStream) {
+pub(super) fn readable(stream:&TcpStream) {
     use std::os::fd::AsRawFd;
     let deadline=Instant::now()+Duration::from_secs(2);
     loop {

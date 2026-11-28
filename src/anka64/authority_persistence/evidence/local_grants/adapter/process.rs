@@ -34,7 +34,7 @@ pub(super) fn hosted_holder(config:&Path,record:&[u8],deadline:Instant)->Result<
     Ok(output[4..4+n].to_vec())
 }
 
-fn capture(mut command: Command, request: &[u8], reply_size: usize, deadline: Instant) -> Result<Vec<u8>, ()> {
+pub(super) fn capture(mut command: Command, request: &[u8], reply_size: usize, deadline: Instant) -> Result<Vec<u8>, ()> {
     if Instant::now() >= deadline || request.len() > codec::LIMIT || reply_size > codec::LIMIT + 72 { return Err(()); }
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     unsafe { command.pre_exec(|| {

@@ -443,3 +443,117 @@ setup only; runtime adapters cannot control Keycloak policy.
 The user selected hosted localhost first. Remote TLS storage transport is recorded
 in the [plan](../../DESIGN_NOTES.md#remote-storage-tls-plan), including actual TLS
 session binding and separate-process hostile acceptance.
+
+
+## LK110 combined real credential and guest-file acceptance
+
+`bridge_acceptance.py` supervises the new ignored Rust witness, supplies an ordinary-
+client configuration, and coordinates ten positive/negative cases against the
+existing disposable Podman lab. LA110 independently verifies real token and holder
+evidence; no parent JSON/status marker is consumed as authority. Administrative
+credentials stay in the lab driver and are not copied into the runtime profile.
+
+```bash
+bash scripts/check-anka110-keycloak-bridge.sh --python-only
+python3 scripts/keycloak/lab.py resume --state target/keycloak-preflight-01
+bash scripts/check-anka110-keycloak-bridge.sh --real target/keycloak-preflight-01
+```
+
+Only the `--real` gate builds/runs Rust. The laptop invocation passed 16 driver
+checks, compiled the release executable and passed all ten real cases. The repair's
+full Python-only gate previously passed 80 checks in the delivery workspace.
+The driver requires exact ignored-test discovery, all ten cases, a final marker,
+one passing libtest result and successful restoration. It writes private schema-2
+reports on success and failure, preserving primary, cleanup and restoration errors
+separately. Private `bridge-acceptance-*.log` files preserve detailed failures.
+
+Realm not-before/lifespan mutations are journaled in `bridge-recovery.json`; outage
+cases preserve the database. If interrupted with a journal remaining, use:
+
+```bash
+python3 scripts/keycloak/bridge_acceptance.py recover --state target/keycloak-preflight-01
+```
+
+Restore refuses unexpected realm identity or policy. Use the disposable lab without
+concurrent administrative mutation. This harness does not make Anka64 a Keycloak
+administrator or enable live/boot admission. See the
+[full LK110 runbook](../../LK110_ACCEPTANCE.md).
+
+
+### LK110 strict TLS certificate repair (2026-11-28)
+
+> Historical checkpoint, superseded by the successful ten-case laptop run below.
+
+The laptop compiled the LK110 additions and passed the full library suite:
+**2080 passed, 0 failed, 22 ignored in 412.20s**. The combined real witness is still
+pending. Both disposable containers started, but realm readiness failed with TLS
+verification code 85 (missing Authority Key Identifier).
+
+The lab generator now explicitly supplies Subject Key Identifier and Authority
+Key Identifier on each issued leaf certificate. The repair helper reissues only
+the existing server certificate with the same server key and CA, validates it with
+a strict Python TLS handshake, updates the mounted certificate and restarts the
+verified lab Keycloak container. It preserves holder certificates/keys (including
+their token-binding fingerprints), CA, client/admin secrets and database. TLS chain,
+purpose and hostname checks remain enabled. No runtime authority semantics change.
+
+From the repository root after applying the repair overlay:
+
+```bash
+python3 scripts/keycloak/repair_server_certificate.py --state target/keycloak-bridge-01
+python3 scripts/keycloak/lab.py doctor --state target/keycloak-bridge-01
+bash scripts/check-anka110-keycloak-bridge.sh --real target/keycloak-bridge-01
+```
+
+The repair uses the existing administrative-test lock, refuses pending recovery,
+foreign container images and unsafe key paths, and retains public certificate
+backups. If interruption leaves the certificate copies different, rerunning repair
+reissues and installs a matching pair without changing any key or CA. If readiness
+still fails after repair, use `doctor`; do not disable TLS verification.
+
+Five new certificate regressions pass, including real reproduction of error 85,
+strict handshake after repair, wrong-hostname rejection and key/holder preservation.
+Together with existing checks the Python-only gate passes 76 tests. No Rust compile,
+Rust tests or real Podman/Keycloak run was performed in this repair workspace.
+At this checkpoint the real LK110 run remained unaccepted; it subsequently passed.
+Live/boot admission remains disabled.
+
+
+### LK110 delivery refresh and failure recovery (2026-11-28)
+
+> Historical checkpoint, superseded by the successful ten-case laptop run below.
+
+The laptop's certificate repair passed strict TLS. The subsequent real witness
+completed CC2 bootstrap and initial grant issuance, then failed in its first
+positive case with `storage reply refused` / `Run(SocketProvisionRejected)`.
+The old log does not identify the denied predicate; it is not evidence that the
+credential chain passed. A recovery journal remained from that failed attempt;
+it was successfully processed before the accepted rerun.
+
+The test embedding now refreshes the same retained grant before host EOF processing
+and before ordinary virtual-NIC reply frames/FIN. This addresses the scheduling gap
+between expensive signed host writes and guest delivery. Refresh uses a correlated
+real observation outside the authority lanes; it does not replace the owner or
+reset work, the five-second freshness bound, or the original deadline. Delivery
+refresh is suppressed after an intentionally injected fault. First-denial diagnostics
+report fixed stages/errors and nonsensitive counters to identify any remaining failure.
+
+The Python driver preserves test, cleanup and restoration errors separately in a
+private schema-2 report. Pipe cleanup cannot skip restoration, and a restoration
+conflict retains the journal. All **80 Python checks passed** in this delivery,
+including 16 driver checks; both changed Rust files passed static syntax parsing.
+No Rust compilation/tests or real Podman witness were run here. The earlier laptop
+full-suite result remains **2080 passed, 0 failed, 22 ignored in 412.20s**.
+At this checkpoint real ten-case acceptance was pending. It subsequently passed
+on the laptop; live and boot admission remain disabled.
+See [the recovery and retry instructions](../../LK110_ACCEPTANCE.md#delivery-refresh-retry).
+
+
+### LK110 real laptop acceptance passed (2026-11-28)
+
+The uploaded terminal output confirms successful journal recovery, **16/16 driver
+checks**, release compilation, and **all ten real Keycloak/CC2/E11/file cases**.
+The driver printed `LK110 accepted; live and boot admission remain disabled.`
+This supersedes the earlier same-day TLS and first-positive-case failure checkpoints.
+No fresh full-suite or performance result is claimed, and no LK110 merge is assumed.
+See [case results, evidence filename and acceptance limits](../../LK110_ACCEPTANCE.md#laptop-acceptance).

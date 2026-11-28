@@ -359,5 +359,81 @@ cargo test --release --locked --lib -- --test-threads=1
 The gate includes eleven focused bridge tests, LA110/LG110/SA110 regressions and one
 ignored real CC2/typed-socket/NIC/TCP/file witness. The guest witness uses private
 authority fixtures; it does not prove the full deployed Keycloak credential chain.
-That combined acceptance and the final E11 provider integration remain prerequisites
-for live admission. See [LT110 scope and acceptance](DESIGN_NOTES.md#local-transport-runtime).
+LK110 below passed the combined real credential-chain acceptance on the laptop. See [LT110 scope and acceptance](DESIGN_NOTES.md#local-transport-runtime).
+
+
+## LK110 combined Keycloak / E11 / guest-file acceptance — laptop passed
+
+LT110 is merged. The accepted LK110 harness joins real Keycloak token and
+holder verification to the retained local grant, hosted read bridge, real CC2 guest
+pump and final E11 content/dependency checks. It includes ten positive and negative
+cases and a separate disposable-lab driver for outage and administrative fault setup.
+
+```bash
+bash scripts/check-anka110-keycloak-bridge.sh --python-only
+python3 scripts/keycloak/lab.py resume --state target/keycloak-preflight-01
+bash scripts/check-anka110-keycloak-bridge.sh --real target/keycloak-preflight-01
+```
+
+**All ten real cases passed on the laptop (2026-11-28).** Recovery succeeded,
+the release test executable compiled, and the driver reported `LK110 accepted`
+after all cases and restoration. The same invocation passed 16 driver checks.
+The prior full-suite result remains **2080 passed, 0 failed, 22 ignored**;
+this focused run does not constitute a new full-suite run. Live/boot admission
+remains disabled and remote TLS storage remains a separate planned task. See the
+[acceptance evidence and scope](LK110_ACCEPTANCE.md#laptop-acceptance).
+
+
+### LK110 laptop checkpoint and TLS repair (2026-11-28)
+
+> Historical checkpoint, superseded by the successful ten-case laptop run below.
+
+The laptop compiled successfully and passed **2080 tests, 0 failures, 22 ignored
+in 412.20s**. LK110's ignored real credential-chain witness remains pending: both
+containers run, but strict HTTPS readiness rejected the lab server certificate for
+a missing Authority Key Identifier (error 85). The generator now explicitly emits
+key identifiers; a server-certificate-only repair preserves CA, holder bindings,
+credentials and database without weakening TLS. Five real-certificate regressions
+and the existing 71 Python checks pass. No new performance result or live/boot
+admission is claimed. See the TLS repair commands in
+[LK110_ACCEPTANCE.md](LK110_ACCEPTANCE.md).
+
+
+### LK110 delivery refresh and failure recovery (2026-11-28)
+
+> Historical checkpoint, superseded by the successful ten-case laptop run below.
+
+The laptop's certificate repair passed strict TLS. The subsequent real witness
+completed CC2 bootstrap and initial grant issuance, then failed in its first
+positive case with `storage reply refused` / `Run(SocketProvisionRejected)`.
+The old log does not identify the denied predicate; it is not evidence that the
+credential chain passed. A recovery journal remained from that failed attempt;
+it was successfully processed before the accepted rerun.
+
+The test embedding now refreshes the same retained grant before host EOF processing
+and before ordinary virtual-NIC reply frames/FIN. This addresses the scheduling gap
+between expensive signed host writes and guest delivery. Refresh uses a correlated
+real observation outside the authority lanes; it does not replace the owner or
+reset work, the five-second freshness bound, or the original deadline. Delivery
+refresh is suppressed after an intentionally injected fault. First-denial diagnostics
+report fixed stages/errors and nonsensitive counters to identify any remaining failure.
+
+The Python driver preserves test, cleanup and restoration errors separately in a
+private schema-2 report. Pipe cleanup cannot skip restoration, and a restoration
+conflict retains the journal. All **80 Python checks passed** in this delivery,
+including 16 driver checks; both changed Rust files passed static syntax parsing.
+No Rust compilation/tests or real Podman witness were run here. The earlier laptop
+full-suite result remains **2080 passed, 0 failed, 22 ignored in 412.20s**.
+At this checkpoint real ten-case acceptance was pending. It subsequently passed
+on the laptop; live and boot admission remain disabled.
+See [the recovery and retry instructions](LK110_ACCEPTANCE.md#delivery-refresh-retry).
+
+
+### LK110 real laptop acceptance passed (2026-11-28)
+
+The uploaded terminal output confirms successful journal recovery, **16/16 driver
+checks**, release compilation, and **all ten real Keycloak/CC2/E11/file cases**.
+The driver printed `LK110 accepted; live and boot admission remain disabled.`
+This supersedes the earlier same-day TLS and first-positive-case failure checkpoints.
+No fresh full-suite or performance result is claimed, and no LK110 merge is assumed.
+See [case results, evidence filename and acceptance limits](LK110_ACCEPTANCE.md#laptop-acceptance).

@@ -464,8 +464,9 @@ Signing and verification share the original finite worker allowance; neither may
 refresh deadlines or hide tick-crossing failures. File scans retain the cooperative
 host filesystem assumption, so measure guard hold time separately from socket IO.
 
-The 59 Python checks are correctness evidence, not a performance result. Rust and
-the ignored CC2/typed-socket/NIC/file witness have not been run for this delivery.
+The 59 Python checks are correctness evidence, not a performance result. At initial delivery, Rust and
+the ignored CC2/typed-socket/NIC/file witness had not been run; the accepted laptop
+checkpoint below supersedes that initial status.
 The latter uses private authority fixtures and must not be reported as real Keycloak
 latency. Capture new baselines only after laptop correctness acceptance. No speedup,
 new full-suite count or hardware/FPGA performance claim is made.
@@ -480,3 +481,76 @@ private authority fixtures, not real Keycloak latency or a speedup measurement.
 After the N110 fixture repair, its exact focused rerun passed (1/1, 0.01s), and
 the final full suite passed **2080 tests, 0 failures, 21 ignored in 409.66s**. No
 fresh profiling baseline or live-admission acceptance is claimed.
+
+
+### LK110 combined acceptance measurement boundary (2026-11-28)
+
+LK110 passed all ten real laptop correctness cases; no profiling baseline for this
+credential chain has been collected. Its ignored
+witness includes real Keycloak observation, private Python worker startup, RSA
+holder signing/verification, LG110 guarded effects, E11 callbacks and the CC2/NIC/
+file path. The disposable lab's administrative fault/restart time and CC2 compilation
+must be separated from read latency. Earlier LT110 fixture timings are not a real
+credential-chain baseline.
+
+The acceptance embedding deliberately pays for fresh holder verification on E11
+checks. It retains the five-second observation-age limit and original 30-second
+worker deadline. Up to three pre-submission tick-crossing preparations are charged;
+measure those discarded attempts separately. No deadline relaxation, work refill,
+speedup, native/FPGA cost or new full-suite result is claimed. For performance work,
+create a fresh profiling session; see [LK110 runbook](LK110_ACCEPTANCE.md).
+
+
+### LK110 laptop checkpoint and TLS repair (2026-11-28)
+
+> Historical checkpoint, superseded by the successful ten-case laptop run below.
+
+The laptop compiled successfully and passed **2080 tests, 0 failures, 22 ignored
+in 412.20s**. LK110's ignored real credential-chain witness remains pending: both
+containers run, but strict HTTPS readiness rejected the lab server certificate for
+a missing Authority Key Identifier (error 85). The generator now explicitly emits
+key identifiers; a server-certificate-only repair preserves CA, holder bindings,
+credentials and database without weakening TLS. Five real-certificate regressions
+and the existing 71 Python checks pass. No new performance result or live/boot
+admission is claimed. See the TLS repair commands in
+[LK110_ACCEPTANCE.md](LK110_ACCEPTANCE.md).
+
+
+### LK110 delivery refresh and failure recovery (2026-11-28)
+
+> Historical checkpoint, superseded by the successful ten-case laptop run below.
+
+The laptop's certificate repair passed strict TLS. The subsequent real witness
+completed CC2 bootstrap and initial grant issuance, then failed in its first
+positive case with `storage reply refused` / `Run(SocketProvisionRejected)`.
+The old log does not identify the denied predicate; it is not evidence that the
+credential chain passed. A recovery journal remained from that failed attempt;
+it was successfully processed before the accepted rerun.
+
+The test embedding now refreshes the same retained grant before host EOF processing
+and before ordinary virtual-NIC reply frames/FIN. This addresses the scheduling gap
+between expensive signed host writes and guest delivery. Refresh uses a correlated
+real observation outside the authority lanes; it does not replace the owner or
+reset work, the five-second freshness bound, or the original deadline. Delivery
+refresh is suppressed after an intentionally injected fault. First-denial diagnostics
+report fixed stages/errors and nonsensitive counters to identify any remaining failure.
+
+The Python driver preserves test, cleanup and restoration errors separately in a
+private schema-2 report. Pipe cleanup cannot skip restoration, and a restoration
+conflict retains the journal. All **80 Python checks passed** in this delivery,
+including 16 driver checks; both changed Rust files passed static syntax parsing.
+No Rust compilation/tests or real Podman witness were run here. The earlier laptop
+full-suite result remains **2080 passed, 0 failed, 22 ignored in 412.20s**.
+At this checkpoint real ten-case acceptance was pending. It subsequently passed
+on the laptop; live and boot admission remain disabled.
+See [the recovery and retry instructions](LK110_ACCEPTANCE.md#delivery-refresh-retry).
+
+
+### LK110 real laptop acceptance passed (2026-11-28)
+
+The uploaded terminal output confirms successful journal recovery, **16/16 driver
+checks**, release compilation, and **all ten real Keycloak/CC2/E11/file cases**.
+The driver printed `LK110 accepted; live and boot admission remain disabled.`
+This supersedes the earlier same-day TLS and first-positive-case failure checkpoints.
+No fresh full-suite or performance result is claimed, and no LK110 merge is assumed.
+See [case results, evidence filename and acceptance limits](LK110_ACCEPTANCE.md#laptop-acceptance).

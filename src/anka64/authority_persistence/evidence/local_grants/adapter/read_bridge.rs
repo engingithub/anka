@@ -259,3 +259,7 @@ impl<C:Clock> ReadBridge<C,HostedTransport> {
         Ok((Self::new(adapter,stream,transport,registration)?,HostedClient(client)))
     }
 }
+
+#[cfg(test)]
+#[path="read_bridge/acceptance.rs"]
+pub(crate) mod acceptance;

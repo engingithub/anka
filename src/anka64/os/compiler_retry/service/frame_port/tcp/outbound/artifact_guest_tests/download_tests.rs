@@ -185,3 +185,5 @@ mod launch_tests;
 mod restart_tests;
 
 mod local_bridge_tests;
+
+mod keycloak_bridge_tests;

@@ -5,3 +5,4 @@ cd "$(dirname "$0")/.."
 python3 scripts/keycloak/test_preflight.py
 
 python3 scripts/keycloak/test_lab.py
+python3 scripts/keycloak/test_certificates.py

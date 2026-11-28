@@ -58,7 +58,8 @@ def certificates(root):
         run(["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-sha256",
              "-subj", "/CN=" + name, "-keyout", str(root / (name + ".key")),
              "-out", str(root / (name + ".csr"))])
-        ext = "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n"
+        ext = ("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n"
+               "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always,issuer\n")
         ext += ("extendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n"
                 if name == "server" else "extendedKeyUsage=clientAuth\n")
         private(root / (name + ".ext"), ext)

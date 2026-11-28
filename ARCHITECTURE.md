@@ -3632,7 +3632,7 @@ toolchains.
 | 10.7 | Protected local pointer ABI and application rebuild | Closed; DN-59 fixes its scope |
 | 10.8 | Shared allocation, compiler resource growth, typed modules and protected network-service rebuild | Closed; final evidence in DN-71 |
 | 10.9 | Identity/authority model, supply-chain closure and hostile CPU-to-HTTP audit | T1 and initial T2 model delivered; persistence/evidence refinements implemented in 10.10; bounded RR110 boot admission accepted; general enrollment/whole-machine reboot, broader T3–T5 and production integration open; DN-72 |
-| 10.10 | Durable network persistence using the artifact/publication foundation | File backend, guarded transfer, guest upload/download, fresh live launch and bounded RR110 restart accepted; RR110 merged to main (user confirmation, 2026-11-19). SC110 formal, Rust and laptop performance acceptance complete; profiling/SC110 merged by user confirmation; KC110 preflight formal/Python/binary-build/14 real Keycloak cases accepted and merged; SA110 and AC110 accepted and merged; 185/185 and 56/56 formal, 33/33 and 15/15 focused Rust, real Podman probe passed; SA110/AC110 full suite 2012/0/20; LG110 formal gate developer-accepted and merged (264/264); bounded local owner/evidence interface accepted with 38/38 focused Rust and 33/33 SA110 regressions; LG110 full suite 2050/0/20; runtime merged to main (user confirmation, 2026-11-27); LA110 hosted adapter accepted and merged by user confirmation; LT110 hosted bridge laptop acceptance passed (11 focused tests, real guest witness, full suite 2080/0/21); real-path integration and live admission remain pending; production credentials, broader deployment and whole-machine reboot remain open; DN-72 |
+| 10.10 | Durable network persistence using the artifact/publication foundation | File backend, guarded transfer, guest upload/download, fresh live launch and bounded RR110 restart accepted; RR110 merged to main (user confirmation, 2026-11-19). SC110 formal, Rust and laptop performance acceptance complete; profiling/SC110 merged by user confirmation; KC110 preflight formal/Python/binary-build/14 real Keycloak cases accepted and merged; SA110 and AC110 accepted and merged; 185/185 and 56/56 formal, 33/33 and 15/15 focused Rust, real Podman probe passed; SA110/AC110 full suite 2012/0/20; LG110 formal gate developer-accepted and merged (264/264); bounded local owner/evidence interface accepted with 38/38 focused Rust and 33/33 SA110 regressions; LG110 full suite 2050/0/20; runtime merged to main (user confirmation, 2026-11-27); LA110 hosted adapter accepted and merged by user confirmation; LT110 hosted bridge laptop acceptance passed (11 focused tests, real guest witness, full suite 2080/0/21); LK110 combined real credential/guest/file acceptance passed all ten cases on the laptop; live admission remains pending; production credentials, broader deployment and whole-machine reboot remain open; DN-72 |
 
 Phase 10.8's implementation chronology and test commands live in
 [DN-71](DESIGN_NOTES.md#dn-71). The repeated allocation/worker/compiler progress
@@ -6040,3 +6040,81 @@ transport/crypto/clock/entropy/credential providers remain explicit prerequisite
 Anka64 neither controls Keycloak nor requires runtime administrator privileges.
 See [LT110 acceptance and remaining credential-chain work](DESIGN_NOTES.md#local-transport-runtime)
 and [remote TLS plan](DESIGN_NOTES.md#remote-storage-tls-plan).
+
+
+#### LK110 combined hosted credential-chain acceptance (2026-11-28)
+
+LT110 is now merged by user confirmation. LK110 adds a test-only trusted embedding
+that connects real ordinary-client Keycloak observations and holder signatures to
+the hosted read bridge and final guest-side E11 read/content/dependency callbacks.
+The same local grant survives socket closure through final private-image validation;
+all local policy changes use the same E11 lane. Introspection and administrative
+fault coordination release that lane and the owner guard. The bounded hosted
+holder subprocesses run before the local owner guard.
+
+Independent, locally pinned artifact/dependency policy remains mandatory. Token
+identity does not confer storage content trust, server-role registration, execution
+or boot authority. The disposable parent lab driver alone changes Keycloak policy
+for negative tests; the runtime worker uses ordinary-client credentials. Anka64
+still cannot inspect or control external Keycloak policy.
+
+The delivered ignored witness covers ten positive/hostile cases with real CC2,
+typed sockets, NIC DMA, owned localhost TCP and reopened artifact files. The initial implementation compiled on the laptop; its full suite passed
+2080/0/22. After certificate and delivery-refresh repairs, the real Podman witness passed
+all ten cases on the laptop. This focused result does not replace a full-suite run. See [LK110 runbook](LK110_ACCEPTANCE.md). Remote TLS, production provider
+registration, native bootstrap and live/boot admission remain separate gates.
+
+
+### LK110 laptop checkpoint and TLS repair (2026-11-28)
+
+> Historical checkpoint, superseded by the successful ten-case laptop run below.
+
+The laptop compiled successfully and passed **2080 tests, 0 failures, 22 ignored
+in 412.20s**. LK110's ignored real credential-chain witness remains pending: both
+containers run, but strict HTTPS readiness rejected the lab server certificate for
+a missing Authority Key Identifier (error 85). The generator now explicitly emits
+key identifiers; a server-certificate-only repair preserves CA, holder bindings,
+credentials and database without weakening TLS. Five real-certificate regressions
+and the existing 71 Python checks pass. No new performance result or live/boot
+admission is claimed. See the TLS repair commands in
+[LK110_ACCEPTANCE.md](LK110_ACCEPTANCE.md).
+
+
+### LK110 delivery refresh and failure recovery (2026-11-28)
+
+> Historical checkpoint, superseded by the successful ten-case laptop run below.
+
+The laptop's certificate repair passed strict TLS. The subsequent real witness
+completed CC2 bootstrap and initial grant issuance, then failed in its first
+positive case with `storage reply refused` / `Run(SocketProvisionRejected)`.
+The old log does not identify the denied predicate; it is not evidence that the
+credential chain passed. A recovery journal remained from that failed attempt;
+it was successfully processed before the accepted rerun.
+
+The test embedding now refreshes the same retained grant before host EOF processing
+and before ordinary virtual-NIC reply frames/FIN. This addresses the scheduling gap
+between expensive signed host writes and guest delivery. Refresh uses a correlated
+real observation outside the authority lanes; it does not replace the owner or
+reset work, the five-second freshness bound, or the original deadline. Delivery
+refresh is suppressed after an intentionally injected fault. First-denial diagnostics
+report fixed stages/errors and nonsensitive counters to identify any remaining failure.
+
+The Python driver preserves test, cleanup and restoration errors separately in a
+private schema-2 report. Pipe cleanup cannot skip restoration, and a restoration
+conflict retains the journal. All **80 Python checks passed** in this delivery,
+including 16 driver checks; both changed Rust files passed static syntax parsing.
+No Rust compilation/tests or real Podman witness were run here. The earlier laptop
+full-suite result remains **2080 passed, 0 failed, 22 ignored in 412.20s**.
+At this checkpoint real ten-case acceptance was pending. It subsequently passed
+on the laptop; live and boot admission remain disabled.
+See [the recovery and retry instructions](LK110_ACCEPTANCE.md#delivery-refresh-retry).
+
+
+### LK110 real laptop acceptance passed (2026-11-28)
+
+The uploaded terminal output confirms successful journal recovery, **16/16 driver
+checks**, release compilation, and **all ten real Keycloak/CC2/E11/file cases**.
+The driver printed `LK110 accepted; live and boot admission remain disabled.`
+This supersedes the earlier same-day TLS and first-positive-case failure checkpoints.
+No fresh full-suite or performance result is claimed, and no LK110 merge is assumed.
+See [case results, evidence filename and acceptance limits](LK110_ACCEPTANCE.md#laptop-acceptance).
