@@ -404,7 +404,7 @@ bash scripts/check-anka110-local-adapter.sh
 ```
 
 15 new Python fixtures passed, along with the 26 preflight, 14 lab and 21 control
-regressions. The 19 new Rust tests remain unexecuted here. The default gate runs
+regressions. The 19 LA110 Rust tests were not run in the delivery workspace; the user subsequently accepted and merged LA110. The default gate runs
 those Rust tests and then the accepted LG110/SA110 gates. No real Podman or guest
 file acceptance is claimed for this new adapter.
 
@@ -414,3 +414,32 @@ The signature covers the complete canonical proposal/token/channel record, while
 the owner rechecks its current bounds before use. See [LA110 design and wire
 layout](../../DESIGN_NOTES.md#local-adapter-runtime) for limits, clocks and remaining
 provider integration. Live/boot defaults remain disabled.
+
+
+## LT110 hosted holder and localhost bridge
+
+LA110 is accepted and merged. LT110 adds the private `holder.py` helper for explicit
+hosted holder delegation. It signs only bridge-created canonical action-2 records,
+checks immutable credential/configuration binding, and returns a fixed-size private
+signature response. The independent LA110 `adapter.py` remains a verifier and never
+signs. Neither helper is a public admission CLI. No administrator access is added.
+
+```bash
+bash scripts/check-anka110-local-bridge.sh --python-only
+# Laptop, including the ignored real guest/file mechanics witness:
+bash scripts/check-anka110-local-bridge.sh --real
+```
+
+Four signer checks plus 55 LA110/preflight/lab regressions passed here. The Rust gate
+expects eleven focused bridge tests and one ignored CC2/typed-socket/NIC/TCP/file test;
+all eleven focused tests and the separate guest witness now passed on the laptop,
+along with the LA110/LG110/SA110 regressions. The repaired N110 fixture passed its
+exact rerun (1/1), and the final full suite passed **2080/0/21 in 409.66s**. The guest
+witness uses private authority fixtures, not a real Keycloak token. The next combined acceptance must use ordinary
+Keycloak identity/holder evidence and final guest-side read/content verification
+before live admission. Use the existing disposable lab for administrative fault
+setup only; runtime adapters cannot control Keycloak policy.
+
+The user selected hosted localhost first. Remote TLS storage transport is recorded
+in the [plan](../../DESIGN_NOTES.md#remote-storage-tls-plan), including actual TLS
+session binding and separate-process hostile acceptance.

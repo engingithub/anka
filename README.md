@@ -168,7 +168,7 @@ bash scripts/check-anka110-local-grants.sh
 
 Ordinary client verification stays outside the local effect guard; no Keycloak
 administrator credential is involved. The hosted ordinary-client evidence adapter and holder-proof encoding are now
-delivered as LA110 below. Its Rust acceptance and the real CC2/typed-socket/NIC/file
+delivered as LA110 below. The real CC2/typed-socket/NIC/file
 integration remain required before live admission. The current
 CLI still publishes no live or boot authority. See the
 [runtime boundary](DESIGN_NOTES.md#local-grant-runtime) and
@@ -314,7 +314,7 @@ Non-commercial use, modification and redistribution are permitted subject to
 its terms. Commercial use requires prior written permission from Engin Atik;
 contact **atik@kleis.io**. Third-party components retain their own licenses.
 
-## LA110 hosted identity adapter — delivered, Rust acceptance pending
+## LA110 hosted identity adapter — accepted and merged
 
 The ordinary-client adapter now feeds verified identity evidence into LG110 through
 private bounded worker pipes. It verifies detached holder signatures over the full
@@ -332,6 +332,32 @@ cargo test --release --locked --lib -- --test-threads=1
 
 The new gate runs Python checks, **19 LA110 Rust tests**, then the accepted
 **38 LG110 and 33 SA110** regressions. `--python-only` skips all Rust commands.
-This does not run ignored guest witnesses. The next task is trusted transport and
-provider integration followed by the real CC2/typed-socket/NIC/file witness;
+This does not run ignored guest witnesses. LT110 below supplies the first hosted transport/read-provider bridge and an
+ignored real CC2/typed-socket/NIC/file mechanics witness;
 live/boot admission defaults stay disabled. See [LA110 details](DESIGN_NOTES.md#local-adapter-runtime).
+
+
+## LT110 hosted localhost read bridge — laptop acceptance passed
+
+The bridge explicitly registers the local grant and exact read range, owns both
+localhost TCP endpoints, separates holder signing/verification from guarded use,
+and rechecks authority for socket intake, file dispatch and every reply fragment.
+Independent read/content checks remain mandatory. Remote TLS storage transport is
+[now planned separately](DESIGN_NOTES.md#remote-storage-tls-plan).
+
+Laptop evidence (2026-11-28): **59 Python checks, 11 LT110 focused tests,
+19 LA110, 38 LG110 and 33 SA110 regressions passed**. The ignored real CC2/socket/
+NIC/TCP/file mechanics witness passed separately in **103.82s**. The full suite
+now passes: **2080 passed, 0 failed, 21 ignored** in **409.66s**. The repaired
+N110 fixture also passed its exact focused rerun (1/1, 0.01s). Reproduction commands:
+
+```bash
+bash scripts/check-anka110-local-bridge.sh --real
+cargo test --release --locked --lib -- --test-threads=1
+```
+
+The gate includes eleven focused bridge tests, LA110/LG110/SA110 regressions and one
+ignored real CC2/typed-socket/NIC/TCP/file witness. The guest witness uses private
+authority fixtures; it does not prove the full deployed Keycloak credential chain.
+That combined acceptance and the final E11 provider integration remain prerequisites
+for live admission. See [LT110 scope and acceptance](DESIGN_NOTES.md#local-transport-runtime).

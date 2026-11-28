@@ -55,7 +55,7 @@ pub(crate) fn accept_read_reply<'a>(frame:&[u8],reply:&'a[u8],eof:bool,connectio
 }
 /// Rechecks the saved backend ticket as well as exact manifest and actual caller.
 /// The ticket is local custody; no upload ticket is accepted from the read wire.
-pub(super) fn authorize_read(store:&ArtifactStore,connection:u64,r:&ReadRequest,
+pub(crate) fn authorize_read(store:&ArtifactStore,connection:u64,r:&ReadRequest,
     saved:Option<(Caller,u64)>,e:&mut impl TransferEvidence)->Result<Caller,Error>
 {
     store.live()?;

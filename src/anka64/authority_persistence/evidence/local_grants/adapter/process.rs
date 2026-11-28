@@ -23,6 +23,17 @@ pub(super) fn worker(config: &Path, request: &[u8], reply_size: usize, deadline:
     command.arg("-I").arg(helper).arg("--config").arg(config);
     capture(command, request, reply_size, deadline)
 }
+/// Separate, explicitly delegated hosted holder; the verifier worker never signs.
+pub(super) fn hosted_holder(config:&Path,record:&[u8],deadline:Instant)->Result<Vec<u8>,()>{
+    let helper=Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/keycloak/holder.py");
+    if !helper.is_file(){return Err(())}
+    let mut command=Command::new("python3");command.arg("-I").arg(helper).arg("--config").arg(config);
+    let output=capture(command,record,516,deadline)?;
+    let n=u32::from_le_bytes(output[..4].try_into().map_err(|_|())?)as usize;
+    if !(256..=512).contains(&n) || output[4+n..].iter().any(|b|*b!=0){return Err(())}
+    Ok(output[4..4+n].to_vec())
+}
+
 fn capture(mut command: Command, request: &[u8], reply_size: usize, deadline: Instant) -> Result<Vec<u8>, ()> {
     if Instant::now() >= deadline || request.len() > codec::LIMIT || reply_size > codec::LIMIT + 72 { return Err(()); }
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());

@@ -113,11 +113,33 @@ fn n110_transport_shutdown_closes_all_owned_slots(){
 }
 #[test]
 fn n110_transport_unbound_or_denied_peer_cannot_read_storage(){
-    let mut s=server();let _c=TcpStream::connect(s.address().unwrap()).unwrap();
-    s.poll(&mut |_|None,true).unwrap();assert_eq!(s.usage(),(0,0));assert_eq!(s.verifier.calls,0);
-    s.verifier.deny=true;let(mut c,_)=connect(&mut s);c.write_all(&envelope().encode().unwrap()).unwrap();c.shutdown(Shutdown::Write).unwrap();
-    assert!(receive(&mut s,&mut c).is_empty());assert_eq!(s.backend.reads,0);assert_eq!(s.usage(),(0,0));
+    let mut s=server();let unbound=TcpStream::connect(s.address().unwrap()).unwrap();
+    let expected_peer=unbound.local_addr().unwrap();
+    let deadline=Instant::now()+Duration::from_secs(2);let mut rejected=false;
+    // Successful connect does not guarantee the next nonblocking accept makes
+    // progress. Keep the rejecting binder installed until it actually sees this
+    // peer; otherwise connect() below could admit the still-pending first peer.
+    while !rejected {
+        assert!(Instant::now()<deadline,"unbound peer was never offered to the rejecting binder");
+        let report=s.poll(&mut |peer| {
+            assert_eq!(peer,expected_peer);assert!(!rejected);
+            rejected=true;None
+        },true).unwrap();
+        assert!(report.accepted.is_none());
+        assert_eq!((report.live,report.closed),(0,usize::from(rejected)));
+        assert_eq!(s.usage(),(0,0));
+        assert_eq!((s.verifier.calls,s.backend.reads,s.backend.commits),(0,0,0));
+        if !rejected {thread::sleep(Duration::from_millis(1));}
+    }
+    drop(unbound);
+    s.verifier.deny=true;let(mut c,ticket)=connect(&mut s);
+    assert_eq!(s.usage(),(1,CHARGE));
+    c.write_all(&envelope().encode().unwrap()).unwrap();c.shutdown(Shutdown::Write).unwrap();
+    assert!(receive(&mut s,&mut c).is_empty());assert!(s.verifier.calls>0);
+    assert_eq!((s.backend.reads,s.backend.commits),(0,0));assert_eq!(s.usage(),(0,0));
+    assert!(!s.cancel(ticket));assert_eq!(s.usage(),(0,0));
 }
+
 #[test]
 fn n110_transport_default_verifier_stays_fail_closed(){
     let mut s=Server::bind(address(),Config::default(),Store::new(),DenyAll).unwrap();

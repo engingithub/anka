@@ -442,8 +442,7 @@ providers; hosted Rust/Python timings do not establish hardware cost.
 ## LA110 measurement boundary
 
 LG110 is accepted and merged; its last full suite remains 2050/0/20 (267.41s).
-LA110's hosted verifier/holder codec has passing Python RSA/mTLS fixtures, with
-Rust acceptance pending. No new speedup or workload timing is claimed. After
+LA110's hosted verifier/holder codec is accepted and merged by user confirmation. No new speedup or workload timing is claimed. After
 correctness and real-path acceptance, build a fresh profiling session.
 
 Separate process startup, JWKS/TLS/introspection, token signature verification,
@@ -453,3 +452,31 @@ profile deliberately uses a fixed maximum 30-second adapter worker lifetime,
 and explicit retries must be counted rather than hidden in successful-run timing.
 No remote HTTP or expensive crypto runs inside the local grant guard. The trusted
 transport/provider integration and native suppliers remain separate obligations.
+
+
+## LT110 hosted bridge measurement boundary
+
+Hosted localhost is the first transport target; remote TLS storage is a separate
+planned task. LT110 splits proof verification from guarded use and adds separate
+holder signing. Measure signer startup/signature work, verifier startup/verification,
+local owner checks, actual socket fragments and file/content scanning separately.
+Signing and verification share the original finite worker allowance; neither may
+refresh deadlines or hide tick-crossing failures. File scans retain the cooperative
+host filesystem assumption, so measure guard hold time separately from socket IO.
+
+The 59 Python checks are correctness evidence, not a performance result. Rust and
+the ignored CC2/typed-socket/NIC/file witness have not been run for this delivery.
+The latter uses private authority fixtures and must not be reported as real Keycloak
+latency. Capture new baselines only after laptop correctness acceptance. No speedup,
+new full-suite count or hardware/FPGA performance claim is made.
+
+
+### LT110 laptop correctness checkpoint (2026-11-28)
+
+The laptop passed 59 Python checks, 11 focused LT110 tests and 19/38/33
+LA110/LG110/SA110 regressions. The real CC2/typed-socket/NIC/TCP/file mechanics
+witness passed separately in 103.82s. That is a correctness-run duration using
+private authority fixtures, not real Keycloak latency or a speedup measurement.
+After the N110 fixture repair, its exact focused rerun passed (1/1, 0.01s), and
+the final full suite passed **2080 tests, 0 failures, 21 ignored in 409.66s**. No
+fresh profiling baseline or live-admission acceptance is claimed.

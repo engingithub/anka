@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 #[path="adapter/codec.rs"] mod codec;
 #[path="adapter/process.rs"] mod process;
+#[path="adapter/read_bridge.rs"] pub(crate) mod read_bridge;
 
 /// Hosted seconds clock. The adapter/owner retain high-water marks; Instant
 /// additionally bounds subprocess lifetime independently of wall-clock changes.
@@ -74,6 +75,10 @@ impl<C: Clock> Revoker<C> { pub(crate) fn revoke(&self) -> Result<(), Error> { s
 /// never signs. No token or signature is printed by its worker.
 pub(crate) struct Challenge { proposal: Proposal, channel: Channel, record: Vec<u8> }
 impl Challenge { pub(crate) fn bytes(&self) -> &[u8] { &self.record } }
+
+/// Verified bytes awaiting a guarded use. This is not a permission: submit
+/// rechecks owner, sequence, clocks, revision and scope, and consumes the proof.
+pub(crate) struct PreparedUse { channel: Channel, proposal: Proposal, reply: Option<codec::Reply> }
 
 pub(crate) struct Adapter<C> {
     owner: Arc<Owner<Mailbox, SharedClock<C>>>, slots: Arc<Mutex<Slots>>,
@@ -196,26 +201,46 @@ impl<C: Clock> Adapter<C> {
         }
         Ok(())
     }
-    pub(crate) fn attempt<T>(&mut self, channel: Channel, challenge: Challenge, signature: &[u8],
-        gate: impl FnOnce(&Scope) -> bool, submit: impl FnOnce() -> Result<T, ()>) -> Result<T, Error>
+    /// Perform expensive proof verification before entering any transport/file
+    /// lane. A stale or invalid proof is retained only as a denied attempt.
+    pub(crate) fn verify_use(&mut self, channel: Channel, challenge: Challenge, signature: &[u8])
+        -> Result<PreparedUse, Error>
     {
         self.clear()?;
         let p = challenge.proposal; let v = self.owner.view()?; let now = self.sample()?;
-        // Invalid/stale input still reaches the owner to spend its attempt, but
-        // never launches expensive verification or populates the possession slot.
+        let mut reply = None;
         if channel == challenge.channel && channel.scope == self.config.scope &&
             channel.holder == self.profile.holder && v.mode == Mode::Issued && v.usable(now) &&
             v.matches(p, self.config.scope, now) && (256..=512).contains(&signature.len()) {
             let expected = codec::record(2, self.session, codec::proposal(p, self.config), self.config.scope,
                 self.profile.holder, channel.binding, self.input_binding, &self.profile);
-            if expected == challenge.record {
-                if let Ok(r) = self.invoke(&expected, signature) {
-                    self.stage_possession(channel, p, r)?;
-                }
+            if expected == challenge.record { reply = self.invoke(&expected, signature).ok(); }
+        }
+        Ok(PreparedUse { channel, proposal: p, reply })
+    }
+    /// Single-use staging and submission. No worker, signature operation or HTTP
+    /// runs here. Previously verified evidence cannot bypass current authority.
+    pub(crate) fn submit<T>(&mut self, prepared: PreparedUse,
+        gate: impl FnOnce(&Scope) -> bool, submit: impl FnOnce() -> Result<T, ()>) -> Result<T, Error>
+    {
+        self.clear()?;
+        self.sample()?; // Include high-water samples made during out-of-guard verification.
+        // Check ownership before staging even a negative result: a foreign
+        // prepared value must never revoke this owner.
+        if prepared.proposal.owner == self.owner.view()?.owner {
+            if let Some(reply) = prepared.reply {
+                self.stage_possession(prepared.channel, prepared.proposal, reply)?;
             }
         }
-        self.owner.attempt(&channel, p, gate, submit)
+        self.owner.attempt(&prepared.channel, prepared.proposal, gate, submit)
     }
+    pub(crate) fn attempt<T>(&mut self, channel: Channel, challenge: Challenge, signature: &[u8],
+        gate: impl FnOnce(&Scope) -> bool, submit: impl FnOnce() -> Result<T, ()>) -> Result<T, Error>
+    {
+        let prepared = self.verify_use(channel, challenge, signature)?;
+        self.submit(prepared, gate, submit)
+    }
+
 }
 
 #[cfg(test)]
